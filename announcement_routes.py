@@ -53,7 +53,18 @@ def sync_announcements():
             return jsonify({"ok": False, "error": "tickers required"}), 400
 
         days = body.get('days', 3)
-        settings = body.get('settings', {})
+        # Prefer settings from POST body; fall back to saved settings in DB
+        settings = body.get('settings') or {}
+        if not settings:
+            try:
+                with ae.get_db(DB_PATH) as conn:
+                    row = conn.execute(
+                        "SELECT value FROM blob_store WHERE key='ann_settings'"
+                    ).fetchone()
+                if row:
+                    settings = json.loads(row[0])
+            except Exception:
+                settings = dict(DEFAULT_SETTINGS)
 
         status = ae.get_sync_status()
         if status.get('running'):

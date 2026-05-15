@@ -96,9 +96,11 @@ async function renderAnnouncementsPage(gen) {
       items: [],
       status: null,
       lastSync: null,
+      settingsOpen: false,
       filter: { ticker: 'all', type: 'all', sentiment: 'all', search: '' },
     };
   }
+  if (state.announcements.settingsOpen === undefined) state.announcements.settingsOpen = false;
 
   // Show skeleton immediately
   el.innerHTML = _annSkeletonHTML();
@@ -136,9 +138,15 @@ async function renderAnnouncementsPage(gen) {
     state.announcements.items    = feedResp.items || [];
     state.announcements.lastSync = statusResp.last_sync || null;
 
-    // Merge settings from server if available
-    if (statusResp.settings && !state.announcements.settings) {
-      state.announcements.settings = statusResp.settings;
+    // Always load settings from server so the form reflects what's actually saved
+    if (!state.announcements._settingsLoaded) {
+      try {
+        const srv = await fetch(`${API}/api/announcements/settings`).then(r => r.ok ? r.json() : null);
+        if (srv && typeof srv === 'object' && !srv.error) {
+          state.announcements.settings = { ...state.announcements.settings, ...srv };
+        }
+      } catch { /* keep defaults */ }
+      state.announcements._settingsLoaded = true;
     }
 
     el.innerHTML = _annPageHTML(statusResp);
@@ -236,7 +244,6 @@ function _annPageHTML(status) {
             ⟳ ${isRunning ? 'Scanning…' : 'Sync Now'}
           </button>
           <button class="btn btn-sm" onclick="renderPage()" title="Refresh view">↺</button>
-          <button class="btn btn-sm" onclick="toggleAnnSettings()" id="ann-settings-toggle-btn">⚙ LLM Settings</button>
         </div>
       </div>
     </div>
@@ -256,10 +263,17 @@ function _annPageHTML(status) {
       <div id="ann-card-list">${cardList}</div>
     </div>
 
-    <!-- LLM Settings panel (hidden by default) -->
-    <div class="card" id="ann-settings-panel" style="display:none;margin-bottom:12px">
-      ${_annSettingsPanelHTML(status)}
-    </div>`;
+    <!-- LLM Settings panel — native <details> requires no JS toggle -->
+    <details id="ann-settings-panel" style="margin-bottom:12px" ${state.announcements.settingsOpen ? 'open' : ''}>
+      <summary class="card" style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:var(--radius-md);font-size:13px;font-weight:600;color:var(--text-primary);user-select:none"
+        onclick="state.announcements.settingsOpen=this.parentElement.open">
+        ⚙ LLM Settings
+        <span style="font-size:10px;color:var(--text-muted);font-weight:400">(click to expand)</span>
+      </summary>
+      <div class="card" style="margin-top:4px;border-top-left-radius:0;border-top-right-radius:0">
+        ${_annSettingsPanelHTML(status)}
+      </div>
+    </details>`;
 }
 
 // ── Filter bar HTML ───────────────────────────────────────────
@@ -401,58 +415,61 @@ function _renderAnnCard(ann) {
 // ── LLM Settings panel HTML ───────────────────────────────────
 function _annSettingsPanelHTML(status) {
   const cfg = state.announcements.settings || {};
-  const provider = cfg.provider || 'ollama';
+  // Use correct key names that match state.announcements.settings in config.js
+  const provider = cfg.ann_llm_provider || 'ollama';
+  const model    = cfg.ann_llm_model    || 'qwen2.5:1.5b';
+  const url      = cfg.ollama_url       || 'http://localhost:11434';
+  const groqKey  = cfg.groq_api_key     || '';
+  const gemKey   = cfg.gemini_api_key   || '';
+
+  const inputStyle = 'width:100%;box-sizing:border-box;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)';
+  const lblStyle   = 'font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px';
 
   return `
-    <div class="card-title" style="margin-bottom:12px">⚙ LLM Settings</div>
-    <div style="display:flex;flex-direction:column;gap:10px;max-width:480px">
+    <div style="display:flex;flex-direction:column;gap:12px;max-width:520px">
       <div>
-        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Provider</label>
-        <select id="ann-provider" onchange="toggleAnnProviderFields()" style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
-          <option value="ollama"  ${provider === 'ollama'  ? 'selected' : ''}>Ollama (local)</option>
-          <option value="groq"    ${provider === 'groq'    ? 'selected' : ''}>Groq (free)</option>
-          <option value="gemini"  ${provider === 'gemini'  ? 'selected' : ''}>Gemini (free)</option>
-          <option value="keyword" ${provider === 'keyword' ? 'selected' : ''}>Keyword only</option>
+        <label style="${lblStyle}">Classification provider</label>
+        <select id="ann-provider" onchange="toggleAnnProviderFields()"
+          style="width:100%;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+          <option value="ollama"  ${provider === 'ollama'  ? 'selected' : ''}>Ollama (local — free)</option>
+          <option value="groq"    ${provider === 'groq'    ? 'selected' : ''}>Groq (cloud — free tier)</option>
+          <option value="gemini"  ${provider === 'gemini'  ? 'selected' : ''}>Gemini (cloud — free tier)</option>
+          <option value="keyword" ${provider === 'keyword' ? 'selected' : ''}>Keyword only (no LLM)</option>
         </select>
       </div>
 
       <!-- Ollama fields -->
       <div id="ann-ollama-fields" style="display:${provider === 'ollama' ? 'flex' : 'none'};flex-direction:column;gap:8px">
         <div>
-          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Ollama Model</label>
-          <input type="text" id="ann-ollama-model" value="${cfg.ollama_model || 'qwen2.5:1.5b'}"
-            placeholder="qwen2.5:1.5b"
-            style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+          <label style="${lblStyle}">Ollama model <span style="color:var(--text-muted);font-size:11px">(e.g. qwen2.5:1.5b, gemma3:4b)</span></label>
+          <input type="text" id="ann-ollama-model" value="${model}" placeholder="qwen2.5:1.5b" style="${inputStyle}">
         </div>
         <div>
-          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Ollama URL</label>
-          <input type="text" id="ann-ollama-url" value="${cfg.ollama_url || 'http://localhost:11434'}"
-            placeholder="http://localhost:11434"
-            style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+          <label style="${lblStyle}">Ollama server URL</label>
+          <input type="text" id="ann-ollama-url" value="${url}" placeholder="http://localhost:11434" style="${inputStyle}">
         </div>
       </div>
 
       <!-- Groq fields -->
       <div id="ann-groq-fields" style="display:${provider === 'groq' ? 'flex' : 'none'};flex-direction:column;gap:8px">
         <div>
-          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Groq API Key</label>
-          <input type="password" id="ann-groq-key" value="${cfg.groq_api_key || ''}"
-            placeholder="gsk_…"
-            style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+          <label style="${lblStyle}">Groq API Key <a href="https://console.groq.com/keys" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a></label>
+          <input type="password" id="ann-groq-key" value="${groqKey}" placeholder="gsk_…" style="${inputStyle}">
         </div>
       </div>
 
       <!-- Gemini fields -->
       <div id="ann-gemini-fields" style="display:${provider === 'gemini' ? 'flex' : 'none'};flex-direction:column;gap:8px">
         <div>
-          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Gemini API Key</label>
-          <input type="password" id="ann-gemini-key" value="${cfg.gemini_api_key || ''}"
-            placeholder="AIza…"
-            style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+          <label style="${lblStyle}">Gemini API Key <a href="https://aistudio.google.com/apikey" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a></label>
+          <input type="password" id="ann-gemini-key" value="${gemKey}" placeholder="AIza…" style="${inputStyle}">
         </div>
       </div>
 
-      <button class="btn btn-primary btn-sm" onclick="saveAnnSettings()" style="align-self:flex-start;margin-top:4px">Save Settings</button>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="btn btn-primary btn-sm" onclick="saveAnnSettings()">💾 Save Settings</button>
+        <span id="ann-settings-saved-msg" style="font-size:12px;color:#16a34a;display:none">✓ Saved</span>
+      </div>
     </div>`;
 }
 
@@ -602,7 +619,10 @@ async function syncAnnouncements() {
     const r = await fetch(`${API}/api/announcements/sync`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tickers: allTickers }),
+      body: JSON.stringify({
+        tickers:  allTickers,
+        settings: state.announcements.settings || {},
+      }),
     });
 
     if (!r.ok) {
@@ -644,18 +664,33 @@ function addAnnToContext(headline, summary, ticker, date) {
 
 // ── Save LLM settings ─────────────────────────────────────────
 async function saveAnnSettings() {
-  const provider   = document.getElementById('ann-provider')?.value || 'ollama';
+  // Read form values
+  const provider    = document.getElementById('ann-provider')?.value    || 'ollama';
   const ollamaModel = document.getElementById('ann-ollama-model')?.value?.trim() || 'qwen2.5:1.5b';
-  const ollamaUrl  = document.getElementById('ann-ollama-url')?.value?.trim() || 'http://localhost:11434';
-  const groqKey    = document.getElementById('ann-groq-key')?.value?.trim() || '';
-  const geminiKey  = document.getElementById('ann-gemini-key')?.value?.trim() || '';
+  const ollamaUrl   = document.getElementById('ann-ollama-url')?.value?.trim()   || 'http://localhost:11434';
+  const groqKey     = document.getElementById('ann-groq-key')?.value?.trim()     || '';
+  const geminiKey   = document.getElementById('ann-gemini-key')?.value?.trim()   || '';
 
-  const payload = { provider, ollama_model: ollamaModel, ollama_url: ollamaUrl, groq_api_key: groqKey, gemini_api_key: geminiKey };
+  // Use the SAME key names as state.announcements.settings and the backend DEFAULT_SETTINGS
+  const payload = {
+    ann_llm_provider: provider,
+    ann_llm_model:    ollamaModel,
+    ollama_url:       ollamaUrl,
+    groq_api_key:     groqKey,
+    gemini_api_key:   geminiKey,
+  };
 
-  // Persist to state
+  // Update in-memory state immediately so next sync picks it up
   state.announcements.settings = { ...state.announcements.settings, ...payload };
 
+  // Show inline "Saved" confirmation
+  const showSaved = () => {
+    const msg = document.getElementById('ann-settings-saved-msg');
+    if (msg) { msg.style.display = 'inline'; setTimeout(() => { msg.style.display = 'none'; }, 2500); }
+  };
+
   if (!state.serverOk) {
+    showSaved();
     toast('Settings saved locally (server offline)', 'info');
     return;
   }
@@ -671,7 +706,7 @@ async function saveAnnSettings() {
       toast(`Failed to save: ${err.error || r.statusText}`, 'error');
       return;
     }
-    toast('LLM settings saved', 'success');
+    showSaved();
   } catch (e) {
     toast(`Could not save settings: ${e.message}`, 'error');
   }
@@ -688,12 +723,3 @@ function toggleAnnProviderFields() {
   if (geminiEl) geminiEl.style.display = provider === 'gemini'  ? 'flex' : 'none';
 }
 
-// ── Toggle settings panel ─────────────────────────────────────
-function toggleAnnSettings() {
-  const panel = document.getElementById('ann-settings-panel');
-  const btn   = document.getElementById('ann-settings-toggle-btn');
-  if (!panel) return;
-  const hidden = panel.style.display === 'none';
-  panel.style.display = hidden ? 'block' : 'none';
-  if (btn) btn.textContent = hidden ? '✕ Close Settings' : '⚙ LLM Settings';
-}
