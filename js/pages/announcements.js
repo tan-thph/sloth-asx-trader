@@ -73,6 +73,19 @@ function _annSkeletonHTML() {
     <div class="card"><div style="height:300px"></div></div>`;
 }
 
+// ── CSS animation (injected once) ────────────────────────────
+(function _injectAnnStyles() {
+  if (document.getElementById('ann-pulse-style')) return;
+  const s = document.createElement('style');
+  s.id = 'ann-pulse-style';
+  s.textContent = `
+    @keyframes annPulse {
+      0%,100% { opacity:1; transform:scale(1); }
+      50%      { opacity:0.4; transform:scale(1.35); }
+    }`;
+  document.head.appendChild(s);
+})();
+
 // ── Main render ───────────────────────────────────────────────
 async function renderAnnouncementsPage(gen) {
   const el = document.getElementById('main-content');
@@ -138,13 +151,18 @@ async function renderAnnouncementsPage(gen) {
 
 // ── Page HTML builder ─────────────────────────────────────────
 function _annPageHTML(status) {
-  const lastSync   = state.announcements.lastSync;
-  const items      = _annFilterItems(state.announcements.items);
-  const totalCount = state.announcements.items.length;
+  const lastSync    = state.announcements.lastSync;
+  const items       = _annFilterItems(state.announcements.items);
+  const totalCount  = state.announcements.items.length;
+  const isRunning   = status && status.running;
 
   // Sync status pill
   let syncPill;
-  if (lastSync) {
+  if (isRunning) {
+    syncPill = `<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:2px 10px;border-radius:99px;background:#dbeafe;color:#1d4ed8;font-weight:600">
+      <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#3b82f6;animation:annPulse 1.2s ease-in-out infinite"></span> Scanning…
+    </span>`;
+  } else if (lastSync) {
     const minAgo = Math.floor((Date.now() - new Date(lastSync).getTime()) / 60000);
     syncPill = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 10px;border-radius:99px;background:#dcfce7;color:#16a34a;font-weight:600">
       ● Synced ${minAgo < 1 ? 'just now' : minAgo + ' min ago'}
@@ -157,6 +175,11 @@ function _annPageHTML(status) {
 
   const countBadge = `<span class="badge" style="background:var(--bg-secondary);color:var(--text-secondary);font-size:11px">${items.length} of ${totalCount} announcement${totalCount !== 1 ? 's' : ''}</span>`;
 
+  // DB total badge
+  const dbTotal = status && status.total_in_db != null
+    ? `<span style="font-size:11px;color:var(--text-muted)">${status.total_in_db} in DB</span>`
+    : '';
+
   // Card list
   const cardList = items.length
     ? items.map(a => _renderAnnCard(a)).join('')
@@ -165,6 +188,36 @@ function _annPageHTML(status) {
         <p>${totalCount > 0 ? 'No announcements match the current filters.' : 'No announcements yet. Click <strong>Sync Now</strong> to fetch ASX filings.'}</p>
       </div>`;
 
+  // Progress banner — shown when running (or just triggered)
+  const bannerDisplay = isRunning ? 'block' : 'none';
+  const bannerContent = isRunning ? (() => {
+    const done  = status.tickers_done  || 0;
+    const total = status.tickers_total || 1;
+    const pct   = Math.round((done / total) * 100);
+    const cur   = status.current_ticker || '…';
+    const found = status.current_ticker_new || 0;
+    return `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#1d4ed8">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3b82f6;animation:annPulse 1.2s ease-in-out infinite"></span>
+        Scanning ASX announcements…
+      </span>
+      <span style="font-size:12px;color:var(--text-secondary)">
+        Processing <strong>${cur}</strong> &nbsp;·&nbsp; ${done} of ${total} tickers
+        ${found > 0 ? `&nbsp;·&nbsp; <span style="color:#16a34a;font-weight:600">+${found} new</span>` : ''}
+      </span>
+      <div style="flex:1;min-width:120px;max-width:240px;height:6px;background:var(--border-light);border-radius:99px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#3b82f6,#6366f1);border-radius:99px;transition:width 0.4s ease"></div>
+      </div>
+      <span style="font-size:11px;color:var(--text-muted)">${pct}%</span>
+    </div>`;
+  })() : '';
+
+  // Kick off poller if sync is already running when page loads
+  if (isRunning) {
+    setTimeout(_startAnnSyncPoller, 100);
+    setTimeout(() => _setAnnSyncBtn(true), 100);
+  }
+
   return `
     <!-- Top bar -->
     <div class="card" style="margin-bottom:12px">
@@ -172,15 +225,25 @@ function _annPageHTML(status) {
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:15px;font-weight:700;color:var(--text-primary)">ASX Announcements</span>
           ${syncPill}
-          ${lastSync ? `<span style="font-size:11px;color:var(--text-muted)">Last sync: ${_annFmtDate(lastSync)}</span>` : ''}
+          ${!isRunning && lastSync ? `<span style="font-size:11px;color:var(--text-muted)">Last: ${_annFmtDate(lastSync)}</span>` : ''}
+          ${dbTotal}
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           ${countBadge}
-          <button class="btn btn-primary btn-sm" onclick="syncAnnouncements()">⟳ Sync Now</button>
-          <button class="btn btn-sm" onclick="renderPage()" title="Refresh">⟳</button>
+          <button class="btn btn-primary btn-sm" id="ann-sync-btn"
+            onclick="syncAnnouncements()"
+            ${isRunning ? 'disabled style="opacity:0.6;cursor:not-allowed"' : ''}>
+            ⟳ ${isRunning ? 'Scanning…' : 'Sync Now'}
+          </button>
+          <button class="btn btn-sm" onclick="renderPage()" title="Refresh view">↺</button>
           <button class="btn btn-sm" onclick="toggleAnnSettings()" id="ann-settings-toggle-btn">⚙ LLM Settings</button>
         </div>
       </div>
+    </div>
+
+    <!-- Live scan progress banner -->
+    <div id="ann-sync-banner" class="card" style="display:${bannerDisplay};margin-bottom:12px;background:linear-gradient(135deg,#eff6ff 0%,#eef2ff 100%);border:1px solid #bfdbfe">
+      ${bannerContent}
     </div>
 
     <!-- Filter bar -->
@@ -441,9 +504,88 @@ function setAnnFilter(key, value) {
       </div>`;
 }
 
+// ── Sync progress poller ──────────────────────────────────────
+let _annSyncPoller = null;
+
+function _startAnnSyncPoller() {
+  if (_annSyncPoller) return; // already polling
+  _annSyncPoller = setInterval(async () => {
+    try {
+      const s = await fetch(`${API}/api/announcements/status`).then(r => r.ok ? r.json() : null);
+      if (!s) return;
+      state.announcements.status = s;
+      _updateAnnProgressBanner(s);
+      if (!s.running) {
+        _stopAnnSyncPoller();
+        // Final refresh to show new data
+        renderPage();
+      }
+    } catch { /* ignore transient errors */ }
+  }, 2000);
+}
+
+function _stopAnnSyncPoller() {
+  if (_annSyncPoller) { clearInterval(_annSyncPoller); _annSyncPoller = null; }
+}
+
+function _updateAnnProgressBanner(s) {
+  const banner = document.getElementById('ann-sync-banner');
+  if (!banner) return;
+  if (!s.running) {
+    banner.style.display = 'none';
+    return;
+  }
+  const done  = s.tickers_done  || 0;
+  const total = s.tickers_total || 1;
+  const pct   = Math.round((done / total) * 100);
+  const cur   = s.current_ticker || '…';
+  const found = s.current_ticker_new || 0;
+
+  banner.style.display = 'block';
+  banner.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#1d4ed8">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3b82f6;animation:annPulse 1.2s ease-in-out infinite"></span>
+        Scanning ASX announcements…
+      </span>
+      <span style="font-size:12px;color:var(--text-secondary)">
+        Processing <strong>${cur}</strong> &nbsp;·&nbsp; ${done} of ${total} tickers
+        ${found > 0 ? `&nbsp;·&nbsp; <span style="color:#16a34a;font-weight:600">+${found} new</span>` : ''}
+      </span>
+      <div style="flex:1;min-width:120px;max-width:240px;height:6px;background:var(--border-light);border-radius:99px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#3b82f6,#6366f1);border-radius:99px;transition:width 0.4s ease"></div>
+      </div>
+      <span style="font-size:11px;color:var(--text-muted)">${pct}%</span>
+    </div>`;
+}
+
+// ── Sync button state helpers ─────────────────────────────────
+function _setAnnSyncBtn(running) {
+  const btn = document.getElementById('ann-sync-btn');
+  if (!btn) return;
+  if (running) {
+    btn.disabled = true;
+    btn.textContent = '⟳ Scanning…';
+    btn.style.opacity = '0.6';
+    btn.style.cursor = 'not-allowed';
+  } else {
+    btn.disabled = false;
+    btn.textContent = '⟳ Sync Now';
+    btn.style.opacity = '';
+    btn.style.cursor = '';
+  }
+}
+
 // ── Sync announcements from ASX ───────────────────────────────
 async function syncAnnouncements() {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  // Check if already running
+  const status = state.announcements.status || {};
+  if (status.running) {
+    toast('Sync already in progress', 'info');
+    return;
+  }
 
   const tickers = mergedPortfolio().map(h => h.ticker);
   const allTickers = [...new Set([
@@ -455,8 +597,6 @@ async function syncAnnouncements() {
     toast('No tickers in portfolio to sync', 'info');
     return;
   }
-
-  toast('Syncing ASX announcements…', 'info');
 
   try {
     const r = await fetch(`${API}/api/announcements/sync`, {
@@ -471,15 +611,23 @@ async function syncAnnouncements() {
       return;
     }
 
-    const d = await r.json();
-    const msg = d.message || `Synced ${d.count || 0} announcements`;
-    toast(msg, 'success');
+    // Sync started on the backend — show progress UI immediately
+    _setAnnSyncBtn(true);
+    const banner = document.getElementById('ann-sync-banner');
+    if (banner) {
+      banner.style.display = 'block';
+      banner.innerHTML = `
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#1d4ed8">
+            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3b82f6;animation:annPulse 1.2s ease-in-out infinite"></span>
+            Starting scan for ${allTickers.length} tickers…
+          </span>
+        </div>`;
+    }
 
-    // Refresh status + feed
-    state.announcements.lastSync = new Date().toISOString();
+    // Begin polling for progress
+    _startAnnSyncPoller();
 
-    // Re-render page to show new data
-    renderPage();
   } catch (e) {
     toast(`Sync request failed: ${e.message}`, 'error');
   }

@@ -215,6 +215,11 @@ _sync_status: Dict[str, Any] = {
     "last_count": 0,
     "last_error": None,
     "last_tickers": [],
+    # Live progress fields (reset on each run)
+    "current_ticker": None,
+    "tickers_done": 0,
+    "tickers_total": 0,
+    "current_ticker_new": 0,  # new announcements found for current ticker
 }
 _sync_lock = threading.Lock()
 
@@ -1110,7 +1115,15 @@ def run_sync(
     Returns the number of new announcements saved.
     """
     settings = settings or {}
-    _update_status(running=True, last_error=None, last_tickers=list(tickers))
+    _update_status(
+        running=True,
+        last_error=None,
+        last_tickers=list(tickers),
+        current_ticker=None,
+        tickers_done=0,
+        tickers_total=len(tickers),
+        current_ticker_new=0,
+    )
     logger.info("run_sync: starting for %d tickers (days=%d)", len(tickers), days)
 
     total_saved = 0
@@ -1123,6 +1136,7 @@ def run_sync(
                 time.sleep(0.8)
 
             ticker = ticker.upper().strip()
+            _update_status(current_ticker=ticker, tickers_done=i, current_ticker_new=0)
             logger.info("run_sync: processing %s", ticker)
 
             try:
@@ -1195,8 +1209,13 @@ def run_sync(
                 try:
                     if save_announcement(ann, db_path):
                         total_saved += 1
+                        with _sync_lock:
+                            _sync_status["current_ticker_new"] += 1
                 except Exception as exc:
                     logger.error("run_sync: save failed for %s — %s", ann.get("id"), exc)
+
+            # Mark this ticker done
+            _update_status(tickers_done=i + 1)
 
         # Purge old
         try:
@@ -1210,6 +1229,8 @@ def run_sync(
             running=False,
             last_run=datetime.utcnow().isoformat(),
             last_count=total_saved,
+            current_ticker=None,
+            tickers_done=len(tickers),
         )
         logger.info("run_sync: complete — %d new announcements saved", total_saved)
 

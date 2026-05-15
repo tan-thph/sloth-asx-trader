@@ -2,6 +2,10 @@
 // NAVIGATION
 // ============================================================
 function showPage(page) {
+  // Stop announcement poller when navigating away from announcements
+  if (state.page === 'announcements' && page !== 'announcements') {
+    if (typeof _stopAnnSyncPoller === 'function') _stopAnnSyncPoller();
+  }
   state.page = page;
   state._renderGen = (state._renderGen || 0) + 1; // invalidate any in-flight async renders
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
