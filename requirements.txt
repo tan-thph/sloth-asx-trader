@@ -1,0 +1,30 @@
+# ASX Trading Assistant - Python dependencies
+# Run: pip install -r requirements.txt
+
+# ── Core ─────────────────────────────────────────────────────
+flask>=3.0
+flask-cors>=4.0
+yfinance>=0.2.36
+pandas>=2.0
+numpy>=1.26
+ta>=0.11
+requests>=2.31
+python-dateutil>=2.9
+
+# ── News Scanner ─────────────────────────────────────────────
+feedparser>=6.0.11
+beautifulsoup4>=4.12
+scikit-learn>=1.4          # TF-IDF dedup + cosine similarity
+lxml>=5.0                  # faster BS4 parser
+
+# ── Vector store (optional — heavy, ~2 GB download) ──────────
+# Uncomment if you want semantic search / near-duplicate detection
+# sentence-transformers>=2.7
+# faiss-cpu>=1.8
+
+# ── Local LLM via Ollama (Ollama itself is a separate install) ─
+# Install Ollama: https://ollama.com/download
+# Then pull a model, e.g.:
+#   ollama pull gemma3:4b       # recommended for 8 GB RAM
+#   ollama pull gemma3:12b      # 16 GB RAM
+#   ollama pull llama3.2:3b     # lightweight alternative

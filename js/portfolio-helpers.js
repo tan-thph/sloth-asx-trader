@@ -1,0 +1,379 @@
+// ── CRITICAL PRICE-DECLINE ALERT ENGINE ──────────────────────────────────────
+// Thresholds:
+//   1. Single-day decline ≥15% (flash crash / trading halt risk)
+//   2. Consecutive 3-day decline where each day closed lower AND cumulative drop ≥10%
+// Data source: chart_data from liveSignals (close prices, last 90 days from backend)
+// Called: after each signal refresh; result stored in state.criticalAlerts
+
+function computeCriticalAlerts() {
+  const newAlerts = {};
+  const signals = state.liveSignals || {};
+  const now = Date.now();
+
+  for (const [ticker, s] of Object.entries(signals)) {
+    if (s.error || !s.chart_data || s.chart_data.length < 2) continue;
+    // Only alert for current portfolio holdings (not watchlist)
+    const holding = getPortfolioHolding(ticker);
+    if (!holding || holding.shares <= 0) continue;
+
+    const closes = s.chart_data.map(d => d.close).filter(v => v > 0);
+    if (closes.length < 2) continue;
+
+    // ── Test 1: Single-day decline ≥15% ───────────────────────────────────────
+    const prev = closes[closes.length - 2];
+    const curr = closes[closes.length - 1];
+    const dayPct = prev > 0 ? ((curr - prev) / prev) * 100 : 0;
+    if (dayPct <= -15) {
+      newAlerts[ticker] = {
+        type: 'single_day',
+        pct: dayPct,
+        days: 1,
+        fromPrice: prev,
+        toPrice: curr,
+        triggeredAt: newAlerts[ticker]?.triggeredAt || now,
+        severity: 'critical',
+      };
+      continue; // single-day is highest severity; no need to check 3-day
+    }
+
+    // ── Test 2: 3 consecutive down days with cumulative decline ≥10% ──────────
+    if (closes.length >= 4) {
+      const d1 = closes[closes.length - 4]; // open of window
+      const d2 = closes[closes.length - 3];
+      const d3 = closes[closes.length - 2];
+      const d4 = closes[closes.length - 1]; // latest close
+      const allDown = d2 < d1 && d3 < d2 && d4 < d3;
+      const cumulPct = d1 > 0 ? ((d4 - d1) / d1) * 100 : 0;
+      if (allDown && cumulPct <= -10) {
+        newAlerts[ticker] = {
+          type: 'consecutive',
+          pct: cumulPct,
+          days: 3,
+          fromPrice: d1,
+          toPrice: d4,
+          triggeredAt: newAlerts[ticker]?.triggeredAt || now,
+          severity: cumulPct <= -10 ? 'critical' : 'warning',
+        };
+      }
+    }
+  }
+
+  // Merge: preserve triggeredAt for alerts that are continuing
+  const merged = {};
+  for (const [t, alert] of Object.entries(newAlerts)) {
+    const prev = state.criticalAlerts?.[t];
+    merged[t] = {
+      ...alert,
+      triggeredAt: prev?.triggeredAt || alert.triggeredAt,
+      // Don't re-dismiss if the alert worsened
+      dismissed: prev?.dismissed && prev.pct >= alert.pct,
+    };
+  }
+  state.criticalAlerts = merged;
+  return merged;
+}
+
+function dismissCriticalAlert(ticker) {
+  if (state.criticalAlerts[ticker]) {
+    state.criticalAlerts[ticker].dismissed = true;
+  }
+  if (!state.dismissedAlerts) state.dismissedAlerts = {};
+  state.dismissedAlerts[ticker] = Date.now();
+  scheduleSave();
+  // Re-render whatever page is visible to remove the banner
+  renderPage();
+}
+
+function renderCriticalAlertBanners() {
+  const alerts = state.criticalAlerts || {};
+  const active = Object.entries(alerts).filter(([,a]) => !a.dismissed);
+  if (!active.length) return '';
+  return active.map(([ticker, a]) => {
+    const isSingleDay = a.type === 'single_day';
+    const pctStr = a.pct.toFixed(1);
+    const title = isSingleDay
+      ? `⚡ ${ticker}: Flash crash — ${pctStr}% in one session`
+      : `⚠ ${ticker}: Down ${pctStr}% over 3 consecutive days`;
+    const desc = isSingleDay
+      ? `${ticker} dropped ${Math.abs(pctStr)}% in a single session (from $${fmt(a.fromPrice)} → $${fmt(a.toPrice)}). This meets the flash-crash threshold. Consider selling to protect capital.`
+      : `${ticker} has closed lower for 3 consecutive days, falling ${Math.abs(pctStr)}% cumulatively (from $${fmt(a.fromPrice)} → $${fmt(a.toPrice)}). Momentum is firmly negative.`;
+    const holding = getPortfolioHolding(ticker);
+    const posValue = holding ? fmt(holding.shares * holding.currentPrice) : '—';
+    const unrealPnl = holding ? holding.gain : null;
+    return `
+    <div class="critical-alert-banner">
+      <div class="alert-icon">${isSingleDay ? '⚡' : '📉'}</div>
+      <div class="alert-body">
+        <div class="alert-title">${title}</div>
+        <div class="alert-desc">${desc}</div>
+        <div class="alert-desc" style="margin-top:4px">
+          Position value: <strong>$${posValue}</strong>
+          ${unrealPnl != null ? ` · Unrealised P&L: <strong class="${unrealPnl >= 0 ? 'text-success' : 'text-danger'}">${unrealPnl >= 0 ? '+' : ''}$${fmt(Math.abs(unrealPnl))}</strong>` : ''}
+          · ${isSingleDay ? '1-day' : '3-day'} decline: <strong style="color:#ef4444">${pctStr}%</strong>
+        </div>
+        <div class="alert-actions">
+          <button class="btn btn-sm btn-danger" onclick="quickSellFromAlert('${ticker}')">🚨 Sell ${ticker} Now</button>
+          <button class="btn btn-sm" onclick="showPage('signals');setTimeout(()=>expandSignal('${ticker}'),300)">View Signals</button>
+          <button class="btn btn-sm" onclick="dismissCriticalAlert('${ticker}')" style="opacity:0.7">Dismiss</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function quickSellFromAlert(ticker) {
+  // Navigate to pending recs filtered to this ticker, or open journal
+  const holding = getPortfolioHolding(ticker);
+  if (!holding) { toast(`No holding found for ${ticker}`, 'error'); return; }
+  const confirmed = confirm(
+    `🚨 CRITICAL SELL — ${ticker}\n\n` +
+    `You hold ${holding.shares} shares @ avg $${fmt(holding.avgPrice)}.\n` +
+    `Current price: $${fmt(holding.currentPrice)}\n` +
+    `Estimated proceeds: $${fmt(holding.shares * holding.currentPrice)}\n\n` +
+    `This will open the Trade Journal to log a manual SELL. Continue?`
+  );
+  if (!confirmed) return;
+  showPage('journal');
+  // Pre-fill the new trade form after the page renders
+  setTimeout(() => {
+    const dateEl = document.getElementById('tj-date');
+    const tickerEl = document.getElementById('tj-ticker');
+    const actionEl = document.getElementById('tj-action');
+    const qtyEl = document.getElementById('tj-qty');
+    const priceEl = document.getElementById('tj-price');
+    if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
+    if (tickerEl) tickerEl.value = ticker;
+    if (actionEl) actionEl.value = 'SELL';
+    if (qtyEl) qtyEl.value = holding.shares;
+    if (priceEl) priceEl.value = holding.currentPrice.toFixed(3);
+    toast(`Pre-filled SELL for ${ticker} — review and confirm in journal`, 'error');
+  }, 350);
+}
+
+// ── PARCEL HELPERS ──────────────────────────────────────────
+function nextParcelId() {
+  // Derive from max existing id every time to survive page reloads safely
+  const max = state.cgtParcels.reduce((m,p) => Math.max(m, p.id || 0), 0);
+  return max + 1;
+}
+
+function addParcel(ticker, date, qty, costPerShare, fees, sector) {
+  state.cgtParcels.push({
+    id: nextParcelId(),
+    ticker: ticker.toUpperCase(),
+    date,
+    qty,
+    remainingQty: qty,
+    costPerShare,
+    fees,          // buy brokerage for this lot
+    sector: sector || 'Other',
+  });
+}
+
+// Returns parcels for a ticker ordered by the chosen CGT method
+function getParcelsForTicker(ticker, method) {
+  const open = state.cgtParcels.filter(p => p.ticker === ticker.toUpperCase() && p.remainingQty > 0);
+  method = method || state.cgtMethod || 'fifo';
+  if (method === 'fifo')     return open.sort((a,b) => parseDate(a.date) - parseDate(b.date));
+  if (method === 'lifo')     return open.sort((a,b) => parseDate(b.date) - parseDate(a.date));
+  if (method === 'minimise') return open.sort((a,b) => {
+    // Minimise CGT: prefer discount-eligible (>12mo) lots first; within same group, sell highest-cost first
+    const today = todayStr();
+    const aDisc = daysBetween(a.date, today) >= 365;
+    const bDisc = daysBetween(b.date, today) >= 365;
+    if (aDisc !== bDisc) return aDisc ? -1 : 1;      // discount-eligible first
+    return b.costPerShare - a.costPerShare;            // highest cost first (lowest taxable gain)
+  });
+  if (method === 'maximise') return open.sort((a,b) => b.costPerShare - a.costPerShare); // highest cost first = maximise realised loss (tax-loss harvesting)
+  return open.sort((a,b) => parseDate(a.date) - parseDate(b.date));
+}
+
+function parseDate(dateStr) {
+  if (!dateStr) return null;
+  // Handle DD-MM-YYYY format
+  if (/^\d{2}-\d{2}-\d{4}$/.test(dateStr)) {
+    const [day, month, year] = dateStr.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }
+  // Fallback to other formats
+  return new Date(dateStr);
+}
+
+function daysBetween(dateStr1, dateStr2) {
+  const date1 = parseDate(dateStr1);
+  const date2 = parseDate(dateStr2);
+  return Math.floor((date2 - date1) / 86400000);
+}
+
+// Match qty against parcels (FIFO/LIFO/etc), record disposals, return {disposals, totalCostBase, totalGrossGain}
+function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees, method) {
+  const parcels = getParcelsForTicker(ticker, method);
+  let remaining = saleQty;
+  const disposals = [];
+  // Split fees proportionally across parcels by qty
+  const feePerShare = saleFees / saleQty;
+
+  for (const parcel of parcels) {
+    if (remaining <= 0) break;
+    const matched = Math.min(parcel.remainingQty, remaining);
+    const held = daysBetween(parcel.date, saleDate);
+    const eligible50 = held >= 365;
+    const proceeds = matched * salePrice;
+    const costBase = matched * parcel.costPerShare + (parcel.fees * matched / parcel.qty); // pro-rata buy fee
+    const allocatedSaleFee = feePerShare * matched;
+    const grossGain = proceeds - costBase - allocatedSaleFee;
+    const discount = eligible50 && grossGain > 0 ? grossGain * 0.5 : 0;
+    const netGain = grossGain - discount;
+
+    disposals.push({
+      saleDate,
+      ticker: ticker.toUpperCase(),
+      salePrice,
+      saleQty: matched,
+      parcelId: parcel.id,
+      parcelDate: parcel.date,
+      parcelCostPerShare: parcel.costPerShare,
+      heldDays: held,
+      eligible50,
+      proceeds,
+      costBase,
+      saleFee: allocatedSaleFee,
+      grossGain,
+      discount,
+      netGain,
+    });
+
+    parcel.remainingQty -= matched;
+    remaining -= matched;
+  }
+
+  // If no parcels exist (e.g. pre-app position) fall back to avgPrice
+  if (remaining > 0) {
+    const holding = getPortfolioHolding(ticker);
+    const costPerShare = holding ? holding.avgPrice : salePrice;
+    const proceeds = remaining * salePrice;
+    const costBase = remaining * costPerShare;
+    const grossGain = proceeds - costBase - (feePerShare * remaining);
+    disposals.push({
+      saleDate,
+      ticker: ticker.toUpperCase(),
+      salePrice,
+      saleQty: remaining,
+      parcelId: null,
+      parcelDate: null,
+      parcelCostPerShare: costPerShare,
+      heldDays: null,
+      eligible50: false,
+      proceeds,
+      costBase,
+      saleFee: feePerShare * remaining,
+      grossGain,
+      discount: 0,
+      netGain: grossGain,
+      note: 'No parcel — used avg cost basis',
+    });
+  }
+
+  return disposals;
+}
+
+function applyBuyToPortfolio(ticker, qty, price, date, fees, sector) {
+  const symbol = ticker.toUpperCase();
+  const existing = getPortfolioHolding(symbol);
+  if(existing) {
+    const totalCostVal = existing.shares * existing.avgPrice + qty * price;
+    existing.shares += qty;
+    existing.avgPrice = totalCostVal / existing.shares;
+    if(!existing.currentPrice) existing.currentPrice = price;
+  } else {
+    state.portfolio.push({ ticker: symbol, shares: qty, avgPrice: price, currentPrice: price, sector: sector || 'Other' });
+  }
+  // Always record a parcel
+  addParcel(symbol, date || todayStr(), qty, price, fees || 0, sector);
+}
+
+function applySellToPortfolio(ticker, qty, sellPrice, fees, date, method) {
+  const symbol = ticker.toUpperCase();
+  const holding = getPortfolioHolding(symbol);
+  if(!holding || holding.shares < qty) return { ok: false, disposals: [] };
+  holding.currentPrice = sellPrice;
+  holding.shares -= qty;
+  if(holding.shares <= 0) {
+    state.portfolio = state.portfolio.filter(h => h.ticker !== symbol);
+  }
+  state.cash += qty * sellPrice - Number(fees || 0);
+
+  // Match against parcels and record disposals
+  const disposals = matchSaleAgainstParcels(symbol, qty, sellPrice, date || todayStr(), fees || 0, method);
+  state.cgtDisposals.push(...disposals);
+  return { ok: true, disposals };
+
+}
+
+function computeSellPnl(costBasis, sellPrice, qty, fees = 0) {
+  return (sellPrice - costBasis) * qty - Number(fees || 0);
+}
+
+// Compute total pnl from disposals for a sell trade
+function disposalsToPnl(disposals) {
+  return disposals.reduce((s,d) => s + d.grossGain, 0);
+}
+
+function rollbackTradeJournalEntry(t) {
+  if(!t || !t.action || !t.ticker || !t.qty) return;
+  // Treat TOP_UP like BUY and TRIM like SELL for rollback purposes.
+  let action = t.action.toUpperCase();
+  if(action === 'TOP_UP') action = 'BUY';
+  if(action === 'TRIM')   action = 'SELL';
+  if(action === 'BUY' && t.status === 'open') {
+    const holding = getPortfolioHolding(t.ticker);
+    if(!holding || holding.shares < t.qty) return;
+    // Back-calculate avgPrice before this buy/top-up was applied.
+    // totalCost_before = totalCost_after - (qty × entryPrice)
+    const totalCostAfter  = holding.shares * holding.avgPrice;
+    const topupCost       = t.qty * t.entryPrice;
+    const sharesAfter     = holding.shares - t.qty;
+    holding.shares        = sharesAfter;
+    if (sharesAfter > 0) {
+      holding.avgPrice = (totalCostAfter - topupCost) / sharesAfter;
+    }
+    state.cash += t.qty * t.entryPrice + Number(t.fees || 0);
+    if(holding.shares <= 0) state.portfolio = state.portfolio.filter(h => h.ticker !== holding.ticker);
+    // Remove matching parcel (last added for this ticker matching qty+price)
+    if(t.parcelId) {
+      state.cgtParcels = state.cgtParcels.filter(p => p.id !== t.parcelId);
+    } else {
+      const idx = [...state.cgtParcels].reverse().findIndex(p => p.ticker === t.ticker && p.qty === t.qty && Math.abs(p.costPerShare - t.entryPrice) < 0.001);
+      if(idx !== -1) state.cgtParcels.splice(state.cgtParcels.length - 1 - idx, 1);
+    }
+    return;
+  }
+  if(action === 'SELL' && t.status === 'closed' && t.exitPrice != null) {
+    const costBasis = t.entryPrice;
+    const holding = getPortfolioHolding(t.ticker);
+    if(holding) {
+      const totalCostVal = holding.shares * holding.avgPrice + t.qty * costBasis;
+      holding.shares += t.qty;
+      holding.avgPrice = totalCostVal / holding.shares;
+      holding.currentPrice = t.exitPrice;
+    } else {
+      state.portfolio.push({ ticker: t.ticker.toUpperCase(), shares: t.qty, avgPrice: costBasis, currentPrice: t.exitPrice, sector: 'Other' });
+    }
+    state.cash -= t.qty * t.exitPrice - Number(t.fees || 0);
+    // Restore parcel remainingQty from disposals that belong to this trade
+    if(t.disposalIds && t.disposalIds.length) {
+      // Remove those disposals and restore parcel qty
+      t.disposalIds.forEach(dIdx => {
+        const d = state.cgtDisposals[dIdx];
+        if(!d) return;
+        if(d.parcelId) {
+          const parcel = state.cgtParcels.find(p => p.id === d.parcelId);
+          if(parcel) parcel.remainingQty += d.saleQty;
+        }
+      });
+      // Remove disposal records (in reverse order to preserve indices)
+      t.disposalIds.slice().sort((a,b)=>b-a).forEach(i => state.cgtDisposals.splice(i,1));
+    }
+    return;
+  }
+}

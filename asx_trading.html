@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASX Trading Assistant</title>
+<link rel="stylesheet" href="asx_trading.css">
+</head>
+<body>
+
+<div id="toast-container"></div>
+
+<div class="app">
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <h1>ASX Trader</h1>
+      <p>Decision Support v2.0</p>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Overview</div>
+      <button class="nav-item active" onclick="showPage('dashboard')"><span class="nav-icon">⬡</span> Dashboard</button>
+      <button class="nav-item" onclick="showPage('portfolio')"><span class="nav-icon">⬢</span> Portfolio</button>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Analysis</div>
+      <button class="nav-item" onclick="showPage('macro')"><span class="nav-icon">◎</span> Morning Macro</button>
+      <button class="nav-item" onclick="showPage('recommendations')"><span class="nav-icon">◆</span> Recommendations</button>
+      <button class="nav-item" onclick="showPage('signals')"><span class="nav-icon">◇</span> Live Signals</button>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Records</div>
+      <button class="nav-item" onclick="showPage('journal')"><span class="nav-icon">▣</span> Trade Journal</button>
+      <button class="nav-item" onclick="showPage('performance')"><span class="nav-icon">▤</span> Performance</button>
+      <button class="nav-item" onclick="showPage('history')"><span class="nav-icon">▥</span> Value History</button>
+      <button class="nav-item" onclick="showPage('cgt')"><span class="nav-icon">◈</span> CGT Parcels</button>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Tools</div>
+      <button class="nav-item" onclick="showPage('backtest')"><span class="nav-icon">▷</span> Backtesting</button>
+      <button class="nav-item" onclick="showPage('assistant')"><span class="nav-icon">◉</span> AI Assistant</button>
+      <button class="nav-item" onclick="showPage('news')"><span class="nav-icon">◈</span> News Scanner</button>
+      <button class="nav-item" onclick="showPage('settings')"><span class="nav-icon">⊙</span> Settings</button>
+    </div>
+    <div class="server-indicator">
+      <div class="flex-row" style="font-size:11px;color:var(--text-secondary)">
+        <span class="server-dot checking" id="srv-dot"></span>
+        <span id="srv-label">Connecting...</span>
+      </div>
+      <div style="font-size:10px;color:var(--text-tertiary);margin-top:3px">localhost:5000 · yfinance</div>
+      <div style="font-size:10px;color:var(--text-tertiary);margin-top:2px" id="db-label">💾 DB: —</div>
+    </div>
+  </nav>
+
+  <div class="main">
+    <div class="topbar">
+      <h2 id="page-title">Dashboard</h2>
+      <div class="flex-row">
+        <div class="market-pill"><div class="live-dot"></div><span id="market-time">ASX Loading...</span></div>
+        <button class="btn btn-sm" onclick="refreshPrices()">⟳ Refresh Prices</button>
+        <button class="btn btn-primary btn-sm" onclick="runAnalysis()">▶ Run Analysis</button>
+      </div>
+    </div>
+    <div class="content" id="main-content"></div>
+  </div>
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/api.js"></script>
+<script src="js/portfolio-helpers.js"></script>
+<script src="js/scheduler.js"></script>
+<script src="js/reconcile.js"></script>
+<script src="js/prices.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/pages/dashboard.js"></script>
+<script src="js/pages/portfolio.js"></script>
+<script src="js/pages/macro.js"></script>
+<script src="js/pages/signals.js"></script>
+<script src="js/pages/recommendations.js"></script>
+<script src="js/pages/journal.js"></script>
+<script src="js/pages/cgt.js"></script>
+<script src="js/pages/performance.js"></script>
+<script src="js/pages/backtest.js"></script>
+<script src="js/pages/assistant.js"></script>
+<script src="js/analysis.js"></script>
+<script src="js/pages/news.js"></script>
+<script src="js/pages/settings.js"></script>
+<script src="js/navigation.js"></script>
+<script src="js/init.js"></script>
+<!-- original monolithic script block replaced with separate files above -->
+
+</body>

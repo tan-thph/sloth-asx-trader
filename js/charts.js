@@ -1,0 +1,388 @@
+// ============================================================
+// PORTFOLIO VALUE HISTORY PAGE
+// ============================================================
+let _historyPeriod = 'monthly';
+
+function renderPortfolioHistory() {
+  const history = state.portfolioHistory;
+  const now = totalNetWorth();
+  const pv  = portfolioValue();
+
+  // Compute period-bucketed data
+  function getFilteredData(period) {
+    if (!history.length) return [];
+    const today = new Date();
+    let cutoff;
+    if (period === 'daily')   { cutoff = new Date(today); cutoff.setDate(today.getDate() - 30); }
+    if (period === 'weekly')  { cutoff = new Date(today); cutoff.setDate(today.getDate() - 90); }
+    if (period === 'monthly') { cutoff = new Date(today); cutoff.setFullYear(today.getFullYear() - 2); }
+    if (period === 'yearly')  { cutoff = new Date(today); cutoff.setFullYear(today.getFullYear() - 10); }
+    if (!cutoff) { cutoff = new Date(today); cutoff.setFullYear(today.getFullYear() - 10); }
+
+    const filtered = history.filter(s => parseDate(s.date) >= cutoff);
+
+    if (period === 'daily') return filtered;
+
+    // Group
+    const grouped = {};
+    filtered.forEach(s => {
+      let key;
+      const d = parseDate(s.date);
+      if (period === 'weekly') {
+        const startOfWeek = new Date(d); startOfWeek.setDate(d.getDate() - d.getDay());
+        key = startOfWeek.toISOString().slice(0,10);
+      } else if (period === 'monthly') {
+        key = `${s.date.slice(6,10)}-${s.date.slice(3,5)}-01`;
+      } else { // yearly
+        key = `${s.date.slice(6,10)}-01-01`;
+      }
+      grouped[key] = s; // last entry in period wins
+    });
+    return Object.keys(grouped).sort().map(k => grouped[k]);
+  }
+
+  const data = getFilteredData(_historyPeriod);
+
+  // Stats
+  const first = data[0];
+  const change = first ? now - first.netWorth : 0;
+  const changePct = first && first.netWorth ? (change / first.netWorth) * 100 : 0;
+  const maxNW = data.length ? Math.max(...data.map(d=>d.netWorth)) : now;
+  const minNW = data.length ? Math.min(...data.map(d=>d.netWorth)) : now;
+
+  const periodLabels = {daily:'Last 30 days',weekly:'Last 90 days',monthly:'Last 2 years',yearly:'All time'};
+
+  // Summary row for individual holdings
+  const holdingRows = state.portfolio.map(h => {
+    const val = h.shares * h.currentPrice;
+    const cost = h.shares * h.avgPrice;
+    const pl = val - cost;
+    const plp = cost ? (pl/cost)*100 : 0;
+    return { ticker: h.ticker, sector: h.sector, val, pl, plp };
+  }).sort((a,b) => b.val - a.val);
+
+  return `
+    <div class="metrics-grid" style="margin-bottom:1.25rem">
+      <div class="metric-card">
+        <div class="metric-label">Net Worth (now)</div>
+        <div class="metric-value">$${fmt(now)}</div>
+        <div class="metric-sub">Stocks + Cash</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Portfolio Value</div>
+        <div class="metric-value">$${fmt(pv)}</div>
+        <div class="metric-sub">Equities only</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Cash</div>
+        <div class="metric-value">$${fmt(state.cash)}</div>
+        <div class="metric-sub">${fmt(state.cash/now*100)}% of net worth</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Period Change</div>
+        <div class="metric-value ${change>=0?'up':'down'}">${change>=0?'+':''}$${fmt(Math.abs(change))}</div>
+        <div class="metric-sub ${change>=0?'up':'down'}">${change>=0?'+':''}${fmt(Math.abs(changePct))}% · ${periodLabels[_historyPeriod]}</div>
+      </div>
+    </div>
+
+    <div class="card section-gap">
+      <div class="flex-between" style="margin-bottom:1rem">
+        <div class="card-title" style="margin:0">Portfolio Value Over Time</div>
+        <div class="flex-row" style="gap:6px">
+          ${['daily','weekly','monthly','yearly'].map(p=>`
+            <button class="btn btn-sm ${_historyPeriod===p?'btn-primary':''}" onclick="_historyPeriod='${p}';document.getElementById('main-content').innerHTML=renderPortfolioHistory();setTimeout(drawHistoryChart,80)">${p.charAt(0).toUpperCase()+p.slice(1)}</button>
+          `).join('')}
+          <button class="btn btn-sm" onclick="recordPortfolioSnapshot();scheduleSave();document.getElementById('main-content').innerHTML=renderPortfolioHistory();setTimeout(drawHistoryChart,80)" title="Record today's snapshot now">⊕ Snapshot</button>
+        </div>
+      </div>
+
+      ${data.length < 2 ? `
+        <div class="empty-state" style="padding:2rem">
+          <div class="empty-icon">▥</div>
+          <p>Not enough data yet for this period.</p>
+          <p class="sub">Snapshots are auto-recorded when you refresh prices. Click <strong>⊕ Snapshot</strong> above to record today's value now.</p>
+        </div>
+      ` : `
+        <div style="position:relative;width:100%;height:240px;margin-bottom:8px">
+          <canvas id="history-chart" style="width:100%;height:240px"></canvas>
+        </div>
+        <div class="flex-row" style="gap:16px;font-size:11px;color:var(--text-secondary);margin-top:4px">
+          <span>─ <span style="color:#3b82f6">Net Worth</span></span>
+          <span>─ <span style="color:#22c55e">Portfolio</span></span>
+          <span>── <span style="color:#f59e0b">Cash</span></span>
+          <span style="margin-left:auto">Peak: $${fmt(maxNW)} · Trough: $${fmt(minNW)}</span>
+        </div>
+        <div style="margin-top:12px">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr>
+              <th style="text-align:left;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Date</th>
+              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Net Worth</th>
+              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Portfolio</th>
+              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Cash</th>
+              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Δ Net Worth</th>
+            </tr></thead>
+            <tbody>
+              ${data.slice().reverse().slice(0,20).map((s,i,arr)=>{
+                const prev = arr[i+1];
+                const delta = prev ? s.netWorth - prev.netWorth : null;
+                return `<tr>
+                  <td style="padding:5px 8px">${s.date}</td>
+                  <td style="padding:5px 8px;text-align:right;font-weight:600">$${fmt(s.netWorth)}</td>
+                  <td style="padding:5px 8px;text-align:right">$${fmt(s.portfolioValue)}</td>
+                  <td style="padding:5px 8px;text-align:right">$${fmt(s.cash)}</td>
+                  <td style="padding:5px 8px;text-align:right;color:${delta==null?'var(--text-muted)':delta>=0?'#16a34a':'#dc2626'}">${delta==null?'—':(delta>=0?'+':'')+' $'+fmt(Math.abs(delta))}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+          ${data.length > 20 ? `<p class="text-xs text-muted mt-1">Showing 20 most recent entries of ${data.length} total.</p>` : ''}
+        </div>
+      `}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Current Holdings Breakdown</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Ticker</th><th>Sector</th><th>Value</th><th>Unrealised P&L</th><th>Return</th><th>Weight</th></tr></thead>
+          <tbody>
+            ${holdingRows.map(h=>`<tr>
+              <td><strong>${h.ticker}</strong></td>
+              <td><span class="text-xs">${h.sector}</span></td>
+              <td>$${fmt(h.val)}</td>
+              <td class="${h.pl>=0?'text-success':'text-danger'}">${h.pl>=0?'+':''}$${fmt(Math.abs(h.pl))}</td>
+              <td class="${h.plp>=0?'text-success':'text-danger'}">${h.plp>=0?'+':''}${fmt(Math.abs(h.plp))}%</td>
+              <td>
+                <div class="flex-row" style="gap:6px">
+                  <div class="conf-bar" style="width:60px"><div class="conf-fill" style="width:${fmt(h.val/pv*100,0)}%;background:#3b82f6"></div></div>
+                  <span class="text-xs">${fmt(h.val/pv*100)}%</span>
+                </div>
+              </td>
+            </tr>`).join('')}
+            <tr style="border-top:0.5px solid var(--border-medium)">
+              <td colspan="2"><strong>Cash</strong></td>
+              <td>$${fmt(state.cash)}</td>
+              <td colspan="2" class="text-muted">—</td>
+              <td class="text-xs">${fmt(state.cash/now*100)}% of total</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function drawHistoryChart() {
+  const canvas = document.getElementById('history-chart');
+  if (!canvas) return;
+
+  function getFilteredData(period) {
+    const history = state.portfolioHistory;
+    if (!history.length) return [];
+    const today = new Date();
+    let cutoff = new Date(today);
+    if (period === 'daily')   cutoff.setDate(today.getDate() - 30);
+    if (period === 'weekly')  cutoff.setDate(today.getDate() - 90);
+    if (period === 'monthly') cutoff.setFullYear(today.getFullYear() - 2);
+    if (period === 'yearly')  cutoff.setFullYear(today.getFullYear() - 10);
+    const filtered = history.filter(s => parseDate(s.date) >= cutoff);
+    if (period === 'daily') return filtered;
+    const grouped = {};
+    filtered.forEach(s => {
+      let key;
+      const d = parseDate(s.date);
+      if (period === 'weekly') {
+        const sow = new Date(d); sow.setDate(d.getDate() - d.getDay());
+        key = sow.toISOString().slice(0,10);
+      } else if (period === 'monthly') {
+        key = `${s.date.slice(6,10)}-${s.date.slice(3,5)}-01`;
+      } else {
+        key = `${s.date.slice(6,10)}-01-01`;
+
+      }
+      grouped[key] = s;
+    });
+    return Object.keys(grouped).sort().map(k => grouped[k]);
+  }
+
+  const data = getFilteredData(_historyPeriod);
+  if (data.length < 2) return;
+
+  const ctx = canvas.getContext('2d');
+  const w = canvas.offsetWidth || 600;
+  const h = 240;
+  canvas.width = w; canvas.height = h;
+
+  const nwArr = data.map(d => d.netWorth);
+  const pvArr = data.map(d => d.portfolioValue);
+  const cashArr = data.map(d => d.cash);
+  const allVals = [...nwArr, ...pvArr, ...cashArr];
+  const minV = Math.min(...allVals) * 0.98;
+  const maxV = Math.max(...allVals) * 1.02;
+  const range = maxV - minV || 1;
+
+  const pad = { t: 16, r: 16, b: 40, l: 72 };
+  const cw = w - pad.l - pad.r;
+  const ch = h - pad.t - pad.b;
+
+  const px = v => pad.t + ch - ((v - minV) / range) * ch;
+  const py = i => pad.l + (i / (data.length - 1)) * cw;
+
+  // Dark mode detection
+  const isDark = window.matchMedia('(prefers-color-scheme:dark)').matches;
+  const gridCol = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)';
+  const textCol = isDark ? '#888' : '#999';
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Grid lines + y-axis labels
+  ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+  [0, 0.25, 0.5, 0.75, 1].forEach(f => {
+    const yv = minV + range * (1 - f);
+    const y = px(yv);
+    ctx.strokeStyle = gridCol; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.fillStyle = textCol;
+    ctx.fillText('$' + (yv >= 1000 ? (yv/1000).toFixed(0)+'k' : yv.toFixed(0)), pad.l - 6, y + 3);
+  });
+
+  // X-axis labels
+  ctx.textAlign = 'center'; ctx.fillStyle = textCol;
+  const step = Math.max(1, Math.floor(data.length / 6));
+  data.forEach((d, i) => {
+    if (i % step !== 0 && i !== data.length - 1) return;
+    const lbl = _historyPeriod === 'yearly' ? d.date.slice(6,10) :
+                _historyPeriod === 'monthly' ? d.date.slice(3,10) :
+                d.date.slice(0,5);
+    ctx.fillText(lbl, py(i), h - pad.b + 14);
+  });
+
+  // Draw a line series
+  function drawLine(arr, color, dashed) {
+    ctx.beginPath();
+    arr.forEach((v, i) => i === 0 ? ctx.moveTo(py(i), px(v)) : ctx.lineTo(py(i), px(v)));
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    if (dashed) ctx.setLineDash([4, 3]); else ctx.setLineDash([]);
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  // Gradient fill under net worth
+  const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
+  grad.addColorStop(0, 'rgba(59,130,246,0.18)');
+  grad.addColorStop(1, 'rgba(59,130,246,0)');
+  ctx.beginPath();
+  nwArr.forEach((v, i) => i === 0 ? ctx.moveTo(py(i), px(v)) : ctx.lineTo(py(i), px(v)));
+  ctx.lineTo(py(data.length - 1), pad.t + ch);
+  ctx.lineTo(py(0), pad.t + ch);
+  ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+
+  drawLine(nwArr, '#3b82f6', false);
+  drawLine(pvArr, '#22c55e', false);
+  drawLine(cashArr, '#f59e0b', true);
+
+  // Dots at last point
+  [['#3b82f6', nwArr], ['#22c55e', pvArr], ['#f59e0b', cashArr]].forEach(([col, arr]) => {
+    const lastX = py(arr.length - 1), lastY = px(arr[arr.length - 1]);
+    ctx.beginPath(); ctx.arc(lastX, lastY, 4, 0, Math.PI*2);
+    ctx.fillStyle = col; ctx.fill();
+  });
+}
+
+
+async function fetchSignals(tickers, forceRefresh=false) {
+  if(!state.serverOk) return {};
+  const now = Date.now();
+  const stale = tickers.filter(t => forceRefresh || !state.lastSignalFetch[t] || (now - state.lastSignalFetch[t]) > 15*60*1000);
+  if(!stale.length) return state.liveSignals;
+
+  try {
+    const r = await fetch(`${API}/api/analyse/batch`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({tickers: stale, period:'6mo'})
+    });
+    if(!r.ok) return state.liveSignals;
+    const data = await r.json();
+    stale.forEach(t => {
+      state.liveSignals[t] = data[t];
+      state.lastSignalFetch[t] = now;
+    });
+  } catch {}
+  // Recompute critical alerts whenever fresh signal data arrives
+  computeCriticalAlerts();
+  return state.liveSignals;
+}
+
+// ============================================================
+// MINI SPARKLINE CANVAS
+// ============================================================
+function drawSparkline(canvasId, data, color='#3b82f6') {
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.offsetWidth || canvas.width;
+  const h = canvas.offsetHeight || canvas.height;
+  canvas.width = w; canvas.height = h;
+  if(!data || data.length<2) return;
+  const prices = data.map(d=>d.close);
+  const min=Math.min(...prices), max=Math.max(...prices), range=max-min||1;
+  ctx.clearRect(0,0,w,h);
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0, color+'44');
+  grad.addColorStop(1, color+'00');
+  ctx.beginPath();
+  prices.forEach((p,i)=>{
+    const x=(i/(prices.length-1))*w, y=h-((p-min)/range)*(h-8)-4;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  });
+  ctx.strokeStyle=color;
+  ctx.lineWidth=1.5;
+  ctx.stroke();
+  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
+  ctx.fillStyle=grad;
+  ctx.fill();
+}
+
+// ============================================================
+// PRICE CHART
+// ============================================================
+function drawPriceChart(canvasId, chartData, sma20, sma50, bbUpper, bbLower) {
+  const canvas = document.getElementById(canvasId);
+  if(!canvas || !chartData?.length) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.offsetWidth; const h = canvas.height = 180;
+  canvas.width = w;
+  const prices = chartData.map(d=>d.close);
+  const allVals = [...prices];
+  if(sma20) allVals.push(sma20);
+  if(bbUpper) allVals.push(bbUpper);
+  if(bbLower) allVals.push(bbLower);
+  const min=Math.min(...allVals)-Math.min(...allVals)*0.01, max=Math.max(...allVals)+Math.max(...allVals)*0.01;
+  const range=max-min||1;
+  const px=(v) => h-((v-min)/range)*h;
+  const py=(i) => (i/(chartData.length-1))*(w-8)+4;
+
+  ctx.clearRect(0,0,w,h);
+
+  // BB fill
+  if(bbUpper && bbLower) {
+    ctx.beginPath();
+    chartData.forEach((_,i)=>{ const x=py(i); i===0?ctx.moveTo(x,px(bbUpper)):ctx.lineTo(x,px(bbUpper)); });
+    chartData.slice().reverse().forEach((_,i)=>{ const ii=chartData.length-1-i; ctx.lineTo(py(ii),px(bbLower)); });
+    ctx.closePath();
+    ctx.fillStyle='rgba(59,130,246,0.07)';
+    ctx.fill();
+  }
+
+  // Price line
+  ctx.beginPath();
+  chartData.forEach((d,i)=>{ const x=py(i),y=px(d.close); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+  ctx.strokeStyle='#3b82f6'; ctx.lineWidth=1.5; ctx.stroke();
+
+  // SMA20
+  if(sma20) {
+    ctx.beginPath(); ctx.moveTo(4,px(sma20));
+    chartData.forEach((_,i)=>ctx.lineTo(py(i),px(sma20)));
+    ctx.strokeStyle='#f59e0b'; ctx.lineWidth=1; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+  }
+}
