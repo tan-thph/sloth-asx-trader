@@ -82,4 +82,18 @@ const state = {
       max_age_days: 7,
     },
   },
+  announcements: {
+    items: [],
+    status: null,
+    lastSync: null,
+    settingsOpen: false,
+    filter: { ticker: 'all', type: 'all', sentiment: 'all', search: '' },
+    settings: {
+      ann_llm_provider: 'ollama',
+      ann_llm_model: 'qwen2.5:1.5b',
+      ollama_url: 'http://localhost:11434',
+      groq_api_key: '',
+      gemini_api_key: '',
+    },
+  },
 };

@@ -22,9 +22,16 @@ lxml>=5.0                  # faster BS4 parser
 # sentence-transformers>=2.7
 # faiss-cpu>=1.8
 
+# ── Announcement engine ──────────────────────────────────────────
+pdfplumber>=0.11          # PDF text extraction (primary)
+pymupdf>=1.24             # PDF text extraction (fallback) + OCR page render
+# pytesseract>=0.3.10     # OCR for scanned PDFs (optional, needs Tesseract binary)
+# Pillow>=10.0            # Required by pytesseract
+
 # ── Local LLM via Ollama (Ollama itself is a separate install) ─
 # Install Ollama: https://ollama.com/download
 # Then pull a model, e.g.:
-#   ollama pull gemma3:4b       # recommended for 8 GB RAM
+#   ollama pull qwen2.5:1.5b    # recommended for announcements (tiny, fast)
+#   ollama pull gemma3:4b       # recommended for news scanner (8 GB RAM)
 #   ollama pull gemma3:12b      # 16 GB RAM
 #   ollama pull llama3.2:3b     # lightweight alternative

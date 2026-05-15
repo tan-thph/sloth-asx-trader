@@ -43,6 +43,15 @@ except ImportError as _ne_err:
     _ne_err_msg = str(_ne_err)
     _NE_OK = False
 
+# ── Announcement engine (optional — graceful if missing deps) ──────────────────
+try:
+    import announcement_engine as _ae
+    from announcement_routes import ann_bp
+    _AE_OK = True
+except ImportError as _ae_err:
+    _ae_err_msg = str(_ae_err)
+    _AE_OK = False
+
 
 app = Flask(__name__)
 CORS(app)  # allow browser requests from the HTML file
@@ -142,6 +151,10 @@ def init_db():
         """)
 
 init_db()
+
+# ── Register blueprints ────────────────────────────────────────────────────────
+if _AE_OK:
+    app.register_blueprint(ann_bp, url_prefix='/api/announcements')
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -2626,4 +2639,23 @@ if __name__ == "__main__":
         print("  News Scanner: enabled (4×/day via Ollama)")
     else:
         print("  News Scanner: disabled — pip install feedparser beautifulsoup4 scikit-learn")
+    if _AE_OK:
+        def _get_ann_tickers():
+            try:
+                with get_db() as conn:
+                    rows = conn.execute("SELECT ticker FROM portfolio").fetchall()
+                    return [r["ticker"] for r in rows]
+            except Exception:
+                return []
+        def _get_ann_settings():
+            try:
+                with get_db() as conn:
+                    row = conn.execute("SELECT value FROM blob_store WHERE key='ann_settings'").fetchone()
+                    return json.loads(row["value"]) if row else {}
+            except Exception:
+                return {}
+        _ae.start_scheduler(_get_ann_tickers, _get_ann_settings, DB_PATH)
+        print("  Announcements: enabled (10:30 AM + 3:00 PM AEST, price-sensitive only)")
+    else:
+        print(f"  Announcements: disabled — {_ae_err_msg}")
     app.run(host="0.0.0.0", port=5000, debug=False)

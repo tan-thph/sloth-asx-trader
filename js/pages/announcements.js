@@ -1,0 +1,551 @@
+// ============================================================
+// ASX ANNOUNCEMENTS PAGE
+// Pipeline: ASX Filings → LLM summarisation → SQLite
+// ============================================================
+
+// ── Type colour map ───────────────────────────────────────────
+const ANN_TYPE_COLORS = {
+  'Earnings':         '#7c3aed',
+  'Dividend':         '#16a34a',
+  'Capital Raise':    '#2563eb',
+  'CEO Change':       '#dc2626',
+  'Acquisition':      '#9333ea',
+  'AGM':              '#64748b',
+  'Trading Halt':     '#ef4444',
+  'Asset Sale':       '#d97706',
+  'Guidance Update':  '#0891b2',
+  'Other':            '#6b7280',
+};
+
+const ANN_TYPES = [
+  'All', 'Earnings', 'Dividend', 'Capital Raise', 'CEO Change',
+  'Acquisition', 'AGM', 'Trading Halt', 'Asset Sale', 'Guidance Update', 'Other',
+];
+
+// ── Impact border colour ──────────────────────────────────────
+function _annImpactBorder(score) {
+  if (score >= 8) return '#ef4444';
+  if (score >= 6) return '#f59e0b';
+  if (score >= 4) return '#3b82f6';
+  return 'var(--border-light)';
+}
+
+// ── Sentiment colours ─────────────────────────────────────────
+function _annSentiStyle(s) {
+  if (!s) return { bg: 'var(--bg-secondary)', color: 'var(--text-muted)' };
+  const m = {
+    positive: { bg: '#dcfce7', color: '#16a34a' },
+    neutral:  { bg: '#fef9c3', color: '#92400e' },
+    negative: { bg: '#fee2e2', color: '#dc2626' },
+  };
+  return m[s.toLowerCase()] || { bg: 'var(--bg-secondary)', color: 'var(--text-muted)' };
+}
+
+// ── Relative time ─────────────────────────────────────────────
+function _annRelTime(iso) {
+  if (!iso) return '';
+  const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (secs < 60)    return 'just now';
+  if (secs < 3600)  return Math.floor(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  return Math.floor(secs / 86400) + 'd ago';
+}
+
+// ── Format date for display ───────────────────────────────────
+function _annFmtDate(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' });
+  } catch { return iso; }
+}
+
+// ── Loading skeleton ──────────────────────────────────────────
+function _annSkeletonHTML() {
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <div style="height:16px;width:55%;background:var(--border-light);border-radius:4px;margin-bottom:8px"></div>
+      <div style="height:10px;width:35%;background:var(--border-light);border-radius:4px"></div>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div style="height:10px;width:80%;background:var(--border-light);border-radius:4px;margin-bottom:6px"></div>
+      <div style="height:10px;width:60%;background:var(--border-light);border-radius:4px"></div>
+    </div>
+    <div class="card"><div style="height:300px"></div></div>`;
+}
+
+// ── Main render ───────────────────────────────────────────────
+async function renderAnnouncementsPage(gen) {
+  const el = document.getElementById('main-content');
+
+  // Guard + default state
+  if (!state.announcements) {
+    state.announcements = {
+      items: [],
+      status: null,
+      lastSync: null,
+      filter: { ticker: 'all', type: 'all', sentiment: 'all', search: '' },
+    };
+  }
+
+  // Show skeleton immediately
+  el.innerHTML = _annSkeletonHTML();
+
+  if (!state.serverOk) {
+    if (state._renderGen !== gen) return;
+    el.innerHTML = `
+      <div class="card">
+        <div class="empty-state">
+          <div class="empty-icon">◆</div>
+          <p>Backend server not running.</p>
+          <p class="sub">Start <code>asx_server.py</code> then refresh this page.</p>
+          <button class="btn btn-primary" onclick="checkServer().then(renderPage)">Check Connection</button>
+        </div>
+      </div>`;
+    return;
+  }
+
+  try {
+    // Build query params from current filters (server-side pre-filter)
+    const f = state.announcements.filter;
+    const params = new URLSearchParams({ days: 7 });
+    if (f.ticker     && f.ticker     !== 'all') params.set('ticker',    f.ticker);
+    if (f.type       && f.type       !== 'all') params.set('type',      f.type);
+    if (f.sentiment  && f.sentiment  !== 'all') params.set('sentiment', f.sentiment);
+
+    const [statusResp, feedResp] = await Promise.all([
+      fetch(`${API}/api/announcements/status`).then(r => r.ok ? r.json() : {}).catch(() => ({})),
+      fetch(`${API}/api/announcements?${params}`).then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] })),
+    ]);
+
+    if (state._renderGen !== gen) return; // stale render guard
+
+    state.announcements.status   = statusResp;
+    state.announcements.items    = feedResp.items || [];
+    state.announcements.lastSync = statusResp.last_sync || null;
+
+    // Merge settings from server if available
+    if (statusResp.settings && !state.announcements.settings) {
+      state.announcements.settings = statusResp.settings;
+    }
+
+    el.innerHTML = _annPageHTML(statusResp);
+
+  } catch (ex) {
+    if (state._renderGen !== gen) return;
+    el.innerHTML = `<div class="card"><p class="text-danger">Failed to load announcements: ${ex.message}</p></div>`;
+  }
+}
+
+// ── Page HTML builder ─────────────────────────────────────────
+function _annPageHTML(status) {
+  const lastSync   = state.announcements.lastSync;
+  const items      = _annFilterItems(state.announcements.items);
+  const totalCount = state.announcements.items.length;
+
+  // Sync status pill
+  let syncPill;
+  if (lastSync) {
+    const minAgo = Math.floor((Date.now() - new Date(lastSync).getTime()) / 60000);
+    syncPill = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 10px;border-radius:99px;background:#dcfce7;color:#16a34a;font-weight:600">
+      ● Synced ${minAgo < 1 ? 'just now' : minAgo + ' min ago'}
+    </span>`;
+  } else {
+    syncPill = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 10px;border-radius:99px;background:var(--bg-secondary);color:var(--text-muted)">
+      ○ Never synced
+    </span>`;
+  }
+
+  const countBadge = `<span class="badge" style="background:var(--bg-secondary);color:var(--text-secondary);font-size:11px">${items.length} of ${totalCount} announcement${totalCount !== 1 ? 's' : ''}</span>`;
+
+  // Card list
+  const cardList = items.length
+    ? items.map(a => _renderAnnCard(a)).join('')
+    : `<div class="empty-state" style="padding:50px 20px">
+        <div class="empty-icon">◆</div>
+        <p>${totalCount > 0 ? 'No announcements match the current filters.' : 'No announcements yet. Click <strong>Sync Now</strong> to fetch ASX filings.'}</p>
+      </div>`;
+
+  return `
+    <!-- Top bar -->
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:15px;font-weight:700;color:var(--text-primary)">ASX Announcements</span>
+          ${syncPill}
+          ${lastSync ? `<span style="font-size:11px;color:var(--text-muted)">Last sync: ${_annFmtDate(lastSync)}</span>` : ''}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          ${countBadge}
+          <button class="btn btn-primary btn-sm" onclick="syncAnnouncements()">⟳ Sync Now</button>
+          <button class="btn btn-sm" onclick="renderPage()" title="Refresh">⟳</button>
+          <button class="btn btn-sm" onclick="toggleAnnSettings()" id="ann-settings-toggle-btn">⚙ LLM Settings</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filter bar -->
+    <div class="card" style="margin-bottom:12px" id="ann-filter-bar">
+      ${_renderAnnFilters(state.announcements.items)}
+    </div>
+
+    <!-- Announcement cards -->
+    <div class="card" style="margin-bottom:12px">
+      <div id="ann-card-list">${cardList}</div>
+    </div>
+
+    <!-- LLM Settings panel (hidden by default) -->
+    <div class="card" id="ann-settings-panel" style="display:none;margin-bottom:12px">
+      ${_annSettingsPanelHTML(status)}
+    </div>`;
+}
+
+// ── Filter bar HTML ───────────────────────────────────────────
+function _renderAnnFilters(items) {
+  const f    = state.announcements.filter;
+  const tickers = ['all', ...new Set(items.map(a => a.ticker).filter(Boolean))];
+
+  const tickerChips = tickers.map(t => {
+    const active = f.ticker === t;
+    return `<button class="btn btn-sm" onclick="setAnnFilter('ticker','${t}')"
+      style="padding:2px 10px;font-size:11px;${active ? 'background:var(--accent,#3b82f6);color:#fff;' : 'background:var(--bg-secondary);color:var(--text-secondary);'}border-radius:99px">
+      ${t === 'all' ? 'All' : t}
+    </button>`;
+  }).join('');
+
+  const typeOpts = ANN_TYPES.map(tp => {
+    const val = tp === 'All' ? 'all' : tp;
+    return `<option value="${val}" ${f.type === val ? 'selected' : ''}>${tp}</option>`;
+  }).join('');
+
+  const sentiOpts = [
+    ['all', 'All Sentiment'],
+    ['positive', '▲ Positive'],
+    ['neutral',  '● Neutral'],
+    ['negative', '▼ Negative'],
+  ].map(([v, l]) => `<option value="${v}" ${f.sentiment === v ? 'selected' : ''}>${l}</option>`).join('');
+
+  return `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <div style="display:flex;gap:4px;flex-wrap:wrap;flex:1">${tickerChips}</div>
+      <select onchange="setAnnFilter('type',this.value)" style="font-size:12px;padding:3px 6px;border-radius:var(--radius-md);border:1px solid var(--border-light);background:var(--bg-secondary);color:var(--text-primary)">${typeOpts}</select>
+      <select onchange="setAnnFilter('sentiment',this.value)" style="font-size:12px;padding:3px 6px;border-radius:var(--radius-md);border:1px solid var(--border-light);background:var(--bg-secondary);color:var(--text-primary)">${sentiOpts}</select>
+      <input type="text" placeholder="Search headlines…" value="${f.search || ''}"
+        oninput="setAnnFilter('search',this.value)"
+        style="width:160px;font-size:12px;padding:3px 8px;border:1px solid var(--border-light);border-radius:var(--radius-md);background:var(--bg-secondary);color:var(--text-primary)">
+    </div>`;
+}
+
+// ── Single announcement card ──────────────────────────────────
+function _renderAnnCard(ann) {
+  const impact   = ann.impact_score != null ? Number(ann.impact_score) : null;
+  const senti    = (ann.sentiment || '').toLowerCase();
+  const annType  = ann.type || 'Other';
+  const typeColor = ANN_TYPE_COLORS[annType] || ANN_TYPE_COLORS['Other'];
+  const sentiStyle = _annSentiStyle(senti);
+  const borderColor = impact != null ? _annImpactBorder(impact) : 'var(--border-light)';
+  const tags     = ann.tags || [];
+  const ticker   = ann.ticker || '';
+  const headline = ann.headline || ann.title || '';
+  const summary  = ann.summary || '';
+  const date     = ann.date || ann.published_date || '';
+  const priceSensitive = ann.price_sensitive || false;
+  const llmModel = ann.llm_model || '';
+  const annId    = ann.id || '';
+
+  // Ticker badge
+  const tickerBadge = ticker
+    ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd">${ticker}</span>`
+    : '';
+
+  // Type pill
+  const typePill = `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:${typeColor}22;color:${typeColor};font-weight:600">${annType}</span>`;
+
+  // Sentiment pill
+  const sentiPill = senti
+    ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:${sentiStyle.bg};color:${sentiStyle.color};font-weight:600">${senti.charAt(0).toUpperCase() + senti.slice(1)}</span>`
+    : '';
+
+  // Impact score badge
+  const impactBadge = impact != null
+    ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:${borderColor}22;color:${borderColor};font-weight:700;border:1px solid ${borderColor}44" title="Impact score">⚡ ${impact}/10</span>`
+    : '';
+
+  // Price sensitive dot
+  const psDot = priceSensitive
+    ? `<span style="font-size:11px;color:#ef4444" title="Price sensitive">● Price Sensitive</span>`
+    : '';
+
+  // Tags
+  const tagBadges = tags.slice(0, 4).map(tag =>
+    `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--bg-secondary);color:var(--text-muted)">#${tag}</span>`
+  ).join('');
+
+  // LLM model attribution
+  const llmBadge = llmModel
+    ? `<span style="font-size:10px;color:var(--text-muted)" title="Processed by LLM">LLM: ${llmModel}</span>`
+    : '';
+
+  // Summary text
+  const summaryHtml = summary
+    ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px">${summary}</div>`
+    : '';
+
+  // View PDF button
+  const viewPdfBtn = annId
+    ? `<a href="${API}/api/announcements/${annId}/pdf" target="_blank" rel="noopener"
+         class="btn btn-sm" style="font-size:11px;text-decoration:none">View PDF ↗</a>`
+    : '';
+
+  // Add to analysis button — escape for inline onclick
+  const safeHeadline = headline.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  const safeSummary  = summary.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  const safeTicker   = ticker.replace(/'/g, "\\'");
+  const safeDate     = date.replace(/'/g, "\\'");
+
+  const addToAnalysisBtn = `<button class="btn btn-sm btn-primary" style="font-size:11px"
+    onclick="addAnnToContext('${safeHeadline}','${safeSummary}','${safeTicker}','${safeDate}')">+ Add to Analysis</button>`;
+
+  return `
+    <div style="border:1px solid var(--border-light);border-left:3px solid ${borderColor};border-radius:var(--radius-md);padding:12px 14px;margin-bottom:10px">
+      <!-- Row 1: ticker, headline, date -->
+      <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+        ${tickerBadge}
+        <span style="flex:1;font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.4">${headline}</span>
+        <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;flex-shrink:0">${_annFmtDate(date)}</span>
+      </div>
+      <!-- Row 2: pills + price sensitive -->
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${summary ? '8px' : '6px'}">
+        ${typePill}
+        ${sentiPill}
+        ${impactBadge}
+        ${psDot}
+      </div>
+      <!-- Row 3: summary -->
+      ${summaryHtml}
+      <!-- Row 4: tags -->
+      ${tagBadges ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${tagBadges}</div>` : ''}
+      <!-- Row 5: actions + llm attribution -->
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:space-between">
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${viewPdfBtn}
+          ${addToAnalysisBtn}
+        </div>
+        <div>${llmBadge}</div>
+      </div>
+    </div>`;
+}
+
+// ── LLM Settings panel HTML ───────────────────────────────────
+function _annSettingsPanelHTML(status) {
+  const cfg = state.announcements.settings || {};
+  const provider = cfg.provider || 'ollama';
+
+  return `
+    <div class="card-title" style="margin-bottom:12px">⚙ LLM Settings</div>
+    <div style="display:flex;flex-direction:column;gap:10px;max-width:480px">
+      <div>
+        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Provider</label>
+        <select id="ann-provider" onchange="toggleAnnProviderFields()" style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+          <option value="ollama"  ${provider === 'ollama'  ? 'selected' : ''}>Ollama (local)</option>
+          <option value="groq"    ${provider === 'groq'    ? 'selected' : ''}>Groq (free)</option>
+          <option value="gemini"  ${provider === 'gemini'  ? 'selected' : ''}>Gemini (free)</option>
+          <option value="keyword" ${provider === 'keyword' ? 'selected' : ''}>Keyword only</option>
+        </select>
+      </div>
+
+      <!-- Ollama fields -->
+      <div id="ann-ollama-fields" style="display:${provider === 'ollama' ? 'flex' : 'none'};flex-direction:column;gap:8px">
+        <div>
+          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Ollama Model</label>
+          <input type="text" id="ann-ollama-model" value="${cfg.ollama_model || 'qwen2.5:1.5b'}"
+            placeholder="qwen2.5:1.5b"
+            style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Ollama URL</label>
+          <input type="text" id="ann-ollama-url" value="${cfg.ollama_url || 'http://localhost:11434'}"
+            placeholder="http://localhost:11434"
+            style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+        </div>
+      </div>
+
+      <!-- Groq fields -->
+      <div id="ann-groq-fields" style="display:${provider === 'groq' ? 'flex' : 'none'};flex-direction:column;gap:8px">
+        <div>
+          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Groq API Key</label>
+          <input type="password" id="ann-groq-key" value="${cfg.groq_api_key || ''}"
+            placeholder="gsk_…"
+            style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+        </div>
+      </div>
+
+      <!-- Gemini fields -->
+      <div id="ann-gemini-fields" style="display:${provider === 'gemini' ? 'flex' : 'none'};flex-direction:column;gap:8px">
+        <div>
+          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Gemini API Key</label>
+          <input type="password" id="ann-gemini-key" value="${cfg.gemini_api_key || ''}"
+            placeholder="AIza…"
+            style="width:100%;font-size:13px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
+        </div>
+      </div>
+
+      <button class="btn btn-primary btn-sm" onclick="saveAnnSettings()" style="align-self:flex-start;margin-top:4px">Save Settings</button>
+    </div>`;
+}
+
+// ── Client-side filter ────────────────────────────────────────
+function _annFilterItems(items) {
+  const f = state.announcements.filter;
+  let result = items.slice();
+
+  if (f.ticker && f.ticker !== 'all') {
+    result = result.filter(a => (a.ticker || '').toUpperCase() === f.ticker.toUpperCase());
+  }
+  if (f.type && f.type !== 'all') {
+    result = result.filter(a => (a.type || '').toLowerCase() === f.type.toLowerCase());
+  }
+  if (f.sentiment && f.sentiment !== 'all') {
+    result = result.filter(a => (a.sentiment || '').toLowerCase() === f.sentiment.toLowerCase());
+  }
+  if (f.search) {
+    const q = f.search.toLowerCase();
+    result = result.filter(a =>
+      (a.headline || a.title || '').toLowerCase().includes(q) ||
+      (a.summary || '').toLowerCase().includes(q) ||
+      (a.ticker || '').toLowerCase().includes(q)
+    );
+  }
+
+  return result;
+}
+
+// ── Update filter + re-render list only ──────────────────────
+function setAnnFilter(key, value) {
+  if (!state.announcements) return;
+  state.announcements.filter[key] = value;
+
+  // Re-render filter bar (ticker chips need updated active state)
+  const filterBar = document.getElementById('ann-filter-bar');
+  if (filterBar) filterBar.innerHTML = _renderAnnFilters(state.announcements.items);
+
+  // Re-render card list only
+  const list = document.getElementById('ann-card-list');
+  if (!list) { renderPage(); return; }
+
+  const items = _annFilterItems(state.announcements.items);
+  list.innerHTML = items.length
+    ? items.map(a => _renderAnnCard(a)).join('')
+    : `<div class="empty-state" style="padding:50px 20px">
+        <div class="empty-icon">◆</div>
+        <p>No announcements match the current filters.</p>
+      </div>`;
+}
+
+// ── Sync announcements from ASX ───────────────────────────────
+async function syncAnnouncements() {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  const tickers = mergedPortfolio().map(h => h.ticker);
+  const allTickers = [...new Set([
+    ...tickers,
+    ...(state.analysisConfig.extraTickers || []),
+  ])];
+
+  if (!allTickers.length) {
+    toast('No tickers in portfolio to sync', 'info');
+    return;
+  }
+
+  toast('Syncing ASX announcements…', 'info');
+
+  try {
+    const r = await fetch(`${API}/api/announcements/sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tickers: allTickers }),
+    });
+
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      toast(`Sync failed: ${err.error || r.statusText}`, 'error');
+      return;
+    }
+
+    const d = await r.json();
+    const msg = d.message || `Synced ${d.count || 0} announcements`;
+    toast(msg, 'success');
+
+    // Refresh status + feed
+    state.announcements.lastSync = new Date().toISOString();
+
+    // Re-render page to show new data
+    renderPage();
+  } catch (e) {
+    toast(`Sync request failed: ${e.message}`, 'error');
+  }
+}
+
+// ── Add to analysis context ───────────────────────────────────
+function addAnnToContext(headline, summary, ticker, date) {
+  if (!state.analysisConfig) state.analysisConfig = { extraTickers: [], marketView: '', savedViews: [] };
+  const snippet = `\n\n[${ticker} announcement ${date}] ${headline}: ${summary}`.trim();
+  state.analysisConfig.marketView = (state.analysisConfig.marketView || '') + '\n\n' + snippet;
+  scheduleSave();
+  toast('Added to analysis context', 'success');
+}
+
+// ── Save LLM settings ─────────────────────────────────────────
+async function saveAnnSettings() {
+  const provider   = document.getElementById('ann-provider')?.value || 'ollama';
+  const ollamaModel = document.getElementById('ann-ollama-model')?.value?.trim() || 'qwen2.5:1.5b';
+  const ollamaUrl  = document.getElementById('ann-ollama-url')?.value?.trim() || 'http://localhost:11434';
+  const groqKey    = document.getElementById('ann-groq-key')?.value?.trim() || '';
+  const geminiKey  = document.getElementById('ann-gemini-key')?.value?.trim() || '';
+
+  const payload = { provider, ollama_model: ollamaModel, ollama_url: ollamaUrl, groq_api_key: groqKey, gemini_api_key: geminiKey };
+
+  // Persist to state
+  state.announcements.settings = { ...state.announcements.settings, ...payload };
+
+  if (!state.serverOk) {
+    toast('Settings saved locally (server offline)', 'info');
+    return;
+  }
+
+  try {
+    const r = await fetch(`${API}/api/announcements/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      toast(`Failed to save: ${err.error || r.statusText}`, 'error');
+      return;
+    }
+    toast('LLM settings saved', 'success');
+  } catch (e) {
+    toast(`Could not save settings: ${e.message}`, 'error');
+  }
+}
+
+// ── Toggle provider-specific form fields ──────────────────────
+function toggleAnnProviderFields() {
+  const provider = document.getElementById('ann-provider')?.value || 'ollama';
+  const ollamaEl = document.getElementById('ann-ollama-fields');
+  const groqEl   = document.getElementById('ann-groq-fields');
+  const geminiEl = document.getElementById('ann-gemini-fields');
+  if (ollamaEl) ollamaEl.style.display = provider === 'ollama'  ? 'flex' : 'none';
+  if (groqEl)   groqEl.style.display   = provider === 'groq'    ? 'flex' : 'none';
+  if (geminiEl) geminiEl.style.display = provider === 'gemini'  ? 'flex' : 'none';
+}
+
+// ── Toggle settings panel ─────────────────────────────────────
+function toggleAnnSettings() {
+  const panel = document.getElementById('ann-settings-panel');
+  const btn   = document.getElementById('ann-settings-toggle-btn');
+  if (!panel) return;
+  const hidden = panel.style.display === 'none';
+  panel.style.display = hidden ? 'block' : 'none';
+  if (btn) btn.textContent = hidden ? '✕ Close Settings' : '⚙ LLM Settings';
+}
