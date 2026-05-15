@@ -353,20 +353,20 @@ def _normalise_pdf_url(url: str, base: str = "https://www.asx.com.au") -> str:
 # ---------------------------------------------------------------------------
 
 def _markit_pdf_url(doc_key: str, date_str: str) -> str:
-    """Construct best-effort ASX PDF URL from Markit documentKey + date.
+    """Construct an ASX PDF URL from a Markit documentKey.
 
-    documentKey format: "2924-{docId}-{markitXid}"  e.g. "2924-03088504-3A693022"
-    The middle part (docId) maps to the file on announcements.asx.com.au.
+    documentKey format: "2924-{idsId}-{markitXid}"  e.g. "2924-03088504-3A693022"
+    The middle part is the ASX `idsId`.  The displayAnnouncement.do endpoint
+    accepts it and redirects (HTTP 302) to the actual obfuscated PDF filename,
+    so requests with allow_redirects=True will land on the real file.
     """
-    if not doc_key or not date_str:
+    if not doc_key:
         return ""
     parts = doc_key.split("-")
     if len(parts) < 2:
         return ""
-    doc_id = parts[1]  # e.g. "03088504"
-    date_nodash = date_str.replace("-", "")  # "20260510"
-    # www.asx.com.au redirects this to announcements.asx.com.au
-    return f"https://announcements.asx.com.au/asxpdf/{date_nodash}/pdf/{doc_id}.pdf"
+    ids_id = parts[1]  # e.g. "03088504"
+    return f"https://www.asx.com.au/asx/statistics/displayAnnouncement.do?display=pdf&idsId={ids_id}"
 
 
 def _markit_type(raw_type: str) -> str:
@@ -950,28 +950,32 @@ def classify_announcement(
     """Classify an announcement using configured LLM providers with fallback."""
     settings = settings or {}
     provider = settings.get("ann_llm_provider", "ollama").lower()
+
+    # "keyword" provider: skip LLM entirely — user explicitly wants heuristic only
+    if provider == "keyword":
+        return _classify_keyword(ticker, headline, pdf_text)
+
     prompt = _build_prompt(ticker, headline, pdf_text)
 
-    # Ordered list based on configured provider
     provider_fns = {
-        "ollama": _classify_ollama,
-        "groq": _classify_groq,
-        "gemini": _classify_gemini,
+        "ollama":  _classify_ollama,
+        "groq":    _classify_groq,
+        "gemini":  _classify_gemini,
     }
 
-    # Build ordered list: configured provider first, then others
-    order = [provider] + [p for p in ("ollama", "groq", "gemini") if p != provider]
-
-    for prov in order:
-        fn = provider_fns.get(prov)
-        if fn is None:
-            continue
+    # Try the configured provider first; only cascade to others if it fails
+    fn = provider_fns.get(provider)
+    if fn:
         result = fn(prompt, settings)
         if result:
             logger.debug("classify_announcement: %s classified by %s", ticker, result.get("llm_model"))
             return result
+        logger.warning(
+            "classify_announcement: %s — provider '%s' failed, falling back to keyword",
+            ticker, provider,
+        )
 
-    # Keyword fallback
+    # Keyword fallback (LLM unavailable/timed out/bad JSON)
     return _classify_keyword(ticker, headline, pdf_text)
 
 
@@ -1098,6 +1102,72 @@ def get_sync_status() -> Dict:
 def _update_status(**kwargs: Any) -> None:
     with _sync_lock:
         _sync_status.update(kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Re-classify existing announcements
+# ---------------------------------------------------------------------------
+
+def reclassify_all(
+    settings: Optional[Dict] = None,
+    days: int = 30,
+    db_path: Optional[str | Path] = None,
+) -> int:
+    """Re-run LLM classification on stored announcements and update DB.
+
+    Only touches announcements within `days` (default 30).  Returns the
+    number of records updated.
+    """
+    settings = settings or {}
+    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    with get_db(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, ticker, headline, pdf_text FROM announcements WHERE date >= ?",
+            (cutoff,),
+        ).fetchall()
+
+    if not rows:
+        return 0
+
+    updated = 0
+    for row in rows:
+        ann_id   = row["id"]
+        ticker   = row["ticker"]
+        headline = row["headline"] or ""
+        pdf_text = row["pdf_text"] or ""
+
+        try:
+            result = classify_announcement(ticker, headline, pdf_text, settings)
+        except Exception as exc:
+            logger.warning("reclassify_all: failed for %s — %s", ann_id, exc)
+            continue
+
+        try:
+            with get_db(db_path) as conn:
+                conn.execute(
+                    """UPDATE announcements
+                       SET type=?, sentiment=?, impact=?, summary=?, tags=?,
+                           llm_model=?, processed=1
+                       WHERE id=?""",
+                    (
+                        result.get("type"),
+                        result.get("sentiment"),
+                        result.get("impact"),
+                        result.get("summary"),
+                        json.dumps(result.get("tags", [])),
+                        result.get("llm_model"),
+                        ann_id,
+                    ),
+                )
+            updated += 1
+        except Exception as exc:
+            logger.warning("reclassify_all: DB update failed for %s — %s", ann_id, exc)
+
+        time.sleep(0.1)  # avoid hammering the LLM
+
+    logger.info("reclassify_all: updated %d / %d announcements", updated, len(rows))
+    return updated
 
 
 # ---------------------------------------------------------------------------

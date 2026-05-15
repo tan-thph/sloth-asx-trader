@@ -1,7 +1,9 @@
 from flask import Blueprint, jsonify, request, Response
 from pathlib import Path
 import json
+import re
 import threading
+import requests as _requests
 import announcement_engine as ae
 
 ann_bp = Blueprint('announcements', __name__)
@@ -104,6 +106,19 @@ def get_pdf(ann_id):
             return jsonify({"error": "No PDF URL stored"}), 404
 
         pdf_bytes = ae.download_pdf(pdf_url)
+
+        # If the stored URL is the old announcements.asx.com.au path (pre-fix),
+        # extract the idsId and retry via the displayAnnouncement.do redirect.
+        if pdf_bytes is None:
+            m = re.search(r'/pdf/(\w+)\.pdf', pdf_url)
+            if m:
+                ids_id = m.group(1)
+                alt_url = (
+                    f"https://www.asx.com.au/asx/statistics/"
+                    f"displayAnnouncement.do?display=pdf&idsId={ids_id}"
+                )
+                pdf_bytes = ae.download_pdf(alt_url)
+
         if pdf_bytes is None:
             return jsonify({"error": "Failed to download PDF"}), 502
 
@@ -116,6 +131,36 @@ def get_pdf(ann_id):
         return jsonify({"error": str(e)}), 500
 
 
+@ann_bp.route('/reclassify', methods=['POST'])
+def reclassify_announcements():
+    """Re-run LLM classification on stored announcements using current settings."""
+    try:
+        body = request.get_json(silent=True) or {}
+        settings = body.get('settings') or {}
+        if not settings:
+            try:
+                with ae.get_db(DB_PATH) as conn:
+                    row = conn.execute(
+                        "SELECT value FROM blob_store WHERE key='ann_settings'"
+                    ).fetchone()
+                if row:
+                    settings = json.loads(row[0])
+            except Exception:
+                settings = dict(DEFAULT_SETTINGS)
+
+        days = int(body.get('days', 30))
+
+        def run():
+            ae.reclassify_all(settings=settings, days=days, db_path=DB_PATH)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        return jsonify({"ok": True, "message": "Re-classification started in background"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 DEFAULT_SETTINGS = {
     "ann_llm_provider": "ollama",
     "ann_llm_model": "qwen2.5:1.5b",
@@ -123,6 +168,40 @@ DEFAULT_SETTINGS = {
     "groq_api_key": "",
     "gemini_api_key": "",
 }
+
+
+@ann_bp.route('/ollama-models', methods=['GET'])
+def get_ollama_models():
+    """Proxy to Ollama /api/tags so the frontend avoids CORS issues.
+    Accepts optional ?url= to override the saved Ollama server URL.
+    """
+    try:
+        # URL priority: query param → saved setting → default
+        ollama_url = request.args.get('url', '').strip()
+        if not ollama_url:
+            try:
+                with ae.get_db(DB_PATH) as conn:
+                    row = conn.execute(
+                        "SELECT value FROM blob_store WHERE key='ann_settings'"
+                    ).fetchone()
+                if row:
+                    ollama_url = json.loads(row[0]).get('ollama_url', '')
+            except Exception:
+                pass
+        if not ollama_url:
+            ollama_url = 'http://localhost:11434'
+
+        resp = _requests.get(f'{ollama_url.rstrip("/")}/api/tags', timeout=5)
+        if resp.status_code == 200:
+            raw_models = resp.json().get('models', [])
+            # Sort: smallest first (most likely to run on low RAM)
+            raw_models.sort(key=lambda m: m.get('size', 0))
+            models = [m['name'] for m in raw_models if m.get('name')]
+            return jsonify({'models': models, 'ok': True})
+        return jsonify({'models': [], 'ok': False,
+                        'error': f'Ollama returned HTTP {resp.status_code}'})
+    except Exception as e:
+        return jsonify({'models': [], 'ok': False, 'error': str(e)}), 200
 
 
 @ann_bp.route('/settings', methods=['GET'])

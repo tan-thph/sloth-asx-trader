@@ -159,10 +159,15 @@ async function renderAnnouncementsPage(gen) {
 
 // ── Page HTML builder ─────────────────────────────────────────
 function _annPageHTML(status) {
-  const lastSync    = state.announcements.lastSync;
-  const items       = _annFilterItems(state.announcements.items);
-  const totalCount  = state.announcements.items.length;
-  const isRunning   = status && status.running;
+  const lastSync         = state.announcements.lastSync;
+  const items            = _annFilterItems(state.announcements.items);
+  const totalCount       = state.announcements.items.length;
+  const isRunning        = status && status.running;
+
+  // Ticker breakdown for the info row
+  const _portfolioTickers = mergedPortfolio().map(h => h.ticker);
+  const _extraTickers     = state.analysisConfig?.extraTickers || [];
+  const _allSyncTickers   = [...new Set([..._portfolioTickers, ..._extraTickers])];
 
   // Sync status pill
   let syncPill;
@@ -246,7 +251,39 @@ function _annPageHTML(status) {
           <button class="btn btn-sm" onclick="renderPage()" title="Refresh view">↺</button>
         </div>
       </div>
+      <!-- Ticker scope row -->
+      ${_allSyncTickers.length ? `
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <span style="font-size:11px;color:var(--text-muted)">Will scan:</span>
+        ${_portfolioTickers.map(t =>
+          `<span style="font-size:11px;padding:1px 7px;border-radius:99px;background:#dbeafe;color:#1d4ed8;font-weight:600">${t}</span>`
+        ).join('')}
+        ${_extraTickers.length ? `
+          <span style="font-size:11px;color:var(--text-muted)">+</span>
+          ${_extraTickers.map(t =>
+            `<span style="font-size:11px;padding:1px 7px;border-radius:99px;background:#ede9fe;color:#6d28d9;font-weight:600" title="From watchlist">★ ${t}</span>`
+          ).join('')}
+        ` : ''}
+        ${_extraTickers.length === 0 ? `<span style="font-size:11px;color:var(--text-muted)">&nbsp;·&nbsp; add watchlist tickers under <em>Recommendations → Run Analysis</em></span>` : ''}
+      </div>` : `
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light)">
+        <span style="font-size:11px;color:var(--text-muted)">No tickers yet — add holdings or watchlist tickers under <em>Recommendations → Run Analysis</em>.</span>
+      </div>`}
     </div>
+
+    <!-- LLM Settings panel — ABOVE filter/cards so user sees it first -->
+    <details id="ann-settings-panel" style="margin-bottom:12px" ${state.announcements.settingsOpen ? 'open' : ''}
+      ontoggle="state.announcements.settingsOpen=this.open; if(this.open) _maybeLoadOllamaModels()">
+      <summary class="card" style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 16px;border-radius:var(--radius-md);font-size:13px;font-weight:600;color:var(--text-primary);user-select:none">
+        <span>⚙</span>
+        <span>LLM Settings</span>
+        <span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:2px">— click to configure classification model</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--text-muted)">${state.announcements.settingsOpen ? '▲' : '▼'}</span>
+      </summary>
+      <div class="card" style="border-top:none;border-top-left-radius:0;border-top-right-radius:0;padding-top:14px">
+        ${_annSettingsPanelHTML(status)}
+      </div>
+    </details>
 
     <!-- Live scan progress banner -->
     <div id="ann-sync-banner" class="card" style="display:${bannerDisplay};margin-bottom:12px;background:linear-gradient(135deg,#eff6ff 0%,#eef2ff 100%);border:1px solid #bfdbfe">
@@ -261,19 +298,7 @@ function _annPageHTML(status) {
     <!-- Announcement cards -->
     <div class="card" style="margin-bottom:12px">
       <div id="ann-card-list">${cardList}</div>
-    </div>
-
-    <!-- LLM Settings panel — native <details> requires no JS toggle -->
-    <details id="ann-settings-panel" style="margin-bottom:12px" ${state.announcements.settingsOpen ? 'open' : ''}>
-      <summary class="card" style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:var(--radius-md);font-size:13px;font-weight:600;color:var(--text-primary);user-select:none"
-        onclick="state.announcements.settingsOpen=this.parentElement.open">
-        ⚙ LLM Settings
-        <span style="font-size:10px;color:var(--text-muted);font-weight:400">(click to expand)</span>
-      </summary>
-      <div class="card" style="margin-top:4px;border-top-left-radius:0;border-top-right-radius:0">
-        ${_annSettingsPanelHTML(status)}
-      </div>
-    </details>`;
+    </div>`;
 }
 
 // ── Filter bar HTML ───────────────────────────────────────────
@@ -358,8 +383,13 @@ function _renderAnnCard(ann) {
   ).join('');
 
   // LLM model attribution
-  const llmBadge = llmModel
-    ? `<span style="font-size:10px;color:var(--text-muted)" title="Processed by LLM">LLM: ${llmModel}</span>`
+  const llmDisplay = llmModel === 'keyword_fallback' || llmModel === 'keyword'
+    ? { label: 'Keyword heuristic', color: 'var(--text-muted)', title: 'No LLM available — classified by keyword matching' }
+    : llmModel
+      ? { label: llmModel, color: 'var(--text-muted)', title: 'Classified by LLM' }
+      : null;
+  const llmBadge = llmDisplay
+    ? `<span style="font-size:10px;color:${llmDisplay.color}" title="${llmDisplay.title}">LLM: ${llmDisplay.label}</span>`
     : '';
 
   // Summary text
@@ -414,61 +444,112 @@ function _renderAnnCard(ann) {
 
 // ── LLM Settings panel HTML ───────────────────────────────────
 function _annSettingsPanelHTML(status) {
-  const cfg = state.announcements.settings || {};
-  // Use correct key names that match state.announcements.settings in config.js
+  const cfg      = state.announcements.settings || {};
   const provider = cfg.ann_llm_provider || 'ollama';
   const model    = cfg.ann_llm_model    || 'qwen2.5:1.5b';
   const url      = cfg.ollama_url       || 'http://localhost:11434';
   const groqKey  = cfg.groq_api_key     || '';
   const gemKey   = cfg.gemini_api_key   || '';
 
-  const inputStyle = 'width:100%;box-sizing:border-box;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)';
-  const lblStyle   = 'font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px';
+  const inSt  = 'width:100%;box-sizing:border-box;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)';
+  const lblSt = 'font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px';
+
+  // Cached model list from the last fetch
+  const cachedModels = state.announcements._ollamaModels || [];
+  const modelIsCustom = cachedModels.length > 0 && !cachedModels.includes(model);
+
+  // Build the model dropdown options
+  let modelOpts = '';
+  if (cachedModels.length) {
+    modelOpts = cachedModels.map(m =>
+      `<option value="${m}" ${m === model ? 'selected' : ''}>${m}</option>`
+    ).join('');
+    modelOpts += `<option value="__custom__" ${modelIsCustom ? 'selected' : ''}>Custom (type below)…</option>`;
+  } else {
+    // No models loaded yet — show current model as the only option + custom
+    modelOpts  = `<option value="${model}" selected>${model}</option>`;
+    modelOpts += `<option value="__custom__">Custom (type below)…</option>`;
+  }
+
+  const showCustomInput = modelIsCustom || cachedModels.length === 0;
 
   return `
-    <div style="display:flex;flex-direction:column;gap:12px;max-width:520px">
-      <div>
-        <label style="${lblStyle}">Classification provider</label>
-        <select id="ann-provider" onchange="toggleAnnProviderFields()"
-          style="width:100%;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)">
-          <option value="ollama"  ${provider === 'ollama'  ? 'selected' : ''}>Ollama (local — free)</option>
-          <option value="groq"    ${provider === 'groq'    ? 'selected' : ''}>Groq (cloud — free tier)</option>
-          <option value="gemini"  ${provider === 'gemini'  ? 'selected' : ''}>Gemini (cloud — free tier)</option>
-          <option value="keyword" ${provider === 'keyword' ? 'selected' : ''}>Keyword only (no LLM)</option>
-        </select>
+    <div style="display:flex;flex-direction:column;gap:14px;max-width:560px">
+
+      <!-- Provider row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
+        <div>
+          <label style="${lblSt}">Provider</label>
+          <select id="ann-provider" onchange="toggleAnnProviderFields()" style="${inSt}">
+            <option value="ollama"  ${provider === 'ollama'  ? 'selected' : ''}>Ollama (local — free)</option>
+            <option value="groq"    ${provider === 'groq'    ? 'selected' : ''}>Groq (cloud — free tier)</option>
+            <option value="gemini"  ${provider === 'gemini'  ? 'selected' : ''}>Gemini (cloud — free tier)</option>
+            <option value="keyword" ${provider === 'keyword' ? 'selected' : ''}>Keyword only (no LLM)</option>
+          </select>
+        </div>
+        <div id="ann-ollama-url-wrap" style="display:${provider === 'ollama' ? 'block' : 'none'}">
+          <label style="${lblSt}">Ollama server URL</label>
+          <input type="text" id="ann-ollama-url" value="${url}" placeholder="http://localhost:11434"
+            style="${inSt}" onchange="_maybeLoadOllamaModels(true)">
+        </div>
       </div>
 
-      <!-- Ollama fields -->
+      <!-- Ollama model picker -->
       <div id="ann-ollama-fields" style="display:${provider === 'ollama' ? 'flex' : 'none'};flex-direction:column;gap:8px">
         <div>
-          <label style="${lblStyle}">Ollama model <span style="color:var(--text-muted);font-size:11px">(e.g. qwen2.5:1.5b, gemma3:4b)</span></label>
-          <input type="text" id="ann-ollama-model" value="${model}" placeholder="qwen2.5:1.5b" style="${inputStyle}">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <label style="font-size:12px;color:var(--text-secondary);margin:0">Model</label>
+            <button class="btn btn-sm" onclick="_maybeLoadOllamaModels(true)"
+              id="ann-refresh-models-btn"
+              style="padding:1px 8px;font-size:11px" title="Reload model list from Ollama">
+              ↺ Refresh
+            </button>
+            <span id="ann-ollama-models-status" style="font-size:11px;color:var(--text-muted)">
+              ${cachedModels.length ? cachedModels.length + ' model' + (cachedModels.length > 1 ? 's' : '') + ' found' : 'click Refresh to detect'}
+            </span>
+          </div>
+          <select id="ann-ollama-model-select" onchange="toggleAnnOllamaCustom()" style="${inSt}">
+            ${modelOpts}
+          </select>
         </div>
-        <div>
-          <label style="${lblStyle}">Ollama server URL</label>
-          <input type="text" id="ann-ollama-url" value="${url}" placeholder="http://localhost:11434" style="${inputStyle}">
+        <!-- Custom model text input, shown when "Custom" is selected or no models loaded -->
+        <div id="ann-ollama-custom-wrap" style="display:${showCustomInput ? 'block' : 'none'}">
+          <label style="${lblSt}">Custom model name <span style="color:var(--text-muted)">(e.g. qwen2.5:7b, llama3.2:3b)</span></label>
+          <input type="text" id="ann-ollama-model-custom"
+            value="${modelIsCustom ? model : (cachedModels.length ? '' : model)}"
+            placeholder="model:tag" style="${inSt}">
         </div>
       </div>
 
       <!-- Groq fields -->
       <div id="ann-groq-fields" style="display:${provider === 'groq' ? 'flex' : 'none'};flex-direction:column;gap:8px">
         <div>
-          <label style="${lblStyle}">Groq API Key <a href="https://console.groq.com/keys" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a></label>
-          <input type="password" id="ann-groq-key" value="${groqKey}" placeholder="gsk_…" style="${inputStyle}">
+          <label style="${lblSt}">Groq API Key
+            <a href="https://console.groq.com/keys" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a>
+          </label>
+          <input type="password" id="ann-groq-key" value="${groqKey}" placeholder="gsk_…" style="${inSt}">
         </div>
       </div>
 
       <!-- Gemini fields -->
       <div id="ann-gemini-fields" style="display:${provider === 'gemini' ? 'flex' : 'none'};flex-direction:column;gap:8px">
         <div>
-          <label style="${lblStyle}">Gemini API Key <a href="https://aistudio.google.com/apikey" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a></label>
-          <input type="password" id="ann-gemini-key" value="${gemKey}" placeholder="AIza…" style="${inputStyle}">
+          <label style="${lblSt}">Gemini API Key
+            <a href="https://aistudio.google.com/apikey" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a>
+          </label>
+          <input type="password" id="ann-gemini-key" value="${gemKey}" placeholder="AIza…" style="${inSt}">
         </div>
       </div>
 
-      <div style="display:flex;align-items:center;gap:10px">
+      <!-- Save row -->
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <button class="btn btn-primary btn-sm" onclick="saveAnnSettings()">💾 Save Settings</button>
+        <button class="btn btn-sm" id="ann-reclassify-btn" onclick="reclassifyAnnouncements()"
+          title="Re-run LLM classification on all stored announcements using current settings">
+          ↺ Re-classify All
+        </button>
         <span id="ann-settings-saved-msg" style="font-size:12px;color:#16a34a;display:none">✓ Saved</span>
+        <span id="ann-reclassify-msg" style="font-size:12px;color:#6366f1;display:none">↺ Re-classifying…</span>
       </div>
     </div>`;
 }
@@ -604,14 +685,12 @@ async function syncAnnouncements() {
     return;
   }
 
-  const tickers = mergedPortfolio().map(h => h.ticker);
-  const allTickers = [...new Set([
-    ...tickers,
-    ...(state.analysisConfig.extraTickers || []),
-  ])];
+  const portfolioTickers = mergedPortfolio().map(h => h.ticker);
+  const extraTickers     = state.analysisConfig?.extraTickers || [];
+  const allTickers       = [...new Set([...portfolioTickers, ...extraTickers])];
 
   if (!allTickers.length) {
-    toast('No tickers in portfolio to sync', 'info');
+    toast('No tickers in portfolio or watchlist to sync', 'info');
     return;
   }
 
@@ -635,12 +714,19 @@ async function syncAnnouncements() {
     _setAnnSyncBtn(true);
     const banner = document.getElementById('ann-sync-banner');
     if (banner) {
+      const extraLabel = extraTickers.length
+        ? ` &nbsp;·&nbsp; <span style="color:#6366f1">${extraTickers.length} watchlist</span>`
+        : '';
       banner.style.display = 'block';
       banner.innerHTML = `
-        <div style="display:flex;align-items:center;gap:10px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#1d4ed8">
             <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3b82f6;animation:annPulse 1.2s ease-in-out infinite"></span>
-            Starting scan for ${allTickers.length} tickers…
+            Starting scan…
+          </span>
+          <span style="font-size:12px;color:var(--text-secondary)">
+            <span style="color:#1d4ed8;font-weight:600">${portfolioTickers.length} portfolio</span>${extraLabel}
+            &nbsp;=&nbsp; <strong>${allTickers.length} tickers</strong>
           </span>
         </div>`;
     }
@@ -665,8 +751,12 @@ function addAnnToContext(headline, summary, ticker, date) {
 // ── Save LLM settings ─────────────────────────────────────────
 async function saveAnnSettings() {
   // Read form values
-  const provider    = document.getElementById('ann-provider')?.value    || 'ollama';
-  const ollamaModel = document.getElementById('ann-ollama-model')?.value?.trim() || 'qwen2.5:1.5b';
+  const provider     = document.getElementById('ann-provider')?.value || 'ollama';
+  const modelSelect  = document.getElementById('ann-ollama-model-select');
+  const customInput  = document.getElementById('ann-ollama-model-custom');
+  const ollamaModel  = (modelSelect?.value === '__custom__' || !modelSelect?.value)
+    ? (customInput?.value?.trim() || 'qwen2.5:1.5b')
+    : (modelSelect?.value || 'qwen2.5:1.5b');
   const ollamaUrl   = document.getElementById('ann-ollama-url')?.value?.trim()   || 'http://localhost:11434';
   const groqKey     = document.getElementById('ann-groq-key')?.value?.trim()     || '';
   const geminiKey   = document.getElementById('ann-gemini-key')?.value?.trim()   || '';
@@ -712,14 +802,102 @@ async function saveAnnSettings() {
   }
 }
 
+// ── Re-classify stored announcements with current model ───────
+async function reclassifyAnnouncements() {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  const btn = document.getElementById('ann-reclassify-btn');
+  const msg = document.getElementById('ann-reclassify-msg');
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+  if (msg) msg.style.display = 'inline';
+
+  // First save current settings so the backend uses the latest model
+  await saveAnnSettings();
+
+  try {
+    const r = await fetch(`${API}/api/announcements/reclassify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: state.announcements.settings || {}, days: 30 }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
+      toast('Re-classification started — refresh in a moment to see updated models', 'success');
+      // Auto-refresh after a delay to pick up updated records
+      setTimeout(() => renderPage(), 8000);
+    } else {
+      toast(`Re-classify failed: ${data.error || r.statusText}`, 'error');
+    }
+  } catch (e) {
+    toast(`Re-classify error: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+    if (msg) msg.style.display = 'none';
+  }
+}
+
 // ── Toggle provider-specific form fields ──────────────────────
 function toggleAnnProviderFields() {
-  const provider = document.getElementById('ann-provider')?.value || 'ollama';
-  const ollamaEl = document.getElementById('ann-ollama-fields');
-  const groqEl   = document.getElementById('ann-groq-fields');
-  const geminiEl = document.getElementById('ann-gemini-fields');
-  if (ollamaEl) ollamaEl.style.display = provider === 'ollama'  ? 'flex' : 'none';
-  if (groqEl)   groqEl.style.display   = provider === 'groq'    ? 'flex' : 'none';
-  if (geminiEl) geminiEl.style.display = provider === 'gemini'  ? 'flex' : 'none';
+  const provider  = document.getElementById('ann-provider')?.value || 'ollama';
+  const ollamaEl  = document.getElementById('ann-ollama-fields');
+  const urlWrapEl = document.getElementById('ann-ollama-url-wrap');
+  const groqEl    = document.getElementById('ann-groq-fields');
+  const geminiEl  = document.getElementById('ann-gemini-fields');
+  if (ollamaEl)  ollamaEl.style.display  = provider === 'ollama' ? 'flex'  : 'none';
+  if (urlWrapEl) urlWrapEl.style.display = provider === 'ollama' ? 'block' : 'none';
+  if (groqEl)    groqEl.style.display    = provider === 'groq'   ? 'flex'  : 'none';
+  if (geminiEl)  geminiEl.style.display  = provider === 'gemini' ? 'flex'  : 'none';
+}
+
+// ── Show/hide custom model input ──────────────────────────────
+function toggleAnnOllamaCustom() {
+  const selectEl = document.getElementById('ann-ollama-model-select');
+  const wrapEl   = document.getElementById('ann-ollama-custom-wrap');
+  if (!selectEl || !wrapEl) return;
+  wrapEl.style.display = selectEl.value === '__custom__' ? 'block' : 'none';
+}
+
+// ── Load Ollama models from backend proxy ─────────────────────
+async function _maybeLoadOllamaModels(force = false) {
+  if (!state.serverOk) return;
+  if (!force && (state.announcements._ollamaModels || []).length > 0) return;
+
+  const statusEl = document.getElementById('ann-ollama-models-status');
+  const selectEl = document.getElementById('ann-ollama-model-select');
+  if (statusEl) statusEl.textContent = 'Loading…';
+
+  const ollamaUrl = document.getElementById('ann-ollama-url')?.value?.trim() || '';
+  const params    = ollamaUrl ? `?url=${encodeURIComponent(ollamaUrl)}` : '';
+
+  try {
+    const d      = await fetch(`${API}/api/announcements/ollama-models${params}`).then(r => r.json());
+    const models = d.models || [];
+    state.announcements._ollamaModels = models;
+
+    if (statusEl) {
+      statusEl.textContent = models.length
+        ? `${models.length} model${models.length > 1 ? 's' : ''} found`
+        : (d.error ? `Error: ${d.error}` : 'No models found — is Ollama running?');
+    }
+
+    // Repopulate the dropdown
+    if (selectEl) {
+      const currentModel  = state.announcements.settings?.ann_llm_model || 'qwen2.5:1.5b';
+      const modelIsCustom = models.length > 0 && !models.includes(currentModel);
+      let opts = models.map(m =>
+        `<option value="${m}" ${m === currentModel ? 'selected' : ''}>${m}</option>`
+      ).join('');
+      opts += `<option value="__custom__" ${modelIsCustom ? 'selected' : ''}>Custom (type below)…</option>`;
+      selectEl.innerHTML = opts;
+
+      // Populate custom input if model isn't in the list
+      const customInput = document.getElementById('ann-ollama-model-custom');
+      if (customInput && modelIsCustom) customInput.value = currentModel;
+
+      toggleAnnOllamaCustom();
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Could not reach Ollama';
+  }
 }
 
