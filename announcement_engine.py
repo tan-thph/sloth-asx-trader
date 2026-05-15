@@ -3,9 +3,15 @@ announcement_engine.py
 ======================
 ASX announcement scraper + analyser engine for the Sloth.ai trading app.
 
-Scrapes price-sensitive announcements from marketindex.com.au, extracts PDF
-text, classifies with an LLM (Ollama / Groq / Gemini / keyword fallback),
-and persists results to the asx_trader.db SQLite database.
+Fetches ASX announcements from three sources in order:
+  1. Markit Digital API (asx.api.markitdigital.com) — powers www2.asx.com.au;
+     public, no auth, returns last ~5 announcements per company with
+     isPriceSensitive flag. Reliable primary source.
+  2. cloudscraper on marketindex.com.au (Cloudflare bypass, optional fallback)
+  3. listcorp.com HTML scraping (no Cloudflare, last-resort fallback)
+Extracts PDF text where available, classifies with an LLM (Ollama / Groq /
+Gemini / keyword fallback), and persists results to the asx_trader.db SQLite
+database.
 
 Runs automatically twice daily (10:30 and 15:00 AEST) via a daemon thread.
 No Flask dependency — pure engine module.
@@ -61,6 +67,13 @@ except ImportError:
     _HAS_BS4 = False
 
 try:
+    import cloudscraper  # type: ignore  # pip install cloudscraper
+
+    _HAS_CLOUDSCRAPER = True
+except ImportError:
+    _HAS_CLOUDSCRAPER = False
+
+try:
     from zoneinfo import ZoneInfo  # stdlib ≥ 3.9
 
     _SYDNEY_TZ = ZoneInfo("Australia/Sydney")
@@ -98,6 +111,48 @@ _API_HEADERS: Dict[str, str] = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "en-AU,en;q=0.9",
     "X-Requested-With": "XMLHttpRequest",
+}
+
+# Markit Digital API (powers www2.asx.com.au) — primary data source
+_MARKIT_BASE = "https://asx.api.markitdigital.com/asx-research/1.0"
+_MARKIT_HEADERS: Dict[str, str] = {
+    "User-Agent": _BROWSER_HEADERS["User-Agent"],
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-AU,en;q=0.9",
+    "Origin": "https://www2.asx.com.au",
+    "Referer": "https://www2.asx.com.au/",
+}
+
+# Map from Markit announcementType strings → our internal type taxonomy
+_MARKIT_TYPE_MAP: Dict[str, str] = {
+    "PERIODIC REPORTS": "Earnings",
+    "HALF YEARLY REPORT": "Earnings",
+    "QUARTERLY REPORT": "Earnings",
+    "FULL YEAR RESULTS": "Earnings",
+    "ANNUAL REPORT": "Earnings",
+    "DIVIDEND": "Dividend",
+    "DISTRIBUTION": "Dividend",
+    "CAPITAL RAISING": "Capital Raise",
+    "CAPITAL MANAGEMENT": "Capital Raise",
+    "ISSUED CAPITAL": "Capital Raise",
+    "RIGHTS ISSUE": "Capital Raise",
+    "PLACEMENT": "Capital Raise",
+    "CHANGE OF DIRECTOR": "CEO Change",
+    "DIRECTOR CHANGE": "CEO Change",
+    "CEO": "CEO Change",
+    "MD": "CEO Change",
+    "MERGER": "Acquisition",
+    "TAKEOVER": "Acquisition",
+    "ACQUISITION": "Acquisition",
+    "TRADING HALT": "Trading Halt",
+    "VOLUNTARY SUSPENSION": "Trading Halt",
+    "ASSET SALE": "Asset Sale",
+    "DIVESTMENT": "Asset Sale",
+    "GUIDANCE": "Guidance Update",
+    "OUTLOOK": "Guidance Update",
+    "AGM": "AGM",
+    "ANNUAL GENERAL MEETING": "AGM",
+    "SECURITY HOLDER DETAILS": "Other",
 }
 
 _ALLOWED_TYPES = {
@@ -142,13 +197,13 @@ _LLM_PROMPT_TEMPLATE = (
     "Ticker: {ticker}\n"
     "Headline: {headline}\n"
     "Content: {content}\n\n"
-    'Reply with ONLY this JSON:\n'
-    '{"type":"Earnings|Dividend|Capital Raise|CEO Change|Acquisition|AGM|'
+    "Reply with ONLY this JSON (no other text):\n"
+    '{{"type":"Earnings|Dividend|Capital Raise|CEO Change|Acquisition|AGM|'
     'Trading Halt|Asset Sale|Guidance Update|Other",'
     '"sentiment":"positive|neutral|negative",'
     '"impact":6,'
     '"summary":"One sentence max 120 chars.",'
-    '"tags":["tag1","tag2"]}'
+    '"tags":["tag1","tag2"]}}'
 )
 
 # ---------------------------------------------------------------------------
@@ -242,10 +297,7 @@ def _make_ann_id(ticker: str, date: str, headline: str) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def _get_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(_BROWSER_HEADERS)
-    return s
+
 
 
 def _parse_date_str(raw: str) -> Optional[str]:
@@ -281,146 +333,214 @@ def _is_recent(date_str: str, days: int) -> bool:
         return False
 
 
-def _normalise_pdf_url(url: str) -> str:
+def _normalise_pdf_url(url: str, base: str = "https://www.asx.com.au") -> str:
+    if not url:
+        return ""
     if url.startswith("http"):
         return url
     if url.startswith("/"):
-        return "https://www.marketindex.com.au" + url
-    return "https://www.marketindex.com.au/" + url
+        return base.rstrip("/") + url
+    return base + "/" + url
 
 
 # ---------------------------------------------------------------------------
-# Strategy 1 — Next.js __NEXT_DATA__ JSON
+# Strategy 1 — Markit Digital API (primary — powers www2.asx.com.au)
 # ---------------------------------------------------------------------------
 
-def _strategy_next_data(session: requests.Session, ticker: str, days: int) -> List[Dict]:
-    url = f"https://www.marketindex.com.au/asx/{ticker.lower()}"
+def _markit_pdf_url(doc_key: str, date_str: str) -> str:
+    """Construct best-effort ASX PDF URL from Markit documentKey + date.
+
+    documentKey format: "2924-{docId}-{markitXid}"  e.g. "2924-03088504-3A693022"
+    The middle part (docId) maps to the file on announcements.asx.com.au.
+    """
+    if not doc_key or not date_str:
+        return ""
+    parts = doc_key.split("-")
+    if len(parts) < 2:
+        return ""
+    doc_id = parts[1]  # e.g. "03088504"
+    date_nodash = date_str.replace("-", "")  # "20260510"
+    # www.asx.com.au redirects this to announcements.asx.com.au
+    return f"https://announcements.asx.com.au/asxpdf/{date_nodash}/pdf/{doc_id}.pdf"
+
+
+def _markit_type(raw_type: str) -> str:
+    """Convert a Markit announcementType string to our internal type taxonomy."""
+    upper = raw_type.upper()
+    for key, val in _MARKIT_TYPE_MAP.items():
+        if key in upper:
+            return val
+    return "Other"
+
+
+def _strategy_markit(ticker: str, days: int) -> List[Dict]:
+    """Primary strategy: Markit Digital API — the data backbone of www2.asx.com.au.
+
+    Public endpoint, no auth required. Returns the ~5 most recent announcements
+    for the company with isPriceSensitive, announcementType, date, documentKey.
+    """
+    session = requests.Session()
+    session.headers.update(_MARKIT_HEADERS)
+
+    url = f"{_MARKIT_BASE}/companies/{ticker.upper()}/announcements"
     try:
-        resp = session.get(url, timeout=20)
+        resp = session.get(url, timeout=15)
+        logger.debug("Markit API %s → HTTP %s", ticker, resp.status_code)
         if resp.status_code != 200:
             return []
-        html = resp.text
-        m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.DOTALL)
-        if not m:
-            return []
-        data = json.loads(m.group(1))
+        data = resp.json()
     except Exception as exc:
-        logger.debug("strategy1 failed for %s: %s", ticker, exc)
+        logger.debug("_strategy_markit failed for %s: %s", ticker, exc)
         return []
 
-    # Walk pageProps looking for announcements list
-    announcements_raw: List[Any] = []
-    try:
-        page_props = data.get("props", {}).get("pageProps", {})
-        # Common keys to check
-        for key in ("announcements", "priceAnnouncements", "companyAnnouncements", "announceData"):
-            val = page_props.get(key)
-            if isinstance(val, list) and val:
-                announcements_raw = val
-                break
-        # Deeper nesting
-        if not announcements_raw:
-            for _k, _v in page_props.items():
-                if isinstance(_v, dict):
-                    for key2 in ("announcements", "priceAnnouncements"):
-                        val2 = _v.get(key2)
-                        if isinstance(val2, list) and val2:
-                            announcements_raw = val2
-                            break
-                if announcements_raw:
-                    break
-    except Exception as exc:
-        logger.debug("strategy1 parse failed for %s: %s", ticker, exc)
-        return []
-
-    return _normalise_raw_list(announcements_raw, ticker, days)
-
-
-# ---------------------------------------------------------------------------
-# Strategy 2 — Internal API endpoints
-# ---------------------------------------------------------------------------
-
-def _strategy_api(session: requests.Session, ticker: str, days: int) -> List[Dict]:
-    endpoints = [
-        f"https://www.marketindex.com.au/api/asx/{ticker.lower()}/announcements",
-        f"https://www.marketindex.com.au/api/company/{ticker.lower()}/announcements",
-        f"https://www.marketindex.com.au/asx/{ticker.lower()}/announcements.json",
-    ]
-    for url in endpoints:
-        try:
-            resp = session.get(url, headers=_API_HEADERS, timeout=15)
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            raw: List[Any] = []
-            if isinstance(data, list):
-                raw = data
-            elif isinstance(data, dict):
-                for key in ("data", "announcements", "results", "items"):
-                    if isinstance(data.get(key), list):
-                        raw = data[key]
-                        break
-            if raw:
-                return _normalise_raw_list(raw, ticker, days)
-        except Exception as exc:
-            logger.debug("strategy2 endpoint %s failed: %s", url, exc)
-    return []
-
-
-# ---------------------------------------------------------------------------
-# Strategy 3 — HTML parse ticker page
-# ---------------------------------------------------------------------------
-
-def _strategy_html_ticker(session: requests.Session, ticker: str, days: int) -> List[Dict]:
-    if not _HAS_BS4:
-        return []
-    url = f"https://www.marketindex.com.au/asx/{ticker.lower()}"
-    try:
-        resp = session.get(url, timeout=20)
-        if resp.status_code != 200:
-            return []
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as exc:
-        logger.debug("strategy3 fetch failed for %s: %s", ticker, exc)
+    items = data.get("data", {}).get("items", [])
+    if not isinstance(items, list):
         return []
 
     results: List[Dict] = []
-    # Look for announcement containers
-    ann_containers = soup.find_all(
-        lambda tag: tag.name in ("div", "section", "article")
-        and any(
-            c in (tag.get("class") or [])
-            for c in ("announcement", "announcements", "ann-row", "ann-item")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        # Date — ISO 8601 from API e.g. "2026-05-10T22:15:14.000Z"
+        date_raw = item.get("date", "")
+        date_str = _parse_date_str(str(date_raw)) if date_raw else None
+        if not date_str or not _is_recent(date_str, days):
+            continue
+
+        headline = str(item.get("headline", "")).strip()
+        if not headline:
+            continue
+
+        is_price_sensitive = bool(item.get("isPriceSensitive", False))
+        raw_ann_type = str(item.get("announcementType", "")).strip()
+        doc_key = str(item.get("documentKey", "")).strip()
+
+        # Construct best-effort PDF URL from documentKey
+        pdf_url = _markit_pdf_url(doc_key, date_str)
+
+        results.append({
+            "id": _make_ann_id(ticker, date_str, headline),
+            "ticker": ticker.upper(),
+            "date": date_str,
+            "headline": headline,
+            "pdf_url": pdf_url,
+            "price_sensitive": 1 if is_price_sensitive else 0,
+            "_markit_type": raw_ann_type,   # used by run_sync for pre-classification
+            "_doc_key": doc_key,
+        })
+
+    logger.debug("_strategy_markit %s: %d items (%d days)", ticker, len(results), days)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Strategy 2 — cloudscraper on marketindex.com.au (bypasses Cloudflare)
+# ---------------------------------------------------------------------------
+
+def _strategy_cloudscraper(ticker: str, days: int) -> List[Dict]:
+    """Use the cloudscraper library to bypass Cloudflare on marketindex.com.au.
+    Requires:  pip install cloudscraper"""
+    if not _HAS_CLOUDSCRAPER or not _HAS_BS4:
+        return []
+
+    try:
+        cs = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
         )
-    )
-    if not ann_containers:
-        # Try table rows
-        tables = soup.find_all("table")
-        for table in tables:
-            rows = table.find_all("tr")
-            for row in rows[1:]:  # skip header
+    except Exception as exc:
+        logger.debug("cloudscraper init failed: %s", exc)
+        return []
+
+    results: List[Dict] = []
+
+    # Try the Next.js embedded JSON first
+    url = f"https://www.marketindex.com.au/asx/{ticker.lower()}"
+    try:
+        resp = cs.get(url, timeout=30)
+        if resp.status_code == 200:
+            m = re.search(
+                r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+                resp.text, re.DOTALL,
+            )
+            if m:
+                page_data = json.loads(m.group(1))
+                page_props = page_data.get("props", {}).get("pageProps", {})
+                for key in ("announcements", "priceAnnouncements", "companyAnnouncements"):
+                    val = page_props.get(key)
+                    if isinstance(val, list) and val:
+                        return _normalise_raw_list(val, ticker, days, base="https://www.marketindex.com.au")
+                # Deeper nesting
+                for _v in page_props.values():
+                    if isinstance(_v, dict):
+                        for key2 in ("announcements", "priceAnnouncements"):
+                            val2 = _v.get(key2)
+                            if isinstance(val2, list) and val2:
+                                return _normalise_raw_list(val2, ticker, days, base="https://www.marketindex.com.au")
+    except Exception as exc:
+        logger.debug("cloudscraper strategy failed for %s: %s", ticker, exc)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Strategy 3 — listcorp.com (no Cloudflare, aggregates ASX data)
+# ---------------------------------------------------------------------------
+
+def _strategy_listcorp(ticker: str, days: int) -> List[Dict]:
+    """Scrape listcorp.com/asx/{ticker}/news — generally accessible."""
+    if not _HAS_BS4:
+        return []
+
+    session = requests.Session()
+    session.headers.update(_BROWSER_HEADERS)
+
+    url = f"https://www.listcorp.com/asx/{ticker.lower()}/news"
+    try:
+        resp = session.get(url, timeout=20)
+        if resp.status_code != 200:
+            logger.debug("listcorp returned %s for %s", resp.status_code, ticker)
+            return []
+    except Exception as exc:
+        logger.debug("listcorp fetch failed for %s: %s", ticker, exc)
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results: List[Dict] = []
+
+    # Listcorp renders announcements as article/li elements or a table
+    for container in soup.find_all(
+        lambda tag: tag.name in ("article", "li", "tr", "div")
+        and re.search(r"news|announce|release", " ".join(tag.get("class") or []), re.I)
+    ):
+        ann = _parse_generic_container(container, ticker, base="https://www.listcorp.com")
+        if ann and _is_recent(ann["date"], days):
+            results.append(ann)
+
+    # Also try any plain table rows (some listcorp pages use a table layout)
+    if not results:
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr")[1:]:
                 cells = row.find_all(["td", "th"])
                 if len(cells) < 2:
                     continue
-                ann = _parse_table_row(cells, ticker)
-                if ann:
+                ann = _parse_table_row(cells, ticker, base="https://www.listcorp.com")
+                if ann and _is_recent(ann["date"], days):
                     results.append(ann)
-    else:
-        for container in ann_containers:
-            ann = _parse_ann_container(container, ticker)
-            if ann:
-                results.append(ann)
 
-    filtered = [a for a in results if _is_recent(a.get("date", ""), days)]
-    return filtered
+    return results
 
 
-def _parse_table_row(cells, ticker: str) -> Optional[Dict]:
+# ---------------------------------------------------------------------------
+# HTML parsing helpers (used by listcorp + cloudscraper HTML fallback)
+# ---------------------------------------------------------------------------
+
+def _parse_table_row(cells, ticker: str, base: str = "https://www.asx.com.au") -> Optional[Dict]:
     """Best-effort parse of a table row into an announcement dict."""
     text_cells = [c.get_text(strip=True) for c in cells]
-    date_str = None
-    headline = None
-    pdf_url = None
+    date_str: Optional[str] = None
+    headline: Optional[str] = None
+    pdf_url: Optional[str] = None
 
     for cell_text in text_cells:
         parsed = _parse_date_str(cell_text)
@@ -432,16 +552,15 @@ def _parse_table_row(cells, ticker: str) -> Optional[Dict]:
     for cell in cells:
         link = cell.find("a", href=True)
         if link and ".pdf" in link["href"].lower():
-            pdf_url = _normalise_pdf_url(link["href"])
+            pdf_url = _normalise_pdf_url(link["href"], base)
             if not headline:
                 headline = link.get_text(strip=True)
 
     if not date_str or not headline:
         return None
 
-    ann_id = _make_ann_id(ticker, date_str, headline)
     return {
-        "id": ann_id,
+        "id": _make_ann_id(ticker, date_str, headline),
         "ticker": ticker.upper(),
         "date": date_str,
         "headline": headline,
@@ -450,25 +569,21 @@ def _parse_table_row(cells, ticker: str) -> Optional[Dict]:
     }
 
 
-def _parse_ann_container(tag, ticker: str) -> Optional[Dict]:
+def _parse_generic_container(tag, ticker: str, base: str = "https://www.asx.com.au") -> Optional[Dict]:
     """Parse an announcement div/article container."""
     text = tag.get_text(" ", strip=True)
-    date_str = None
-    # Try to find date
-    date_m = re.search(r"\d{1,2}[/ ]\w+[/ ]\d{4}|\d{4}-\d{2}-\d{2}", text)
-    if date_m:
-        date_str = _parse_date_str(date_m.group())
-    headline_tag = tag.find(["h2", "h3", "h4", "a", "span"])
+    date_m = re.search(r"\d{1,2}[/ ]\w+[/ ]\d{4}|\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}", text)
+    date_str = _parse_date_str(date_m.group()) if date_m else None
+    headline_tag = tag.find(["h2", "h3", "h4", "a"])
     headline = headline_tag.get_text(strip=True) if headline_tag else text[:120]
     link_tag = tag.find("a", href=re.compile(r"\.pdf", re.I))
-    pdf_url = _normalise_pdf_url(link_tag["href"]) if link_tag else None
+    pdf_url = _normalise_pdf_url(link_tag["href"], base) if link_tag else None
 
     if not date_str or not headline:
         return None
 
-    ann_id = _make_ann_id(ticker, date_str, headline)
     return {
-        "id": ann_id,
+        "id": _make_ann_id(ticker, date_str, headline),
         "ticker": ticker.upper(),
         "date": date_str,
         "headline": headline,
@@ -478,54 +593,17 @@ def _parse_ann_container(tag, ticker: str) -> Optional[Dict]:
 
 
 # ---------------------------------------------------------------------------
-# Strategy 4 — Main announcements page, filter by ticker
+# Normalise raw JSON list (used by cloudscraper Next.js parsing)
 # ---------------------------------------------------------------------------
 
-def _strategy_html_main(session: requests.Session, ticker: str, days: int) -> List[Dict]:
-    if not _HAS_BS4:
-        return []
-    url = "https://www.marketindex.com.au/asx/announcements"
-    try:
-        resp = session.get(url, timeout=20)
-        if resp.status_code != 200:
-            return []
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as exc:
-        logger.debug("strategy4 fetch failed: %s", exc)
-        return []
-
-    results: List[Dict] = []
-    # Search for any text node containing the ticker
-    for tag in soup.find_all(True):
-        if tag.get_text(strip=True).upper() == ticker.upper():
-            # Walk up to find the row
-            parent = tag.parent
-            for _ in range(4):
-                if parent is None:
-                    break
-                cells = parent.find_all(["td", "th", "div"])
-                if len(cells) >= 2:
-                    ann = _parse_table_row(cells, ticker)
-                    if ann:
-                        results.append(ann)
-                    break
-                parent = parent.parent
-    filtered = [a for a in results if _is_recent(a.get("date", ""), days)]
-    return filtered
-
-
-# ---------------------------------------------------------------------------
-# Normalise raw JSON list from Next.js / API responses
-# ---------------------------------------------------------------------------
-
-def _normalise_raw_list(raw: List[Any], ticker: str, days: int) -> List[Dict]:
+def _normalise_raw_list(raw: List[Any], ticker: str, days: int,
+                        base: str = "https://www.asx.com.au") -> List[Dict]:
     results: List[Dict] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
-        # Date
         date_str = None
-        for k in ("date", "announcementDate", "announcement_date", "released", "time", "releasedAt"):
+        for k in ("date", "announcementDate", "announcement_date", "released", "releasedAt", "time"):
             val = item.get(k, "")
             if val:
                 date_str = _parse_date_str(str(val))
@@ -535,22 +613,22 @@ def _normalise_raw_list(raw: List[Any], ticker: str, days: int) -> List[Dict]:
             continue
 
         # Price sensitive filter
-        ps_val = item.get("price_sensitive") or item.get("priceSensitive") or item.get("sensitive")
-        # Accept if True, "1", "Y", "yes", or field absent (assume sensitive)
+        ps_val = (
+            item.get("price_sensitive")
+            or item.get("priceSensitive")
+            or item.get("market_sensitive")
+            or item.get("sensitive")
+        )
         if ps_val is not None:
-            if isinstance(ps_val, bool):
-                if not ps_val:
-                    continue
-            elif isinstance(ps_val, int):
-                if ps_val == 0:
-                    continue
-            elif isinstance(ps_val, str):
-                if ps_val.lower() in ("false", "0", "no", "n"):
-                    continue
+            if isinstance(ps_val, bool) and not ps_val:
+                continue
+            if isinstance(ps_val, int) and ps_val == 0:
+                continue
+            if isinstance(ps_val, str) and ps_val.lower() in ("false", "0", "no", "n"):
+                continue
 
-        # Headline
         headline = None
-        for k in ("headline", "header", "title", "announcementHeader", "subject", "description"):
+        for k in ("headline", "header", "title", "subject", "description"):
             v = item.get(k, "")
             if v and isinstance(v, str):
                 headline = v.strip()
@@ -558,55 +636,59 @@ def _normalise_raw_list(raw: List[Any], ticker: str, days: int) -> List[Dict]:
         if not headline:
             continue
 
-        # PDF URL
         pdf_url = None
-        for k in ("url", "pdfUrl", "pdf_url", "documentUrl", "document_url", "link", "href"):
+        for k in ("url", "pdfUrl", "pdf_url", "documentUrl", "document_url", "link"):
             v = item.get(k, "")
-            if v and isinstance(v, str) and (".pdf" in v.lower() or "document" in v.lower()):
-                pdf_url = _normalise_pdf_url(v)
+            if v and isinstance(v, str):
+                pdf_url = _normalise_pdf_url(v, base)
                 break
 
-        ann_id = _make_ann_id(ticker, date_str, headline)
-        results.append(
-            {
-                "id": ann_id,
-                "ticker": ticker.upper(),
-                "date": date_str,
-                "headline": headline,
-                "pdf_url": pdf_url,
-                "price_sensitive": 1,
-            }
-        )
+        results.append({
+            "id": _make_ann_id(ticker, date_str, headline),
+            "ticker": ticker.upper(),
+            "date": date_str,
+            "headline": headline,
+            "pdf_url": pdf_url,
+            "price_sensitive": 1,
+        })
     return results
 
 
 # ---------------------------------------------------------------------------
-# Main fetch function: try all strategies
+# Main fetch function — try strategies in order, return first hit
 # ---------------------------------------------------------------------------
 
 def fetch_announcements(ticker: str, days: int = 3) -> List[Dict]:
-    """Fetch price-sensitive announcements for a ticker using 4 strategies."""
-    session = _get_session()
-    session.headers["Referer"] = f"https://www.marketindex.com.au/asx/{ticker.lower()}"
+    """Fetch announcements for *ticker* using 3 strategies in order:
+    1. Markit Digital API (asx.api.markitdigital.com) — primary, public, no CF
+    2. cloudscraper on marketindex.com.au  (if cloudscraper installed)
+    3. listcorp.com  (plain HTML, last-resort fallback)
 
+    Returns all announcements regardless of isPriceSensitive; the caller decides
+    what to store. Each item contains 'price_sensitive' (0/1) from source.
+    """
     strategies = [
-        ("next_data", _strategy_next_data),
-        ("api", _strategy_api),
-        ("html_ticker", _strategy_html_ticker),
-        ("html_main", _strategy_html_main),
+        ("markit",        lambda t, d: _strategy_markit(t, d)),
+        ("cloudscraper",  lambda t, d: _strategy_cloudscraper(t, d)),
+        ("listcorp",      lambda t, d: _strategy_listcorp(t, d)),
     ]
 
     for name, fn in strategies:
         try:
-            results = fn(session, ticker, days)
+            results = fn(ticker, days)
             if results:
-                logger.info("fetch_announcements: %s — strategy '%s' returned %d items", ticker, name, len(results))
+                logger.info(
+                    "fetch_announcements: %s — strategy '%s' returned %d items",
+                    ticker, name, len(results),
+                )
                 return results
         except Exception as exc:
-            logger.warning("fetch_announcements: %s strategy '%s' raised: %s", ticker, name, exc)
-        time.sleep(0.15)
+            logger.warning(
+                "fetch_announcements: %s strategy '%s' raised: %s", ticker, name, exc
+            )
+        time.sleep(0.3)
 
-    logger.info("fetch_announcements: %s — no announcements found (all strategies exhausted)", ticker)
+    logger.info("fetch_announcements: %s — no announcements found", ticker)
     return []
 
 
@@ -1062,7 +1144,11 @@ def run_sync(
                 if j > 0:
                     time.sleep(0.3)
 
-                # Download + extract PDF text
+                # Extract private metadata keys before saving (not DB columns)
+                markit_type_raw = ann.pop("_markit_type", "")
+                ann.pop("_doc_key", None)
+
+                # Download + extract PDF text (best-effort; may 404 for new ASX system)
                 pdf_text = ""
                 if ann.get("pdf_url"):
                     pdf_bytes = download_pdf(ann["pdf_url"])
@@ -1071,10 +1157,15 @@ def run_sync(
                             pdf_text = extract_text(pdf_bytes)
                         except Exception as exc:
                             logger.warning("run_sync: text extraction failed for %s — %s", ann["pdf_url"], exc)
+                    else:
+                        logger.debug("run_sync: PDF not available for %s (%s)", ann.get("headline","")[:40], ann["pdf_url"])
 
                 ann["pdf_text"] = pdf_text
 
-                # LLM classify
+                # Pre-classify from Markit type if available (free, no LLM needed)
+                pre_type = _markit_type(markit_type_raw) if markit_type_raw else None
+
+                # LLM classify — passes headline + pdf_text (may be empty)
                 try:
                     classification = classify_announcement(
                         ticker=ticker,
@@ -1082,10 +1173,20 @@ def run_sync(
                         pdf_text=pdf_text,
                         settings=settings,
                     )
+                    # Prefer Markit-derived type over keyword heuristic when LLM
+                    # falls back to keyword_fallback and we have a Markit type
+                    if (pre_type and pre_type != "Other"
+                            and classification.get("llm_model") == "keyword_fallback"):
+                        classification["type"] = pre_type
                     ann.update(classification)
                     ann["processed"] = 1
                 except Exception as exc:
                     logger.warning("run_sync: classify failed for %s ann — %s", ticker, exc)
+                    # Use keyword fallback with Markit type hint
+                    kw = _classify_keyword(ticker, ann.get("headline", ""), pdf_text)
+                    if pre_type and pre_type != "Other":
+                        kw["type"] = pre_type
+                    ann.update(kw)
                     ann["processed"] = 0
 
                 ann["fetched_at"] = datetime.utcnow().isoformat()

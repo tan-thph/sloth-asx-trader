@@ -25,6 +25,7 @@ lxml>=5.0                  # faster BS4 parser
 # ── Announcement engine ──────────────────────────────────────────
 pdfplumber>=0.11          # PDF text extraction (primary)
 pymupdf>=1.24             # PDF text extraction (fallback) + OCR page render
+cloudscraper>=1.2.71      # Cloudflare bypass for marketindex.com.au (fallback scraper)
 # pytesseract>=0.3.10     # OCR for scanned PDFs (optional, needs Tesseract binary)
 # Pillow>=10.0            # Required by pytesseract
 
