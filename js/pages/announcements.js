@@ -397,10 +397,12 @@ function _renderAnnCard(ann) {
     ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px">${summary}</div>`
     : '';
 
-  // View PDF button
-  const viewPdfBtn = annId
-    ? `<a href="${API}/api/announcements/${annId}/pdf" target="_blank" rel="noopener"
-         class="btn btn-sm" style="font-size:11px;text-decoration:none">View PDF ↗</a>`
+  // Search button — opens a Google search for the announcement so the user
+  // can find the ASX filing or news coverage directly (avoids broken CDN URLs)
+  const searchQuery = encodeURIComponent(`${ticker} ASX ${headline}`);
+  const viewPdfBtn = headline
+    ? `<a href="https://www.google.com/search?q=${searchQuery}" target="_blank" rel="noopener"
+         class="btn btn-sm" style="font-size:11px;text-decoration:none">Search ↗</a>`
     : '';
 
   // Add to analysis button — escape for inline onclick
