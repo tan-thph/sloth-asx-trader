@@ -1267,6 +1267,92 @@ def quick_quote(ticker):
         return jsonify({"error": str(e)}), 500
 
 
+# ── Portfolio Risk Analytics ────────────────────────────────────────────────────
+
+@app.route("/api/risk")
+def portfolio_risk():
+    """Compute portfolio risk metrics: beta, annualised volatility, Sharpe, correlation."""
+    tickers_raw = request.args.get("tickers", "")
+    tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()]
+    if not tickers:
+        return jsonify({"error": "tickers required"}), 400
+
+    rf_rate = float(request.args.get("rf", 4.35)) / 100   # RBA cash rate (annual)
+    benchmark = "VAS.AX"                                   # ASX 300 ETF as market proxy
+    asx_tickers = [f"{t}.AX" for t in tickers]
+    all_dl = list(set(asx_tickers + [benchmark]))
+
+    try:
+        raw = yf.download(all_dl, period="90d", auto_adjust=True, progress=False)
+        if raw.empty:
+            return jsonify({"error": "No market data returned"}), 502
+
+        # Handle both MultiIndex (multiple tickers) and Series (single ticker)
+        if isinstance(raw.columns, pd.MultiIndex):
+            closes = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw.iloc[:, 0]
+        else:
+            closes = raw[["Close"]] if "Close" in raw.columns else raw
+
+        closes = closes.dropna(how="all")
+        returns = closes.pct_change().dropna(how="all")
+
+        bench_col = benchmark if benchmark in returns.columns else None
+        bench_ret = returns[bench_col] if bench_col else None
+
+        metrics = {}
+        for ticker, asx_t in zip(tickers, asx_tickers):
+            col = asx_t if asx_t in returns.columns else None
+            if col is None:
+                continue
+            tr = returns[col].dropna()
+            if len(tr) < 10:
+                continue
+
+            vol_ann = float(tr.std() * (252 ** 0.5) * 100)      # annualised %
+            mean_d  = float(tr.mean())
+            daily_rf = rf_rate / 252
+            sharpe  = float((mean_d - daily_rf) / tr.std() * (252 ** 0.5)) if tr.std() > 0 else 0.0
+
+            # Beta vs benchmark
+            beta = 1.0
+            if bench_ret is not None:
+                aligned = pd.concat([tr, bench_ret], axis=1).dropna()
+                if len(aligned) >= 10:
+                    cov_mat = aligned.cov()
+                    var_b   = float(aligned.iloc[:, 1].var())
+                    beta    = float(cov_mat.iloc[0, 1] / var_b) if var_b > 0 else 1.0
+
+            # 30-calendar-day return (~21 trading days)
+            ret_30d = float((1 + tr.tail(21)).prod() - 1) * 100
+            ret_90d = float((1 + tr).prod() - 1) * 100
+
+            metrics[ticker] = {
+                "volatility_ann": round(vol_ann, 2),
+                "sharpe":         round(sharpe, 3),
+                "beta":           round(beta, 3),
+                "return_30d":     round(ret_30d, 2),
+                "return_90d":     round(ret_90d, 2),
+                "data_points":    len(tr),
+            }
+
+        # Correlation matrix (portfolio tickers only, not benchmark)
+        port_cols = [t for t in asx_tickers if t in returns.columns]
+        correlation = {}
+        if len(port_cols) >= 2:
+            corr = returns[port_cols].corr()
+            for i, at in enumerate(port_cols):
+                t = tickers[asx_tickers.index(at)]
+                correlation[t] = {}
+                for j, bt in enumerate(port_cols):
+                    t2 = tickers[asx_tickers.index(bt)]
+                    correlation[t][t2] = round(float(corr.iloc[i, j]), 3)
+
+        return jsonify({"metrics": metrics, "correlation": correlation, "tickers": tickers})
+
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 # ── DB: State save/load (bulk) ──────────────────────────────────────────────────
 
 @app.route("/api/db/save", methods=["POST"])
@@ -1340,7 +1426,7 @@ def db_save():
         BLOB_KEYS = [
             'analysisConfig', 'macroData', 'macroDate', 'analysisLastSummary',
             'portfolioHistory', 'cgtParcels', 'cgtDisposals', 'cgtMethod', 'activityLog',
-            'recommendations',
+            'recommendations', 'priceAlerts',
         ]
         for key in BLOB_KEYS:
             if key in data:

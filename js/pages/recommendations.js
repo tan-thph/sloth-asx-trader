@@ -418,6 +418,9 @@ function renderPendingRecs(recs) {
         </div>
       </div>
 
+      <!-- Position Sizing Calculator (BUY / TOP_UP only) -->
+      ${!isReducing ? renderPositionSizer(r) : ''}
+
       <!-- Feedback -->
       <div style="display:flex;gap:8px;align-items:center;padding-top:8px;border-top:0.5px solid var(--border-light)">
         <input type="text" id="feedback-${r.id}" placeholder="Optional feedback for next analysis run (e.g. 'too aggressive', 'ignore WDS for now')" value="${r.feedback||''}"
@@ -774,4 +777,118 @@ function addHistoryFeedback(idx) {
     }
     toast(text ? 'Feedback saved' : 'Feedback cleared', 'success');
   }
+}
+
+// ============================================================
+// POSITION SIZING CALCULATOR
+// ============================================================
+function renderPositionSizer(rec) {
+  const nw      = totalNetWorth();
+  const entry   = rec.priceRange ? ((rec.priceRange[0] + rec.priceRange[1]) / 2) : rec.priceRange?.[0] || 0;
+  const stop    = rec.stopLoss || 0;
+  const target  = rec.target   || 0;
+  const fees    = state.settings.brokerage || 10;
+  const riskPct = 1.0;   // default 1% risk — user can change via input
+
+  const riskAmt   = nw * riskPct / 100;
+  const perShare  = entry > stop && stop > 0 ? entry - stop : null;
+  const recQty    = perShare ? Math.floor(riskAmt / perShare) : rec.qty || 0;
+  const posValue  = recQty * entry;
+  const posWeight = nw > 0 ? posValue / nw * 100 : 0;
+  const maxLoss   = perShare ? recQty * perShare + fees : null;
+  const potGain   = target > entry ? recQty * (target - entry) - fees * 2 : null;
+  const rr        = maxLoss && potGain ? potGain / maxLoss : null;
+
+  const sId = `sizer-${rec.id}`;
+
+  return `
+  <details style="margin-bottom:10px" id="${sId}-details">
+    <summary style="cursor:pointer;padding:7px 10px;background:var(--bg-secondary);border-radius:var(--radius-md);border:0.5px solid var(--border-light);font-size:12px;font-weight:600;color:var(--text-secondary);user-select:none;list-style:none;display:flex;align-items:center;gap:6px">
+      <span>📐</span> Position Sizing Calculator
+      <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:4px">(click to expand)</span>
+    </summary>
+    <div style="padding:12px;border:0.5px solid var(--border-light);border-top:none;border-radius:0 0 var(--radius-md) var(--radius-md);background:var(--bg-primary)">
+
+      <!-- Inputs row -->
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+        <div>
+          <div class="form-label">Risk % of net worth</div>
+          <div style="display:flex;align-items:center;gap:4px">
+            <input type="number" id="${sId}-risk" value="${riskPct}" min="0.1" max="10" step="0.1"
+              style="width:65px;padding:4px 8px;border-radius:6px;border:1px solid var(--border-medium);font-size:13px;background:var(--bg-primary);color:var(--text-primary)"
+              oninput="updateSizer('${rec.id}')">
+            <span class="text-xs text-muted">% = $<span id="${sId}-risk-amt">${fmt(riskAmt, 0)}</span></span>
+          </div>
+        </div>
+        <div>
+          <div class="form-label">Entry price $</div>
+          <input type="number" id="${sId}-entry" value="${entry.toFixed(3)}" step="0.001" min="0"
+            style="width:90px;padding:4px 8px;border-radius:6px;border:1px solid var(--border-medium);font-size:13px;background:var(--bg-primary);color:var(--text-primary)"
+            oninput="updateSizer('${rec.id}')">
+        </div>
+        <div>
+          <div class="form-label">Stop-loss $</div>
+          <input type="number" id="${sId}-stop" value="${stop.toFixed(3)}" step="0.001" min="0"
+            style="width:90px;padding:4px 8px;border-radius:6px;border:1px solid #ef4444;font-size:13px;background:var(--bg-primary);color:var(--text-primary)"
+            oninput="updateSizer('${rec.id}')">
+        </div>
+        <div>
+          <div class="form-label">Target $</div>
+          <input type="number" id="${sId}-target" value="${target.toFixed(3)}" step="0.001" min="0"
+            style="width:90px;padding:4px 8px;border-radius:6px;border:1px solid #16a34a;font-size:13px;background:var(--bg-primary);color:var(--text-primary)"
+            oninput="updateSizer('${rec.id}')">
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div id="${sId}-output" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
+        ${sizerOutput(recQty, posValue, posWeight, maxLoss, potGain, rr, fees, nw)}
+      </div>
+    </div>
+  </details>`;
+}
+
+function sizerOutput(qty, posValue, posWeight, maxLoss, potGain, rr, fees, nw) {
+  const maxPosPct = (state.settings.maxPositionPct || 15);
+  const overweight = posWeight > maxPosPct;
+  const rrColor = rr == null ? 'var(--text-muted)' : rr >= 3 ? '#16a34a' : rr >= 2 ? '#d97706' : '#dc2626';
+  const tile = (label, val, sub, color) =>
+    `<div style="padding:8px 10px;background:var(--bg-secondary);border-radius:6px;border:0.5px solid var(--border-light)">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px">${label}</div>
+      <div style="font-weight:600;font-size:13px;color:${color||'var(--text-primary)'};">${val}</div>
+      ${sub ? `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">${sub}</div>` : ''}
+    </div>`;
+  return [
+    tile('Suggested Qty', qty > 0 ? `${qty} shares` : '—', qty > 0 ? `$${fmt(posValue)} total` : 'check stop-loss'),
+    tile('Position Size', posValue > 0 ? `$${fmt(posValue)}` : '—', `${fmt(posWeight, 1)}% of net worth`, overweight ? '#ef4444' : undefined),
+    tile('Max loss if stopped', maxLoss != null ? `$${fmt(maxLoss)}` : '—', maxLoss != null ? `inc. $${fees} brokerage` : 'set stop-loss'),
+    tile('Potential gain', potGain != null ? `$${fmt(potGain)}` : '—', potGain != null ? 'if target hit (2× brokerage)' : 'set target'),
+    tile('R:R ratio', rr != null ? `${rr.toFixed(1)} : 1` : '—', rr != null ? (rr >= 2 ? '✓ Acceptable' : '⚠ Below 2:1 — avoid') : '', rrColor),
+    overweight ? tile('⚠ Position limit', `Max ${maxPosPct}% rule`, `Reduce qty to stay within limit`, '#ef4444') : '',
+  ].join('');
+}
+
+function updateSizer(recId) {
+  const sId = `sizer-${recId}`;
+  const riskPct  = parseFloat(document.getElementById(`${sId}-risk`)?.value)   || 1;
+  const entry    = parseFloat(document.getElementById(`${sId}-entry`)?.value)   || 0;
+  const stop     = parseFloat(document.getElementById(`${sId}-stop`)?.value)    || 0;
+  const target   = parseFloat(document.getElementById(`${sId}-target`)?.value)  || 0;
+  const nw       = totalNetWorth();
+  const fees     = state.settings.brokerage || 10;
+
+  const riskAmt  = nw * riskPct / 100;
+  const perShare = entry > stop && stop > 0 ? entry - stop : null;
+  const qty      = perShare ? Math.floor(riskAmt / perShare) : 0;
+  const posValue = qty * entry;
+  const posWeight = nw > 0 ? posValue / nw * 100 : 0;
+  const maxLoss  = perShare ? qty * perShare + fees : null;
+  const potGain  = target > entry && qty > 0 ? qty * (target - entry) - fees * 2 : null;
+  const rr       = maxLoss && potGain ? potGain / maxLoss : null;
+
+  const riskAmtEl = document.getElementById(`${sId}-risk-amt`);
+  if (riskAmtEl) riskAmtEl.textContent = fmt(riskAmt, 0);
+
+  const out = document.getElementById(`${sId}-output`);
+  if (out) out.innerHTML = sizerOutput(qty, posValue, posWeight, maxLoss, potGain, rr, fees, nw);
 }

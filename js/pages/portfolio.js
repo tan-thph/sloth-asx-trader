@@ -283,6 +283,8 @@ function renderPortfolio() {
     </div>`;
     })()}
 
+    ${renderPriceAlertsCard()}
+
     <div class="card">
       <div class="card-title">CSV Import Format</div>
       <p class="text-xs text-muted" style="margin-bottom:8px">Each row is a separate buy lot. Multiple rows for the same ticker are kept as individual CGT parcels (FIFO ordered). <strong>date is required</strong> — import will be blocked without it.</p>
@@ -295,6 +297,116 @@ function renderPortfolio() {
     </div>
   `;
 }
+
+// ============================================================
+// PRICE ALERTS CARD (rendered inside Portfolio page)
+// ============================================================
+function renderPriceAlertsCard() {
+  const alerts = state.priceAlerts || [];
+  const priceMap = {};
+  for (const h of state.portfolio) priceMap[h.ticker] = h.currentPrice;
+  const allTickers = [...new Set([
+    ...state.portfolio.map(h => h.ticker),
+    ...(state.analysisConfig.extraTickers || []),
+  ])].sort();
+
+  const alertRows = alerts.map(a => {
+    const isTriggered = !!a.triggeredAt;
+    const typeLabel = a.type === 'above' ? '↑ Above' : a.type === 'below' ? '↓ Below' : '↓ Drop %';
+    const thresholdLabel = a.type === 'pct_drop'
+      ? `${a.value}% from $${fmt(a.referencePrice)}`
+      : `$${fmt(a.value)}`;
+    const currentPrice = priceMap[a.ticker];
+    const distanceLabel = currentPrice != null && a.type !== 'pct_drop'
+      ? `<span class="text-xs text-muted">(now $${fmt(currentPrice)}, ${a.type === 'above' ? currentPrice >= a.value ? '✓ already above' : `$${fmt(a.value - currentPrice)} away`) : currentPrice <= a.value ? '✓ already below' : `$${fmt(currentPrice - a.value)} away`})</span>`
+      : '';
+    return `
+    <tr style="${isTriggered ? 'background:rgba(245,158,11,0.06)' : ''}">
+      <td><strong>${a.ticker}</strong></td>
+      <td><span style="font-size:11px;padding:2px 7px;border-radius:4px;background:${a.type==='above'?'#dcfce7':a.type==='below'?'#fee2e2':'#fef3c7'};color:${a.type==='above'?'#15803d':a.type==='below'?'#dc2626':'#92400e'};font-weight:600">${typeLabel}</span></td>
+      <td>${thresholdLabel} ${distanceLabel}</td>
+      <td>${isTriggered
+        ? `<span style="color:#f59e0b;font-weight:600">🔔 Triggered $${a.lastPrice != null ? fmt(a.lastPrice) : '—'}</span>`
+        : `<span style="color:#16a34a;font-size:11px">● Active</span>`}</td>
+      <td style="font-size:11px;color:var(--text-muted)">${a.createdAt ? a.createdAt.slice(0,10) : '—'}</td>
+      <td>
+        <div class="flex-row" style="gap:4px">
+          ${isTriggered ? `<button class="btn btn-sm" onclick="rearmPriceAlert('${a.id}')" title="Re-arm this alert">↺ Re-arm</button>` : ''}
+          <button class="btn btn-sm btn-danger" onclick="deletePriceAlert('${a.id}')" style="font-size:11px;padding:3px 8px">✕</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="card">
+    <div class="flex-between" style="margin-bottom:12px">
+      <div>
+        <div class="card-title" style="margin:0">🔔 Price Alerts</div>
+        <div class="text-xs text-muted" style="margin-top:3px">Triggers a banner + browser notification when price crosses your threshold. Checked on every price refresh.</div>
+      </div>
+      ${typeof Notification !== 'undefined' && Notification.permission === 'default'
+        ? `<button class="btn btn-sm" onclick="requestNotificationPermission()">Enable notifications</button>` : ''}
+    </div>
+
+    <!-- Add new alert -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:10px 12px;background:var(--bg-secondary);border-radius:var(--radius-md);margin-bottom:12px">
+      <div>
+        <div class="form-label">Ticker</div>
+        <select id="alert-ticker" style="width:120px;padding:5px 8px;border-radius:6px;border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:13px">
+          ${allTickers.map(t => `<option value="${t}">${t}</option>`).join('')}
+          <option value="__custom__">Other…</option>
+        </select>
+        <input type="text" id="alert-ticker-custom" placeholder="e.g. WDS" style="display:none;width:80px;margin-left:4px;padding:5px 8px;border-radius:6px;border:0.5px solid var(--border-medium);font-size:13px">
+      </div>
+      <div>
+        <div class="form-label">Type</div>
+        <select id="alert-type" style="width:130px;padding:5px 8px;border-radius:6px;border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:13px"
+          onchange="document.getElementById('alert-value-label').textContent=this.value==='pct_drop'?'Drop %':'Price ($)'">
+          <option value="below">↓ Falls below</option>
+          <option value="above">↑ Rises above</option>
+          <option value="pct_drop">↓ Drops by %</option>
+        </select>
+      </div>
+      <div>
+        <div class="form-label" id="alert-value-label">Price ($)</div>
+        <input type="number" id="alert-value" step="0.01" min="0.01" placeholder="e.g. 120.00"
+          style="width:120px;padding:5px 8px;border-radius:6px;border:0.5px solid var(--border-medium);font-size:13px"
+          onkeydown="if(event.key==='Enter')submitPriceAlert()">
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="submitPriceAlert()" style="align-self:flex-end;margin-bottom:1px">+ Add Alert</button>
+    </div>
+
+    <!-- Alert list -->
+    ${alerts.length === 0
+      ? `<div class="text-xs text-muted" style="padding:10px 4px">No alerts set yet. Add one above to get notified when a price hits your target.</div>`
+      : `<div class="table-wrap"><table>
+          <thead><tr><th>Ticker</th><th>Type</th><th>Threshold</th><th>Status</th><th>Created</th><th></th></tr></thead>
+          <tbody>${alertRows}</tbody>
+        </table></div>`}
+  </div>`;
+}
+
+function submitPriceAlert() {
+  const sel = document.getElementById('alert-ticker');
+  const custom = document.getElementById('alert-ticker-custom');
+  const ticker = sel.value === '__custom__' ? (custom.value.trim().toUpperCase()) : sel.value;
+  const type  = document.getElementById('alert-type').value;
+  const value = parseFloat(document.getElementById('alert-value').value);
+  if (!ticker) { toast('Select a ticker', 'error'); return; }
+  if (isNaN(value) || value <= 0) { toast('Enter a valid threshold value', 'error'); return; }
+  addPriceAlert(ticker, type, value);
+  document.getElementById('alert-value').value = '';
+  renderPage();
+}
+
+// Show custom ticker input when "Other…" selected
+document.addEventListener('change', e => {
+  if (e.target.id === 'alert-ticker') {
+    const custom = document.getElementById('alert-ticker-custom');
+    if (custom) custom.style.display = e.target.value === '__custom__' ? 'inline-block' : 'none';
+  }
+});
 
 function toggleLots(ticker) {
   const row = document.getElementById(`lots-${ticker}`);

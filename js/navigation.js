@@ -10,7 +10,7 @@ function showPage(page) {
   state._renderGen = (state._renderGen || 0) + 1; // invalidate any in-flight async renders
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(el => { if(el.getAttribute('onclick')?.includes("'"+page+"'")) el.classList.add('active'); });
-  const titles = {dashboard:'Dashboard',portfolio:'Portfolio',macro:'Morning Macro',recommendations:'Trade Recommendations',signals:'Live Signals (yfinance)',journal:'Trade Journal',performance:'Performance Analytics',history:'Portfolio Value History',cgt:'CGT Parcel Tracker',backtest:'Backtesting',assistant:'AI Assistant',news:'News Scanner',announcements:'ASX Announcements',settings:'Settings'};
+  const titles = {dashboard:'Dashboard',portfolio:'Portfolio',macro:'Morning Macro',recommendations:'Trade Recommendations',signals:'Live Signals (yfinance)',journal:'Trade Journal',performance:'Performance Analytics',history:'Portfolio Value History',cgt:'CGT Parcel Tracker',backtest:'Backtesting',assistant:'AI Assistant',news:'News Scanner',announcements:'ASX Announcements',risk:'Portfolio Risk',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   renderPage();
 }
@@ -28,6 +28,7 @@ function renderPage() {
     case 'history':         el.innerHTML = renderPortfolioHistory(); setTimeout(() => { if(state._renderGen === gen) drawHistoryChart(); }, 80); break;
     case 'cgt':             el.innerHTML = renderCGT(); break;
     case 'backtest':        el.innerHTML = renderBacktest(); break;
+    case 'risk':            renderRiskPage(gen); break;
     case 'assistant':       el.innerHTML = renderAssistant(); setTimeout(() => { const m = document.getElementById('chat-messages'); if(m) m.scrollTop = m.scrollHeight; }, 50); break;
     case 'news':            renderNewsPage(gen); break;
     case 'announcements':   renderAnnouncementsPage(gen); break;

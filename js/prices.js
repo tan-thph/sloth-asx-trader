@@ -23,10 +23,115 @@ async function refreshPrices(opts = {}) {
   }
   state.lastPriceRefresh = Date.now();
   if(!silent) toast(`Updated ${updated} prices from yfinance`,'success');
+  checkPriceAlerts();
   recordPortfolioSnapshot();
   scheduleSave();
   renderPage();
   return updated;
+}
+
+// ============================================================
+// PRICE ALERTS — check thresholds after every price refresh
+// ============================================================
+function checkPriceAlerts() {
+  if (!state.priceAlerts || !state.priceAlerts.length) return;
+  const priceMap = {};
+  for (const h of state.portfolio) priceMap[h.ticker] = h.currentPrice;
+
+  let anyTriggered = false;
+  for (const alert of state.priceAlerts) {
+    if (!alert.active || alert.triggeredAt) continue;
+    const price = priceMap[alert.ticker];
+    if (price == null) continue;
+
+    let fired = false;
+    let msg = '';
+    if (alert.type === 'above' && price >= alert.value) {
+      fired = true;
+      msg = `🔔 ${alert.ticker} hit $${price.toFixed(2)} — above your $${alert.value.toFixed(2)} target`;
+    } else if (alert.type === 'below' && price <= alert.value) {
+      fired = true;
+      msg = `🔔 ${alert.ticker} fell to $${price.toFixed(2)} — below your $${alert.value.toFixed(2)} floor`;
+    } else if (alert.type === 'pct_drop' && alert.referencePrice) {
+      const drop = (alert.referencePrice - price) / alert.referencePrice * 100;
+      if (drop >= alert.value) {
+        fired = true;
+        msg = `🔔 ${alert.ticker} dropped ${drop.toFixed(1)}% from $${alert.referencePrice.toFixed(2)} (now $${price.toFixed(2)})`;
+      }
+    }
+
+    if (fired) {
+      alert.triggeredAt = new Date().toISOString();
+      alert.lastPrice   = price;
+      anyTriggered = true;
+      toast(msg, 'warning');
+      // Browser push notification (if permission granted)
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        try { new Notification('ASX Price Alert', { body: msg }); } catch {}
+      }
+    }
+  }
+  if (anyTriggered) scheduleSave();
+}
+
+function requestNotificationPermission() {
+  if (typeof Notification === 'undefined') return;
+  if (Notification.permission === 'default') {
+    Notification.requestPermission().then(p => {
+      if (p === 'granted') toast('Browser notifications enabled for price alerts ✓', 'success');
+    });
+  }
+}
+
+function addPriceAlert(ticker, type, value) {
+  ticker = ticker.toUpperCase().trim();
+  if (!ticker || isNaN(value) || value <= 0) { toast('Invalid alert parameters', 'error'); return; }
+  // Check ticker exists in portfolio or extra tickers
+  const knownTickers = [
+    ...state.portfolio.map(h => h.ticker),
+    ...(state.analysisConfig.extraTickers || []),
+  ];
+  const priceMap = {};
+  for (const h of state.portfolio) priceMap[h.ticker] = h.currentPrice;
+
+  if (!state.priceAlerts) state.priceAlerts = [];
+  const referencePrice = priceMap[ticker] || null;
+  state.priceAlerts.push({
+    id: 'alert-' + Date.now(),
+    ticker,
+    type,     // 'above' | 'below' | 'pct_drop'
+    value: parseFloat(value),
+    referencePrice,
+    active: true,
+    createdAt: new Date().toISOString(),
+    triggeredAt: null,
+    lastPrice: null,
+  });
+  requestNotificationPermission();
+  scheduleSave();
+  toast(`Alert set: ${ticker} ${type === 'above' ? '↑ above' : type === 'below' ? '↓ below' : '↓ drop'} ${type === 'pct_drop' ? value + '%' : '$' + parseFloat(value).toFixed(2)}`, 'success');
+}
+
+function deletePriceAlert(id) {
+  state.priceAlerts = (state.priceAlerts || []).filter(a => a.id !== id);
+  scheduleSave();
+  renderPage();
+}
+
+function rearmPriceAlert(id) {
+  const alert = (state.priceAlerts || []).find(a => a.id === id);
+  if (!alert) return;
+  // Update reference price for pct_drop alerts
+  const priceMap = {};
+  for (const h of state.portfolio) priceMap[h.ticker] = h.currentPrice;
+  if (alert.type === 'pct_drop' && priceMap[alert.ticker]) {
+    alert.referencePrice = priceMap[alert.ticker];
+  }
+  alert.triggeredAt = null;
+  alert.lastPrice   = null;
+  scheduleSave();
+  renderPage();
+  toast(`Alert re-armed for ${alert.ticker}`, 'success');
 }
 
 // ============================================================

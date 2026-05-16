@@ -85,10 +85,10 @@ function dismissCriticalAlert(ticker) {
 }
 
 function renderCriticalAlertBanners() {
+  // ── Critical price-decline alerts (auto-detected) ──────────────────────────
   const alerts = state.criticalAlerts || {};
   const active = Object.entries(alerts).filter(([,a]) => !a.dismissed);
-  if (!active.length) return '';
-  return active.map(([ticker, a]) => {
+  const declineBanners = active.map(([ticker, a]) => {
     const isSingleDay = a.type === 'single_day';
     const pctStr = a.pct.toFixed(1);
     const title = isSingleDay
@@ -118,7 +118,28 @@ function renderCriticalAlertBanners() {
         </div>
       </div>
     </div>`;
-  }).join('');
+  });
+
+  // ── User-defined price alerts (triggered) ──────────────────────────────────
+  const triggeredAlerts = (state.priceAlerts || []).filter(a => a.triggeredAt && a.active);
+  const alertBanners = triggeredAlerts.map(a => {
+    const typeLabel = a.type === 'above' ? `↑ rose above $${fmt(a.value)}` : a.type === 'below' ? `↓ fell below $${fmt(a.value)}` : `↓ dropped ${a.value}% from $${fmt(a.referencePrice)}`;
+    return `
+    <div class="critical-alert-banner" style="border-left-color:#f59e0b;background:linear-gradient(135deg,#fef3c7 0%,#fffbeb 100%)">
+      <div class="alert-icon">🔔</div>
+      <div class="alert-body">
+        <div class="alert-title" style="color:#92400e">Price Alert: ${a.ticker} ${typeLabel}</div>
+        <div class="alert-desc">Triggered at $${a.lastPrice != null ? fmt(a.lastPrice) : '—'} · Set on ${a.createdAt ? a.createdAt.slice(0,10) : '—'}</div>
+        <div class="alert-actions">
+          <button class="btn btn-sm" onclick="showPage('portfolio')">Manage Alerts</button>
+          <button class="btn btn-sm" onclick="rearmPriceAlert('${a.id}')">↺ Re-arm</button>
+          <button class="btn btn-sm btn-danger" onclick="deletePriceAlert('${a.id}')" style="opacity:0.8">Dismiss</button>
+        </div>
+      </div>
+    </div>`;
+  });
+
+  return [...declineBanners, ...alertBanners].join('');
 }
 
 function quickSellFromAlert(ticker) {

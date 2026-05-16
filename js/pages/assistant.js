@@ -30,19 +30,37 @@ async function sendChat() {
   msgs.innerHTML+=`<div class="msg msg-ai" id="typing"><div class="loading-dots"><span></span><span></span><span></span></div></div>`;
   msgs.scrollTop=msgs.scrollHeight;
 
-  // Build indicator context from live signals
-  const ps=state.portfolio.map(h=>`${h.ticker}(${h.shares}sh@$${h.currentPrice}, cost $${h.avgPrice})`).join(', ');
+  // ── Portfolio snapshot ────────────────────────────────────────────────────
+  const merged = mergedPortfolio();
+  const pv = portfolioValue(), tc = totalCost(), gain = totalGain();
+  const gainPct = tc > 0 ? (gain/tc*100) : 0;
+  const ps = merged.map(h => {
+    const val = h.shares * h.currentPrice;
+    const pl  = (h.currentPrice - h.avgPrice) * h.shares;
+    const plp = ((h.currentPrice - h.avgPrice) / h.avgPrice * 100).toFixed(1);
+    const wt  = pv > 0 ? (val/pv*100).toFixed(1) : '0';
+    return `${h.ticker}(${h.shares}sh @$${h.currentPrice.toFixed(2)}, cost $${h.avgPrice.toFixed(2)}, P&L ${pl>=0?'+':''}$${fmt(Math.abs(pl))} / ${plp}%, wt ${wt}%)`;
+  }).join('\n  ');
+
+  // Top gainer / loser context
+  const sorted = [...merged].sort((a,b)=>((b.currentPrice-b.avgPrice)/b.avgPrice)-((a.currentPrice-a.avgPrice)/a.avgPrice));
+  const topGainer = sorted[0], topLoser = sorted[sorted.length-1];
+  const gainLossCtx = sorted.length >= 2
+    ? `\nTop gainer: ${topGainer.ticker} +${fmt((topGainer.currentPrice-topGainer.avgPrice)/topGainer.avgPrice*100)}%  |  Top loser: ${topLoser.ticker} ${fmt((topLoser.currentPrice-topLoser.avgPrice)/topLoser.avgPrice*100)}%`
+    : '';
+
+  // ── Technical indicators ──────────────────────────────────────────────────
   let indicatorCtx='';
   const loadedTickers=Object.keys(state.liveSignals).filter(t=>!state.liveSignals[t]?.error);
   if(loadedTickers.length) {
-    indicatorCtx='\n\nLive Technical Indicators:\n'+loadedTickers.map(t=>{
+    indicatorCtx='\n\nLIVE TECHNICAL INDICATORS:\n'+loadedTickers.map(t=>{
       const s=state.liveSignals[t];
-      return `${t}: RSI14=${s.rsi_14?.toFixed(1)}, MACD=${s.macd_hist?.toFixed(3)}, Signal=${s.composite_signal}, Conf=${(s.confidence*100).toFixed(0)}%, Trend=${s.trend_direction}, ADX=${s.adx?.toFixed(1)}, BB%B=${s.bb_pct_b!=null?(s.bb_pct_b*100).toFixed(0)+'%':'n/a'}, SMA20=$${s.sma_20?.toFixed(3)}, MFI=${s.mfi?.toFixed(1)}, ATR=${s.atr_14?.toFixed(3)}`;
+      return `${t}: RSI14=${s.rsi_14?.toFixed(1)}, MACD_hist=${s.macd_hist?.toFixed(3)}, Signal=${s.composite_signal}, Conf=${(s.confidence*100).toFixed(0)}%, Trend=${s.trend_direction}, ADX=${s.adx?.toFixed(1)}, BB%B=${s.bb_pct_b!=null?(s.bb_pct_b*100).toFixed(0)+'%':'n/a'}, SMA20=$${s.sma_20?.toFixed(3)}, MFI=${s.mfi?.toFixed(1)}, ATR=${s.atr_14?.toFixed(3)}`;
     }).join('\n');
   }
 
-  // Dividend context for chat assistant
-  const chatDivLines = mergedPortfolio()
+  // ── Dividend context ──────────────────────────────────────────────────────
+  const chatDivLines = merged
     .filter(h => state.dividendData[h.ticker] && !state.dividendData[h.ticker].error)
     .map(h => {
       const d = state.dividendData[h.ticker];
@@ -54,11 +72,51 @@ async function sendChat() {
     });
   const chatDivCtx = chatDivLines.length ? '\n\nDIVIDEND DATA:\n' + chatDivLines.join('\n') : '';
 
+  // ── Recent ASX announcements ──────────────────────────────────────────────
+  let annCtx = '';
+  if (state.serverOk && merged.length) {
+    try {
+      const tickers = merged.map(h=>h.ticker).join(',');
+      const annResp = await fetch(`${API}/api/announcements/brief?tickers=${tickers}&days=3&max=8`)
+        .then(r => r.ok ? r.json() : {items:[]}).catch(() => ({items:[]}));
+      const annItems = (annResp.items || []);
+      if (annItems.length) {
+        const psAnns  = annItems.filter(a => a.price_sensitive);
+        const othAnns = annItems.filter(a => !a.price_sensitive);
+        const lines = [];
+        if (psAnns.length)  lines.push('⚡ Price-sensitive:', ...psAnns.map(a=>`  • ${a.signal}`));
+        if (othAnns.length) lines.push('Routine filings:',   ...othAnns.map(a=>`  • ${a.signal}`));
+        annCtx = '\n\nASX ANNOUNCEMENTS (last 3d):\n' + lines.join('\n');
+      }
+    } catch {}
+  }
+
+  // ── Pending recommendations ───────────────────────────────────────────────
+  const pendingRecs = state.recommendations.filter(r => r.status === 'pending');
+  const recCtx = pendingRecs.length
+    ? '\n\nPENDING TRADE RECOMMENDATIONS:\n' + pendingRecs.map(r =>
+        `  • ${r.action} ${r.ticker} @ $${r.priceRange?.[0]?.toFixed(2)||'?'}–$${r.priceRange?.[1]?.toFixed(2)||'?'}, target $${r.target?.toFixed(2)||'?'}, stop $${r.stopLoss?.toFixed(2)||'?'}, conf ${r.confidence!=null?(r.confidence*100).toFixed(0)+'%':'?'} — ${(r.reasoning||'').slice(0,80)}`
+      ).join('\n')
+    : '';
+
+  // ── Recent news headlines ─────────────────────────────────────────────────
+  const recentNews = (state.news?.items || [])
+    .filter(n => !n.error && n.sentiment !== undefined)
+    .slice(0, 8);
+  const newsCtx = recentNews.length
+    ? '\n\nRECENT NEWS (LLM-classified):\n' + recentNews.map(n =>
+        `  • [${n.tickers?.join(',')||'general'}] ${n.sentiment?.toUpperCase()} | ${(n.title||'').slice(0,80)}`
+      ).join('\n')
+    : '';
+
   const system=`You are an expert ASX (Australian Stock Exchange) quantitative analyst and trading coach with deep knowledge of technical analysis, Australian equity markets, sector dynamics, and risk management. You support human traders who manually execute all trades — never suggest automated or algorithmic execution.
 
-PORTFOLIO CONTEXT:
-Holdings: ${ps}
-Cash available: $${fmt(state.cash)} | RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}) | Brokerage: $${state.settings.brokerage}/trade | Min trade: $${state.settings.minTradeSize} | Max ${state.settings.maxTradesPerDay} trades/day${chatDivCtx}${indicatorCtx}
+PORTFOLIO CONTEXT (${new Date().toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'})}):
+Portfolio value: $${fmt(pv)} | Net worth: $${fmt(pv + state.cash)} | Unrealised P&L: ${gain>=0?'+':''}$${fmt(Math.abs(gain))} (${gainPct>=0?'+':''}${fmt(Math.abs(gainPct))}%)${gainLossCtx}
+Cash: $${fmt(state.cash)} | RBA: ${state.rbaRate.toFixed(2)}% | Brokerage: $${state.settings.brokerage}/trade | Max trades/day: ${state.settings.maxTradesPerDay}
+
+Holdings:
+  ${ps}${chatDivCtx}${indicatorCtx}${annCtx}${recCtx}${newsCtx}
 
 RESPONSE FRAMEWORK — tailor depth to the question:
 • For indicator questions: interpret each indicator in context (e.g. "RSI14=68 approaching overbought but momentum still rising — watch for divergence"). Cross-reference at least 3 indicators before forming a view.
