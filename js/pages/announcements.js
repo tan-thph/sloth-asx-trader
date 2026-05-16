@@ -498,6 +498,10 @@ function _annSettingsPanelHTML(status) {
 
       <!-- Ollama model picker -->
       <div id="ann-ollama-fields" style="display:${provider === 'ollama' ? 'flex' : 'none'};flex-direction:column;gap:8px">
+        <!-- Ollama status + start button -->
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap" id="ann-ollama-status-wrap">
+          ${_annOllamaStatusHTML(state.announcements._ollamaAvailable || false)}
+        </div>
         <div>
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
             <label style="font-size:12px;color:var(--text-secondary);margin:0">Model</label>
@@ -874,7 +878,11 @@ async function _maybeLoadOllamaModels(force = false) {
   try {
     const d      = await fetch(`${API}/api/announcements/ollama-models${params}`).then(r => r.json());
     const models = d.models || [];
-    state.announcements._ollamaModels = models;
+    state.announcements._ollamaModels   = models;
+    state.announcements._ollamaAvailable = models.length > 0;
+
+    // Update Ollama status badge if it's already in the DOM
+    _updateAnnOllamaStatus(models.length > 0);
 
     if (statusEl) {
       statusEl.textContent = models.length
@@ -899,7 +907,54 @@ async function _maybeLoadOllamaModels(force = false) {
       toggleAnnOllamaCustom();
     }
   } catch (e) {
+    state.announcements._ollamaAvailable = false;
+    _updateAnnOllamaStatus(false);
     if (statusEl) statusEl.textContent = 'Could not reach Ollama';
+  }
+}
+
+// ── Update Ollama status badge in-place (avoids full re-render) ──
+function _updateAnnOllamaStatus(available) {
+  const wrap = document.getElementById('ann-ollama-status-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = _annOllamaStatusHTML(available);
+}
+
+// ── Ollama status badge + start button HTML ───────────────────
+function _annOllamaStatusHTML(available) {
+  if (available) {
+    return `<span class="badge" style="background:#dcfce7;color:#16a34a">✓ Ollama running</span>`;
+  }
+  return `
+    <span class="badge" style="background:#fee2e2;color:#dc2626">✗ Ollama not found</span>
+    <button class="btn btn-sm btn-primary" id="ann-ollama-start-btn"
+      onclick="annStartOllama()" style="font-size:11px;padding:3px 10px">▶ Start Ollama</button>`;
+}
+
+// ── Start Ollama from Announcements tab ───────────────────────
+async function annStartOllama() {
+  const btn = document.getElementById('ann-ollama-start-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ Starting…'; }
+  try {
+    const r = await fetch(`${API}/api/ollama/start`, { method: 'POST' });
+    if (r.status === 404) {
+      toast('Restart asx_server.py — new endpoint not yet loaded', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Start Ollama'; }
+      return;
+    }
+    let d;
+    try { d = await r.json(); } catch { d = { ok: false, error: `HTTP ${r.status}` }; }
+    if (d.ok) {
+      toast((d.message || 'Ollama starting') + ' — rechecking in 4s…', 'success');
+      // Re-check after a short delay, then update the status badge + model list
+      setTimeout(() => _maybeLoadOllamaModels(true), 4000);
+    } else {
+      toast(`Could not start Ollama: ${d.error}`, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Start Ollama'; }
+    }
+  } catch (e) {
+    toast(`Flask server not reachable (${e.message})`, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Start Ollama'; }
   }
 }
 
