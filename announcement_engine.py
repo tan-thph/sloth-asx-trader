@@ -845,15 +845,55 @@ def download_pdf(
         if doc_key:
             logger.debug("download_pdf: recovered doc_key=%s for %s", doc_key, ticker)
 
-    # Strategy 1: Markit documents API (most reliable — direct from ASX's own API backend)
+    # Strategy 1: Markit documents API — do NOT follow redirects; capture the
+    # csf.asx.com.au CDN URL from the Location header and fetch that separately.
+    # Following the redirect with our headers causes csf to reject the request.
     if doc_key:
-        markit_url = (
+        markit_dl_url = (
             f"https://asx.api.markitdigital.com/asx-research/1.0/documents"
             f"/{doc_key}/download"
         )
-        result = _fetch(markit_url, "markit-api")
-        if result:
-            return result
+        try:
+            r0 = requests.get(
+                markit_dl_url,
+                headers=_MARKIT_HEADERS,
+                timeout=(15, 30),
+                allow_redirects=False,
+            )
+            logger.debug("download_pdf [markit-api]: HTTP %s for %s", r0.status_code, markit_dl_url)
+            if r0.status_code == 200 and r0.content and _is_real_pdf(r0.content):
+                # Unlikely but handle direct PDF response
+                logger.debug("download_pdf [markit-api]: direct PDF (%d bytes)", len(r0.content))
+                return r0.content
+            elif r0.status_code in (301, 302, 303, 307, 308):
+                cdn_url = r0.headers.get("Location", "")
+                logger.debug("download_pdf [markit-api]: redirect → %s", cdn_url)
+                if cdn_url:
+                    result = _fetch(cdn_url, "markit-cdn")
+                    if result:
+                        return result
+            elif r0.status_code == 200 and r0.content:
+                # JSON response? Try to extract a URL field
+                try:
+                    body = r0.json()
+                    cdn_url = (
+                        body.get("url") or body.get("downloadUrl")
+                        or body.get("data", {}).get("url", "")
+                    )
+                    if cdn_url:
+                        result = _fetch(cdn_url, "markit-json-url")
+                        if result:
+                            return result
+                except Exception:
+                    pass
+                # Treat response body as potential HTML page with embedded link
+                cdn_url = _extract_pdf_link_from_html(r0.content)
+                if cdn_url:
+                    result = _fetch(cdn_url, "markit-html-cdn")
+                    if result:
+                        return result
+        except Exception as exc:
+            logger.warning("download_pdf [markit-api]: %s — %s", markit_dl_url, exc)
 
     # Strategy 2: stored pdf_url (displayAnnouncement.do or direct CDN link)
     if url:
@@ -995,22 +1035,28 @@ def _parse_llm_json(raw: str) -> Optional[Dict]:
     """Strip think blocks + fences, extract first JSON object, validate fields."""
     if not raw:
         return None
+    logger.debug("_parse_llm_json: raw=%s", raw[:300])
     # Strip thinking blocks (Qwen3, DeepSeek-R1 etc.) — even with think:false some
     # server versions still emit them
     cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
     # Strip ```json fences
     cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"```", "", cleaned).strip()
-    # Extract the first JSON object
-    m = re.search(r"\{.*?\}", cleaned, re.DOTALL)   # non-greedy first
+    # Use greedy match to find the OUTERMOST {...} (captures the full JSON object,
+    # not a nested one that the non-greedy form might stop at prematurely)
+    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if not m:
-        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not m:
+        logger.debug("_parse_llm_json: no JSON object found | cleaned=%s", cleaned[:200])
         return None
 
     data = _robust_json_parse(m.group())
     if data is None:
-        logger.debug("_parse_llm_json: repair failed | raw=%s", raw[:200])
+        # Greedy failed — try non-greedy (picks up smallest/first {...} in free text)
+        m2 = re.search(r"\{.*?\}", cleaned, re.DOTALL)
+        if m2 and m2.group() != m.group():
+            data = _robust_json_parse(m2.group())
+    if data is None:
+        logger.debug("_parse_llm_json: repair failed | raw=%s", raw[:300])
         return None
 
     # Validate / coerce
@@ -1089,12 +1135,14 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
         )
         if resp.status_code == 200:
             raw = resp.json().get("response", "")
+            logger.debug("_classify_ollama [%s] raw response: %s", model, raw[:300])
             result = _parse_llm_json(raw)
             if result:
                 result["llm_model"] = f"ollama/{model}"
                 return result
+            logger.warning("_classify_ollama [%s]: JSON parse failed | raw=%s", model, raw[:200])
     except Exception as exc:
-        logger.debug("ollama classify failed: %s", exc)
+        logger.warning("_classify_ollama failed: %s", exc)
     return None
 
 
