@@ -783,20 +783,72 @@ def _build_prompt(ticker: str, headline: str, pdf_text: str) -> str:
     )
 
 
-def _parse_llm_json(raw: str) -> Optional[Dict]:
-    """Strip fences, find first {...}, validate fields."""
+def _robust_json_parse(raw: str) -> Optional[Dict]:
+    """Parse JSON from LLM output, repairing the most common failure modes.
+
+    Stages:
+      1. Direct json.loads.
+      2. Fix trailing commas before } or ].
+      3. Close unclosed structures (token-limit truncation repair).
+    """
     if not raw:
         return None
+
+    def _try(s: str) -> Optional[Dict]:
+        try:
+            result = json.loads(s)
+            return result if isinstance(result, dict) else None
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    # Stage 1
+    r = _try(raw)
+    if r is not None:
+        return r
+
+    # Stage 2 — trailing commas
+    fixed = re.sub(r",(\s*[}\]])", r"\1", raw)
+    r = _try(fixed)
+    if r is not None:
+        return r
+
+    # Stage 3 — close unclosed structures
+    trimmed = fixed.rstrip().rstrip(",")
+    n_quotes = len(re.findall(r'(?<!\\)"', trimmed))
+    if n_quotes % 2 == 1:
+        trimmed += '"'
+    n_brace   = trimmed.count("{") - trimmed.count("}")
+    n_bracket = trimmed.count("[") - trimmed.count("]")
+    if n_brace > 0 or n_bracket > 0:
+        trimmed += "]" * max(0, n_bracket) + "}" * max(0, n_brace)
+        trimmed = re.sub(r",(\s*[}\]])", r"\1", trimmed)
+        r = _try(trimmed)
+        if r is not None:
+            return r
+
+    return None
+
+
+def _parse_llm_json(raw: str) -> Optional[Dict]:
+    """Strip think blocks + fences, extract first JSON object, validate fields."""
+    if not raw:
+        return None
+    # Strip thinking blocks (Qwen3, DeepSeek-R1 etc.) — even with think:false some
+    # server versions still emit them
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
     # Strip ```json fences
-    cleaned = re.sub(r"```json\s*", "", raw)
-    cleaned = re.sub(r"```\s*", "", cleaned)
-    # Find first JSON object
-    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"```", "", cleaned).strip()
+    # Extract the first JSON object
+    m = re.search(r"\{.*?\}", cleaned, re.DOTALL)   # non-greedy first
+    if not m:
+        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if not m:
         return None
-    try:
-        data = json.loads(m.group())
-    except json.JSONDecodeError:
+
+    data = _robust_json_parse(m.group())
+    if data is None:
+        logger.debug("_parse_llm_json: repair failed | raw=%s", raw[:200])
         return None
 
     # Validate / coerce
@@ -1080,6 +1132,69 @@ def get_announcements(
         except Exception:
             d["tags"] = []
         results.append(d)
+    return results
+
+
+def get_ann_brief(
+    db_path: Optional[str | Path] = None,
+    tickers: Optional[List[str]] = None,
+    days: int = 3,
+    max_items: int = 8,
+) -> List[Dict]:
+    """Return recent announcements for portfolio tickers, formatted for prompt injection.
+
+    Prioritises:
+      1. Price-sensitive announcements (always included first)
+      2. High-impact announcements (impact_score DESC)
+      3. Recency (date DESC as tiebreak)
+
+    Each item includes a compact `signal` string (~15 tokens) ready for the
+    Claude analysis userMessage, plus full fields for the frontend brief panel.
+    """
+    if not tickers:
+        return []
+
+    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    ticker_upper = [t.upper() for t in tickers]
+    placeholders = ",".join("?" * len(ticker_upper))
+
+    try:
+        with get_db(db_path) as conn:
+            rows = conn.execute(
+                f"""SELECT ticker, date, headline, type, sentiment, impact,
+                           price_sensitive, summary
+                    FROM announcements
+                    WHERE date >= ? AND ticker IN ({placeholders})
+                    ORDER BY price_sensitive DESC, impact DESC, date DESC
+                    LIMIT ?""",
+                [cutoff, *ticker_upper, max_items],
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("get_ann_brief: DB query failed — %s", exc)
+        return []
+
+    results = []
+    for row in rows:
+        impact = row["impact"] or 0
+        ps     = bool(row["price_sensitive"])
+        signal = (
+            f"{row['ticker']} [{row['type'] or 'Other'}|"
+            f"{row['sentiment'] or 'neutral'}|{impact:.1f}"
+            f"{'|⚡PS' if ps else ''}] "
+            f"{(row['headline'] or '')[:80]} ({row['date']})"
+        )
+        results.append({
+            "ticker":          row["ticker"],
+            "date":            row["date"],
+            "headline":        row["headline"],
+            "type":            row["type"],
+            "sentiment":       row["sentiment"],
+            "impact":          impact,
+            "price_sensitive": ps,
+            "summary":         (row["summary"] or "")[:120],
+            "signal":          signal,
+        })
+
     return results
 
 

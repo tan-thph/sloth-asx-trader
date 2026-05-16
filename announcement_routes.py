@@ -131,6 +131,28 @@ def get_pdf(ann_id):
         return jsonify({"error": str(e)}), 500
 
 
+@ann_bp.route('/brief', methods=['GET'])
+def get_ann_brief():
+    """Return recent announcements for given tickers, formatted for prompt injection.
+
+    Query params:
+      tickers  — comma-separated ASX codes (required)
+      days     — lookback window (default 3)
+      max      — max items returned (default 8)
+    """
+    try:
+        tickers_raw = request.args.get('tickers', '')
+        tickers = [t.strip().upper() for t in tickers_raw.split(',') if t.strip()]
+        if not tickers:
+            return jsonify({"items": []})
+        days     = int(request.args.get('days', 3))
+        max_items = int(request.args.get('max', 8))
+        items = ae.get_ann_brief(DB_PATH, tickers=tickers, days=days, max_items=max_items)
+        return jsonify({"items": items})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @ann_bp.route('/reclassify', methods=['POST'])
 def reclassify_announcements():
     """Re-run LLM classification on stored announcements using current settings."""

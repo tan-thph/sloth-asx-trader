@@ -181,7 +181,7 @@ Sentiment: ${_m.sentiment||'n/a'} | Bullish: ${_m.bullish!=null?_m.bullish+'/100
 Key drivers: ${(_m.keyDrivers||'n/a').slice(0,200)}` : '';
 
 
-  // ── News signals — compact tiered block, no separate API call ──────────────
+  // ── News signals — compact tiered block ─────────────────────────────────────
   // Tier 1: articles whose primary subject is a portfolio holding (high signal value)
   // Tier 2: high-impact market-wide articles (impact ≥ 6.0, no holding as primary subject)
   // Each article pre-formatted to ~15-20 tokens via the 'signal' field from the server.
@@ -193,10 +193,8 @@ Key drivers: ${(_m.keyDrivers||'n/a').slice(0,200)}` : '';
     const broad   = news.filter(n => !n.portfolio_direct);
 
     const fmtSignal = n => {
-      // Use pre-built compact signal string if available (new scanner format)
       if (n.signal) return `  • ${n.signal}`;
-      // Fallback for legacy yfinance format (no classification)
-      const date = (n.date || n.timestamp || '').slice(5, 10); // MM-DD
+      const date = (n.date || n.timestamp || '').slice(5, 10);
       return `  • ${n.title?.slice(0, 70)} (${date})`;
     };
 
@@ -207,6 +205,31 @@ Key drivers: ${(_m.keyDrivers||'n/a').slice(0,200)}` : '';
     if (lines.length) {
       newsOutlook = `\n\nNEWS SIGNALS (LLM-classified, last 2d — use to adjust conviction on impacted tickers):\n${lines.join('\n')}`;
     }
+  }
+
+  // ── ASX Announcements — price-sensitive filings for portfolio tickers ────────
+  // Fetched from the local announcement DB (synced separately by the Ann engine).
+  // Only included when the server is up and there is data — silently skipped otherwise.
+  // Signal format: TICKER [Type|sentiment|impact|⚡PS] Headline (date)
+  //   ⚡PS = price sensitive flag from ASX/Markit directly (high reliability)
+  let annCtx = '';
+  if (state.serverOk && allTickers.length) {
+    try {
+      const annResp = await fetch(
+        `${API}/api/announcements/brief?tickers=${allTickers.join(',')}&days=3&max=10`
+      ).then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] }));
+
+      const annItems = annResp.items || [];
+      if (annItems.length) {
+        // Separate price-sensitive from routine to give the AI a clear priority signal
+        const psItems   = annItems.filter(a => a.price_sensitive);
+        const otherItems = annItems.filter(a => !a.price_sensitive);
+        const lines = [];
+        if (psItems.length)    lines.push('⚡ Price-sensitive (ASX-flagged):',   ...psItems.map(a   => `  • ${a.signal}`));
+        if (otherItems.length) lines.push('Routine filings:',                     ...otherItems.map(a => `  • ${a.signal}`));
+        annCtx = `\n\nASX ANNOUNCEMENT FILINGS (last 3d — authoritative: from ASX/Markit directly):\n${lines.join('\n')}`;
+      }
+    } catch { /* non-fatal — analysis continues without announcements */ }
   }
 
 
@@ -251,7 +274,7 @@ LIVE PORTFOLIO STATE:
 Holdings: ${portfolioJson}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
 RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
-${recCtx}${pendingFeedbackCtx}${macroCtx}${newsOutlook}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${indicatorCtx}
+${recCtx}${pendingFeedbackCtx}${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${indicatorCtx}
 
 
 ANALYSIS INSTRUCTIONS — follow in order, do not skip steps

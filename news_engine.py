@@ -188,9 +188,25 @@ def news_db(db_path: Path):
 # ── Scraper ───────────────────────────────────────────────────────────────────
 
 class NewsScraper:
+    # Generic RSS headers — works for RBA, Reuters, ASX
     HEADERS = {
         "User-Agent": "ASXNewsScanner/1.0 (financial research; not for commercial use)",
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+
+    # Full browser headers required for Yahoo Finance and Google News RSS,
+    # which block non-browser User-Agents with 403 or redirect to a login page.
+    BROWSER_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-AU,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Referer": "https://www.google.com/",
     }
 
     def __init__(self, max_age_days: int = 7):
@@ -202,15 +218,18 @@ class NewsScraper:
         self._cutoff_dt = datetime.utcnow() - timedelta(days=self.max_age_days)
         return self._cutoff_dt
 
-    def fetch_rss(self, url: str, source: str, feed_type: str = "news") -> list[dict]:
+    def fetch_rss(self, url: str, source: str, feed_type: str = "news",
+                  browser_ua: bool = False) -> list[dict]:
+        headers = self.BROWSER_HEADERS if browser_ua else self.HEADERS
         if HAS_FEEDPARSER:
-            return self._feedparser_fetch(url, source, feed_type)
-        return self._raw_xml_fetch(url, source, feed_type)
+            return self._feedparser_fetch(url, source, feed_type, headers)
+        return self._raw_xml_fetch(url, source, feed_type, headers)
 
-    def _feedparser_fetch(self, url: str, source: str, feed_type: str) -> list[dict]:
+    def _feedparser_fetch(self, url: str, source: str, feed_type: str,
+                          headers: dict) -> list[dict]:
         articles = []
         try:
-            feed = feedparser.parse(url, request_headers=self.HEADERS)
+            feed = feedparser.parse(url, request_headers=headers)
             for e in feed.entries[:30]:
                 link = (e.get("link") or "").strip()
                 if not link:
@@ -237,10 +256,11 @@ class NewsScraper:
             log.warning("feedparser RSS failed %s: %s", url, ex)
         return articles
 
-    def _raw_xml_fetch(self, url: str, source: str, feed_type: str) -> list[dict]:
+    def _raw_xml_fetch(self, url: str, source: str, feed_type: str,
+                       headers: dict) -> list[dict]:
         articles = []
         try:
-            r = requests.get(url, headers=self.HEADERS, timeout=10)
+            r = requests.get(url, headers=headers, timeout=10)
             r.raise_for_status()
             for item in re.findall(r"<item>(.*?)</item>", r.text, re.DOTALL)[:25]:
                 def _tag(t):
@@ -340,6 +360,60 @@ class NewsPreprocessor:
         if len(self._recent_titles) > 1000:
             self._recent_titles = self._recent_titles[-500:]
         return new_count
+
+
+# ── Robust JSON parser (handles truncated / trailing-comma LLM output) ────────
+
+def _robust_json_parse(raw: str) -> dict | None:
+    """Parse JSON from LLM output, repairing the most common failure modes.
+
+    Stages:
+      1. Direct json.loads (fast path).
+      2. Strip trailing commas before } or ] — common when the model lists items.
+      3. Close unclosed structures — handles token-limit truncation mid-output.
+         Counts unescaped braces/brackets and appends the missing closers.
+    Returns a dict on success, None on total failure.
+    """
+    if not raw:
+        return None
+
+    def _try(s: str) -> dict | None:
+        try:
+            result = json.loads(s)
+            return result if isinstance(result, dict) else None
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    # Stage 1 — direct
+    r = _try(raw)
+    if r is not None:
+        return r
+
+    # Stage 2 — trailing commas
+    fixed = re.sub(r",(\s*[}\]])", r"\1", raw)
+    r = _try(fixed)
+    if r is not None:
+        return r
+
+    # Stage 3 — close unclosed structures (truncation repair)
+    trimmed = fixed.rstrip().rstrip(",")
+    # Close any dangling string literal (odd number of unescaped double-quotes)
+    n_quotes = len(re.findall(r'(?<!\\)"', trimmed))
+    if n_quotes % 2 == 1:
+        trimmed += '"'
+    # Count net-open braces and brackets (ignoring those inside strings is
+    # impractical without a full parser, but for LLM-generated JSON with simple
+    # string values the count approach is reliable enough)
+    n_brace   = trimmed.count("{") - trimmed.count("}")
+    n_bracket = trimmed.count("[") - trimmed.count("]")
+    if n_brace > 0 or n_bracket > 0:
+        trimmed += "]" * max(0, n_bracket) + "}" * max(0, n_brace)
+        trimmed = re.sub(r",(\s*[}\]])", r"\1", trimmed)
+        r = _try(trimmed)
+        if r is not None:
+            return r
+
+    return None
 
 
 # ── Ollama LLM ────────────────────────────────────────────────────────────────
@@ -491,22 +565,32 @@ Required JSON (fill ALL fields):
         raw = "".join(raw_parts).strip()
         if not raw:
             return None
-        # Strip thinking blocks (<think>…</think>) produced by Qwen3, DeepSeek-R1, etc.
+
+        # ── Post-processing pipeline ──────────────────────────────────────────
+        # 1. Strip ALL thinking blocks — some models emit them even with think:false
+        #    or /no_think if the sampler flag isn't honoured by the server version.
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-        # Strip markdown code fences
-        raw = re.sub(r"```(?:json)?|```", "", raw).strip()
-        # Extract the first complete JSON object
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        # 2. Strip markdown code fences (``` json ... ```)
+        raw = re.sub(r"```(?:json)?\s*", "", raw)
+        raw = re.sub(r"```", "", raw).strip()
+        # 3. Isolate the first JSON object.  Use a non-greedy match first so
+        #    that a short, well-formed object is preferred over one that greedily
+        #    swallows trailing free-text.
+        m = re.search(r"\{.*?\}", raw, re.DOTALL)
+        if not m:
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
             raw = m.group(0)
+
         if not raw:
-            log.debug("LLM returned no JSON after stripping (thinking model token starvation?)")
+            log.debug("LLM returned no JSON after stripping (thinking model?)")
             return None
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as ex:
-            log.debug("LLM JSON parse error: %s | raw=%s", ex, raw[:300])
-            return None
+
+        # 4. Robust parse — handles trailing commas and truncation
+        result = _robust_json_parse(raw)
+        if result is None:
+            log.debug("LLM JSON parse failed after repair | raw=%s", raw[:300])
+        return result
 
 
 # ── Decay weighting ───────────────────────────────────────────────────────────
@@ -618,9 +702,16 @@ class NewsPipeline:
             time.sleep(0.2)
 
         # ── 2. Scrape per-ticker feeds (capped to avoid hammering) ───────────
+        # Yahoo Finance and Google News require a real browser User-Agent;
+        # the generic scanner UA gets 403 / login-page redirects.
         for ticker in all_tickers[:12]:
-            for fn, delay in [(_ticker_yahoo_rss, 0.15), (_ticker_google_rss, 0.25)]:
-                arts = self.scraper.fetch_rss(fn(ticker), f"News:{ticker}", "news")
+            for fn, delay, use_browser in [
+                (_ticker_yahoo_rss,  0.15, True),
+                (_ticker_google_rss, 0.25, True),
+            ]:
+                arts = self.scraper.fetch_rss(
+                    fn(ticker), f"News:{ticker}", "news", browser_ua=use_browser
+                )
                 all_articles.extend(arts)
                 fetched += len(arts)
                 time.sleep(delay)
@@ -717,7 +808,9 @@ class NewsPipeline:
                                     if isinstance(t, str)
                                 ][:15]
                                 # tickers col = union of both (primary first) for backward compat
-                                all_tickers = list(dict.fromkeys(primary + [t for t in mentioned if t not in primary]))
+                                # NOTE: use a different name to avoid shadowing the outer
+                                # `all_tickers` (portfolio tickers list used by classify())
+                                ann_tickers = list(dict.fromkeys(primary + [t for t in mentioned if t not in primary]))
                                 conn.execute("""
                                     UPDATE news_items SET
                                         summary         = :summary,
@@ -738,7 +831,7 @@ class NewsPipeline:
                                     "sentiment":       _norm_sentiment(result.get("sentiment")),
                                     "score":           _safe_float(result.get("sentiment_score"), max_val=1.0),
                                     "impact":          _safe_float(result.get("impact_score"), max_val=10.0),
-                                    "tickers":         json.dumps(all_tickers),
+                                    "tickers":         json.dumps(ann_tickers),
                                     "primary_tickers": json.dumps(primary),
                                     "tags":            json.dumps(
                                         [str(t) for t in (result.get("tags") or []) if t][:8]
