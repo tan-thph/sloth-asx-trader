@@ -1,7 +1,6 @@
 from flask import Blueprint, jsonify, request, Response
 from pathlib import Path
 import json
-import re
 import threading
 import requests as _requests
 import announcement_engine as ae
@@ -99,25 +98,14 @@ def sync_status():
 @ann_bp.route('/<ann_id>/pdf', methods=['GET'])
 def get_pdf(ann_id):
     try:
-        pdf_url = ae.get_announcement_pdf_url(ann_id, DB_PATH)
-        if pdf_url is None:
+        result = ae.get_announcement_pdf_url(ann_id, DB_PATH)
+        if result is None:
             return jsonify({"error": "Announcement not found"}), 404
-        if not pdf_url:
-            return jsonify({"error": "No PDF URL stored"}), 404
 
-        pdf_bytes = ae.download_pdf(pdf_url)
+        pdf_url, doc_key = result
 
-        # If the stored URL is the old announcements.asx.com.au path (pre-fix),
-        # extract the idsId and retry via the displayAnnouncement.do redirect.
-        if pdf_bytes is None:
-            m = re.search(r'/pdf/(\w+)\.pdf', pdf_url)
-            if m:
-                ids_id = m.group(1)
-                alt_url = (
-                    f"https://www.asx.com.au/asx/statistics/"
-                    f"displayAnnouncement.do?display=pdf&idsId={ids_id}"
-                )
-                pdf_bytes = ae.download_pdf(alt_url)
+        # download_pdf tries multiple strategies and validates %PDF- magic bytes
+        pdf_bytes = ae.download_pdf(pdf_url, doc_key=doc_key)
 
         if pdf_bytes is None:
             return jsonify({"error": "Failed to download PDF"}), 502

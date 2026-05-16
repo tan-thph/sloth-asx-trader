@@ -237,6 +237,7 @@ CREATE TABLE IF NOT EXISTS announcements (
     date            TEXT NOT NULL,
     headline        TEXT,
     pdf_url         TEXT,
+    doc_key         TEXT,
     pdf_text        TEXT,
     type            TEXT,
     sentiment       TEXT,
@@ -256,10 +257,21 @@ CREATE INDEX IF NOT EXISTS idx_ann_ps     ON announcements(price_sensitive);
 
 
 def init_db(db_path: Optional[str | Path] = None) -> None:
-    """Create the announcements table and indexes if they do not exist."""
+    """Create the announcements table and indexes if they do not exist.
+
+    Also runs a safe ALTER TABLE migration to add the `doc_key` column to
+    databases created before this column was introduced.
+    """
     path = str(db_path or DB_PATH_DEFAULT)
     with sqlite3.connect(path) as conn:
         conn.executescript(_CREATE_TABLE_SQL)
+        # Migration: add doc_key column if not present (safe; ignored if exists)
+        try:
+            conn.execute("ALTER TABLE announcements ADD COLUMN doc_key TEXT")
+            conn.commit()
+            logger.info("announcement_engine: migrated — added doc_key column")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.commit()
     logger.info("announcement_engine: DB initialised at %s", path)
 
@@ -701,20 +713,118 @@ def fetch_announcements(ticker: str, days: int = 3) -> List[Dict]:
 # PDF download + text extraction
 # ---------------------------------------------------------------------------
 
-def download_pdf(url: str) -> Optional[bytes]:
-    """Download a PDF from `url` and return raw bytes, or None on failure."""
-    try:
-        resp = requests.get(
-            url,
-            headers=_BROWSER_HEADERS,
-            timeout=30,
-            allow_redirects=True,
+def _is_real_pdf(data: bytes) -> bool:
+    """Return True if data starts with the PDF magic bytes (%PDF-)."""
+    return data[:5] == b"%PDF-"
+
+
+def _extract_pdf_link_from_html(html: bytes) -> Optional[str]:
+    """Try to find a direct PDF/csf URL embedded in an HTML redirect page."""
+    if not _HAS_BS4:
+        # Fallback: crude regex scan
+        text = html.decode("utf-8", errors="replace")
+        m = re.search(r'https://csf\.asx\.com\.au/[^\s"\'<>]+\.pdf[^\s"\'<>]*', text)
+        if m:
+            return m.group(0)
+        m = re.search(r'https://[^\s"\'<>]+\.pdf[^\s"\'<>]*', text)
+        return m.group(0) if m else None
+
+    soup = BeautifulSoup(html, "html.parser")
+    # 1. meta refresh: <meta http-equiv="refresh" content="0; url=...">
+    for tag in soup.find_all("meta", attrs={"http-equiv": re.compile("refresh", re.I)}):
+        content = tag.get("content", "")
+        m = re.search(r"url=(.+)", content, re.I)
+        if m:
+            return m.group(1).strip().strip("'\"")
+    # 2. Direct <a href="...pdf...">
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if ".pdf" in href.lower():
+            return href
+    # 3. iframe/embed src
+    for tag in soup.find_all(["iframe", "embed"], src=True):
+        if ".pdf" in tag["src"].lower():
+            return tag["src"]
+    return None
+
+
+def download_pdf(url: str, doc_key: str = "") -> Optional[bytes]:
+    """Download a PDF from `url` and return raw bytes, or None on failure.
+
+    Strategy:
+      1. Try the stored pdf_url (displayAnnouncement.do redirect) with allow_redirects.
+      2. If response is HTML (not a real PDF), parse it for a csf.asx.com.au CDN link
+         and retry that link directly.
+      3. Try the Markit documents API endpoint using doc_key (if available).
+    All responses are validated with %PDF- magic bytes before acceptance.
+    """
+    _PDF_HEADERS = {
+        **_BROWSER_HEADERS,
+        "Accept": "application/pdf,application/octet-stream,*/*",
+        "Referer": "https://www.asx.com.au/",
+    }
+
+    def _fetch(target_url: str, label: str) -> Optional[bytes]:
+        try:
+            resp = requests.get(
+                target_url,
+                headers=_PDF_HEADERS,
+                timeout=(15, 30),
+                allow_redirects=True,
+            )
+            if resp.status_code == 200 and resp.content:
+                if _is_real_pdf(resp.content):
+                    logger.debug("download_pdf [%s]: real PDF (%d bytes)", label, len(resp.content))
+                    return resp.content
+                # Got HTML — try to extract a direct CDN link
+                cdn_url = _extract_pdf_link_from_html(resp.content)
+                if cdn_url:
+                    logger.debug("download_pdf [%s]: HTML redirect → CDN %s", label, cdn_url)
+                    try:
+                        r2 = requests.get(cdn_url, headers=_PDF_HEADERS, timeout=(15, 30), allow_redirects=True)
+                        if r2.status_code == 200 and r2.content and _is_real_pdf(r2.content):
+                            logger.debug("download_pdf [%s→CDN]: real PDF (%d bytes)", label, len(r2.content))
+                            return r2.content
+                    except Exception as exc2:
+                        logger.debug("download_pdf CDN retry failed: %s", exc2)
+                logger.debug("download_pdf [%s]: HTML page, not a PDF (content-type: %s)",
+                             label, resp.headers.get("content-type", "?"))
+            else:
+                logger.debug("download_pdf [%s]: HTTP %s for %s", label, resp.status_code, target_url)
+        except Exception as exc:
+            logger.warning("download_pdf [%s]: %s — %s", label, target_url, exc)
+        return None
+
+    # Strategy 1: stored pdf_url (displayAnnouncement.do or direct)
+    if url:
+        result = _fetch(url, "stored-url")
+        if result:
+            return result
+
+    # Strategy 2: Markit documents API (requires doc_key)
+    if doc_key:
+        markit_url = (
+            f"https://asx.api.markitdigital.com/asx-research/1.0/documents"
+            f"/{doc_key}/download"
         )
-        if resp.status_code == 200 and resp.content:
-            return resp.content
-        logger.debug("download_pdf: non-200 status %s for %s", resp.status_code, url)
-    except Exception as exc:
-        logger.warning("download_pdf: failed for %s — %s", url, exc)
+        result = _fetch(markit_url, "markit-api")
+        if result:
+            return result
+
+    # Strategy 3: reconstruct displayAnnouncement.do from doc_key idsId (if url was empty/wrong)
+    if doc_key and (not url or "displayAnnouncement" not in url):
+        parts = doc_key.split("-")
+        if len(parts) >= 2:
+            ids_id = parts[1]
+            alt_url = (
+                f"https://www.asx.com.au/asx/statistics/"
+                f"displayAnnouncement.do?display=pdf&idsId={ids_id}"
+            )
+            result = _fetch(alt_url, "display-ann-alt")
+            if result:
+                return result
+
+    logger.info("download_pdf: all strategies exhausted for url=%s doc_key=%s", url, doc_key)
     return None
 
 
@@ -909,6 +1019,9 @@ def _classify_keyword(ticker: str, headline: str, pdf_text: str) -> Dict:
 def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
     ollama_url = settings.get("ollama_url", "http://localhost:11434").rstrip("/")
     model = settings.get("ann_llm_model", "qwen2.5:1.5b")
+    cpu_mode = bool(settings.get("cpu_mode", False))
+    # CPU/SBC mode needs much more time — tiny models on CPU can take 3–5 min per call
+    read_timeout = 300 if cpu_mode else 120
     try:
         resp = requests.post(
             f"{ollama_url}/api/generate",
@@ -920,7 +1033,7 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
                 "num_predict": 200,
                 "options": {"temperature": 0.1, "num_predict": 200},
             },
-            timeout=60,
+            timeout=(30, read_timeout),
         )
         if resp.status_code == 200:
             raw = resp.json().get("response", "")
@@ -1048,10 +1161,10 @@ def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
         conn.execute(
             """
             INSERT INTO announcements
-                (id, ticker, date, headline, pdf_url, pdf_text, type, sentiment, impact,
+                (id, ticker, date, headline, pdf_url, doc_key, pdf_text, type, sentiment, impact,
                  price_sensitive, summary, tags, llm_model, processed, fetched_at)
             VALUES
-                (:id, :ticker, :date, :headline, :pdf_url, :pdf_text, :type, :sentiment, :impact,
+                (:id, :ticker, :date, :headline, :pdf_url, :doc_key, :pdf_text, :type, :sentiment, :impact,
                  :price_sensitive, :summary, :tags, :llm_model, :processed, :fetched_at)
             """,
             {
@@ -1060,6 +1173,7 @@ def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
                 "date": ann.get("date"),
                 "headline": ann.get("headline"),
                 "pdf_url": ann.get("pdf_url"),
+                "doc_key": ann.get("doc_key", ""),
                 "pdf_text": ann.get("pdf_text"),
                 "type": ann.get("type"),
                 "sentiment": ann.get("sentiment"),
@@ -1198,11 +1312,15 @@ def get_ann_brief(
     return results
 
 
-def get_announcement_pdf_url(ann_id: str, db_path: Optional[str | Path] = None) -> Optional[str]:
-    """Return pdf_url for the given announcement id, or None."""
+def get_announcement_pdf_url(ann_id: str, db_path: Optional[str | Path] = None) -> Optional[tuple]:
+    """Return (pdf_url, doc_key) for the given announcement id, or None if not found."""
     with get_db(db_path) as conn:
-        row = conn.execute("SELECT pdf_url FROM announcements WHERE id=?", (ann_id,)).fetchone()
-    return row["pdf_url"] if row else None
+        row = conn.execute(
+            "SELECT pdf_url, doc_key FROM announcements WHERE id=?", (ann_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    return (row["pdf_url"] or "", row["doc_key"] or "")
 
 
 # ---------------------------------------------------------------------------
@@ -1343,14 +1461,15 @@ def run_sync(
                 if j > 0:
                     time.sleep(0.3)
 
-                # Extract private metadata keys before saving (not DB columns)
+                # Extract private metadata keys before saving
                 markit_type_raw = ann.pop("_markit_type", "")
-                ann.pop("_doc_key", None)
+                # Preserve doc_key as a real DB column (was previously discarded)
+                ann["doc_key"] = ann.pop("_doc_key", "")
 
                 # Download + extract PDF text (best-effort; may 404 for new ASX system)
                 pdf_text = ""
-                if ann.get("pdf_url"):
-                    pdf_bytes = download_pdf(ann["pdf_url"])
+                if ann.get("pdf_url") or ann.get("doc_key"):
+                    pdf_bytes = download_pdf(ann.get("pdf_url", ""), doc_key=ann.get("doc_key", ""))
                     if pdf_bytes:
                         try:
                             pdf_text = extract_text(pdf_bytes)

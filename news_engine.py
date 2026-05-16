@@ -523,7 +523,7 @@ Required JSON (fill ALL fields):
         try:
             # connect timeout 30s; read timeout scales with model size:
             # thinking/large models can take 2–3 min per article on mid-range GPU
-            read_timeout = 180 if thinking else 90
+            read_timeout = 300 if cpu_mode else (180 if thinking else 90)
             with requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
