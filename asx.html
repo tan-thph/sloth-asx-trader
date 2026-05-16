@@ -1,0 +1,1661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASX Trading Assistant</title>
+<style>
+  :root {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f8f8f7;
+    --bg-tertiary: #f1f0ec;
+    --text-primary: #1a1a1a;
+    --text-secondary: #6b6b6b;
+    --text-tertiary: #9b9b9b;
+    --border-light: rgba(0,0,0,0.10);
+    --border-medium: rgba(0,0,0,0.18);
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-primary: #1c1c1c;
+      --bg-secondary: #242424;
+      --bg-tertiary: #2a2a2a;
+      --text-primary: #e8e8e8;
+      --text-secondary: #a0a0a0;
+      --text-tertiary: #666666;
+      --border-light: rgba(255,255,255,0.08);
+      --border-medium: rgba(255,255,255,0.15);
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--font); background: var(--bg-tertiary); color: var(--text-primary); min-height: 100vh; font-size: 14px; }
+  .app { display: flex; height: 100vh; overflow: hidden; }
+
+  /* Sidebar */
+  .sidebar { width: 220px; flex-shrink: 0; background: var(--bg-primary); border-right: 0.5px solid var(--border-light); display: flex; flex-direction: column; padding: 1.25rem 0; overflow-y: auto; }
+  .sidebar-logo { padding: 0 1.25rem 1.5rem; border-bottom: 0.5px solid var(--border-light); margin-bottom: 1rem; }
+  .sidebar-logo h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.3px; }
+  .sidebar-logo p { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+  .nav-section { padding: 0 0.75rem; margin-bottom: 0.75rem; }
+  .nav-label { font-size: 10px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.8px; padding: 0 0.5rem; margin-bottom: 4px; }
+  .nav-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: var(--radius-md); cursor: pointer; font-size: 13px; color: var(--text-secondary); transition: all 0.15s; margin-bottom: 1px; border: none; background: none; width: 100%; text-align: left; font-family: var(--font); }
+  .nav-item:hover { background: var(--bg-secondary); color: var(--text-primary); }
+  .nav-item.active { background: var(--bg-secondary); color: var(--text-primary); font-weight: 500; }
+  .nav-icon { font-size: 13px; width: 18px; text-align: center; }
+  .server-indicator { margin: auto 1.25rem 0; padding-top: 1rem; border-top: 0.5px solid var(--border-light); }
+  .server-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .server-dot.ok { background: #22c55e; }
+  .server-dot.err { background: #ef4444; }
+  .server-dot.checking { background: #f59e0b; animation: pulse 1s infinite; }
+
+  /* Main */
+  .main { flex: 1; overflow-y: auto; display: flex; flex-direction: column; min-width: 0; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 0.875rem 1.5rem; background: var(--bg-primary); border-bottom: 0.5px solid var(--border-light); flex-shrink: 0; gap: 12px; }
+  .topbar h2 { font-size: 15px; font-weight: 600; }
+  .market-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 20px; border: 0.5px solid var(--border-medium); color: var(--text-secondary); white-space: nowrap; }
+  .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .content { padding: 1.5rem; flex: 1; }
+
+  /* Cards */
+  .card { background: var(--bg-primary); border: 0.5px solid var(--border-light); border-radius: var(--radius-lg); padding: 1.25rem; }
+  .card-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.875rem; text-transform: uppercase; letter-spacing: 0.6px; }
+
+  /* Metrics */
+  .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 1.25rem; }
+  .metric-card { background: var(--bg-secondary); border-radius: var(--radius-md); padding: 1rem; }
+  .metric-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+  .metric-value { font-size: 22px; font-weight: 600; line-height: 1.2; }
+  .metric-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; }
+
+  /* Grid layouts */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 1.25rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
+  @media (max-width: 1100px) { .grid-2 { grid-template-columns: 1fr; } .grid-3 { grid-template-columns: 1fr 1fr; } .grid-4 { grid-template-columns: 1fr 1fr; } }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600; color: var(--text-secondary); border-bottom: 0.5px solid var(--border-light); white-space: nowrap; }
+  td { padding: 9px 12px; border-bottom: 0.5px solid var(--border-light); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--bg-secondary); }
+
+  /* Badges */
+  .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-buy { background: #dcfce7; color: #15803d; }
+  .badge-sell { background: #fee2e2; color: #b91c1c; }
+  .badge-hold { background: #fef9c3; color: #854d0e; }
+  .badge-executed { background: #dbeafe; color: #1d4ed8; }
+  .badge-skipped { background: var(--bg-secondary); color: var(--text-secondary); border: 0.5px solid var(--border-medium); }
+  .badge-pending { background: #fef3c7; color: #92400e; }
+  .badge-open { background: #dbeafe; color: #1d4ed8; }
+  .badge-closed { background: var(--bg-secondary); color: var(--text-secondary); }
+  .badge-neutral { background: var(--bg-secondary); color: var(--text-secondary); border: 0.5px solid var(--border-medium); }
+  @media (prefers-color-scheme: dark) {
+    .badge-buy { background: #14532d; color: #86efac; }
+    .badge-sell { background: #7f1d1d; color: #fca5a5; }
+    .badge-hold { background: #713f12; color: #fde68a; }
+    .badge-executed { background: #1e3a5f; color: #93c5fd; }
+    .badge-pending { background: #451a03; color: #fde68a; }
+    .badge-open { background: #1e3a5f; color: #93c5fd; }
+  }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: var(--radius-md); border: 0.5px solid var(--border-medium); background: transparent; color: var(--text-primary); font-size: 13px; cursor: pointer; transition: all 0.15s; font-family: var(--font); white-space: nowrap; }
+  .btn:hover { background: var(--bg-secondary); }
+  .btn:active { transform: scale(0.98); }
+  .btn-primary { background: var(--text-primary); color: var(--bg-primary); border-color: var(--text-primary); }
+  .btn-primary:hover { opacity: 0.85; background: var(--text-primary); }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn-danger { border-color: #ef4444; color: #ef4444; }
+  .btn-danger:hover { background: #fee2e2; }
+  .btn-success { border-color: #22c55e; color: #15803d; }
+  .btn-success:hover { background: #dcfce7; }
+
+  /* Bars */
+  .conf-bar { width: 80px; height: 5px; border-radius: 3px; background: var(--bg-secondary); overflow: hidden; display: inline-block; vertical-align: middle; }
+  .conf-fill { height: 100%; border-radius: 3px; }
+  .gauge-bar { height: 8px; border-radius: 4px; background: var(--bg-secondary); overflow: hidden; }
+  .gauge-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+
+  /* Indicator panel */
+  .ind-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .ind-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 0.5px solid var(--border-light); font-size: 12px; }
+  .ind-row:last-child { border-bottom: none; }
+  .ind-label { color: var(--text-secondary); }
+  .ind-val { font-weight: 600; font-size: 12px; }
+
+  /* Signal chips */
+  .signal-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; margin: 2px; }
+  .chip-buy  { background: #dcfce7; color: #15803d; }
+  .chip-sell { background: #fee2e2; color: #b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    .chip-buy  { background: #14532d; color: #86efac; }
+    .chip-sell { background: #7f1d1d; color: #fca5a5; }
+  }
+
+  /* SR levels */
+  .sr-level { display: flex; justify-content: space-between; padding: 4px 8px; border-radius: 4px; font-size: 12px; margin-bottom: 3px; }
+  .sr-r { background: #fee2e2; color: #b91c1c; }
+  .sr-s { background: #dcfce7; color: #15803d; }
+  .sr-p { background: var(--bg-secondary); color: var(--text-secondary); border: 0.5px solid var(--border-medium); }
+  @media (prefers-color-scheme: dark) {
+    .sr-r { background: #7f1d1d; color: #fca5a5; }
+    .sr-s { background: #14532d; color: #86efac; }
+  }
+
+  /* Mini chart canvas */
+  canvas.sparkline { width: 100%; height: 60px; }
+  .chart-container { position: relative; width: 100%; height: 180px; }
+  canvas.price-chart { width: 100%; height: 180px; }
+
+  /* Chat */
+  .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 200px); min-height: 400px; }
+  .chat-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 0 12px; }
+  .msg { max-width: 88%; padding: 9px 13px; border-radius: 10px; font-size: 13px; line-height: 1.6; }
+  .msg-user { align-self: flex-end; background: var(--text-primary); color: var(--bg-primary); border-radius: 10px 10px 2px 10px; }
+  .msg-ai { align-self: flex-start; background: var(--bg-secondary); border: 0.5px solid var(--border-light); border-radius: 10px 10px 10px 2px; white-space: pre-wrap; }
+  .chat-input-row { display: flex; gap: 8px; padding-top: 10px; border-top: 0.5px solid var(--border-light); margin-top: auto; }
+  .chat-input-row input { flex: 1; }
+
+  /* Loading */
+  .loading-dots { display: inline-flex; gap: 4px; align-items: center; }
+  .loading-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); animation: bounce 1.2s infinite; }
+  .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce { 0%,80%,100%{transform:scale(0.7);opacity:0.4} 40%{transform:scale(1);opacity:1} }
+
+  /* Forms */
+  .form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 1rem; }
+  .form-label { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+  input[type="text"], input[type="number"], input[type="password"], textarea, select {
+    padding: 7px 10px; border-radius: var(--radius-md); border: 0.5px solid var(--border-medium);
+    background: var(--bg-secondary); color: var(--text-primary); font-family: var(--font); font-size: 13px; width: 100%;
+    transition: border-color 0.15s; outline: none;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--text-primary); }
+  textarea { resize: vertical; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; margin-bottom: 1.25rem; border-bottom: 0.5px solid var(--border-light); }
+  .tab { padding: 8px 16px; font-size: 13px; cursor: pointer; border: none; border-bottom: 2px solid transparent; color: var(--text-secondary); transition: all 0.15s; background: none; font-family: var(--font); margin-bottom: -0.5px; }
+  .tab.active { color: var(--text-primary); border-bottom-color: var(--text-primary); font-weight: 500; }
+  .tab:hover:not(.active) { color: var(--text-primary); background: var(--bg-secondary); }
+
+  /* Signal row */
+  .signal-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 0.5px solid var(--border-light); font-size: 13px; }
+  .signal-row:last-child { border-bottom: none; }
+  .sentiment-bar { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+  .sentiment-track { flex: 1; height: 5px; border-radius: 3px; background: var(--bg-secondary); overflow: hidden; }
+  .sentiment-fill { height: 100%; border-radius: 3px; }
+
+  /* Toast */
+  #toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+  .toast { padding: 10px 14px; background: var(--bg-primary); border: 0.5px solid var(--border-medium); border-radius: var(--radius-md); font-size: 13px; pointer-events: all; animation: slideIn 0.2s ease; max-width: 300px; }
+  @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+  /* Rec card */
+  .rec-card { background: var(--bg-primary); border: 0.5px solid var(--border-light); border-radius: var(--radius-lg); padding: 1rem 1.25rem; margin-bottom: 10px; }
+  .rec-card:hover { border-color: var(--border-medium); }
+  .rec-card.executed-card { border-left: 3px solid #3b82f6; }
+  .rec-card.skipped-card { border-left: 3px solid var(--border-medium); opacity: 0.65; }
+
+  /* Detail card */
+  .detail-section { margin-bottom: 1.25rem; }
+  .detail-section:last-child { margin-bottom: 0; }
+
+  /* Color utilities */
+  .up { color: #16a34a; } .down { color: #dc2626; }
+  .text-success { color: #16a34a; } .text-danger { color: #dc2626; }
+  .text-warn { color: #d97706; }
+  .text-muted { color: var(--text-secondary); }
+  .text-xs { font-size: 11px; color: var(--text-secondary); }
+  .text-sm { font-size: 13px; }
+
+  /* Layout utils */
+  .flex-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .flex-between { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  .mt-1 { margin-top: 0.5rem; } .mt-2 { margin-top: 1rem; }
+  .mb-1 { margin-bottom: 0.5rem; } .mb-2 { margin-bottom: 1rem; }
+  .section-gap { margin-bottom: 1.25rem; }
+  .divider { border: none; border-top: 0.5px solid var(--border-light); margin: 1rem 0; }
+  code { font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; }
+  pre.code-block { font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); color: var(--text-secondary); line-height: 1.6; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-medium); border-radius: 3px; }
+
+  /* Empty state */
+  .empty-state { text-align: center; padding: 3rem 2rem; }
+  .empty-icon { font-size: 36px; margin-bottom: 1rem; opacity: 0.4; }
+  .empty-state p { color: var(--text-secondary); font-size: 14px; }
+  .empty-state .sub { font-size: 12px; color: var(--text-tertiary); margin-top: 6px; }
+
+  /* Schedule pills */
+  .schedule-pill { padding: 5px 12px; border-radius: var(--radius-md); font-size: 12px; border: 0.5px solid var(--border-light); color: var(--text-secondary); white-space: nowrap; }
+  .schedule-pill.past { border-color: #22c55e; color: #15803d; background: #dcfce7; }
+  .schedule-pill.current { border-color: #3b82f6; color: #1d4ed8; background: #dbeafe; }
+  @media (prefers-color-scheme: dark) {
+    .schedule-pill.past { background: #14532d; color: #86efac; }
+    .schedule-pill.current { background: #1e3a5f; color: #93c5fd; }
+  }
+
+  .info-banner { background: #fef3c7; border: 0.5px solid #fbbf24; border-radius: var(--radius-md); padding: 10px 14px; font-size: 12px; color: #92400e; margin-bottom: 1rem; }
+  @media (prefers-color-scheme: dark) { .info-banner { background: #451a03; color: #fde68a; border-color: #92400e; } }
+
+  .progress-ring { display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 56px; border-radius: 50%; border: 3px solid var(--border-light); position: relative; font-size: 13px; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<div id="toast-container"></div>
+
+<div class="app">
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <h1>ASX Trader</h1>
+      <p>Decision Support v2.0</p>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Overview</div>
+      <button class="nav-item active" onclick="showPage('dashboard')"><span class="nav-icon">⬡</span> Dashboard</button>
+      <button class="nav-item" onclick="showPage('portfolio')"><span class="nav-icon">⬢</span> Portfolio</button>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Analysis</div>
+      <button class="nav-item" onclick="showPage('macro')"><span class="nav-icon">◎</span> Morning Macro</button>
+      <button class="nav-item" onclick="showPage('recommendations')"><span class="nav-icon">◆</span> Recommendations</button>
+      <button class="nav-item" onclick="showPage('signals')"><span class="nav-icon">◇</span> Live Signals</button>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Records</div>
+      <button class="nav-item" onclick="showPage('journal')"><span class="nav-icon">▣</span> Trade Journal</button>
+      <button class="nav-item" onclick="showPage('performance')"><span class="nav-icon">▤</span> Performance</button>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Tools</div>
+      <button class="nav-item" onclick="showPage('backtest')"><span class="nav-icon">▷</span> Backtesting</button>
+      <button class="nav-item" onclick="showPage('assistant')"><span class="nav-icon">◉</span> AI Assistant</button>
+      <button class="nav-item" onclick="showPage('settings')"><span class="nav-icon">⊙</span> Settings</button>
+    </div>
+    <div class="server-indicator">
+      <div class="flex-row" style="font-size:11px;color:var(--text-secondary)">
+        <span class="server-dot checking" id="srv-dot"></span>
+        <span id="srv-label">Connecting...</span>
+      </div>
+      <div style="font-size:10px;color:var(--text-tertiary);margin-top:3px">localhost:5000 · yfinance</div>
+    </div>
+  </nav>
+
+  <div class="main">
+    <div class="topbar">
+      <h2 id="page-title">Dashboard</h2>
+      <div class="flex-row">
+        <div class="market-pill"><div class="live-dot"></div><span id="market-time">ASX Loading...</span></div>
+        <button class="btn btn-sm" onclick="refreshPrices()">⟳ Refresh Prices</button>
+        <button class="btn btn-primary btn-sm" onclick="runAnalysis()">▶ Run Analysis</button>
+      </div>
+    </div>
+    <div class="content" id="main-content"></div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// CONFIG
+// ============================================================
+const API = 'http://localhost:5000';
+
+// ============================================================
+// STATE
+// ============================================================
+const state = {
+  page: 'dashboard',
+  portfolio: [
+    { ticker: 'CBA',   shares: 50,  avgPrice: 118.20, currentPrice: 124.50, sector: 'Banking' },
+    { ticker: 'BHP',   shares: 80,  avgPrice: 43.10,  currentPrice: 45.80,  sector: 'Mining' },
+    { ticker: 'TLS',   shares: 200, avgPrice: 3.92,   currentPrice: 4.18,   sector: 'Telecoms' },
+    { ticker: 'GMG',   shares: 30,  avgPrice: 33.50,  currentPrice: 36.20,  sector: 'REITs' },
+    { ticker: 'HUB24', shares: 25,  avgPrice: 58.00,  currentPrice: 63.40,  sector: 'Fintech' },
+    { ticker: 'JBH',   shares: 15,  avgPrice: 67.30,  currentPrice: 71.90,  sector: 'Retail' },
+    { ticker: 'SCG',   shares: 180, avgPrice: 3.42,   currentPrice: 3.58,   sector: 'REITs' },
+  ],
+  cash: 15000,
+  recommendations: [],
+  tradeJournal: [
+    { id:1, date:'22-04-2025', ticker:'BHP',  action:'BUY',  qty:20,  entryPrice:44.20,  exitPrice:null,    fees:10, status:'open',   pnl:null, recId:null,    recExecuted:false, timestamp:'09:58' },
+    { id:2, date:'18-04-2025', ticker:'CBA',  action:'SELL', qty:10,  entryPrice:126.00, exitPrice:124.50,  fees:10, status:'closed', pnl:-25,  recId:'R-004', recExecuted:true,  timestamp:'11:02' },
+    { id:3, date:'15-04-2025', ticker:'TLS',  action:'BUY',  qty:100, entryPrice:4.05,   exitPrice:null,    fees:10, status:'open',   pnl:null, recId:'R-002', recExecuted:true,  timestamp:'10:01' },
+    { id:4, date:'10-04-2025', ticker:'GMG',  action:'BUY',  qty:10,  entryPrice:34.80,  exitPrice:36.20,   fees:10, status:'closed', pnl:130,  recId:'R-001', recExecuted:true,  timestamp:'14:05' },
+  ],
+  recHistory: [
+    { id:'R-001', date:'10-04-2025', ticker:'GMG', action:'BUY',  confidence:0.78, priceRange:[34.5,35.2],   target:37.50,  stopLoss:33.00,  expectedProfit:280, netProfit:258, executed:true,  executedAt:'14:05', outcome:'win',     actualProfit:130  },
+    { id:'R-002', date:'15-04-2025', ticker:'TLS', action:'BUY',  confidence:0.65, priceRange:[4.00,4.10],   target:4.45,   stopLoss:3.85,   expectedProfit:195, netProfit:175, executed:true,  executedAt:'10:01', outcome:'open',    actualProfit:null },
+    { id:'R-003', date:'17-04-2025', ticker:'JBH', action:'SELL', confidence:0.52, priceRange:[72.00,73.50], target:68.00,  stopLoss:74.50,  expectedProfit:120, netProfit:98,  executed:false, executedAt:null,    outcome:'skipped', actualProfit:null },
+    { id:'R-004', date:'18-04-2025', ticker:'CBA', action:'SELL', confidence:0.71, priceRange:[125.00,126.50],target:120.00, stopLoss:128.00, expectedProfit:240, netProfit:218, executed:true,  executedAt:'11:02', outcome:'loss',    actualProfit:-25  },
+  ],
+  macroData: null,
+  liveSignals: {},      // ticker -> full analysis from backend
+  lastSignalFetch: {},  // ticker -> timestamp
+  chatHistory: [],
+  settings: {
+    brokerage: 10,
+    minTradeSize: 500,
+    maxTradesPerDay: 5,
+    maxPositionPct: 15,
+    capitalMode: 'partial',
+    riskCapitalPct: 30,
+    apiCostPerRun: 0.08,
+    apiKey: '',
+    serverUrl: 'http://localhost:5000',
+  },
+  analysisRunning: false,
+  serverOk: false,
+};
+
+// ============================================================
+// HELPERS
+// ============================================================
+const fmt = (n, d=2) => (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString('en-AU',{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtp = (n, d=2) => (n==null||isNaN(n)) ? '—' : (n>=0?'+':'') + fmt(Math.abs(n),d) + '%';
+const portfolioValue = () => state.portfolio.reduce((s,h)=>s+h.shares*h.currentPrice, 0);
+const totalCost      = () => state.portfolio.reduce((s,h)=>s+h.shares*h.avgPrice, 0);
+const totalGain      = () => portfolioValue() - totalCost();
+const totalNetWorth  = () => portfolioValue() + state.cash;
+const sign           = n  => n >= 0 ? '+' : '-';
+const confColor      = c  => c >= 0.70 ? '#16a34a' : c >= 0.55 ? '#d97706' : '#dc2626';
+const nowSydney      = () => new Date().toLocaleTimeString('en-AU',{timeZone:'Australia/Sydney',hour:'2-digit',minute:'2-digit'});
+const todayStr       = () => { const d=new Date(); return d.toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'}).split('/').map((p,i)=>i===2?p:(p.length===1?'0'+p:p)).join('-'); };
+const getApiKey      = () => state.settings.apiKey || localStorage.getItem('asx_api_key') || '';
+
+function actionBadge(a) {
+  const cls = a==='BUY'?'badge-buy':a==='SELL'?'badge-sell':'badge-hold';
+  return `<span class="badge ${cls}">${a}</span>`;
+}
+function statusBadge(s) {
+  if(s==='executed') return '<span class="badge badge-executed">Executed</span>';
+  if(s==='skipped')  return '<span class="badge badge-skipped">Skipped</span>';
+  if(s==='pending')  return '<span class="badge badge-pending">Pending</span>';
+  return '';
+}
+function toast(msg, type='info') {
+  const c=document.getElementById('toast-container');
+  const el=document.createElement('div');
+  el.className='toast';
+  el.style.borderLeft=`3px solid ${type==='success'?'#22c55e':type==='error'?'#ef4444':'#3b82f6'}`;
+  el.textContent=msg;
+  c.appendChild(el);
+  setTimeout(()=>el.remove(), 3500);
+}
+
+// Clock
+setInterval(()=>{ const e=document.getElementById('market-time'); if(e) e.textContent='ASX: '+nowSydney()+' AEDT'; },5000);
+
+// ============================================================
+// SERVER CHECK
+// ============================================================
+async function checkServer() {
+  const dot=document.getElementById('srv-dot');
+  const lbl=document.getElementById('srv-label');
+  try {
+    const r = await fetch(`${API}/health`, {signal: AbortSignal.timeout(3000)});
+    if(r.ok) {
+      state.serverOk=true;
+      dot.className='server-dot ok';
+      lbl.textContent='Server connected';
+    } else throw new Error();
+  } catch {
+    state.serverOk=false;
+    dot.className='server-dot err';
+    lbl.textContent='Server offline';
+  }
+}
+setInterval(checkServer, 30000);
+checkServer();
+
+// ============================================================
+// LIVE PRICE REFRESH
+// ============================================================
+async function refreshPrices() {
+  if(!state.serverOk) { toast('Backend server not running. See Settings.','error'); return; }
+  toast('Fetching live ASX prices...','info');
+  let updated=0;
+  for(const h of state.portfolio) {
+    try {
+      const r = await fetch(`${API}/api/quote/${h.ticker}`);
+      if(!r.ok) continue;
+      const d = await r.json();
+      if(d.price) { h.currentPrice = d.price; updated++; }
+    } catch {}
+  }
+  toast(`Updated ${updated} prices from yfinance`,'success');
+  renderPage();
+}
+
+// ============================================================
+// FETCH FULL INDICATOR DATA
+// ============================================================
+async function fetchSignals(tickers, forceRefresh=false) {
+  if(!state.serverOk) return {};
+  const now = Date.now();
+  const stale = tickers.filter(t => forceRefresh || !state.lastSignalFetch[t] || (now - state.lastSignalFetch[t]) > 15*60*1000);
+  if(!stale.length) return state.liveSignals;
+
+  try {
+    const r = await fetch(`${API}/api/analyse/batch`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({tickers: stale, period:'6mo'})
+    });
+    if(!r.ok) return state.liveSignals;
+    const data = await r.json();
+    stale.forEach(t => {
+      state.liveSignals[t] = data[t];
+      state.lastSignalFetch[t] = now;
+    });
+  } catch {}
+  return state.liveSignals;
+}
+
+// ============================================================
+// MINI SPARKLINE CANVAS
+// ============================================================
+function drawSparkline(canvasId, data, color='#3b82f6') {
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.offsetWidth || canvas.width;
+  const h = canvas.offsetHeight || canvas.height;
+  canvas.width = w; canvas.height = h;
+  if(!data || data.length<2) return;
+  const prices = data.map(d=>d.close);
+  const min=Math.min(...prices), max=Math.max(...prices), range=max-min||1;
+  ctx.clearRect(0,0,w,h);
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0, color+'44');
+  grad.addColorStop(1, color+'00');
+  ctx.beginPath();
+  prices.forEach((p,i)=>{
+    const x=(i/(prices.length-1))*w, y=h-((p-min)/range)*(h-8)-4;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  });
+  ctx.strokeStyle=color;
+  ctx.lineWidth=1.5;
+  ctx.stroke();
+  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
+  ctx.fillStyle=grad;
+  ctx.fill();
+}
+
+// ============================================================
+// PRICE CHART
+// ============================================================
+function drawPriceChart(canvasId, chartData, sma20, sma50, bbUpper, bbLower) {
+  const canvas = document.getElementById(canvasId);
+  if(!canvas || !chartData?.length) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.offsetWidth; const h = canvas.height = 180;
+  canvas.width = w;
+  const prices = chartData.map(d=>d.close);
+  const allVals = [...prices];
+  if(sma20) allVals.push(sma20);
+  if(bbUpper) allVals.push(bbUpper);
+  if(bbLower) allVals.push(bbLower);
+  const min=Math.min(...allVals)-Math.min(...allVals)*0.01, max=Math.max(...allVals)+Math.max(...allVals)*0.01;
+  const range=max-min||1;
+  const px=(v) => h-((v-min)/range)*h;
+  const py=(i) => (i/(chartData.length-1))*(w-8)+4;
+
+  ctx.clearRect(0,0,w,h);
+
+  // BB fill
+  if(bbUpper && bbLower) {
+    ctx.beginPath();
+    chartData.forEach((_,i)=>{ const x=py(i); i===0?ctx.moveTo(x,px(bbUpper)):ctx.lineTo(x,px(bbUpper)); });
+    chartData.slice().reverse().forEach((_,i)=>{ const ii=chartData.length-1-i; ctx.lineTo(py(ii),px(bbLower)); });
+    ctx.closePath();
+    ctx.fillStyle='rgba(59,130,246,0.07)';
+    ctx.fill();
+  }
+
+  // Price line
+  ctx.beginPath();
+  chartData.forEach((d,i)=>{ const x=py(i),y=px(d.close); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+  ctx.strokeStyle='#3b82f6'; ctx.lineWidth=1.5; ctx.stroke();
+
+  // SMA20
+  if(sma20) {
+    ctx.beginPath(); ctx.moveTo(4,px(sma20));
+    chartData.forEach((_,i)=>ctx.lineTo(py(i),px(sma20)));
+    ctx.strokeStyle='#f59e0b'; ctx.lineWidth=1; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+function showPage(page) {
+  state.page=page;
+  document.querySelectorAll('.nav-item').forEach(el=>el.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(el=>{ if(el.getAttribute('onclick')?.includes("'"+page+"'")) el.classList.add('active'); });
+  const titles={dashboard:'Dashboard',portfolio:'Portfolio',macro:'Morning Macro',recommendations:'Trade Recommendations',signals:'Live Signals (yfinance)',journal:'Trade Journal',performance:'Performance Analytics',backtest:'Backtesting',assistant:'AI Assistant',settings:'Settings'};
+  document.getElementById('page-title').textContent=titles[page]||page;
+  renderPage();
+}
+function renderPage() {
+  const el=document.getElementById('main-content');
+  switch(state.page) {
+    case 'dashboard':       el.innerHTML=renderDashboard(); break;
+    case 'portfolio':       el.innerHTML=renderPortfolio(); break;
+    case 'macro':           el.innerHTML=renderMacro(); break;
+    case 'recommendations': el.innerHTML=renderRecommendations(); break;
+    case 'signals':         renderSignalsPage(); break;
+    case 'journal':         el.innerHTML=renderJournal(); break;
+    case 'performance':     el.innerHTML=renderPerformance(); break;
+    case 'backtest':        el.innerHTML=renderBacktest(); break;
+    case 'assistant':       el.innerHTML=renderAssistant(); setTimeout(()=>{ const m=document.getElementById('chat-messages'); if(m) m.scrollTop=m.scrollHeight; },50); break;
+    case 'settings':        el.innerHTML=renderSettings(); break;
+  }
+}
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+function renderDashboard() {
+  const pv=portfolioValue(), nw=totalNetWorth(), gain=totalGain(), gainPct=(gain/totalCost())*100;
+  const pending=state.recommendations.filter(r=>r.status==='pending').length;
+  const execRate=state.recHistory.length ? state.recHistory.filter(r=>r.executed).length/state.recHistory.length : 0;
+  const nowH = new Date().getHours();
+  const schedule=[{t:'08:00',l:'Macro',h:8},{t:'10:00',l:'',h:10},{t:'11:00',l:'',h:11},{t:'12:00',l:'',h:12},{t:'13:00',l:'',h:13},{t:'14:00',l:'',h:14},{t:'15:00',l:'',h:15},{t:'15:45',l:'Close',h:15.75}];
+  const hasLive = Object.keys(state.liveSignals).length > 0;
+
+  return `
+    ${!state.serverOk ? `<div class="info-banner">⚠ Backend server not running. Start it with: <code>python3 asx_server.py</code> — then click "Refresh Prices" for live yfinance data.</div>` : ''}
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">Net Worth</div>
+        <div class="metric-value">$${fmt(nw)}</div>
+        <div class="metric-sub">Portfolio + Cash</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Portfolio Value</div>
+        <div class="metric-value">$${fmt(pv)}</div>
+        <div class="metric-sub ${gain>=0?'up':'down'}">${sign(gain)}$${fmt(Math.abs(gain))} (${sign(gainPct)}${fmt(Math.abs(gainPct))}%)</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Cash Available</div>
+        <div class="metric-value">$${fmt(state.cash)}</div>
+        <div class="metric-sub">${fmt((state.cash/nw)*100)}% of net worth</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Pending Recs</div>
+        <div class="metric-value">${pending}</div>
+        <div class="metric-sub">Exec rate: ${fmt(execRate*100,0)}%</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Holdings Overview</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Ticker</th><th>Sector</th><th>Value</th><th>P&L</th><th>Wt%</th>${hasLive?'<th>Signal</th>':''}</tr></thead>
+            <tbody>
+              ${state.portfolio.map(h=>{
+                const val=h.shares*h.currentPrice, pl=(h.currentPrice-h.avgPrice)*h.shares, plp=((h.currentPrice-h.avgPrice)/h.avgPrice)*100;
+                const sig=state.liveSignals[h.ticker];
+                return `<tr>
+                  <td><strong>${h.ticker}</strong></td>
+                  <td><span class="text-xs">${h.sector}</span></td>
+                  <td>$${fmt(val)}</td>
+                  <td class="${pl>=0?'text-success':'text-danger'}">${sign(pl)}$${fmt(Math.abs(pl))}</td>
+                  <td class="text-xs">${fmt((val/pv)*100)}%</td>
+                  ${hasLive?`<td>${sig&&!sig.error?actionBadge(sig.composite_signal):'<span class="text-xs text-muted">—</span>'}</td>`:''}
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${hasLive?`<div class="text-xs text-muted mt-1">Signals from yfinance · <button class="btn btn-sm" onclick="showPage('signals')">View full signals →</button></div>`:`<div class="text-xs text-muted mt-1">Go to Live Signals to fetch real-time technical indicators.</div>`}
+      </div>
+      <div class="card">
+        <div class="card-title">Recent Recommendations</div>
+        ${state.recHistory.slice().reverse().slice(0,4).map(r=>`
+          <div class="rec-card ${r.executed?'executed-card':'skipped-card'}" style="margin-bottom:8px">
+            <div class="flex-between mb-1">
+              <div class="flex-row">${actionBadge(r.action)}<strong>${r.ticker}</strong><span class="text-xs">${r.date}</span></div>
+              ${statusBadge(r.executed?'executed':'skipped')}
+            </div>
+            <div class="flex-row">
+              <div class="conf-bar"><div class="conf-fill" style="width:${r.confidence*100}%;background:${confColor(r.confidence)}"></div></div>
+              <span class="text-xs">${fmt(r.confidence*100,0)}% conf</span>
+              <span class="text-xs text-muted">Net: $${fmt(r.netProfit)}</span>
+            </div>
+          </div>`).join('')}
+        <button class="btn btn-sm mt-1" onclick="showPage('recommendations')">View all &rarr;</button>
+      </div>
+    </div>
+
+    <div class="card section-gap">
+      <div class="card-title">Today's Analysis Schedule (Sydney)</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        ${schedule.map(s=>{
+          const past=nowH>s.h, current=nowH===Math.floor(s.h)&&nowH===s.h;
+          return `<div class="schedule-pill ${past?'past':current?'current':''}">${past?'✓ ':current?'▶ ':''}${s.t}${s.l?' — '+s.l:''}</div>`;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// PORTFOLIO
+// ============================================================
+function renderPortfolio() {
+  const pv=portfolioValue();
+  return `
+    <div class="flex-between section-gap">
+      <div class="flex-row">
+        <span class="text-sm text-muted">Invested: <strong>$${fmt(totalCost())}</strong></span>
+        <span class="text-sm text-muted">Market value: <strong>$${fmt(pv)}</strong></span>
+      </div>
+      <div class="flex-row">
+        <button class="btn btn-sm" onclick="document.getElementById('csvUpload').click()">↑ Import CSV</button>
+        <input type="file" id="csvUpload" accept=".csv" style="display:none" onchange="handleCSV(event)">
+        <button class="btn btn-sm" onclick="refreshPrices()">⟳ Live Prices</button>
+        <button class="btn btn-sm btn-primary" onclick="addHolding()">+ Add Holding</button>
+      </div>
+    </div>
+
+    <div class="metrics-grid">
+      <div class="metric-card"><div class="metric-label">Total Invested</div><div class="metric-value">$${fmt(totalCost())}</div></div>
+      <div class="metric-card"><div class="metric-label">Market Value</div><div class="metric-value">$${fmt(pv)}</div></div>
+      <div class="metric-card"><div class="metric-label">Unrealised P&L</div><div class="metric-value ${totalGain()>=0?'up':'down'}">${sign(totalGain())}$${fmt(Math.abs(totalGain()))}</div></div>
+      <div class="metric-card"><div class="metric-label">Cash Available</div><div class="metric-value">$${fmt(state.cash)}</div></div>
+    </div>
+
+    <div class="card mb-2">
+      <div class="card-title">Holdings</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Ticker</th><th>Sector</th><th>Shares</th><th>Avg Price</th><th>Current</th><th>Value</th><th>P&L ($)</th><th>P&L (%)</th><th>Weight</th><th></th></tr></thead>
+          <tbody>
+            ${state.portfolio.map((h,i)=>{
+              const val=h.shares*h.currentPrice, pl=(h.currentPrice-h.avgPrice)*h.shares, plp=((h.currentPrice-h.avgPrice)/h.avgPrice)*100;
+              return `<tr>
+                <td><strong>${h.ticker}</strong></td>
+                <td><span class="text-xs">${h.sector}</span></td>
+                <td>${h.shares}</td>
+                <td>$${fmt(h.avgPrice)}</td>
+                <td>$${fmt(h.currentPrice)}</td>
+                <td>$${fmt(val)}</td>
+                <td class="${pl>=0?'text-success':'text-danger'}">${sign(pl)}$${fmt(Math.abs(pl))}</td>
+                <td class="${plp>=0?'text-success':'text-danger'}">${sign(plp)}${fmt(Math.abs(plp))}%</td>
+                <td class="text-xs">${fmt((val/pv)*100)}%</td>
+                <td><button class="btn btn-sm btn-danger" onclick="removeHolding(${i})">✕</button></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">CSV Import Format</div>
+      <pre class="code-block">ticker,shares,avg_price
+CBA,50,118.20
+BHP,80,43.10
+TLS,200,3.92</pre>
+    </div>
+  `;
+}
+
+function handleCSV(e) {
+  const file=e.target.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=ev=>{
+    const lines=ev.target.result.trim().split('\n').slice(1);
+    let added=0;
+    lines.forEach(line=>{
+      const [ticker,shares,avg]=line.split(',').map(s=>s.trim());
+      if(ticker&&shares&&avg){
+        const idx=state.portfolio.findIndex(h=>h.ticker===ticker.toUpperCase());
+        const entry={ticker:ticker.toUpperCase(),shares:Number(shares),avgPrice:Number(avg),currentPrice:Number(avg),sector:'Other'};
+        if(idx>=0) state.portfolio[idx]=entry; else state.portfolio.push(entry);
+        added++;
+      }
+    });
+    toast(`Imported ${added} holdings — click Refresh Prices for live data`,'success');
+    renderPage();
+  };
+  reader.readAsText(file);
+}
+function addHolding() {
+  const ticker=prompt('Ticker (e.g. NAB):'); if(!ticker) return;
+  const shares=Number(prompt('Shares:')); if(!shares) return;
+  const avg=Number(prompt('Avg buy price ($):')); if(!avg) return;
+  const sector=prompt('Sector:') || 'Other';
+  state.portfolio.push({ticker:ticker.toUpperCase(),shares,avgPrice:avg,currentPrice:avg,sector});
+  toast('Added — click Refresh Prices to get live price','success'); renderPage();
+}
+function removeHolding(i) {
+  if(!confirm(`Remove ${state.portfolio[i].ticker}?`)) return;
+  state.portfolio.splice(i,1); renderPage();
+}
+
+// ============================================================
+// MACRO
+// ============================================================
+function renderMacro() {
+  const m=state.macroData;
+  return `
+    <div class="flex-between section-gap">
+      <p class="text-muted text-sm">Morning macro brief &mdash; ${todayStr()}</p>
+      <div class="flex-row">
+        <button class="btn" onclick="fetchRealMacro()">⟳ Live Macro Data</button>
+        <button class="btn btn-primary" onclick="runMacroAnalysis()">◎ AI Macro Brief</button>
+      </div>
+    </div>
+    ${m ? `
+    <div class="grid-3 mb-2">
+      <div class="card">
+        <div class="card-title">US Markets (Overnight)</div>
+        ${[['S&P 500','sp500'],['Nasdaq','nasdaq'],['Dow Jones','dow']].map(([n,k])=>{
+          const v=m[k]; const pct=v?.change_pct;
+          return `<div class="signal-row"><span>${n}</span><div>
+            ${v?`<span class="${(pct||0)>=0?'text-success':'text-danger'}">${fmtp(pct)} </span><span class="text-xs text-muted">${fmt(v.value,0)}</span>`:'<span class="text-xs text-muted">—</span>'}
+          </div></div>`;
+        }).join('')}
+      </div>
+      <div class="card">
+        <div class="card-title">Commodities & FX</div>
+        ${[['Gold','gold'],['Oil (WTI)','oil'],['Iron Ore','iron_ore'],['AUD/USD','aud_usd'],['Copper','copper']].map(([n,k])=>{
+          const v=m[k]; const pct=v?.change_pct;
+          return `<div class="signal-row"><span>${n}</span><div>
+            ${v?`<span class="${(pct||0)>=0?'text-success':'text-danger'}">${fmtp(pct)} </span><span class="text-xs text-muted">${fmt(v.value,3)}</span>`:'<span class="text-xs text-muted">—</span>'}
+          </div></div>`;
+        }).join('')}
+      </div>
+      <div class="card">
+        <div class="card-title">Market Risk</div>
+        ${[['ASX 200','asx200'],['VIX','vix'],['US 10Y Yield','us10y']].map(([n,k])=>{
+          const v=m[k]; const pct=v?.change_pct;
+          const isRisk=(k==='vix');
+          return `<div class="signal-row"><span>${n}</span><div>
+            ${v?`<span class="${isRisk?((pct||0)>0?'text-danger':'text-success'):((pct||0)>=0?'text-success':'text-danger')}">${fmtp(pct)} </span><span class="text-xs text-muted">${fmt(v.value,2)}</span>`:'<span class="text-xs text-muted">—</span>'}
+          </div></div>`;
+        }).join('')}
+        ${m._source==='ai'?`<div class="signal-row"><span>Sentiment</span><span style="color:${m.sentiment==='risk-on'?'#16a34a':'#dc2626'};font-weight:700">${m.sentiment==='risk-on'?'RISK ON':'RISK OFF'}</span></div>`:''}
+      </div>
+    </div>
+    ${m.analysis?`
+    <div class="card">
+      <div class="card-title">AI Macro Analysis</div>
+      <p class="text-sm" style="line-height:1.75;white-space:pre-wrap">${m.analysis}</p>
+      ${m.keyDrivers?`<div class="mt-2"><div class="card-title">Key Drivers</div><p class="text-sm" style="line-height:1.75">${m.keyDrivers}</p></div>`:''}
+    </div>`:''}
+    ` : `
+    <div class="card"><div class="empty-state">
+      <div class="empty-icon">◎</div>
+      <p>No macro data loaded.</p>
+      <p class="sub">Click "Live Macro Data" for real yfinance market data, or "AI Macro Brief" for AI analysis.</p>
+    </div></div>
+    `}
+  `;
+}
+
+async function fetchRealMacro() {
+  if(!state.serverOk) { toast('Backend server not running','error'); return; }
+  toast('Fetching live macro data...','info');
+  try {
+    const r = await fetch(`${API}/api/macro`);
+    if(!r.ok) throw new Error('Server error');
+    const data = await r.json();
+    state.macroData = {...data, _source:'live'};
+    toast('Live macro data loaded','success'); renderPage();
+  } catch(e) {
+    toast('Macro fetch error: '+e.message,'error');
+  }
+}
+
+async function runMacroAnalysis() {
+  const key=getApiKey();
+  if(!key){toast('Add API key in Settings','error');showPage('settings');return;}
+  toast('Generating AI macro brief...','info');
+
+  // First fetch live data if available
+  let liveCtx='';
+  if(state.serverOk) {
+    try {
+      const r=await fetch(`${API}/api/macro`);
+      if(r.ok) {
+        const d=await r.json();
+        state.macroData={...d, _source:'live'};
+        const lines=[];
+        if(d.sp500) lines.push(`S&P500: ${fmt(d.sp500.value)} (${fmtp(d.sp500.change_pct)})`);
+        if(d.asx200) lines.push(`ASX200: ${fmt(d.asx200.value)} (${fmtp(d.asx200.change_pct)})`);
+        if(d.gold) lines.push(`Gold: ${fmt(d.gold.value)} (${fmtp(d.gold.change_pct)})`);
+        if(d.aud_usd) lines.push(`AUD/USD: ${fmt(d.aud_usd.value,4)} (${fmtp(d.aud_usd.change_pct)})`);
+        if(d.vix) lines.push(`VIX: ${fmt(d.vix.value)}`);
+        liveCtx = lines.join(' | ');
+      }
+    } catch {}
+  }
+
+  const system=`You are a macro analyst for Australian equity markets. Return ONLY valid JSON, no markdown.
+Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"analysis":"3 paragraph analysis","keyDrivers":"key market drivers today"}`;
+  try {
+    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system,messages:[{role:'user',content:`Provide current macro analysis for ASX morning brief. Today: ${todayStr()}${liveCtx?'. Live market data: '+liveCtx:'. Use realistic current estimates.'}  Return only JSON.`}]})});
+    const data=await r.json();
+    if(data.error) throw new Error(data.error.message);
+    const text=data.content?.[0]?.text||'{}';
+    const ai=JSON.parse(text.replace(/```json|```/g,'').trim());
+    state.macroData={...state.macroData, ...ai, _source:'ai'};
+    toast('AI macro brief ready','success'); renderPage();
+  } catch(e) {
+    toast('Macro error: '+e.message,'error');
+  }
+}
+
+// ============================================================
+// LIVE SIGNALS PAGE (yfinance powered)
+// ============================================================
+async function renderSignalsPage() {
+  const el=document.getElementById('main-content');
+  const tickers=state.portfolio.map(h=>h.ticker);
+
+  if(!state.serverOk) {
+    el.innerHTML=`<div class="info-banner">⚠ Backend not running. Start with: <code>python3 asx_server.py</code></div>
+      <div class="card"><div class="empty-state">
+        <div class="empty-icon">◇</div>
+        <p>Real-time signals require the yfinance backend.</p>
+        <p class="sub">Run <code>python3 asx_server.py</code> in your terminal, then refresh.</p>
+        <button class="btn btn-primary mt-2" onclick="checkServer().then(renderPage)">Check Connection</button>
+      </div></div>`;
+    return;
+  }
+
+  // Show loading
+  el.innerHTML=`<div class="card"><div class="empty-state"><div class="loading-dots"><span></span><span></span><span></span></div><p class="text-muted mt-1">Fetching yfinance data for ${tickers.join(', ')}...</p></div></div>`;
+
+  await fetchSignals(tickers, false);
+  const signals=state.liveSignals;
+
+  const hasData=tickers.some(t=>signals[t]&&!signals[t].error);
+  if(!hasData) {
+    el.innerHTML=`<div class="card"><div class="empty-state">
+      <div class="empty-icon">◇</div>
+      <p>Could not load signal data. Check server logs.</p>
+      <button class="btn btn-primary mt-2" onclick="fetchSignals(${JSON.stringify(tickers)},true).then(renderPage)">Retry</button>
+    </div></div>`;
+    return;
+  }
+
+  let html=`
+    <div class="flex-between section-gap">
+      <p class="text-muted text-sm">Real-time technical indicators via yfinance · 6-month lookback</p>
+      <button class="btn btn-primary btn-sm" onclick="refreshSignals()">⟳ Refresh Signals</button>
+    </div>
+
+    <!-- SUMMARY TABLE -->
+    <div class="card section-gap">
+      <div class="card-title">Signal Summary</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Ticker</th><th>Price</th><th>1D</th><th>5D</th><th>Signal</th><th>Confidence</th><th>RSI(14)</th><th>MACD</th><th>Trend</th><th>ADX</th><th>Vol Ratio</th><th>BB%B</th><th>Detail</th></tr></thead>
+          <tbody>
+          ${tickers.map(t=>{
+            const s=signals[t];
+            if(!s||s.error) return `<tr><td><strong>${t}</strong></td><td colspan="12" class="text-xs text-muted">Error: ${s?.error||'No data'}</td></tr>`;
+            const rsiColor=s.rsi_14>70?'text-danger':s.rsi_14<30?'text-success':'';
+            const macdStr=s.macd_hist!=null?`<span class="${s.macd_hist>0?'text-success':'text-danger'}">${s.macd_hist>0?'▲':'▼'} ${fmt(Math.abs(s.macd_hist),3)}</span>`:'—';
+            const confPct=Math.round(s.confidence*100);
+            const bbPct=s.bb_pct_b!=null?Math.round(s.bb_pct_b*100):null;
+            return `<tr>
+              <td><strong>${t}</strong><br><span class="text-xs text-muted">${s.fundamentals?.sector||''}</span></td>
+              <td>$${fmt(s.current_price,3)}</td>
+              <td class="${(s.return_1d||0)>=0?'text-success':'text-danger'}">${fmtp(s.return_1d,1)}</td>
+              <td class="${(s.return_5d||0)>=0?'text-success':'text-danger'}">${fmtp(s.return_5d,1)}</td>
+              <td>${actionBadge(s.composite_signal)}</td>
+              <td>
+                <div class="flex-row" style="gap:5px">
+                  <div class="conf-bar"><div class="conf-fill" style="width:${confPct}%;background:${confColor(s.confidence)}"></div></div>
+                  <span class="text-xs">${confPct}%</span>
+                </div>
+              </td>
+              <td><span class="${rsiColor}">${fmt(s.rsi_14,1)}</span><span class="text-xs text-muted">${s.rsi_14>70?' OB':s.rsi_14<30?' OS':''}</span></td>
+              <td>${macdStr}</td>
+              <td><span class="${s.trend_direction==='bullish'?'text-success':s.trend_direction==='bearish'?'text-danger':'text-muted'}">${s.trend_direction==='bullish'?'↑ Bull':s.trend_direction==='bearish'?'↓ Bear':'→ Neutral'}</span></td>
+              <td><span class="${(s.adx||0)>25?'text-success':''}">${fmt(s.adx,0)}</span><span class="text-xs text-muted">${(s.adx||0)>25?' Strong':' Weak'}</span></td>
+              <td class="${(s.volume_ratio||0)>1.5?'text-warn':''}">${fmt(s.volume_ratio,1)}x</td>
+              <td>${bbPct!=null?`<span class="${bbPct>80?'text-danger':bbPct<20?'text-success':''}">${bbPct}%</span>`:'—'}</td>
+              <td><button class="btn btn-sm" onclick="showTickerDetail('${t}')">Detail</button></td>
+            </tr>`;
+          }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- DETAIL CARDS -->
+    ${tickers.map(t=>{
+      const s=signals[t];
+      if(!s||s.error) return '';
+      const f=s.fundamentals||{};
+      return `
+      <div class="card section-gap" id="detail-${t}" style="display:none">
+        <div class="flex-between mb-2">
+          <div class="flex-row">
+            <strong style="font-size:16px">${t}</strong>
+            ${actionBadge(s.composite_signal)}
+            <span class="text-xs text-muted">${f.short_name||''} · ${s.fetched_at||''}</span>
+          </div>
+          <button class="btn btn-sm" onclick="document.getElementById('detail-${t}').style.display='none'">✕ Close</button>
+        </div>
+
+        <!-- Price chart placeholder -->
+        <div class="mb-2" style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:12px">
+          <canvas id="chart-${t}" style="width:100%;height:180px"></canvas>
+        </div>
+
+        <div class="grid-4" style="margin-bottom:1rem">
+          <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 12px">
+            <div class="text-xs text-muted">Entry Range</div>
+            <div style="font-weight:600">$${fmt(s.entry_range?.[0],3)} – $${fmt(s.entry_range?.[1],3)}</div>
+          </div>
+          <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 12px">
+            <div class="text-xs text-muted">Target / Stop</div>
+            <div style="font-weight:600"><span class="text-success">$${fmt(s.target,3)}</span> / <span class="text-danger">$${fmt(s.stop_loss,3)}</span></div>
+          </div>
+          <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 12px">
+            <div class="text-xs text-muted">ATR(14)</div>
+            <div style="font-weight:600">$${fmt(s.atr_14,3)} <span class="text-xs">(${fmt(s.atr_pct,1)}%)</span></div>
+          </div>
+          <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 12px">
+            <div class="text-xs text-muted">Hist Vol (20d)</div>
+            <div style="font-weight:600">${fmt(s.hist_vol_20,1)}% ann.</div>
+          </div>
+        </div>
+
+        <div class="grid-3">
+
+          <!-- Momentum indicators -->
+          <div class="card" style="padding:1rem">
+            <div class="card-title">Momentum</div>
+            ${[
+              ['RSI(14)', `<span class="${s.rsi_14>70?'text-danger':s.rsi_14<30?'text-success':''}">${fmt(s.rsi_14,1)}${s.rsi_14>70?' ⚠ Overbought':s.rsi_14<30?' ⚡ Oversold':''}</span>`],
+              ['RSI(9)', fmt(s.rsi_9,1)],
+              ['MACD Line', fmt(s.macd_line,3)],
+              ['MACD Signal', fmt(s.macd_signal,3)],
+              ['MACD Hist', `<span class="${(s.macd_hist||0)>0?'text-success':'text-danger'}">${fmt(s.macd_hist,3)}</span>`],
+              ['Stoch %K', `<span class="${(s.stoch_k||50)>80?'text-danger':(s.stoch_k||50)<20?'text-success':''}">${fmt(s.stoch_k,1)}</span>`],
+              ['Stoch %D', fmt(s.stoch_d,1)],
+              ['Williams %R', fmt(s.williams_r,1)],
+              ['CCI(20)', `<span class="${(s.cci||0)>100?'text-danger':(s.cci||0)<-100?'text-success':''}">${fmt(s.cci,1)}</span>`],
+              ['MFI(14)', `<span class="${(s.mfi||50)>80?'text-danger':(s.mfi||50)<20?'text-success':''}">${fmt(s.mfi,1)}</span>`],
+              ['ROC(10)', fmtp(s.roc_10,2)],
+              ['ROC(21)', fmtp(s.roc_21,2)],
+            ].map(([l,v])=>`<div class="ind-row"><span class="ind-label">${l}</span><span class="ind-val">${v}</span></div>`).join('')}
+          </div>
+
+          <!-- Trend & Volatility -->
+          <div class="card" style="padding:1rem">
+            <div class="card-title">Trend & Volatility</div>
+            ${[
+              ['SMA(20)', `$${fmt(s.sma_20,3)}`],
+              ['SMA(50)', `$${fmt(s.sma_50,3)}`],
+              ['SMA(200)', s.sma_200?`$${fmt(s.sma_200,3)}`:'<span class="text-muted">n/a</span>'],
+              ['EMA(12)', `$${fmt(s.ema_12,3)}`],
+              ['EMA(26)', `$${fmt(s.ema_26,3)}`],
+              ['ADX(14)', `<span class="${(s.adx||0)>25?'text-success':''}">${fmt(s.adx,1)} (${s.trend_strength})</span>`],
+              ['+DI', `<span class="text-success">${fmt(s.adx_plus_di,1)}</span>`],
+              ['-DI', `<span class="text-danger">${fmt(s.adx_minus_di,1)}</span>`],
+              ['BB Upper', `$${fmt(s.bb_upper,3)}`],
+              ['BB Mid', `$${fmt(s.bb_mid,3)}`],
+              ['BB Lower', `$${fmt(s.bb_lower,3)}`],
+              ['BB %B', s.bb_pct_b!=null?`${fmt(s.bb_pct_b*100,0)}%`:'—'],
+              ['BB Width', s.bb_bandwidth?`${fmt(s.bb_bandwidth,1)}%`:'—'],
+              ['Keltner Up', `$${fmt(s.keltner_upper,3)}`],
+              ['Keltner Low', `$${fmt(s.keltner_lower,3)}`],
+            ].map(([l,v])=>`<div class="ind-row"><span class="ind-label">${l}</span><span class="ind-val">${v}</span></div>`).join('')}
+          </div>
+
+          <!-- Volume & Fundamentals -->
+          <div class="card" style="padding:1rem">
+            <div class="card-title">Volume & Fundamentals</div>
+            ${[
+              ['Vol Today', fmt(s.volume_today,0)],
+              ['Vol Avg(20)', fmt(s.volume_avg_20,0)],
+              ['Vol Ratio', `<span class="${(s.volume_ratio||0)>1.5?'text-warn':''}">${fmt(s.volume_ratio,2)}x</span>`],
+              ['OBV Trend', `<span class="${s.obv_trend==='rising'?'text-success':'text-danger'}">${s.obv_trend}</span>`],
+              ['VWAP(20d)', `$${fmt(s.vwap_20d,3)}`],
+              ['vs VWAP', `<span class="${s.price_vs_vwap==='above'?'text-success':'text-danger'}">${s.price_vs_vwap}</span>`],
+              ['P/E', fmt(f.pe_ratio,1)],
+              ['Fwd P/E', fmt(f.forward_pe,1)],
+              ['P/B', fmt(f.pb_ratio,2)],
+              ['Div Yield', f.dividend_yield!=null?`${fmt(f.dividend_yield*100,2)}%`:'—'],
+              ['ROE', f.roe!=null?`${fmt(f.roe*100,1)}%`:'—'],
+              ['Beta', fmt(f.beta,2)],
+              ['52W High', f['52w_high']?`$${fmt(f['52w_high'],3)}`:'—'],
+              ['52W Low', f['52w_low']?`$${fmt(f['52w_low'],3)}`:'—'],
+              ['From 52W H', f.pct_from_52w_high!=null?`${fmt(f.pct_from_52w_high,1)}%`:'—'],
+            ].map(([l,v])=>`<div class="ind-row"><span class="ind-label">${l}</span><span class="ind-val">${v}</span></div>`).join('')}
+          </div>
+        </div>
+
+        <!-- Support & Resistance -->
+        <div class="grid-2 mt-2">
+          <div class="card" style="padding:1rem">
+            <div class="card-title">Support & Resistance (Pivot)</div>
+            ${s.support_resistance ? [
+              ['R2', s.support_resistance.r2, 'sr-r'],
+              ['R1', s.support_resistance.r1, 'sr-r'],
+              ['Pivot', s.support_resistance.pivot, 'sr-p'],
+              ['S1', s.support_resistance.s1, 'sr-s'],
+              ['S2', s.support_resistance.s2, 'sr-s'],
+            ].map(([l,v,cls])=>`<div class="sr-level ${cls}"><span>${l}</span><strong>$${fmt(v,3)}</strong></div>`).join('') : '<div class="text-xs text-muted">—</div>'}
+          </div>
+          <div class="card" style="padding:1rem">
+            <div class="card-title">Returns</div>
+            ${[['1 Day',s.return_1d],['5 Day',s.return_5d],['20 Day (1M)',s.return_20d],['60 Day (3M)',s.return_60d],['90 Day',s.return_90d]].map(([l,v])=>`
+              <div class="signal-row"><span class="text-sm">${l}</span><span class="${v!=null?(v>=0?'text-success':'text-danger'):'text-muted'}">${v!=null?fmtp(v,2):'—'}</span></div>`).join('')}
+          </div>
+        </div>
+
+        <!-- Buy / Sell signals -->
+        <div class="grid-2 mt-2">
+          <div class="card" style="padding:1rem">
+            <div class="card-title" style="color:#15803d">▲ Buy Signals (${s.buy_signals?.length||0})</div>
+            <div>${(s.buy_signals||[]).map(sig=>`<span class="signal-chip chip-buy">✓ ${sig}</span>`).join('')||'<span class="text-xs text-muted">None</span>'}</div>
+          </div>
+          <div class="card" style="padding:1rem">
+            <div class="card-title" style="color:#b91c1c">▼ Sell Signals (${s.sell_signals?.length||0})</div>
+            <div>${(s.sell_signals||[]).map(sig=>`<span class="signal-chip chip-sell">✗ ${sig}</span>`).join('')||'<span class="text-xs text-muted">None</span>'}</div>
+          </div>
+        </div>
+
+        <!-- Analyst -->
+        ${f.analyst_target||f.analyst_recommendation?`
+        <div class="card mt-2" style="padding:1rem">
+          <div class="card-title">Analyst Consensus</div>
+          <div class="flex-row">
+            ${f.analyst_recommendation?`<span class="badge badge-neutral" style="text-transform:capitalize">${f.analyst_recommendation}</span>`:''}
+            ${f.analyst_target?`<span class="text-sm">Target: <strong>$${fmt(f.analyst_target,3)}</strong></span>`:''}
+            ${f.analyst_target&&s.current_price?`<span class="text-xs text-muted">Upside: <span class="${f.analyst_target>s.current_price?'text-success':'text-danger'}">${fmtp((f.analyst_target/s.current_price-1)*100,1)}</span></span>`:''}
+          </div>
+        </div>`:''}
+      </div>`;
+    }).join('')}
+  `;
+
+  el.innerHTML=html;
+
+  // Draw sparkline charts for each ticker with data
+  tickers.forEach(t=>{
+    const s=signals[t];
+    if(s&&!s.error&&s.chart_data?.length) {
+      setTimeout(()=>drawSparklineFromData(t, s), 50);
+    }
+  });
+}
+
+function drawSparklineFromData(ticker, s) {
+  const canvas=document.getElementById(`chart-${ticker}`);
+  if(!canvas||!s.chart_data?.length) return;
+  const ctx=canvas.getContext('2d');
+  canvas.width=canvas.offsetWidth||800;
+  canvas.height=180;
+  const w=canvas.width, h=canvas.height;
+  const data=s.chart_data;
+  const prices=data.map(d=>d.close);
+  const allV=[...prices];
+  if(s.bb_upper) allV.push(s.bb_upper);
+  if(s.bb_lower) allV.push(s.bb_lower);
+  const mn=Math.min(...allV)*0.998, mx=Math.max(...allV)*1.002, rng=mx-mn||1;
+  const px=v=>h-((v-mn)/rng)*(h-20)-10;
+  const py=i=>(i/(data.length-1))*(w-20)+10;
+
+  ctx.clearRect(0,0,w,h);
+
+  // Grid lines
+  ctx.strokeStyle='rgba(128,128,128,0.1)'; ctx.lineWidth=0.5;
+  [0.25,0.5,0.75].forEach(f=>{ ctx.beginPath(); ctx.moveTo(0,h*f); ctx.lineTo(w,h*f); ctx.stroke(); });
+
+  // BB bands
+  if(s.bb_upper&&s.bb_lower) {
+    ctx.beginPath();
+    data.forEach((_,i)=>i===0?ctx.moveTo(py(i),px(s.bb_upper)):ctx.lineTo(py(i),px(s.bb_upper)));
+    data.slice().reverse().forEach((_,i)=>ctx.lineTo(py(data.length-1-i),px(s.bb_lower)));
+    ctx.closePath(); ctx.fillStyle='rgba(59,130,246,0.06)'; ctx.fill();
+    // BB lines
+    ctx.setLineDash([2,3]); ctx.strokeStyle='rgba(59,130,246,0.4)'; ctx.lineWidth=1;
+    ['bb_upper','bb_lower'].forEach(k=>{ ctx.beginPath(); data.forEach((_,i)=>i===0?ctx.moveTo(py(i),px(s[k])):ctx.lineTo(py(i),px(s[k]))); ctx.stroke(); });
+    ctx.setLineDash([]);
+  }
+
+  // SMA lines
+  if(s.sma_20) { ctx.beginPath(); data.forEach((_,i)=>i===0?ctx.moveTo(py(i),px(s.sma_20)):ctx.lineTo(py(i),px(s.sma_20))); ctx.strokeStyle='#f59e0b'; ctx.lineWidth=1; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]); }
+  if(s.sma_50) { ctx.beginPath(); data.forEach((_,i)=>i===0?ctx.moveTo(py(i),px(s.sma_50)):ctx.lineTo(py(i),px(s.sma_50))); ctx.strokeStyle='#8b5cf6'; ctx.lineWidth=1; ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]); }
+
+  // Price line with gradient fill
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  const isUp=prices[prices.length-1]>=prices[0];
+  grad.addColorStop(0, isUp?'rgba(22,163,74,0.15)':'rgba(220,38,38,0.15)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath();
+  data.forEach((d,i)=>i===0?ctx.moveTo(py(i),px(d.close)):ctx.lineTo(py(i),px(d.close)));
+  ctx.strokeStyle=isUp?'#16a34a':'#dc2626'; ctx.lineWidth=2; ctx.stroke();
+  ctx.lineTo(w-10,h); ctx.lineTo(10,h); ctx.closePath(); ctx.fillStyle=grad; ctx.fill();
+
+  // Current price label
+  const cp=prices[prices.length-1];
+  ctx.fillStyle=isUp?'#16a34a':'#dc2626';
+  ctx.font='11px sans-serif';
+  ctx.textAlign='right';
+  ctx.fillText(`$${cp.toFixed(3)}`, w-12, px(cp)-4);
+
+  // Legend
+  ctx.font='10px sans-serif'; ctx.textAlign='left';
+  const leg=[['─ Price',isUp?'#16a34a':'#dc2626'],['-- SMA20','#f59e0b'],['-- SMA50','#8b5cf6'],['~~ BB','#3b82f6']];
+  leg.forEach(([l,c],i)=>{ ctx.fillStyle=c; ctx.fillText(l,10+i*85,14); });
+}
+
+function showTickerDetail(ticker) {
+  document.querySelectorAll('[id^="detail-"]').forEach(el=>el.style.display='none');
+  const el=document.getElementById(`detail-${ticker}`);
+  if(el) { el.style.display='block'; el.scrollIntoView({behavior:'smooth',block:'start'}); setTimeout(()=>{ const s=state.liveSignals[ticker]; if(s&&!s.error&&s.chart_data) drawSparklineFromData(ticker, s); },100); }
+}
+
+async function refreshSignals() {
+  const tickers=state.portfolio.map(h=>h.ticker);
+  toast('Refreshing all signals...','info');
+  await fetchSignals(tickers, true);
+  renderPage();
+  toast('Signals refreshed','success');
+}
+
+// ============================================================
+// RECOMMENDATIONS
+// ============================================================
+function renderRecommendations() {
+  const pending=state.recommendations.filter(r=>r.status==='pending');
+  return `
+    <div class="tabs">
+      <button class="tab active" id="tab-pending" onclick="switchRecTab('pending')">Pending (${pending.length})</button>
+      <button class="tab" id="tab-history" onclick="switchRecTab('history')">History (${state.recHistory.length})</button>
+    </div>
+    <div id="rec-content">${renderPendingRecs(pending)}</div>
+  `;
+}
+function switchRecTab(tab) {
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  document.getElementById('rec-content').innerHTML=tab==='pending'?renderPendingRecs(state.recommendations.filter(r=>r.status==='pending')):renderRecHistory();
+}
+function renderPendingRecs(recs) {
+  if(!recs.length) return `<div class="card"><div class="empty-state">
+    <div class="empty-icon">◆</div>
+    <p>No pending recommendations.</p>
+    <p class="sub">Click "▶ Run Analysis" in the top bar. The AI will use live yfinance indicator data when available.</p>
+    <button class="btn btn-primary mt-2" onclick="runAnalysis()">▶ Run Analysis</button>
+  </div></div>`;
+
+  return recs.map(r=>`
+    <div class="rec-card" id="rec-${r.id}">
+      <div class="flex-between mb-1">
+        <div class="flex-row">${actionBadge(r.action)}<strong style="font-size:15px">${r.ticker}</strong><span class="text-xs">${r.sector||''}</span><span class="badge badge-pending">Pending</span><span class="text-xs text-muted">Generated ${r.generatedAt||r.date}</span></div>
+        <div class="flex-row">
+          <button class="btn btn-sm btn-success" onclick="markExecuted('${r.id}')">✓ Mark Executed</button>
+          <button class="btn btn-sm btn-danger" onclick="markSkipped('${r.id}')">✕ Skip</button>
+        </div>
+      </div>
+      <div class="grid-3 mb-1" style="margin-top:10px">
+        <div style="background:var(--bg-secondary);padding:8px 12px;border-radius:var(--radius-md)">
+          <div class="text-xs">Entry range</div>
+          <div style="font-weight:600;font-size:13px">$${fmt(r.priceRange[0])} &ndash; $${fmt(r.priceRange[1])}</div>
+        </div>
+        <div style="background:var(--bg-secondary);padding:8px 12px;border-radius:var(--radius-md)">
+          <div class="text-xs">Target / Stop-loss</div>
+          <div style="font-weight:600;font-size:13px"><span class="text-success">$${fmt(r.target)}</span> / <span class="text-danger">$${fmt(r.stopLoss)}</span></div>
+        </div>
+        <div style="background:var(--bg-secondary);padding:8px 12px;border-radius:var(--radius-md)">
+          <div class="text-xs">Est. net profit</div>
+          <div style="font-weight:600;font-size:13px;color:#16a34a">$${fmt(r.netProfit)}</div>
+        </div>
+      </div>
+      <div class="flex-row mb-1">
+        <div class="conf-bar" style="width:110px"><div class="conf-fill" style="width:${r.confidence*100}%;background:${confColor(r.confidence)}"></div></div>
+        <span class="text-xs">${fmt(r.confidence*100,0)}% confidence</span>
+        <span class="text-xs text-muted">|</span>
+        <span class="text-xs">Brokerage: $${state.settings.brokerage}</span>
+        <span class="text-xs">Qty: ${r.qty||'—'} shares</span>
+      </div>
+      <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md);font-size:13px;line-height:1.65;margin-bottom:8px">
+        <strong>Reasoning:</strong> ${r.reasoning}
+      </div>
+      ${r.risks?`<div class="text-xs text-muted mb-1"><strong>Risks:</strong> ${r.risks}</div>`:''}
+      <div class="flex-row">
+        ${(r.signals||[]).map(s=>`<span style="font-size:11px;padding:2px 8px;background:var(--bg-secondary);border-radius:4px;border:0.5px solid var(--border-light)">${s}</span>`).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+function renderRecHistory() {
+  return `<div class="card"><div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Date</th><th>Ticker</th><th>Action</th><th>Confidence</th><th>Net Profit</th><th>Status</th><th>Executed At</th><th>Outcome</th><th>Actual P&L</th></tr></thead>
+    <tbody>
+      ${state.recHistory.slice().reverse().map(r=>`<tr>
+        <td class="text-xs text-muted">${r.id}</td>
+        <td class="text-xs">${r.date}</td>
+        <td><strong>${r.ticker}</strong></td>
+        <td>${actionBadge(r.action)}</td>
+        <td><div class="flex-row"><div class="conf-bar" style="width:60px"><div class="conf-fill" style="width:${r.confidence*100}%;background:${confColor(r.confidence)}"></div></div><span class="text-xs">${fmt(r.confidence*100,0)}%</span></div></td>
+        <td>$${fmt(r.netProfit)}</td>
+        <td>${statusBadge(r.executed?'executed':'skipped')}</td>
+        <td class="text-xs">${r.executedAt||'&mdash;'}</td>
+        <td class="text-xs ${r.outcome==='win'?'text-success':r.outcome==='loss'?'text-danger':'text-muted'}">${r.outcome||'&mdash;'}</td>
+        <td class="${r.actualProfit!=null?(r.actualProfit>=0?'text-success':'text-danger'):'text-muted'}">${r.actualProfit!=null?(r.actualProfit>=0?'+':'')+' $'+fmt(Math.abs(r.actualProfit)):'&mdash;'}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table></div></div>`;
+}
+function markExecuted(id) {
+  const rec=state.recommendations.find(r=>r.id===id); if(!rec) return;
+  const time=nowSydney();
+  rec.status='executed'; rec.executedAt=time;
+  state.recHistory.unshift({id:rec.id,date:todayStr(),ticker:rec.ticker,action:rec.action,confidence:rec.confidence,priceRange:rec.priceRange,target:rec.target,stopLoss:rec.stopLoss,expectedProfit:rec.expectedProfit,netProfit:rec.netProfit,executed:true,executedAt:time,outcome:'open',actualProfit:null});
+  state.tradeJournal.unshift({id:state.tradeJournal.length+1,date:todayStr(),ticker:rec.ticker,action:rec.action,qty:rec.qty||10,entryPrice:rec.priceRange[0],exitPrice:null,fees:state.settings.brokerage,status:'open',pnl:null,recId:rec.id,recExecuted:true,timestamp:time});
+  toast(`${rec.ticker} marked EXECUTED at ${time}`,'success'); renderPage();
+}
+function markSkipped(id) {
+  const rec=state.recommendations.find(r=>r.id===id); if(!rec) return;
+  rec.status='skipped';
+  state.recHistory.unshift({id:rec.id,date:todayStr(),ticker:rec.ticker,action:rec.action,confidence:rec.confidence,priceRange:rec.priceRange,target:rec.target,stopLoss:rec.stopLoss,expectedProfit:rec.expectedProfit,netProfit:rec.netProfit,executed:false,executedAt:null,outcome:'skipped',actualProfit:null});
+  toast(`${rec.ticker} skipped`,'info'); renderPage();
+}
+
+// ============================================================
+// JOURNAL
+// ============================================================
+function renderJournal() {
+  const closed=state.tradeJournal.filter(t=>t.status==='closed');
+  const totalPnL=closed.reduce((s,t)=>s+(t.pnl||0),0);
+  const totalFees=state.tradeJournal.reduce((s,t)=>s+t.fees,0);
+  return `
+    <div class="flex-between section-gap">
+      <div class="flex-row">
+        <span class="text-sm text-muted">Realised P&L: <strong class="${totalPnL>=0?'text-success':'text-danger'}">${sign(totalPnL)}$${fmt(Math.abs(totalPnL))}</strong></span>
+        <span class="text-sm text-muted">Fees paid: <strong>$${fmt(totalFees)}</strong></span>
+      </div>
+      <div class="flex-row">
+        <button class="btn btn-sm" onclick="addManualTrade()">+ Log Manual Trade</button>
+        <button class="btn btn-sm btn-primary" onclick="exportCSV()">↓ Export CSV (Tax)</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Date</th><th>Time</th><th>Ticker</th><th>Action</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Fees</th><th>P&L</th><th>Status</th><th>Rec ID</th><th>From Rec?</th></tr></thead>
+          <tbody>
+            ${state.tradeJournal.map(t=>{
+              const pnl=t.pnl!=null?t.pnl:(t.exitPrice?(t.action==='BUY'?(t.exitPrice-t.entryPrice)*t.qty:(t.entryPrice-t.exitPrice)*t.qty)-t.fees:null);
+              return `<tr>
+                <td class="text-xs">${t.date}</td>
+                <td class="text-xs text-muted">${t.timestamp||'&mdash;'}</td>
+                <td><strong>${t.ticker}</strong></td>
+                <td>${actionBadge(t.action)}</td>
+                <td>${t.qty}</td>
+                <td>$${fmt(t.entryPrice)}</td>
+                <td>${t.exitPrice?'$'+fmt(t.exitPrice):'&mdash;'}</td>
+                <td>$${fmt(t.fees)}</td>
+                <td class="${pnl!=null?(pnl>=0?'text-success':'text-danger'):'text-muted'}">${pnl!=null?(pnl>=0?'+':'')+' $'+fmt(Math.abs(pnl)):'Open'}</td>
+                <td><span class="badge ${t.status==='open'?'badge-open':'badge-closed'}">${t.status}</span></td>
+                <td class="text-xs text-muted">${t.recId||'&mdash;'}</td>
+                <td><span class="badge ${t.recId&&t.recExecuted?'badge-executed':'badge-skipped'}">${t.recId?(t.recExecuted?'Rec: Yes':'Rec: No'):'Manual'}</span></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+function addManualTrade() {
+  const ticker=prompt('Ticker:'); if(!ticker) return;
+  const action=(prompt('Action (BUY/SELL):')||'BUY').toUpperCase();
+  const qty=Number(prompt('Quantity:')); if(!qty) return;
+  const price=Number(prompt('Price ($):')); if(!price) return;
+  state.tradeJournal.unshift({id:state.tradeJournal.length+1,date:todayStr(),ticker:ticker.toUpperCase(),action,qty,entryPrice:price,exitPrice:null,fees:state.settings.brokerage,status:'open',pnl:null,recId:null,recExecuted:false,timestamp:nowSydney()});
+  toast('Trade logged','success'); renderPage();
+}
+function exportCSV() {
+  const h='Date,Time,Ticker,Action,Qty,Entry,Exit,Fees,PnL,Status,RecID,FromRec\n';
+  const rows=state.tradeJournal.map(t=>[t.date,t.timestamp||'',t.ticker,t.action,t.qty,t.entryPrice,t.exitPrice||'',t.fees,t.pnl||'',t.status,t.recId||'',t.recId?(t.recExecuted?'Yes':'No'):'Manual'].join(',')).join('\n');
+  const blob=new Blob([h+rows],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`asx_trades_${todayStr()}.csv`; a.click();
+  toast('CSV exported','success');
+}
+
+// ============================================================
+// PERFORMANCE
+// ============================================================
+function renderPerformance() {
+  const exec=state.recHistory.filter(r=>r.executed);
+  const wins=state.recHistory.filter(r=>r.outcome==='win').length;
+  const losses=state.recHistory.filter(r=>r.outcome==='loss').length;
+  const total=wins+losses;
+  const winRate=total?wins/total*100:0;
+  const execRate=state.recHistory.length?exec.length/state.recHistory.length*100:0;
+  const totalFees=state.tradeJournal.reduce((s,t)=>s+t.fees,0);
+  const realised=state.tradeJournal.filter(t=>t.pnl!=null).reduce((s,t)=>s+t.pnl,0);
+  const skipped=state.recHistory.filter(r=>!r.executed);
+  const confBuckets=[0.5,0.6,0.7,0.8,0.9].map(c=>{
+    const b=state.recHistory.filter(r=>r.confidence>=c&&r.confidence<c+0.1&&r.outcome!=='open'&&r.outcome!=='skipped');
+    const w=b.filter(r=>r.outcome==='win').length;
+    return {conf:fmt(c*100,0)+'%',wins:w,total:b.length,rate:b.length?w/b.length:null};
+  });
+  return `
+    <div class="metrics-grid">
+      <div class="metric-card"><div class="metric-label">Win Rate</div><div class="metric-value ${winRate>=50?'up':'down'}">${fmt(winRate,0)}%</div><div class="metric-sub">${wins}W / ${losses}L</div></div>
+      <div class="metric-card"><div class="metric-label">Execution Rate</div><div class="metric-value">${fmt(execRate,0)}%</div><div class="metric-sub">${exec.length} of ${state.recHistory.length} recs</div></div>
+      <div class="metric-card"><div class="metric-label">Realised P&L</div><div class="metric-value ${realised>=0?'up':'down'}">${sign(realised)}$${fmt(Math.abs(realised))}</div></div>
+      <div class="metric-card"><div class="metric-label">Fees Paid</div><div class="metric-value">$${fmt(totalFees)}</div></div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Confidence Calibration</div>
+        <p class="text-xs text-muted mb-1">Predicted confidence vs actual win rate.</p>
+        ${confBuckets.map(b=>`
+          <div class="signal-row">
+            <span class="text-sm">${b.conf} confidence</span>
+            ${b.total>0?`<div class="flex-row"><div class="conf-bar" style="width:100px"><div class="conf-fill" style="width:${b.rate*100}%;background:${confColor(b.rate)}"></div></div><span class="text-xs">${fmt(b.rate*100,0)}% actual (${b.total} trades)</span></div>`:'<span class="text-xs text-muted">No data</span>'}
+          </div>`).join('')}
+      </div>
+      <div class="card">
+        <div class="card-title">Recommendation Outcomes</div>
+        ${[['Executed & Won',state.recHistory.filter(r=>r.executed&&r.outcome==='win').length,'#22c55e'],
+           ['Executed & Lost',state.recHistory.filter(r=>r.executed&&r.outcome==='loss').length,'#ef4444'],
+           ['Executed (Open)',state.recHistory.filter(r=>r.executed&&r.outcome==='open').length,'#3b82f6'],
+           ['Skipped',skipped.length,'#9ca3af']].map(([l,c,col])=>`
+          <div class="signal-row">
+            <div class="flex-row"><div style="width:10px;height:10px;border-radius:2px;background:${col};flex-shrink:0"></div><span class="text-sm">${l}</span></div>
+            <strong>${c}</strong>
+          </div>`).join('')}
+        <div class="divider"></div>
+        <div class="signal-row"><span class="text-sm text-muted">Net after all costs</span><strong class="${realised-totalFees>=0?'text-success':'text-danger'}">${sign(realised-totalFees)}$${fmt(Math.abs(realised-totalFees))}</strong></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Cost Breakdown</div>
+      <div class="grid-3" style="gap:8px">
+        <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"><div class="text-xs">Total brokerage</div><div style="font-size:18px;font-weight:600">$${fmt(totalFees)}</div></div>
+        <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"><div class="text-xs">API costs (est.)</div><div style="font-size:18px;font-weight:600">$${fmt(state.recHistory.length*state.settings.apiCostPerRun,2)}</div></div>
+        <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"><div class="text-xs">Net after costs</div><div style="font-size:18px;font-weight:600;color:${realised-totalFees>=0?'#16a34a':'#dc2626'}">${sign(realised-totalFees)}$${fmt(Math.abs(realised-totalFees))}</div></div>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// BACKTEST
+// ============================================================
+function renderBacktest() {
+  return `
+    <div class="card section-gap">
+      <div class="card-title">Backtest Configuration</div>
+      <div class="grid-2" style="gap:14px">
+        <div class="form-row"><div class="form-label">Tickers (comma-separated)</div><input type="text" value="CBA,BHP,TLS,GMG" id="bt-tickers"></div>
+        <div class="form-row"><div class="form-label">Period</div>
+          <select id="bt-period"><option>3 months</option><option>6 months</option><option selected>1 year</option><option>2 years</option></select>
+        </div>
+        <div class="form-row"><div class="form-label">Starting capital ($)</div><input type="number" value="50000" id="bt-capital"></div>
+        <div class="form-row"><div class="form-label">Strategy</div>
+          <select id="bt-strategy"><option>RSI + Trend Following</option><option>MACD Crossover</option><option>BB Mean Reversion</option><option>Momentum (ADX)</option><option>Dividend Focus</option></select>
+        </div>
+      </div>
+      <button class="btn btn-primary mt-1" onclick="runBacktest()">▷ Run Backtest</button>
+    </div>
+    <div id="backtest-results"></div>
+  `;
+}
+function runBacktest() {
+  document.getElementById('backtest-results').innerHTML=`<div class="card"><div class="empty-state"><div class="loading-dots"><span></span><span></span><span></span></div><p class="text-muted mt-1">Simulating strategy on historical data...</p></div></div>`;
+  setTimeout(()=>{
+    const capital=Number(document.getElementById('bt-capital').value)||50000;
+    const strategy=document.getElementById('bt-strategy').value;
+    const ret=12.4+(Math.random()-0.3)*10, sharpe=1.1+Math.random()*0.6, dd=-(8+Math.random()*7);
+    const n=18+Math.floor(Math.random()*10), wr=55+Math.random()*12, fees=n*state.settings.brokerage;
+    document.getElementById('backtest-results').innerHTML=`
+      <div class="metrics-grid">
+        <div class="metric-card"><div class="metric-label">Total Return</div><div class="metric-value up">+${fmt(ret)}%</div></div>
+        <div class="metric-card"><div class="metric-label">Sharpe Ratio</div><div class="metric-value">${fmt(sharpe)}</div></div>
+        <div class="metric-card"><div class="metric-label">Max Drawdown</div><div class="metric-value down">${fmt(dd)}%</div></div>
+        <div class="metric-card"><div class="metric-label">Win Rate</div><div class="metric-value">${fmt(wr,0)}%</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Backtest Summary — ${strategy}</div>
+        <div class="signal-row"><span>Total trades</span><strong>${n}</strong></div>
+        <div class="signal-row"><span>Brokerage costs</span><strong>$${fmt(fees)}</strong></div>
+        <div class="signal-row"><span>Final portfolio value</span><strong>$${fmt(capital*(1+ret/100))}</strong></div>
+        <div class="signal-row"><span>Net profit after fees</span><strong class="text-success">+$${fmt(capital*ret/100-fees)}</strong></div>
+        <p class="text-xs text-muted mt-2">⚠ Backtest uses simulated returns for illustration. For precise backtesting, the yfinance backend provides 6-month historical price data which can be fed into a dedicated backtesting engine (e.g. Backtrader or VectorBT).</p>
+      </div>`;
+  },1800);
+}
+
+// ============================================================
+// AI ASSISTANT
+// ============================================================
+function renderAssistant() {
+  const key=getApiKey();
+  return `
+    <div class="card chat-wrap">
+      <div class="card-title">AI Trading Assistant &mdash; Powered by Claude</div>
+      ${!key?`<div class="info-banner">⚠ Enter your Anthropic API key in <button onclick="showPage('settings')" style="background:none;border:none;color:inherit;cursor:pointer;font-weight:600;text-decoration:underline">Settings</button> to enable AI analysis.</div>`:''}
+      <div id="chat-messages" class="chat-messages">
+        <div class="msg msg-ai">Hello! I'm your ASX trading assistant. I have access to real-time technical indicators for your portfolio via yfinance.<br><br>Try: <em>"Analyse my TLS position with the latest indicators"</em> or <em>"What does the RSI and MACD say about CBA?"</em></div>
+        ${state.chatHistory.map(m=>`<div class="msg msg-${m.role}">${m.content}</div>`).join('')}
+      </div>
+      <div class="chat-input-row">
+        <input type="text" id="chat-input" placeholder="Ask about stocks, indicators, or strategy..." onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="btn btn-primary" onclick="sendChat()">Send</button>
+      </div>
+    </div>
+  `;
+}
+async function sendChat() {
+  const input=document.getElementById('chat-input');
+  const msg=input.value.trim(); if(!msg) return;
+  const key=getApiKey();
+  if(!key) { toast('Add API key in Settings','error'); return; }
+  input.value='';
+  state.chatHistory.push({role:'user',content:msg});
+  const msgs=document.getElementById('chat-messages');
+  msgs.innerHTML+=`<div class="msg msg-user">${msg}</div>`;
+  msgs.innerHTML+=`<div class="msg msg-ai" id="typing"><div class="loading-dots"><span></span><span></span><span></span></div></div>`;
+  msgs.scrollTop=msgs.scrollHeight;
+
+  // Build indicator context from live signals
+  const ps=state.portfolio.map(h=>`${h.ticker}(${h.shares}sh@$${h.currentPrice}, cost $${h.avgPrice})`).join(', ');
+  let indicatorCtx='';
+  const loadedTickers=Object.keys(state.liveSignals).filter(t=>!state.liveSignals[t]?.error);
+  if(loadedTickers.length) {
+    indicatorCtx='\n\nLive Technical Indicators:\n'+loadedTickers.map(t=>{
+      const s=state.liveSignals[t];
+      return `${t}: RSI14=${s.rsi_14?.toFixed(1)}, MACD=${s.macd_hist?.toFixed(3)}, Signal=${s.composite_signal}, Conf=${(s.confidence*100).toFixed(0)}%, Trend=${s.trend_direction}, ADX=${s.adx?.toFixed(1)}, BB%B=${s.bb_pct_b!=null?(s.bb_pct_b*100).toFixed(0)+'%':'n/a'}, SMA20=$${s.sma_20?.toFixed(3)}, MFI=${s.mfi?.toFixed(1)}, ATR=${s.atr_14?.toFixed(3)}`;
+    }).join('\n');
+  }
+
+  const system=`You are an expert ASX (Australian Stock Exchange) trading assistant. You support human traders who manually execute trades. Never suggest auto-trading. Be concise, cost-aware, and always mention risks and brokerage impact.
+
+Portfolio: ${ps}
+Cash: $${fmt(state.cash)}
+Brokerage: $${state.settings.brokerage}/trade | Min trade: $${state.settings.minTradeSize} | Max daily: ${state.settings.maxTradesPerDay} trades${indicatorCtx}
+
+When making recommendations, always include: entry range, target, stop-loss, expected net profit after brokerage ($${state.settings.brokerage}), key risks, and which indicators support the view. Use the live indicator data above when answering ticker-specific questions.`;
+
+  try {
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1200,system,messages:state.chatHistory.map(m=>({role:m.role,content:m.content}))})});
+    const data=await resp.json();
+    if(data.error) throw new Error(data.error.message);
+    const reply=data.content?.[0]?.text||'No response.';
+    state.chatHistory.push({role:'assistant',content:reply});
+    document.getElementById('typing').outerHTML=`<div class="msg msg-ai" style="white-space:pre-wrap">${reply}</div>`;
+  } catch(err) {
+    document.getElementById('typing').outerHTML=`<div class="msg msg-ai text-danger">Error: ${err.message}</div>`;
+  }
+  msgs.scrollTop=msgs.scrollHeight;
+}
+
+// ============================================================
+// ANALYSIS ENGINE
+// ============================================================
+async function runAnalysis() {
+  if(state.analysisRunning){toast('Analysis already running','info');return;}
+  const key=getApiKey();
+  if(!key){toast('Add API key in Settings','error');showPage('settings');return;}
+  state.analysisRunning=true;
+  toast('Running trade analysis...','info');
+
+  // Enrich with live indicator data
+  const tickers=state.portfolio.map(h=>h.ticker);
+  if(state.serverOk) { try { await fetchSignals(tickers, false); } catch {} }
+
+  // Build indicator context
+  let indicatorCtx='';
+  const loaded=tickers.filter(t=>state.liveSignals[t]&&!state.liveSignals[t].error);
+  if(loaded.length) {
+    indicatorCtx='\n\nLive yfinance Technical Indicators:\n'+loaded.map(t=>{
+      const s=state.liveSignals[t];
+      const sr=s.support_resistance;
+      return `${t}:
+  Price=$${s.current_price}, Signal=${s.composite_signal}(${(s.confidence*100).toFixed(0)}% conf), Trend=${s.trend_direction}
+  RSI14=${s.rsi_14?.toFixed(1)}, MACDhist=${s.macd_hist?.toFixed(4)}, Stoch%K=${s.stoch_k?.toFixed(1)}, CCI=${s.cci?.toFixed(1)}, MFI=${s.mfi?.toFixed(1)}, WillR=${s.williams_r?.toFixed(1)}
+  SMA20=$${s.sma_20?.toFixed(3)}, SMA50=${s.sma_50?'$'+s.sma_50.toFixed(3):'n/a'}, ADX=${s.adx?.toFixed(1)}(${s.trend_strength})
+  BB: Upper=$${s.bb_upper?.toFixed(3)}, Mid=$${s.bb_mid?.toFixed(3)}, Lower=$${s.bb_lower?.toFixed(3)}, %B=${s.bb_pct_b!=null?(s.bb_pct_b*100).toFixed(0)+'%':'n/a'}
+  ATR=$${s.atr_14?.toFixed(3)}(${s.atr_pct?.toFixed(1)}%), VolRatio=${s.volume_ratio?.toFixed(2)}x, OBV=${s.obv_trend}
+  S/R: R1=$${sr?.r1?.toFixed(3)}, Pivot=$${sr?.pivot?.toFixed(3)}, S1=$${sr?.s1?.toFixed(3)}
+  Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%
+  Fundamentals: PE=${s.fundamentals?.pe_ratio?.toFixed(1)||'n/a'}, DivYield=${s.fundamentals?.dividend_yield?(s.fundamentals.dividend_yield*100).toFixed(2)+'%':'n/a'}, Beta=${s.fundamentals?.beta?.toFixed(2)||'n/a'}`;
+    }).join('\n');
+  }
+
+  const pj=JSON.stringify(state.portfolio.map(h=>({ticker:h.ticker,shares:h.shares,avgPrice:h.avgPrice,currentPrice:h.currentPrice,sector:h.sector})));
+  const system=`You are a conservative ASX trading assistant with access to real-time yfinance technical indicators. Generate structured trade recommendations. Be cost-aware and disciplined.
+RULES: Brokerage $${state.settings.brokerage}/trade | API cost $${fmt(state.settings.apiCostPerRun,3)} | Min trade $${state.settings.minTradeSize} | Max ${state.settings.maxTradesPerDay} trades/day | Min confidence 0.55
+Only recommend if: expectedProfit > (brokerage + apiCost + $15 safety margin).
+Base recommendations on the REAL indicator data provided. Do NOT invent signals.
+Return ONLY a valid JSON array (empty [] if no quality trades). Each item:
+{"ticker":string,"action":"BUY"|"SELL"|"HOLD","sector":string,"priceRange":[low,high],"target":number,"stopLoss":number,"qty":number,"confidence":0-1,"expectedProfit":number,"brokerageCost":${state.settings.brokerage},"apiCost":${state.settings.apiCostPerRun},"netProfit":number,"reasoning":string,"risks":string,"signals":string[]}`;
+
+  try {
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2000,system,messages:[{role:'user',content:`Analyse these ASX holdings and generate trade recommendations:\n${pj}\nCash: $${state.cash}\nDate: ${todayStr()}${indicatorCtx}\nReturn JSON array only.`}]})});
+    const data=await resp.json();
+    if(data.error) throw new Error(data.error.message);
+    const text=data.content?.[0]?.text||'[]';
+    const recs=JSON.parse(text.replace(/```json|```/g,'').trim());
+    const newRecs=recs.map((r,i)=>({...r,id:`R-${Date.now()}-${i}`,status:'pending',generatedAt:nowSydney(),date:todayStr()}));
+    state.recommendations=[...newRecs,...state.recommendations.filter(r=>r.status==='pending')];
+    state.analysisRunning=false;
+    toast(`Analysis done: ${newRecs.length} recommendation(s) based on live indicators`,'success');
+    showPage('recommendations');
+  } catch(e) {
+    state.analysisRunning=false;
+    toast('Analysis error: '+e.message,'error');
+  }
+}
+
+// ============================================================
+// SETTINGS
+// ============================================================
+function renderSettings() {
+  const key=getApiKey();
+  return `
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">API Key</div>
+        <div class="form-row">
+          <div class="form-label">Anthropic API Key</div>
+          <input type="password" id="api-key-input" value="${key}" placeholder="sk-ant-...">
+          <div class="text-xs text-muted mt-1">Required for AI analysis and assistant. Stored in browser localStorage.</div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="saveApiKey()">Save API Key</button>
+      </div>
+      <div class="card">
+        <div class="card-title">Trading Parameters</div>
+        ${[['Brokerage per trade ($)','brokerage','number'],['Min trade size ($)','minTradeSize','number'],['Max trades per day','maxTradesPerDay','number'],['Max position size (%)','maxPositionPct','number'],['API cost per run ($)','apiCostPerRun','number']].map(([l,k,t])=>`
+          <div class="form-row">
+            <div class="form-label">${l}</div>
+            <input type="${t}" value="${state.settings[k]}" onchange="updateSetting('${k}',this.value)">
+          </div>`).join('')}
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Backend Server (yfinance)</div>
+        <div class="form-row">
+          <div class="form-label">Server URL</div>
+          <input type="text" value="${state.settings.serverUrl||'http://localhost:5000'}" onchange="updateSetting('serverUrl',this.value)">
+        </div>
+        <div class="flex-row mt-1">
+          <button class="btn btn-sm" onclick="checkServer().then(renderPage)">Test Connection</button>
+          <span class="text-xs ${state.serverOk?'text-success':'text-danger'}">${state.serverOk?'✓ Connected':'✗ Not connected'}</span>
+        </div>
+        <div class="mt-2">
+          <div class="card-title" style="margin-bottom:6px">Setup Instructions</div>
+          <pre class="code-block">pip install yfinance flask flask-cors pandas numpy
+python3 asx_server.py</pre>
+          <div class="text-xs text-muted mt-1">Run in same folder as this HTML file. Requires internet access for yfinance.</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Capital Mode</div>
+        <div class="form-row">
+          <div class="form-label">Trading capital mode</div>
+          <select onchange="updateSetting('capitalMode',this.value)">
+            <option value="full" ${state.settings.capitalMode==='full'?'selected':''}>Trade full capital</option>
+            <option value="partial" ${state.settings.capitalMode==='partial'?'selected':''}>Trade partial capital (risk-based)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="form-label">Risk capital % per trade</div>
+          <input type="number" value="${state.settings.riskCapitalPct}" onchange="updateSetting('riskCapitalPct',this.value)">
+        </div>
+        <div class="form-row">
+          <div class="form-label">Cash balance ($)</div>
+          <input type="number" value="${state.cash}" onchange="state.cash=Number(this.value)">
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Analysis Schedule (Sydney Time)</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${['08:00 — Morning macro brief','10:00 — Analysis run 1','11:00 — Analysis run 2','12:00 — Analysis run 3','13:00 — Analysis run 4','14:00 — Analysis run 5','15:00 — Analysis run 6','15:45 — Final run (pre-close)'].map(t=>`<div class="schedule-pill">${t}</div>`).join('')}
+      </div>
+    </div>
+  `;
+}
+function saveApiKey() {
+  const val=document.getElementById('api-key-input').value.trim();
+  if(!val){toast('Enter a valid API key','error');return;}
+  state.settings.apiKey=val;
+  localStorage.setItem('asx_api_key',val);
+  toast('API key saved','success');
+}
+function updateSetting(key,value) {
+  state.settings[key]=isNaN(Number(value))?value:Number(value);
+  toast('Setting updated','success');
+}
+
+// Init
+renderPage();
+</script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"D:\\\\Python\\\\Projects\\\\Sloth.ai\\\\asx_trading\\\\claude2\\\\claude2\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "PowerShell(Get-ChildItem -Path \"D:\\\\Python\\\\Projects\\\\Sloth.ai\\\\asx_trading\\\\claude2\\\\claude2\" -Recurse -File -Force | ForEach-Object { $_.FullName } | Sort-Object)",
+      "PowerShell(Get-ChildItem -Path \"D:\\\\Python\\\\Projects\\\\Sloth.ai\" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match \"^\\(requirements|setup|pyproject|pipfile\\)\" })",
+      "PowerShell(Get-Content *)",
+      "Bash(Get-Item \"D:\\\\Python\\\\Projects\\\\Sloth.ai\\\\asx_trading\\\\claude2\\\\claude2\\\\asx_trader.db*\")",
+      "Bash(Select-Object Name, Length)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('asx_server.py'\\).read\\(\\)\\); print\\('asx_server.py: syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('news_engine.py'\\).read\\(\\)\\); print\\('news_engine.py: syntax OK'\\)\")",
+      "Bash(python *)",
+      "Bash(dir /s /b)",
+      "PowerShell(Get-ChildItem -Recurse -Force | Select-Object -Property FullName | ForEach-Object { $_.FullName.Replace\\('D:\\\\Python\\\\Projects\\\\Sloth.ai\\\\asx_trading\\\\claude2\\\\claude2\\\\', ''\\) } | Sort-Object)",
+      "PowerShell(gh auth status 2>&1)",
+      "Bash(Get-Content \"D:\\\\Python\\\\Projects\\\\Sloth.ai\\\\asx_trading\\\\claude2\\\\claude2\\\\js\\\\pages\\\\announcements.js\")",
+      "Bash(Measure-Object -Line)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
+    ]
+  }
+}
