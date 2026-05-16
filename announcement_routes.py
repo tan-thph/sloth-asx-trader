@@ -102,10 +102,13 @@ def get_pdf(ann_id):
         if result is None:
             return jsonify({"error": "Announcement not found"}), 404
 
-        pdf_url, doc_key = result
+        pdf_url, doc_key, ticker, headline, date = result
 
-        # download_pdf tries multiple strategies and validates %PDF- magic bytes
-        pdf_bytes = ae.download_pdf(pdf_url, doc_key=doc_key)
+        # download_pdf tries multiple strategies and validates %PDF- magic bytes.
+        # ticker/headline/date allow it to recover a missing doc_key via Markit API.
+        pdf_bytes = ae.download_pdf(
+            pdf_url, doc_key=doc_key, ticker=ticker, headline=headline, date=date
+        )
 
         if pdf_bytes is None:
             return jsonify({"error": "Failed to download PDF"}), 502

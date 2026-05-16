@@ -381,6 +381,43 @@ def _markit_pdf_url(doc_key: str, date_str: str) -> str:
     return f"https://www.asx.com.au/asx/statistics/displayAnnouncement.do?display=pdf&idsId={ids_id}"
 
 
+def _fetch_markit_doc_key(ticker: str, headline: str = "", date: str = "") -> str:
+    """Query Markit API to recover the documentKey for a stored announcement.
+
+    Used as a fallback at PDF-serve time when doc_key was not stored (records
+    synced before the doc_key column was introduced).
+
+    Returns the documentKey string (e.g. "2924-03090708-3A693022") or "".
+    """
+    if not ticker:
+        return ""
+    session = requests.Session()
+    session.headers.update(_MARKIT_HEADERS)
+    try:
+        url = f"{_MARKIT_BASE}/companies/{ticker.upper()}/announcements"
+        resp = session.get(url, timeout=15)
+        if resp.status_code != 200:
+            return ""
+        items = resp.json().get("data", {}).get("items", [])
+        for item in items:
+            dk = str(item.get("documentKey", "")).strip()
+            if not dk:
+                continue
+            item_headline = str(item.get("headline", "")).strip()
+            item_date = _parse_date_str(str(item.get("date", ""))) or ""
+            # Exact headline match
+            if item_headline == headline:
+                logger.debug("_fetch_markit_doc_key: matched by headline for %s → %s", ticker, dk)
+                return dk
+            # Fuzzy: same date + headline prefix (first 40 chars)
+            if date and item_date == date and item_headline[:40] == headline[:40]:
+                logger.debug("_fetch_markit_doc_key: matched by date+prefix for %s → %s", ticker, dk)
+                return dk
+    except Exception as exc:
+        logger.debug("_fetch_markit_doc_key failed for %s: %s", ticker, exc)
+    return ""
+
+
 def _markit_type(raw_type: str) -> str:
     """Convert a Markit announcementType string to our internal type taxonomy."""
     upper = raw_type.upper()
@@ -748,15 +785,21 @@ def _extract_pdf_link_from_html(html: bytes) -> Optional[str]:
     return None
 
 
-def download_pdf(url: str, doc_key: str = "") -> Optional[bytes]:
+def download_pdf(
+    url: str,
+    doc_key: str = "",
+    ticker: str = "",
+    headline: str = "",
+    date: str = "",
+) -> Optional[bytes]:
     """Download a PDF from `url` and return raw bytes, or None on failure.
 
-    Strategy:
-      1. Try the stored pdf_url (displayAnnouncement.do redirect) with allow_redirects.
-      2. If response is HTML (not a real PDF), parse it for a csf.asx.com.au CDN link
-         and retry that link directly.
-      3. Try the Markit documents API endpoint using doc_key (if available).
-    All responses are validated with %PDF- magic bytes before acceptance.
+    Strategy (all responses validated with %PDF- magic bytes):
+      0. If doc_key is empty but ticker is known, re-query Markit API to recover it.
+      1. Try Markit documents API: /asx-research/1.0/documents/{doc_key}/download
+      2. Try the stored pdf_url (displayAnnouncement.do or direct) with allow_redirects.
+         If response is HTML, parse it for a csf.asx.com.au CDN link and retry.
+      3. Reconstruct displayAnnouncement.do from doc_key idsId as last resort.
     """
     _PDF_HEADERS = {
         **_BROWSER_HEADERS,
@@ -795,13 +838,14 @@ def download_pdf(url: str, doc_key: str = "") -> Optional[bytes]:
             logger.warning("download_pdf [%s]: %s — %s", label, target_url, exc)
         return None
 
-    # Strategy 1: stored pdf_url (displayAnnouncement.do or direct)
-    if url:
-        result = _fetch(url, "stored-url")
-        if result:
-            return result
+    # Strategy 0: if doc_key is empty, try to recover it live from Markit API
+    if not doc_key and ticker:
+        logger.debug("download_pdf: doc_key missing, querying Markit for %s", ticker)
+        doc_key = _fetch_markit_doc_key(ticker, headline=headline, date=date)
+        if doc_key:
+            logger.debug("download_pdf: recovered doc_key=%s for %s", doc_key, ticker)
 
-    # Strategy 2: Markit documents API (requires doc_key)
+    # Strategy 1: Markit documents API (most reliable — direct from ASX's own API backend)
     if doc_key:
         markit_url = (
             f"https://asx.api.markitdigital.com/asx-research/1.0/documents"
@@ -811,8 +855,15 @@ def download_pdf(url: str, doc_key: str = "") -> Optional[bytes]:
         if result:
             return result
 
-    # Strategy 3: reconstruct displayAnnouncement.do from doc_key idsId (if url was empty/wrong)
-    if doc_key and (not url or "displayAnnouncement" not in url):
+    # Strategy 2: stored pdf_url (displayAnnouncement.do or direct CDN link)
+    if url:
+        result = _fetch(url, "stored-url")
+        if result:
+            return result
+
+    # Strategy 3: reconstruct displayAnnouncement.do from doc_key idsId
+    # (kept as last resort — ASX may still serve some older docs this way)
+    if doc_key:
         parts = doc_key.split("-")
         if len(parts) >= 2:
             ids_id = parts[1]
@@ -824,7 +875,8 @@ def download_pdf(url: str, doc_key: str = "") -> Optional[bytes]:
             if result:
                 return result
 
-    logger.info("download_pdf: all strategies exhausted for url=%s doc_key=%s", url, doc_key)
+    logger.info("download_pdf: all strategies exhausted for url=%s doc_key=%s ticker=%s",
+                url, doc_key, ticker)
     return None
 
 
@@ -1313,14 +1365,21 @@ def get_ann_brief(
 
 
 def get_announcement_pdf_url(ann_id: str, db_path: Optional[str | Path] = None) -> Optional[tuple]:
-    """Return (pdf_url, doc_key) for the given announcement id, or None if not found."""
+    """Return (pdf_url, doc_key, ticker, headline, date) for the given announcement id, or None."""
     with get_db(db_path) as conn:
         row = conn.execute(
-            "SELECT pdf_url, doc_key FROM announcements WHERE id=?", (ann_id,)
+            "SELECT pdf_url, doc_key, ticker, headline, date FROM announcements WHERE id=?",
+            (ann_id,),
         ).fetchone()
     if row is None:
         return None
-    return (row["pdf_url"] or "", row["doc_key"] or "")
+    return (
+        row["pdf_url"] or "",
+        row["doc_key"] or "",
+        row["ticker"] or "",
+        row["headline"] or "",
+        row["date"] or "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1469,7 +1528,13 @@ def run_sync(
                 # Download + extract PDF text (best-effort; may 404 for new ASX system)
                 pdf_text = ""
                 if ann.get("pdf_url") or ann.get("doc_key"):
-                    pdf_bytes = download_pdf(ann.get("pdf_url", ""), doc_key=ann.get("doc_key", ""))
+                    pdf_bytes = download_pdf(
+                        ann.get("pdf_url", ""),
+                        doc_key=ann.get("doc_key", ""),
+                        ticker=ann.get("ticker", ""),
+                        headline=ann.get("headline", ""),
+                        date=ann.get("date", ""),
+                    )
                     if pdf_bytes:
                         try:
                             pdf_text = extract_text(pdf_bytes)
