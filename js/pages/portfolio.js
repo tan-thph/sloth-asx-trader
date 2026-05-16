@@ -317,9 +317,18 @@ function renderPriceAlertsCard() {
       ? `${a.value}% from $${fmt(a.referencePrice)}`
       : `$${fmt(a.value)}`;
     const currentPrice = priceMap[a.ticker];
-    const distanceLabel = currentPrice != null && a.type !== 'pct_drop'
-      ? `<span class="text-xs text-muted">(now $${fmt(currentPrice)}, ${a.type === 'above' ? currentPrice >= a.value ? '✓ already above' : `$${fmt(a.value - currentPrice)} away`) : currentPrice <= a.value ? '✓ already below' : `$${fmt(currentPrice - a.value)} away`})</span>`
-      : '';
+    let distanceLabel = '';
+    if (currentPrice != null && a.type !== 'pct_drop') {
+      if (a.type === 'above') {
+        distanceLabel = currentPrice >= a.value
+          ? `<span class="text-xs" style="color:#16a34a">(now $${fmt(currentPrice)} — already above)</span>`
+          : `<span class="text-xs text-muted">(now $${fmt(currentPrice)}, $${fmt(a.value - currentPrice)} away)</span>`;
+      } else {
+        distanceLabel = currentPrice <= a.value
+          ? `<span class="text-xs" style="color:#ef4444">(now $${fmt(currentPrice)} — already below)</span>`
+          : `<span class="text-xs text-muted">(now $${fmt(currentPrice)}, $${fmt(currentPrice - a.value)} away)</span>`;
+      }
+    }
     return `
     <tr style="${isTriggered ? 'background:rgba(245,158,11,0.06)' : ''}">
       <td><strong>${a.ticker}</strong></td>

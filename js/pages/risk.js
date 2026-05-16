@@ -76,6 +76,13 @@ function buildRiskPage(merged, riskData) {
   const topSector = sectorEntries[0];
   const topSectorPct = pv > 0 ? topSector[1]/pv*100 : 0;
 
+  // Assign colors to sectors in sorted order (largest first) so top sectors get
+  // the most distinct colors from our palette.
+  const sectorColorMap = {};
+  sectorEntries.forEach(([sec], i) => {
+    sectorColorMap[sec] = sectorColor(sec, i);
+  });
+
   // ── Per-holding metrics table ─────────────────────────────────────────────
   const holdingRows = merged.map(h => {
     const val = h.shares * h.currentPrice;
@@ -100,6 +107,8 @@ function buildRiskPage(merged, riskData) {
       <td>${ret30 != null ? `<span style="color:${ret30Color};font-weight:600">${ret30>=0?'+':''}${fmt(ret30,1)}%</span>` : '<span class="text-muted">—</span>'}</td>
     </tr>`;
   }).join('');
+
+  const hasCorrData = Object.keys(riskData.correlation||{}).length >= 2;
 
   return `
   <!-- Portfolio-level summary tiles -->
@@ -131,33 +140,38 @@ function buildRiskPage(merged, riskData) {
   ${!hasMeta && state.serverOk ? `
   <div class="info-banner" style="margin-top:12px">Risk data loading or unavailable — yfinance may be rate-limited. Try again in a moment.</div>` : ''}
 
-  <div class="grid-2" style="margin-top:14px">
-    <!-- Sector Pie -->
-    <div class="card">
-      <div class="card-title">Sector Concentration</div>
-      <canvas id="sector-pie" width="340" height="220" style="display:block;margin:0 auto"></canvas>
-      <div style="margin-top:12px;display:flex;flex-direction:column;gap:4px">
+  <!-- Sector Pie — full row so legend has room -->
+  <div class="card" style="margin-top:14px">
+    <div class="card-title">Sector Concentration</div>
+    <div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap">
+      <canvas id="sector-pie" width="260" height="260" style="flex-shrink:0;display:block"></canvas>
+      <div style="flex:1;min-width:180px;display:flex;flex-direction:column;gap:6px;padding-top:4px">
         ${sectorEntries.map(([sec, val]) => {
           const pct = pv > 0 ? val/pv*100 : 0;
           const warn = pct > 40 ? '#ef4444' : pct > 25 ? '#d97706' : '';
           return `<div style="display:flex;align-items:center;gap:8px;font-size:12px">
-            <div style="width:10px;height:10px;border-radius:50%;background:${sectorColor(sec)};flex-shrink:0"></div>
+            <div style="width:12px;height:12px;border-radius:3px;background:${sectorColorMap[sec]};flex-shrink:0"></div>
             <span style="flex:1">${sec}</span>
             <span style="font-weight:600${warn?';color:'+warn:''}">${fmt(pct,1)}%</span>
-            <span class="text-muted">$${fmt(val,0)}</span>
+            <span class="text-muted" style="min-width:72px;text-align:right">$${fmt(val,0)}</span>
           </div>`;
         }).join('')}
       </div>
     </div>
+  </div>
 
-    <!-- Correlation Heatmap -->
-    <div class="card">
-      <div class="card-title">Correlation Matrix (90-day returns)</div>
-      ${Object.keys(riskData.correlation||{}).length >= 2
-        ? `<canvas id="corr-heatmap" width="340" height="340" style="display:block;margin:0 auto;max-width:100%"></canvas>
-           <p class="text-xs text-muted" style="margin-top:8px">-1 = perfect inverse · 0 = uncorrelated · +1 = perfect correlation. Highly correlated holdings (>0.8) provide little diversification.</p>`
-        : `<div class="text-xs text-muted" style="padding:20px 0">Need ≥ 2 holdings with data to show correlation. Refresh prices first.</div>`}
-    </div>
+  <!-- Correlation Heatmap — full width so cells are large enough to read -->
+  <div class="card" style="margin-top:14px">
+    <div class="card-title">Correlation Matrix (90-day returns)</div>
+    ${hasCorrData
+      ? `<div style="overflow-x:auto">
+           <canvas id="corr-heatmap" style="display:block;margin:0 auto;max-width:100%"></canvas>
+         </div>
+         <p class="text-xs text-muted" style="margin-top:8px">
+           -1 = perfect inverse &nbsp;·&nbsp; 0 = uncorrelated &nbsp;·&nbsp; +1 = perfect correlation.
+           Holdings with correlation &gt; 0.8 provide little diversification benefit.
+         </p>`
+      : `<div class="text-xs text-muted" style="padding:20px 0">Need ≥ 2 holdings with data to show correlation. Refresh prices first.</div>`}
   </div>
 
   <!-- Per-holding metrics table -->
@@ -188,18 +202,74 @@ function buildRiskPage(merged, riskData) {
 }
 
 // ── Sector colour palette ─────────────────────────────────────────────────────
-const SECTOR_COLORS = {
-  'Banking':    '#3b82f6', 'Financials':  '#60a5fa', 'Fintech': '#818cf8',
-  'Mining':     '#f59e0b', 'Resources':   '#fbbf24', 'Energy':  '#f97316',
-  'Healthcare': '#10b981', 'Biotech':     '#34d399',
-  'REITs':      '#8b5cf6', 'Property':    '#a78bfa',
-  'Telecoms':   '#06b6d4', 'Technology':  '#22d3ee',
-  'Retail':     '#ec4899', 'Consumer':    '#f472b6',
-  'Utilities':  '#84cc16', 'Infrastructure': '#a3e635',
-  'Other':      '#94a3b8',
+// Named overrides for the most common yfinance sector strings.
+// Anything not listed falls back to hash-based color generation so every
+// sector always gets a distinct color regardless of the exact name.
+const _SECTOR_NAMED = {
+  // Banking / Finance
+  'Banking':             '#3b82f6',
+  'Financials':          '#60a5fa',
+  'Financial Services':  '#2563eb',
+  'Fintech':             '#818cf8',
+  // Mining / Resources
+  'Mining':              '#f59e0b',
+  'Resources':           '#fbbf24',
+  'Basic Materials':     '#d97706',
+  'Materials':           '#b45309',
+  // Energy
+  'Energy':              '#f97316',
+  'Oil & Gas':           '#ea580c',
+  // Healthcare
+  'Healthcare':          '#10b981',
+  'Health Care':         '#059669',
+  'Biotech':             '#34d399',
+  'Biotechnology':       '#6ee7b7',
+  // REITs / Property
+  'REITs':               '#8b5cf6',
+  'Real Estate':         '#7c3aed',
+  'Property':            '#a78bfa',
+  // Telecoms / Tech
+  'Telecoms':            '#06b6d4',
+  'Telecommunication Services': '#0891b2',
+  'Communication Services': '#0284c7',
+  'Technology':          '#22d3ee',
+  'Information Technology': '#0ea5e9',
+  // Consumer
+  'Retail':              '#ec4899',
+  'Consumer':            '#f472b6',
+  'Consumer Cyclical':   '#db2777',
+  'Consumer Defensive':  '#be185d',
+  'Consumer Staples':    '#9d174d',
+  'Consumer Discretionary': '#e11d48',
+  // Industrials
+  'Industrials':         '#84cc16',
+  'Utilities':           '#65a30d',
+  'Infrastructure':      '#a3e635',
+  // Other
+  'Other':               '#94a3b8',
+  'Diversified':         '#64748b',
 };
-function sectorColor(sector) {
-  return SECTOR_COLORS[sector] || SECTOR_COLORS['Other'];
+
+// Large palette of distinct hues for hash-based fallback
+const _COLOR_PALETTE = [
+  '#ef4444','#f97316','#eab308','#22c55e','#14b8a6','#3b82f6','#8b5cf6',
+  '#ec4899','#06b6d4','#84cc16','#f59e0b','#10b981','#6366f1','#f43f5e',
+  '#0ea5e9','#a855f7','#d946ef','#fb923c','#4ade80','#facc15',
+];
+
+function _hashSector(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function sectorColor(sector, fallbackIndex) {
+  if (_SECTOR_NAMED[sector]) return _SECTOR_NAMED[sector];
+  // Use position index if provided (gives stable ordering), otherwise hash name
+  if (fallbackIndex !== undefined) {
+    return _COLOR_PALETTE[fallbackIndex % _COLOR_PALETTE.length];
+  }
+  return _COLOR_PALETTE[_hashSector(sector) % _COLOR_PALETTE.length];
 }
 
 // ── Sector pie chart ──────────────────────────────────────────────────────────
@@ -219,22 +289,22 @@ function drawSectorPie(merged) {
   const entries = Object.entries(sectorMap).sort((a,b) => b[1]-a[1]);
   if (!entries.length) return;
 
-  const cx = W / 2, cy = H / 2, r = Math.min(cx, cy) - 12;
+  const cx = W / 2, cy = H / 2, r = Math.min(cx, cy) - 10;
   let angle = -Math.PI / 2;
-  for (const [sec, val] of entries) {
+  entries.forEach(([sec, val], i) => {
     const slice = (val / pv) * 2 * Math.PI;
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.arc(cx, cy, r, angle, angle + slice);
     ctx.closePath();
-    ctx.fillStyle = sectorColor(sec);
+    ctx.fillStyle = sectorColor(sec, i);
     ctx.fill();
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // Label if slice > 8%
-    if (slice / (2 * Math.PI) > 0.08) {
+    // Label if slice > 7%
+    if (slice / (2 * Math.PI) > 0.07) {
       const mid = angle + slice / 2;
       const lx = cx + (r * 0.65) * Math.cos(mid);
       const ly = cy + (r * 0.65) * Math.sin(mid);
@@ -245,7 +315,7 @@ function drawSectorPie(merged) {
       ctx.fillText((val/pv*100).toFixed(0)+'%', lx, ly);
     }
     angle += slice;
-  }
+  });
 }
 
 // ── Correlation heatmap ───────────────────────────────────────────────────────
@@ -255,46 +325,54 @@ function drawCorrelationHeatmap(merged, corr) {
   const tickers = Object.keys(corr);
   if (tickers.length < 2) return;
 
-  const n    = tickers.length;
-  const pad  = 36;
-  const cell = Math.min(Math.floor((Math.min(canvas.width, canvas.height) - pad * 2) / n), 52);
+  const n = tickers.length;
+
+  // Compute cell size to fill available width (card is full-width now).
+  // Use the container width, capped so cells don't get absurdly large.
+  const containerW = canvas.parentElement ? canvas.parentElement.clientWidth || 700 : 700;
+  const pad  = 48;
+  const cell = Math.min(Math.floor((containerW - pad * 2) / n), 80);
   const size = cell * n + pad * 2;
+
   canvas.width  = size;
   canvas.height = size;
 
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, size, size);
 
+  const labelFont = `bold ${Math.min(12, Math.max(9, cell / 5))}px system-ui,sans-serif`;
+  const valFont   = `${Math.min(12, Math.max(8, cell / 4))}px system-ui,sans-serif`;
+
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
-      const val  = (corr[tickers[i]] || {})[tickers[j]] ?? 0;
-      const x    = pad + j * cell;
-      const y    = pad + i * cell;
+      const val = (corr[tickers[i]] || {})[tickers[j]] ?? 0;
+      const x   = pad + j * cell;
+      const y   = pad + i * cell;
 
-      // Colour: red for high positive, blue for negative, white for ~0
-      const r = val > 0 ? Math.round(220 * val) : 0;
-      const b = val < 0 ? Math.round(220 * Math.abs(val)) : 0;
-      const g = i === j ? 200 : Math.round(220 * (1 - Math.abs(val)));
-      ctx.fillStyle = i === j ? '#e2e8f0' : `rgb(${r},${g},${b})`;
+      // Colour: red = high positive, blue = negative, near-white = uncorrelated
+      const rv = val > 0 ? Math.round(220 * val)            : 0;
+      const bv = val < 0 ? Math.round(220 * Math.abs(val))  : 0;
+      const gv = i === j  ? 200 : Math.round(220 * (1 - Math.abs(val)));
+      ctx.fillStyle = i === j ? '#e2e8f0' : `rgb(${rv},${gv},${bv})`;
       ctx.fillRect(x, y, cell - 2, cell - 2);
 
       // Value text
       ctx.fillStyle = Math.abs(val) > 0.5 ? '#fff' : '#1e293b';
-      ctx.font = `${Math.min(11, cell/4)}px system-ui,sans-serif`;
+      ctx.font = valFont;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(val.toFixed(2), x + (cell-2)/2, y + (cell-2)/2);
+      ctx.fillText(val.toFixed(2), x + (cell - 2) / 2, y + (cell - 2) / 2);
     }
 
-    // Ticker labels — top
-    ctx.fillStyle = 'var(--text-secondary)';
-    ctx.font = `bold ${Math.min(11, cell/4)}px system-ui,sans-serif`;
+    // Ticker labels — top row
+    ctx.fillStyle = '#64748b';
+    ctx.font = labelFont;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(tickers[i], pad + i * cell + (cell-2)/2, pad / 2);
+    ctx.fillText(tickers[i], pad + i * cell + (cell - 2) / 2, pad / 2);
 
-    // Ticker labels — left
+    // Ticker labels — left column
     ctx.textAlign = 'right';
-    ctx.fillText(tickers[i], pad - 4, pad + i * cell + (cell-2)/2);
+    ctx.fillText(tickers[i], pad - 6, pad + i * cell + (cell - 2) / 2);
   }
 }
