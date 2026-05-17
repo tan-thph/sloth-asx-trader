@@ -80,14 +80,6 @@ try:
 except Exception:
     _SYDNEY_TZ = None  # type: ignore
 
-# ── FinBERT (optional — graceful if not installed) ────────────────────────────
-try:
-    import finbert_engine as _finbert
-    _FINBERT_OK = _finbert.is_available()
-except ImportError:
-    _finbert    = None  # type: ignore
-    _FINBERT_OK = False
-
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -200,6 +192,10 @@ _NEGATIVE_WORDS = {
     "lower", "weak", "challenging", "concern", "deficit",
 }
 
+# Models that use chain-of-thought thinking blocks before JSON output.
+# Substring match: "qwen3" matches "qwen3.5:9b", "qwen3:8b", etc.
+_ANN_THINKING_MODELS = ("qwen3", "qwq", "deepseek-r1", "deepseek-r2", "marco-o1")
+
 _LLM_PROMPT_TEMPLATE = (
     "Analyse this ASX announcement. Reply with valid JSON only, no markdown.\n\n"
     "Ticker: {ticker}\n"
@@ -276,8 +272,6 @@ def init_db(db_path: Optional[str | Path] = None) -> None:
         # Safe migrations — no-op if column already exists
         for col_def, label in [
             ("ALTER TABLE announcements ADD COLUMN doc_key      TEXT", "doc_key"),
-            ("ALTER TABLE announcements ADD COLUMN finbert_label TEXT", "finbert_label"),
-            ("ALTER TABLE announcements ADD COLUMN finbert_score REAL", "finbert_score"),
         ]:
             try:
                 conn.execute(col_def)
@@ -1091,6 +1085,126 @@ def _parse_llm_json(raw: str) -> Optional[Dict]:
     return data
 
 
+def _classify_dividend_keyword(headline: str, pdf_text: str) -> Dict:
+    """Specialised keyword analysis for Dividend/Distribution announcements.
+
+    Detects whether the dividend was increased, decreased, maintained, or is a
+    special/inaugural payment.  Extracts per-share amounts where present.
+    Returns a classification dict with accurate sentiment, impact, and a
+    descriptive summary.
+    """
+    combined = (headline + " " + pdf_text[:1000]).lower()
+
+    # ── Direction detection ─────────────────────────────────────────────────
+    # Patterns are tested in priority order; first match wins.
+    _INCREASE_RE = re.compile(
+        r"increas|ris(?:e|ing|es)|higher|up(?:lift)?|grow(?:th)?|"
+        r"record.{0,15}dividend|special.{0,15}dividend|inaugural|"
+        r"introduc(?:e|ing|tion).{0,20}dividend",
+        re.IGNORECASE,
+    )
+    _DECREASE_RE = re.compile(
+        r"decreas|cut|reduc|lower|slash|suspend|"
+        r"no.{0,6}dividend|no.{0,6}distribution|"
+        r"omit|defer|cancel(?:l(?:ed|ing))?",
+        re.IGNORECASE,
+    )
+    _MAINTAIN_RE = re.compile(
+        r"maintain|unchanged|same|consistent|in.?line|stable|flat|"
+        r"declared.{0,30}(?:interim|final|quarterly|half.year)",
+        re.IGNORECASE,
+    )
+
+    direction: str
+    if _DECREASE_RE.search(combined):
+        direction = "decrease"
+    elif _INCREASE_RE.search(combined):
+        direction = "increase"
+    elif _MAINTAIN_RE.search(combined):
+        direction = "maintain"
+    else:
+        direction = "unknown"
+
+    # ── Amount extraction ───────────────────────────────────────────────────
+    # Matches patterns like "12.5 cents per share", "$0.125 per share",
+    # "AUD 12.5c per share", "12.5 cps"
+    amount_str = ""
+    # Pattern A: "X.X cents per share" or "Xc per share" or "X cps"
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:cents?|c)\s*(?:per\s+share|ps|p\.s\.?|cps)",
+        combined, re.IGNORECASE,
+    )
+    if m:
+        amount_str = f"{m.group(1)}¢/share"
+    else:
+        # Pattern B: "$X.XX per share" or "AUD X.XX per share"
+        m = re.search(
+            r"(?:\$|aud\s*)(\d+(?:\.\d+)?)\s*(?:per\s+share|ps|p\.s\.?)",
+            combined, re.IGNORECASE,
+        )
+        if m:
+            amount_str = f"${m.group(1)}/share"
+
+    # ── Franking ────────────────────────────────────────────────────────────
+    franking = ""
+    fm = re.search(r"(\d+)%\s*frank(?:ed|ing)?", combined, re.IGNORECASE)
+    if fm:
+        franking = f", {fm.group(1)}% franked"
+    elif re.search(r"fully\s+frank", combined, re.IGNORECASE):
+        franking = ", fully franked"
+    elif re.search(r"unfrank|no\s+frank", combined, re.IGNORECASE):
+        franking = ", unfranked"
+
+    # ── Dividend sub-type ───────────────────────────────────────────────────
+    div_type = "dividend"
+    if re.search(r"distribut", combined, re.IGNORECASE):
+        div_type = "distribution"
+    elif re.search(r"special", combined, re.IGNORECASE):
+        div_type = "special dividend"
+    elif re.search(r"final", combined, re.IGNORECASE):
+        div_type = "final dividend"
+    elif re.search(r"interim", combined, re.IGNORECASE):
+        div_type = "interim dividend"
+
+    # ── Build summary ───────────────────────────────────────────────────────
+    if direction == "increase":
+        verb = "increases"
+        sentiment = "positive"
+        impact = 7.0
+    elif direction == "decrease":
+        verb = "cuts/reduces"
+        sentiment = "negative"
+        impact = 7.5
+    elif direction == "maintain":
+        verb = "maintains"
+        sentiment = "positive"
+        impact = 5.0
+    else:
+        verb = "declares"
+        sentiment = "positive"
+        impact = 5.5
+
+    amount_part = f" of {amount_str}" if amount_str else ""
+    summary = f"Company {verb} {div_type}{amount_part}{franking}. {headline}"
+    summary = summary[:200]
+
+    tags = ["Dividend"]
+    if direction != "unknown":
+        tags.append(f"div_{direction}")
+    if amount_str:
+        tags.append(amount_str)
+    tags.append(sentiment)
+
+    return {
+        "type":      "Dividend",
+        "sentiment": sentiment,
+        "impact":    impact,
+        "summary":   summary,
+        "tags":      tags[:5],
+        "llm_model": "keyword_fallback",
+    }
+
+
 def _classify_keyword(ticker: str, headline: str, pdf_text: str) -> Dict:
     """Keyword-based fallback classification."""
     combined = (headline + " " + pdf_text[:500]).lower()
@@ -1100,6 +1214,10 @@ def _classify_keyword(ticker: str, headline: str, pdf_text: str) -> Dict:
         if any(kw in combined for kw in keywords):
             ann_type = kw_type
             break
+
+    # Delegate dividend analysis to the richer dividend classifier
+    if ann_type == "Dividend":
+        return _classify_dividend_keyword(headline, pdf_text)
 
     pos_score = sum(1 for w in _POSITIVE_WORDS if w in combined)
     neg_score = sum(1 for w in _NEGATIVE_WORDS if w in combined)
@@ -1127,23 +1245,51 @@ def _classify_keyword(ticker: str, headline: str, pdf_text: str) -> Dict:
     }
 
 
+def _is_ann_thinking_model(model_name: str) -> bool:
+    """Return True if the model uses chain-of-thought thinking blocks."""
+    name = model_name.lower()
+    return any(m in name for m in _ANN_THINKING_MODELS)
+
+
 def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
     ollama_url = settings.get("ollama_url", "http://localhost:11434").rstrip("/")
     model = settings.get("ann_llm_model", "qwen2.5:1.5b")
     cpu_mode = bool(settings.get("cpu_mode", False))
+    thinking = _is_ann_thinking_model(model)
+
+    # Thinking models: prepend /no_think directive + suppress via API flag
+    # Also need a larger num_predict budget so <think> tokens don't starve the JSON
+    if thinking:
+        prompt = "/no_think\n" + prompt
+        num_predict = 500 if cpu_mode else 800
+    else:
+        num_predict = 250 if cpu_mode else 400
+
+    options: Dict = {
+        "temperature": 0.1,
+        "num_predict": num_predict,
+    }
+    if thinking:
+        options["think"] = False  # Ollama native flag — disables think blocks at sampler level
+
+    payload: Dict = {
+        "model":   model,
+        "prompt":  prompt,
+        "stream":  False,
+        "options": options,
+    }
+    if not thinking:
+        # format:"json" constrains output to valid JSON — safe for non-thinking models.
+        # For thinking models, GBNF grammar conflicts with <think> token emission → skip.
+        payload["format"] = "json"
+
     # CPU/SBC mode needs much more time — tiny models on CPU can take 3–5 min per call
-    read_timeout = 300 if cpu_mode else 120
+    read_timeout = 300 if cpu_mode else (180 if thinking else 120)
+
     try:
         resp = requests.post(
             f"{ollama_url}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.1,
-                "num_predict": 200,
-                "options": {"temperature": 0.1, "num_predict": 200},
-            },
+            json=payload,
             timeout=(30, read_timeout),
         )
         if resp.status_code == 200:
@@ -1225,20 +1371,10 @@ def classify_announcement(
     pdf_text: str,
     settings: Optional[Dict] = None,
 ) -> Dict:
-    """Classify an announcement using FinBERT + configured LLM with fallback."""
+    """Classify an announcement using the configured LLM with keyword fallback."""
     settings = settings or {}
     provider = settings.get("ann_llm_provider", "ollama").lower()
 
-    # ── FinBERT pre-score (fast, financial-specific sentiment) ───────────────
-    fb_result: Optional[Dict] = None
-    if _FINBERT_OK and _finbert is not None:
-        try:
-            fb_text   = f"{headline} {(pdf_text or '')[:300]}"
-            fb_result = _finbert.score(fb_text)
-        except Exception as exc:
-            logger.debug("FinBERT score failed for %s: %s", ticker, exc)
-
-    # ── LLM structured classification (type, impact, summary, tags) ──────────
     result: Optional[Dict] = None
 
     if provider == "keyword":
@@ -1268,18 +1404,6 @@ def classify_announcement(
         if not result:
             result = _classify_keyword(ticker, headline, pdf_text)
 
-    # ── Merge FinBERT sentiment into LLM result ───────────────────────────────
-    # Use FinBERT sentiment when confidence >= 0.80 (financial-specific model
-    # outperforms general-purpose LLMs for the sentiment classification subtask).
-    if fb_result:
-        if fb_result["score"] >= 0.80:
-            result["sentiment"] = fb_result["label"]
-        result["finbert_label"] = fb_result["label"]
-        result["finbert_score"] = fb_result["score"]
-    else:
-        result.setdefault("finbert_label", None)
-        result.setdefault("finbert_score", None)
-
     return result
 
 
@@ -1301,12 +1425,10 @@ def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
             """
             INSERT INTO announcements
                 (id, ticker, date, headline, pdf_url, doc_key, pdf_text, type, sentiment, impact,
-                 price_sensitive, summary, tags, llm_model, processed, fetched_at,
-                 finbert_label, finbert_score)
+                 price_sensitive, summary, tags, llm_model, processed, fetched_at)
             VALUES
                 (:id, :ticker, :date, :headline, :pdf_url, :doc_key, :pdf_text, :type, :sentiment, :impact,
-                 :price_sensitive, :summary, :tags, :llm_model, :processed, :fetched_at,
-                 :finbert_label, :finbert_score)
+                 :price_sensitive, :summary, :tags, :llm_model, :processed, :fetched_at)
             """,
             {
                 "id": ann.get("id"),
@@ -1325,8 +1447,6 @@ def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
                 "llm_model": ann.get("llm_model"),
                 "processed": ann.get("processed", 0),
                 "fetched_at": ann.get("fetched_at", datetime.utcnow().isoformat()),
-                "finbert_label": ann.get("finbert_label"),
-                "finbert_score": ann.get("finbert_score"),
             },
         )
     return True
