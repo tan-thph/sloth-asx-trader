@@ -52,6 +52,14 @@ except ImportError as _ae_err:
     _ae_err_msg = str(_ae_err)
     _AE_OK = False
 
+# ── FinBERT engine (optional — graceful if transformers not installed) ─────────
+try:
+    import finbert_engine as _fb
+    _FB_OK = _fb.is_available()
+except ImportError:
+    _fb = None      # type: ignore
+    _FB_OK = False
+
 
 app = Flask(__name__)
 CORS(app)  # allow browser requests from the HTML file
@@ -2499,6 +2507,54 @@ def ollama_start():
         return jsonify({"ok": False, "error": "ollama not found in PATH — install from https://ollama.com/download"}), 404
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
+
+
+@app.route("/api/finbert/status")
+def finbert_status():
+    """Return FinBERT availability, backend, and install hint."""
+    available = _FB_OK and _fb is not None
+    if available:
+        # Probe whether model has been loaded yet (non-blocking)
+        loaded  = _fb._pipeline is not None
+        backend = _fb.backend()
+    else:
+        loaded  = False
+        backend = None
+    return jsonify({
+        "available":    available,
+        "loaded":       loaded,
+        "backend":      backend,
+        "model":        "ProsusAI/finbert",
+        "install_hint": "" if available else "pip install transformers optimum[onnxruntime] onnxruntime",
+    })
+
+
+@app.route("/api/finbert/sentiment", methods=["POST"])
+def finbert_sentiment():
+    """Score one or more texts with FinBERT financial sentiment.
+
+    Request body (JSON):
+        {"text": "some text"}                    — single text
+        {"texts": ["text1", "text2", ...]}       — batch
+
+    Response:
+        {"results": [{"label":"positive","score":0.97,...},...],
+         "backend": "onnx"|"pytorch"}
+    """
+    if not _FB_OK or _fb is None:
+        hint = "pip install transformers optimum[onnxruntime] onnxruntime"
+        return jsonify({"error": f"FinBERT not available — {hint}"}), 503
+
+    data  = request.get_json(force=True, silent=True) or {}
+    texts = data.get("texts")
+    if texts is None:
+        raw = data.get("text")
+        texts = [str(raw)] if raw is not None else []
+    if not texts:
+        return jsonify({"error": "Provide 'text' (str) or 'texts' (list[str])"}), 400
+
+    results = _fb.score_batch([str(t) for t in texts])
+    return jsonify({"results": results, "backend": _fb.backend()})
 
 
 @app.route("/api/news/ollama-ps")

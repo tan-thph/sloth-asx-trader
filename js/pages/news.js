@@ -469,6 +469,20 @@ function _newsCard(item, portfolioTickers) {
     ? `<span title="LLM classified (${item.llm_model || ''})" style="color:#16a34a;font-size:9px">●</span>`
     : `<span title="Pending classification" style="color:#d97706;font-size:9px">○</span>`;
 
+  // FinBERT confidence badge — shown when score is present
+  const fbScore = item.finbert_score;
+  const fbLabel = item.finbert_label;
+  const finbertBadge = fbScore != null
+    ? (() => {
+        const pct  = Math.round(fbScore * 100);
+        const col  = pct >= 85 ? '#16a34a' : pct >= 70 ? '#d97706' : '#6b7280';
+        const icon = fbLabel === 'positive' ? '▲' : fbLabel === 'negative' ? '▼' : '●';
+        return `<span title="FinBERT financial sentiment: ${fbLabel} (${pct}% confidence)"
+          style="font-size:10px;padding:1px 6px;border-radius:3px;background:${col}18;color:${col};border:1px solid ${col}44;font-weight:600">
+          🧠 ${icon} ${pct}%</span>`;
+      })()
+    : '';
+
   // Impact + sentiment column: only show real values for classified articles
   const impHtml = imp !== null
     ? `<div style="font-size:13px;font-weight:700;color:${_impactColor(imp)}">${imp.toFixed(1)}</div>
@@ -506,6 +520,7 @@ function _newsCard(item, portfolioTickers) {
             <span>${_relativeTime(item.published_date)}</span>
             ${catBadge ? '<span>·</span>' + catBadge : ''}
             ${sentiBadge}
+            ${finbertBadge}
             ${isPortfolio ? '<span style="background:#dbeafe;color:#1d4ed8;padding:1px 5px;border-radius:3px;font-size:10px">★ Portfolio</span>' : ''}
           </div>
           ${contentHtml}

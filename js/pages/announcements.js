@@ -392,6 +392,20 @@ function _renderAnnCard(ann) {
     ? `<span style="font-size:10px;color:${llmDisplay.color}" title="${llmDisplay.title}">LLM: ${llmDisplay.label}</span>`
     : '';
 
+  // FinBERT financial sentiment badge
+  const fbScore = ann.finbert_score;
+  const fbLabel = ann.finbert_label;
+  const finbertBadge = fbScore != null
+    ? (() => {
+        const pct  = Math.round(fbScore * 100);
+        const col  = pct >= 85 ? '#16a34a' : pct >= 70 ? '#d97706' : '#6b7280';
+        const icon = fbLabel === 'positive' ? '▲' : fbLabel === 'negative' ? '▼' : '●';
+        return `<span title="FinBERT financial sentiment: ${fbLabel} (${pct}% confidence)"
+          style="font-size:10px;padding:1px 6px;border-radius:3px;background:${col}18;color:${col};border:1px solid ${col}44;font-weight:600">
+          🧠 ${icon} ${pct}%</span>`;
+      })()
+    : '';
+
   // Summary text
   const summaryHtml = summary
     ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px">${summary}</div>`
@@ -422,12 +436,13 @@ function _renderAnnCard(ann) {
         <span style="flex:1;font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.4">${headline}</span>
         <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;flex-shrink:0">${_annFmtDate(date)}</span>
       </div>
-      <!-- Row 2: pills + price sensitive -->
+      <!-- Row 2: pills + price sensitive + FinBERT -->
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${summary ? '8px' : '6px'}">
         ${typePill}
         ${sentiPill}
         ${impactBadge}
         ${psDot}
+        ${finbertBadge}
       </div>
       <!-- Row 3: summary -->
       ${summaryHtml}

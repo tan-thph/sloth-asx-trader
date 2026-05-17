@@ -23,6 +23,14 @@ import requests
 
 log = logging.getLogger("news_engine")
 
+# ── FinBERT (optional — graceful if not installed) ────────────────────────────
+try:
+    import finbert_engine as _finbert
+    _FINBERT_OK = _finbert.is_available()
+except ImportError:
+    _finbert    = None  # type: ignore
+    _FINBERT_OK = False
+
 
 def _safe_float(v, default: float = 0.0, max_val: float | None = None) -> float:
     """Convert LLM output to float, tolerating strings/lists/None."""
@@ -149,6 +157,17 @@ def init_news_tables(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_news_pub   ON news_items(published_date DESC);
         CREATE INDEX IF NOT EXISTS idx_news_proc  ON news_items(processed);
         CREATE INDEX IF NOT EXISTS idx_news_impact ON news_items(impact_score DESC);
+    """)
+    # ── Safe migrations (no-op if columns already exist) ─────────────────────
+    for col_def in [
+        "ALTER TABLE news_items ADD COLUMN finbert_label TEXT",
+        "ALTER TABLE news_items ADD COLUMN finbert_score REAL",
+    ]:
+        try:
+            conn.execute(col_def)
+        except Exception:
+            pass  # column already exists
+    conn.executescript("""
 
         CREATE TABLE IF NOT EXISTS news_scan_log (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -770,6 +789,16 @@ class NewsPipeline:
                     _scan_status["tokens_per_sec"]        = 0.0
 
                     art_t0 = time.monotonic()
+
+                    # ── FinBERT pre-score (fast, financial-specific sentiment) ──
+                    fb_result = None
+                    if _FINBERT_OK and _finbert is not None:
+                        try:
+                            fb_text   = f"{row['title']} {(row['content'] or '')[:300]}"
+                            fb_result = _finbert.score(fb_text)
+                        except Exception as fb_exc:
+                            log.debug("FinBERT score failed: %s", fb_exc)
+
                     result = llm.classify(
                         row["title"], row["content"] or "", all_tickers,
                         status_ref=_scan_status,
@@ -808,9 +837,17 @@ class NewsPipeline:
                                     if isinstance(t, str)
                                 ][:15]
                                 # tickers col = union of both (primary first) for backward compat
-                                # NOTE: use a different name to avoid shadowing the outer
-                                # `all_tickers` (portfolio tickers list used by classify())
                                 ann_tickers = list(dict.fromkeys(primary + [t for t in mentioned if t not in primary]))
+
+                                # ── Sentiment resolution ──────────────────────────────
+                                # Use FinBERT sentiment when confidence >= 0.80 (financial-specific).
+                                # Fall back to Ollama's sentiment for lower-confidence cases.
+                                ollama_sentiment = _norm_sentiment(result.get("sentiment"))
+                                if fb_result and fb_result["score"] >= 0.80:
+                                    effective_sentiment = fb_result["label"]
+                                else:
+                                    effective_sentiment = ollama_sentiment
+
                                 conn.execute("""
                                     UPDATE news_items SET
                                         summary         = :summary,
@@ -823,12 +860,14 @@ class NewsPipeline:
                                         tags            = :tags,
                                         llm_model       = :model,
                                         decay_weight    = :decay,
+                                        finbert_label   = :finbert_label,
+                                        finbert_score   = :finbert_score,
                                         processed       = 1
                                     WHERE id = :id
                                 """, {
                                     "summary":         str(result.get("summary") or "")[:500],
                                     "category":        str(result.get("category") or "other").lower()[:30],
-                                    "sentiment":       _norm_sentiment(result.get("sentiment")),
+                                    "sentiment":       effective_sentiment,
                                     "score":           _safe_float(result.get("sentiment_score"), max_val=1.0),
                                     "impact":          _safe_float(result.get("impact_score"), max_val=10.0),
                                     "tickers":         json.dumps(ann_tickers),
@@ -838,6 +877,8 @@ class NewsPipeline:
                                     ),
                                     "model":           llm.model,
                                     "decay":           dw,
+                                    "finbert_label":   fb_result["label"] if fb_result else None,
+                                    "finbert_score":   fb_result["score"] if fb_result else None,
                                     "id":              row["id"],
                                 })
                             self.vector.add(row["id"], f"{row['title']} {row['content'] or ''}"[:1000])
@@ -846,9 +887,14 @@ class NewsPipeline:
                             _scan_status["articles_failed"] = _scan_status.get("articles_failed", 0) + 1
                             log.debug("LLM returned None for article %s — marking processed=-1", row["id"][:8])
                             with news_db(self.db_path) as conn:
+                                # Still store FinBERT data even when Ollama fails
                                 conn.execute(
-                                    "UPDATE news_items SET processed=-1, decay_weight=? WHERE id=?",
-                                    (dw, row["id"]),
+                                    "UPDATE news_items SET processed=-1, decay_weight=?, "
+                                    "finbert_label=?, finbert_score=? WHERE id=?",
+                                    (dw,
+                                     fb_result["label"] if fb_result else None,
+                                     fb_result["score"] if fb_result else None,
+                                     row["id"]),
                                 )
                     except Exception as ex:
                         log.warning("DB update failed for article %s: %s", row["id"][:8], ex)
@@ -1117,7 +1163,8 @@ def get_news_brief(
             rows = conn.execute("""
                 SELECT title, source, published_date, summary, category,
                        sentiment, sentiment_score, impact_score,
-                       tickers, primary_tickers, tags, decay_weight
+                       tickers, primary_tickers, tags, decay_weight,
+                       finbert_label, finbert_score
                 FROM news_items
                 WHERE published_date >= ? AND processed = 1
                 ORDER BY published_date DESC
@@ -1162,6 +1209,8 @@ def get_news_brief(
             "decay_weight":      decay,
             "is_recent":         is_recent,
             "signal":            signal,
+            "finbert_label":     row["finbert_label"],
+            "finbert_score":     row["finbert_score"],
         }
 
         if is_direct:

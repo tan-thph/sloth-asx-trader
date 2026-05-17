@@ -80,6 +80,14 @@ try:
 except Exception:
     _SYDNEY_TZ = None  # type: ignore
 
+# ── FinBERT (optional — graceful if not installed) ────────────────────────────
+try:
+    import finbert_engine as _finbert
+    _FINBERT_OK = _finbert.is_available()
+except ImportError:
+    _finbert    = None  # type: ignore
+    _FINBERT_OK = False
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -265,13 +273,18 @@ def init_db(db_path: Optional[str | Path] = None) -> None:
     path = str(db_path or DB_PATH_DEFAULT)
     with sqlite3.connect(path) as conn:
         conn.executescript(_CREATE_TABLE_SQL)
-        # Migration: add doc_key column if not present (safe; ignored if exists)
-        try:
-            conn.execute("ALTER TABLE announcements ADD COLUMN doc_key TEXT")
-            conn.commit()
-            logger.info("announcement_engine: migrated — added doc_key column")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # Safe migrations — no-op if column already exists
+        for col_def, label in [
+            ("ALTER TABLE announcements ADD COLUMN doc_key      TEXT", "doc_key"),
+            ("ALTER TABLE announcements ADD COLUMN finbert_label TEXT", "finbert_label"),
+            ("ALTER TABLE announcements ADD COLUMN finbert_score REAL", "finbert_score"),
+        ]:
+            try:
+                conn.execute(col_def)
+                conn.commit()
+                logger.info("announcement_engine: migrated — added %s column", label)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         conn.commit()
     logger.info("announcement_engine: DB initialised at %s", path)
 
@@ -1212,36 +1225,62 @@ def classify_announcement(
     pdf_text: str,
     settings: Optional[Dict] = None,
 ) -> Dict:
-    """Classify an announcement using configured LLM providers with fallback."""
+    """Classify an announcement using FinBERT + configured LLM with fallback."""
     settings = settings or {}
     provider = settings.get("ann_llm_provider", "ollama").lower()
 
-    # "keyword" provider: skip LLM entirely — user explicitly wants heuristic only
+    # ── FinBERT pre-score (fast, financial-specific sentiment) ───────────────
+    fb_result: Optional[Dict] = None
+    if _FINBERT_OK and _finbert is not None:
+        try:
+            fb_text   = f"{headline} {(pdf_text or '')[:300]}"
+            fb_result = _finbert.score(fb_text)
+        except Exception as exc:
+            logger.debug("FinBERT score failed for %s: %s", ticker, exc)
+
+    # ── LLM structured classification (type, impact, summary, tags) ──────────
+    result: Optional[Dict] = None
+
     if provider == "keyword":
-        return _classify_keyword(ticker, headline, pdf_text)
+        # User explicitly wants heuristic only — skip LLM
+        result = _classify_keyword(ticker, headline, pdf_text)
+    else:
+        prompt = _build_prompt(ticker, headline, pdf_text)
+        provider_fns = {
+            "ollama":  _classify_ollama,
+            "groq":    _classify_groq,
+            "gemini":  _classify_gemini,
+        }
+        fn = provider_fns.get(provider)
+        if fn:
+            result = fn(prompt, settings)
+            if result:
+                logger.debug(
+                    "classify_announcement: %s classified by %s",
+                    ticker, result.get("llm_model"),
+                )
+            else:
+                logger.warning(
+                    "classify_announcement: %s — provider '%s' failed, falling back to keyword",
+                    ticker, provider,
+                )
 
-    prompt = _build_prompt(ticker, headline, pdf_text)
+        if not result:
+            result = _classify_keyword(ticker, headline, pdf_text)
 
-    provider_fns = {
-        "ollama":  _classify_ollama,
-        "groq":    _classify_groq,
-        "gemini":  _classify_gemini,
-    }
+    # ── Merge FinBERT sentiment into LLM result ───────────────────────────────
+    # Use FinBERT sentiment when confidence >= 0.80 (financial-specific model
+    # outperforms general-purpose LLMs for the sentiment classification subtask).
+    if fb_result:
+        if fb_result["score"] >= 0.80:
+            result["sentiment"] = fb_result["label"]
+        result["finbert_label"] = fb_result["label"]
+        result["finbert_score"] = fb_result["score"]
+    else:
+        result.setdefault("finbert_label", None)
+        result.setdefault("finbert_score", None)
 
-    # Try the configured provider first; only cascade to others if it fails
-    fn = provider_fns.get(provider)
-    if fn:
-        result = fn(prompt, settings)
-        if result:
-            logger.debug("classify_announcement: %s classified by %s", ticker, result.get("llm_model"))
-            return result
-        logger.warning(
-            "classify_announcement: %s — provider '%s' failed, falling back to keyword",
-            ticker, provider,
-        )
-
-    # Keyword fallback (LLM unavailable/timed out/bad JSON)
-    return _classify_keyword(ticker, headline, pdf_text)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1262,10 +1301,12 @@ def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
             """
             INSERT INTO announcements
                 (id, ticker, date, headline, pdf_url, doc_key, pdf_text, type, sentiment, impact,
-                 price_sensitive, summary, tags, llm_model, processed, fetched_at)
+                 price_sensitive, summary, tags, llm_model, processed, fetched_at,
+                 finbert_label, finbert_score)
             VALUES
                 (:id, :ticker, :date, :headline, :pdf_url, :doc_key, :pdf_text, :type, :sentiment, :impact,
-                 :price_sensitive, :summary, :tags, :llm_model, :processed, :fetched_at)
+                 :price_sensitive, :summary, :tags, :llm_model, :processed, :fetched_at,
+                 :finbert_label, :finbert_score)
             """,
             {
                 "id": ann.get("id"),
@@ -1284,6 +1325,8 @@ def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
                 "llm_model": ann.get("llm_model"),
                 "processed": ann.get("processed", 0),
                 "fetched_at": ann.get("fetched_at", datetime.utcnow().isoformat()),
+                "finbert_label": ann.get("finbert_label"),
+                "finbert_score": ann.get("finbert_score"),
             },
         )
     return True
