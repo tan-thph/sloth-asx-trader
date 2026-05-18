@@ -420,23 +420,23 @@ def _markit_pdf_url(doc_key: str, date_str: str) -> str:
     return f"https://www.asx.com.au/asx/statistics/displayAnnouncement.do?display=pdf&idsId={ids_id}"
 
 
-def _fetch_markit_doc_key(ticker: str, headline: str = "", date: str = "") -> str:
-    """Query Markit API to recover the documentKey for a stored announcement.
+def _fetch_markit_doc_key(ticker: str, headline: str = "", date: str = "") -> tuple:
+    """Query Markit API to recover the documentKey (and direct PDF URL) for an announcement.
 
     Used as a fallback at PDF-serve time when doc_key was not stored (records
-    synced before the doc_key column was introduced).
+    synced before the doc_key column was introduced), or when the stored URL is stale.
 
-    Returns the documentKey string (e.g. "2924-03090708-3A693022") or "".
+    Returns (doc_key, pdf_url) tuple — either or both may be empty strings.
     """
     if not ticker:
-        return ""
+        return ("", "")
     session = requests.Session()
     session.headers.update(_MARKIT_HEADERS)
     try:
         url = f"{_MARKIT_BASE}/companies/{ticker.upper()}/announcements"
         resp = session.get(url, timeout=15)
         if resp.status_code != 200:
-            return ""
+            return ("", "")
         items = resp.json().get("data", {}).get("items", [])
         for item in items:
             dk = str(item.get("documentKey", "")).strip()
@@ -444,17 +444,27 @@ def _fetch_markit_doc_key(ticker: str, headline: str = "", date: str = "") -> st
                 continue
             item_headline = str(item.get("headline", "")).strip()
             item_date = _parse_date_str(str(item.get("date", ""))) or ""
+            matched = False
             # Exact headline match
             if item_headline == headline:
                 logger.debug("_fetch_markit_doc_key: matched by headline for %s → %s", ticker, dk)
-                return dk
+                matched = True
             # Fuzzy: same date + headline prefix (first 40 chars)
-            if date and item_date == date and item_headline[:40] == headline[:40]:
+            elif date and item_date == date and item_headline[:40] == headline[:40]:
                 logger.debug("_fetch_markit_doc_key: matched by date+prefix for %s → %s", ticker, dk)
-                return dk
+                matched = True
+            if matched:
+                # Also capture direct PDF URL if Markit returns one
+                direct_url = (
+                    item.get("url") or item.get("pdfUrl") or
+                    item.get("downloadUrl") or item.get("documentUrl") or ""
+                )
+                if direct_url:
+                    logger.debug("_fetch_markit_doc_key: direct URL for %s → %s", ticker, direct_url)
+                return (dk, str(direct_url).strip())
     except Exception as exc:
         logger.debug("_fetch_markit_doc_key failed for %s: %s", ticker, exc)
-    return ""
+    return ("", "")
 
 
 def _markit_type(raw_type: str) -> str:
@@ -509,8 +519,19 @@ def _strategy_markit(ticker: str, days: int) -> List[Dict]:
         raw_ann_type = str(item.get("announcementType", "")).strip()
         doc_key = str(item.get("documentKey", "")).strip()
 
-        # Construct best-effort PDF URL from documentKey
-        pdf_url = _markit_pdf_url(doc_key, date_str)
+        # Prefer a direct URL from the API response — covers cases where
+        # displayAnnouncement.do no longer redirects to the real PDF.
+        # Fall back to constructing from documentKey if no direct URL present.
+        direct_url = (
+            item.get("url") or item.get("pdfUrl") or
+            item.get("downloadUrl") or item.get("documentUrl") or ""
+        )
+        pdf_url = str(direct_url).strip() if direct_url else _markit_pdf_url(doc_key, date_str)
+        if direct_url:
+            logger.debug("_strategy_markit: using direct URL for %s: %s", ticker, pdf_url)
+        else:
+            # Log available keys so we can find the right URL field if one is added
+            logger.debug("_strategy_markit: item keys for %s: %s", ticker, list(item.keys()))
 
         results.append({
             "id": _make_ann_id(ticker, date_str, headline),
@@ -877,12 +898,19 @@ def download_pdf(
             logger.warning("download_pdf [%s]: %s — %s", label, target_url, exc)
         return None
 
-    # Strategy 0: if doc_key is empty, try to recover it live from Markit API
+    # Strategy 0: if doc_key is empty, try to recover it live from Markit API.
+    # Also capture any direct PDF URL the API returns — the displayAnnouncement.do
+    # redirect chain no longer works; the Markit response may include the real URL.
+    markit_direct_url = ""
     if not doc_key and ticker:
         logger.debug("download_pdf: doc_key missing, querying Markit for %s", ticker)
-        doc_key = _fetch_markit_doc_key(ticker, headline=headline, date=date)
+        doc_key, markit_direct_url = _fetch_markit_doc_key(ticker, headline=headline, date=date)
         if doc_key:
             logger.debug("download_pdf: recovered doc_key=%s for %s", doc_key, ticker)
+        if markit_direct_url:
+            result = _fetch(markit_direct_url, "markit-direct-url")
+            if result:
+                return result
 
     # Strategy 1: Markit documents API — do NOT follow redirects; capture the
     # csf.asx.com.au CDN URL from the Location header and fetch that separately.
@@ -953,6 +981,21 @@ def download_pdf(
             result = _fetch(alt_url, "display-ann-alt")
             if result:
                 return result
+
+    # Strategy 4: re-query Markit announcements list — covers the case where the
+    # stored pdf_url is the old displayAnnouncement.do format (now 404s) but Markit
+    # has the real announcements.asx.com.au/asxpdf/ URL in its response.
+    # Only runs when we have doc_key (were synced recently) but all stored URLs failed.
+    if ticker and headline and not markit_direct_url:
+        try:
+            _, fresh_url = _fetch_markit_doc_key(ticker, headline=headline, date=date)
+            if fresh_url and fresh_url != url:
+                logger.debug("download_pdf [markit-refresh]: trying fresh URL %s", fresh_url)
+                result = _fetch(fresh_url, "markit-refresh")
+                if result:
+                    return result
+        except Exception as exc:
+            logger.debug("download_pdf [markit-refresh] failed: %s", exc)
 
     logger.info("download_pdf: all strategies exhausted for url=%s doc_key=%s ticker=%s",
                 url, doc_key, ticker)
