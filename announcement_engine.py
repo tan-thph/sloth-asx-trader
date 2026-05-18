@@ -197,7 +197,9 @@ _NEGATIVE_WORDS = {
 _ANN_THINKING_MODELS = ("qwen3", "qwq", "deepseek-r1", "deepseek-r2", "marco-o1")
 
 _LLM_PROMPT_TEMPLATE = (
-    "Analyse this ASX announcement. Reply with valid JSON only, no markdown.\n\n"
+    "Analyse this ASX announcement. Reply with valid JSON only, no markdown.\n"
+    "Do NOT research or verify what the ticker symbol represents — "
+    "classify based solely on the headline and content provided.\n\n"
     "Ticker: {ticker}\n"
     "Headline: {headline}\n"
     "Content: {content}\n\n"
@@ -219,7 +221,9 @@ _LLM_PROMPT_TEMPLATE = (
 # Acquisition:        {"Target": "Company X", "Deal Value": "$120M", "Premium": "25%"}
 _LLM_PROMPT_TEMPLATE_PS = (
     "Analyse this PRICE-SENSITIVE ASX announcement carefully. "
-    "Reply with valid JSON only, no markdown.\n\n"
+    "Reply with valid JSON only, no markdown.\n"
+    "Do NOT research or verify what the ticker symbol represents — "
+    "classify based solely on the headline and content provided.\n\n"
     "Ticker: {ticker}\n"
     "Headline: {headline}\n"
     "Content: {content}\n\n"
