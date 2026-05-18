@@ -454,6 +454,8 @@ def _fetch_markit_doc_key(ticker: str, headline: str = "", date: str = "") -> tu
                 logger.debug("_fetch_markit_doc_key: matched by date+prefix for %s → %s", ticker, dk)
                 matched = True
             if matched:
+                # Log all item keys once so we can see what the API provides
+                logger.debug("_fetch_markit_doc_key: item keys for %s: %s", ticker, list(item.keys()))
                 # Also capture direct PDF URL if Markit returns one
                 direct_url = (
                     item.get("url") or item.get("pdfUrl") or
@@ -982,20 +984,53 @@ def download_pdf(
             if result:
                 return result
 
-    # Strategy 4: re-query Markit announcements list — covers the case where the
-    # stored pdf_url is the old displayAnnouncement.do format (now 404s) but Markit
-    # has the real announcements.asx.com.au/asxpdf/ URL in its response.
-    # Only runs when we have doc_key (were synced recently) but all stored URLs failed.
-    if ticker and headline and not markit_direct_url:
-        try:
-            _, fresh_url = _fetch_markit_doc_key(ticker, headline=headline, date=date)
-            if fresh_url and fresh_url != url:
-                logger.debug("download_pdf [markit-refresh]: trying fresh URL %s", fresh_url)
-                result = _fetch(fresh_url, "markit-refresh")
-                if result:
-                    return result
-        except Exception as exc:
-            logger.debug("download_pdf [markit-refresh] failed: %s", exc)
+    # Strategy 4: scrape the ASX company announcements HTML page to find the real
+    # announcements.asx.com.au/asxpdf/ URL.  The displayAnnouncement.do redirect
+    # no longer works; the hex PDF filename is only visible in the HTML page.
+    # Uses idsId extracted from doc_key to match the announcement row.
+    if ticker and doc_key:
+        ids_id = doc_key.split("-")[1] if "-" in doc_key else ""
+        if ids_id:
+            try:
+                asx_page = f"https://www.asx.com.au/asx/statistics/announcements.do?ASXCode={ticker.upper()}"
+                resp_html = requests.get(
+                    asx_page,
+                    headers=_BROWSER_HEADERS,
+                    timeout=(10, 20),
+                    allow_redirects=True,
+                )
+                if resp_html.status_code == 200:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(resp_html.content, "html.parser")
+                    for a in soup.find_all("a", href=True):
+                        href = a["href"]
+                        # Match any asxpdf link that contains the idsId OR the hex name
+                        if "asxpdf" in href and ".pdf" in href:
+                            # Normalise to absolute URL
+                            if href.startswith("/"):
+                                href = "https://www.asx.com.au" + href
+                            elif href.startswith("//"):
+                                href = "https:" + href
+                            # Prefer links whose path contains the numeric idsId
+                            if ids_id in href:
+                                logger.debug("download_pdf [asx-scrape]: idsId match → %s", href)
+                                result = _fetch(href, "asx-scrape")
+                                if result:
+                                    return result
+                    # No idsId match — try every asxpdf link (headline match via date)
+                    if date:
+                        date_compact = date.replace("-", "")  # "20260518"
+                        for a in soup.find_all("a", href=True):
+                            href = a["href"]
+                            if "asxpdf" in href and date_compact in href and ".pdf" in href:
+                                if href.startswith("/"):
+                                    href = "https://www.asx.com.au" + href
+                                logger.debug("download_pdf [asx-scrape-date]: date match → %s", href)
+                                result = _fetch(href, "asx-scrape-date")
+                                if result:
+                                    return result
+            except Exception as exc:
+                logger.debug("download_pdf [asx-scrape] failed: %s", exc)
 
     logger.info("download_pdf: all strategies exhausted for url=%s doc_key=%s ticker=%s",
                 url, doc_key, ticker)
