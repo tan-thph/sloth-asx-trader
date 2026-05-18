@@ -1661,6 +1661,32 @@ def _update_status(**kwargs: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Re-classify status (separate from sync so both can run independently)
+# ---------------------------------------------------------------------------
+
+_reclassify_status: Dict[str, Any] = {
+    "running":    False,
+    "total":      0,
+    "done":       0,
+    "updated":    0,
+    "last_run":   None,
+    "last_count": 0,
+    "last_error": None,
+}
+_reclassify_lock = threading.Lock()
+
+
+def get_reclassify_status() -> Dict:
+    with _reclassify_lock:
+        return dict(_reclassify_status)
+
+
+def _update_reclassify_status(**kwargs: Any) -> None:
+    with _reclassify_lock:
+        _reclassify_status.update(kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Re-classify existing announcements
 # ---------------------------------------------------------------------------
 
@@ -1673,28 +1699,49 @@ def reclassify_all(
 
     Only touches announcements within `days` (default 30).  Returns the
     number of records updated.
+
+    Progress is tracked in _reclassify_status so the frontend can poll it.
+    Price-sensitive announcements use the richer PS prompt + retry logic.
     """
     settings = settings or {}
     cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
 
+    _update_reclassify_status(
+        running=True, done=0, updated=0, total=0, last_error=None,
+    )
+
     with get_db(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, ticker, headline, pdf_text FROM announcements WHERE date >= ?",
+            "SELECT id, ticker, headline, pdf_text, price_sensitive "
+            "FROM announcements WHERE date >= ?",
             (cutoff,),
         ).fetchall()
 
     if not rows:
+        _update_reclassify_status(
+            running=False,
+            last_run=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            last_count=0,
+        )
         return 0
 
+    _update_reclassify_status(total=len(rows))
     updated = 0
-    for row in rows:
+
+    for i, row in enumerate(rows):
         ann_id   = row["id"]
         ticker   = row["ticker"]
         headline = row["headline"] or ""
         pdf_text = row["pdf_text"] or ""
+        is_ps    = bool(row["price_sensitive"])
+
+        _update_reclassify_status(done=i)
 
         try:
-            result = classify_announcement(ticker, headline, pdf_text, settings)
+            result = classify_announcement(
+                ticker, headline, pdf_text, settings,
+                price_sensitive=is_ps,
+            )
         except Exception as exc:
             logger.warning("reclassify_all: failed for %s — %s", ann_id, exc)
             continue
@@ -1704,7 +1751,7 @@ def reclassify_all(
                 conn.execute(
                     """UPDATE announcements
                        SET type=?, sentiment=?, impact=?, summary=?, tags=?,
-                           llm_model=?, processed=1
+                           llm_model=?, details=?, processed=1
                        WHERE id=?""",
                     (
                         result.get("type"),
@@ -1713,15 +1760,23 @@ def reclassify_all(
                         result.get("summary"),
                         json.dumps(result.get("tags", [])),
                         result.get("llm_model"),
+                        result.get("details", ""),
                         ann_id,
                     ),
                 )
             updated += 1
+            _update_reclassify_status(updated=updated)
         except Exception as exc:
             logger.warning("reclassify_all: DB update failed for %s — %s", ann_id, exc)
 
         time.sleep(0.1)  # avoid hammering the LLM
 
+    _update_reclassify_status(
+        running=False,
+        done=len(rows),
+        last_run=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        last_count=updated,
+    )
     logger.info("reclassify_all: updated %d / %d announcements", updated, len(rows))
     return updated
 

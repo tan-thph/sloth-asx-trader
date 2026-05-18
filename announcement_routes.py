@@ -150,6 +150,10 @@ def get_ann_brief():
 def reclassify_announcements():
     """Re-run LLM classification on stored announcements using current settings."""
     try:
+        # Guard: don't start a second run while one is in progress
+        if ae.get_reclassify_status().get('running'):
+            return jsonify({"ok": False, "error": "Re-classify already running"}), 409
+
         body = request.get_json(silent=True) or {}
         settings = body.get('settings') or {}
         if not settings:
@@ -172,6 +176,15 @@ def reclassify_announcements():
         t.start()
 
         return jsonify({"ok": True, "message": "Re-classification started in background"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@ann_bp.route('/reclassify-status', methods=['GET'])
+def reclassify_status():
+    """Return current progress of a running re-classification job."""
+    try:
+        return jsonify(ae.get_reclassify_status())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

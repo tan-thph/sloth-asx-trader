@@ -363,8 +363,8 @@ function _renderAnnCard(ann) {
 
   // PS cards: always red left-border; use impact colour for non-PS
   const borderColor = priceSensitive ? '#ef4444' : (impact != null ? _annImpactBorder(impact) : 'var(--border-light)');
-  // Subtle red tint background for PS announcements
-  const cardBg = priceSensitive ? 'background:#fff8f8;' : '';
+  // No hardcoded background — rely on left-border + badge for PS distinction (dark-theme safe)
+  const cardBg = '';
 
   // Ticker badge
   const tickerBadge = ticker
@@ -404,29 +404,33 @@ function _renderAnnCard(ann) {
   </span>`;
 
   // ── Key Figures panel (PS + LLM-classified only) ─────────────
-  // Rendered as a compact grid of labelled chips, one per extracted metric.
+  // Uses CSS variables throughout — safe on both light and dark themes.
   const keyFiguresHtml = (priceSensitive && isLLMClassified && hasKeyFigures)
     ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;padding:8px 10px;
-                  background:#eff6ff;border-radius:6px;border:1px solid #bfdbfe">
-        <span style="font-size:10px;color:#1d4ed8;font-weight:700;width:100%;margin-bottom:2px">
+                  background:var(--bg-secondary);border-radius:6px;
+                  border:1px solid rgba(59,130,246,0.35)">
+        <span style="font-size:10px;color:#3b82f6;font-weight:700;width:100%;margin-bottom:2px">
           📊 Key Figures
         </span>
         ${Object.entries(keyFigures).map(([k, v]) => `
           <span style="display:inline-flex;flex-direction:column;align-items:center;padding:4px 10px;
-                       background:#fff;border:1px solid #bfdbfe;border-radius:6px;min-width:60px">
-            <span style="font-size:9px;color:#6b7280;text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap">
-              ${k}
-            </span>
-            <span style="font-size:12px;font-weight:700;color:#1d4ed8;white-space:nowrap">${v}</span>
+                       background:var(--bg-primary);border:1px solid rgba(59,130,246,0.25);
+                       border-radius:6px;min-width:60px">
+            <span style="font-size:9px;color:var(--text-muted);text-transform:uppercase;
+                         letter-spacing:0.4px;white-space:nowrap">${k}</span>
+            <span style="font-size:12px;font-weight:700;color:#3b82f6;white-space:nowrap">${v}</span>
           </span>`).join('')}
       </div>`
     : '';
 
   // ── PS + keyword warning (prompts user to configure LLM) ─────
+  // Uses CSS variables — no hardcoded light colours.
   const psKeywordWarning = (priceSensitive && isKeyword)
-    ? `<div style="font-size:11px;color:#92400e;background:#fef3c7;border:1px solid #fde68a;
+    ? `<div style="font-size:11px;color:var(--text-secondary);
+                  background:var(--bg-secondary);border:1px solid rgba(245,158,11,0.5);
                   border-radius:4px;padding:4px 8px;margin-bottom:6px">
-        ⚠ Price-sensitive filing — configure an LLM in Settings for detailed analysis
+        ⚠ Price-sensitive filing — configure an LLM in Settings for detailed analysis,
+        or click <strong>Re-classify All</strong> if a model is already set.
       </div>`
     : '';
 
@@ -597,7 +601,21 @@ function _annSettingsPanelHTML(status) {
           ↺ Re-classify All
         </button>
         <span id="ann-settings-saved-msg" style="font-size:12px;color:#16a34a;display:none">✓ Saved</span>
-        <span id="ann-reclassify-msg" style="font-size:12px;color:#6366f1;display:none">↺ Re-classifying…</span>
+      </div>
+
+      <!-- Re-classify progress (hidden until running) -->
+      <div id="ann-reclassify-progress" style="display:none;margin-top:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+          <span id="ann-reclassify-label" style="font-size:12px;color:var(--text-secondary)">
+            Re-classifying…
+          </span>
+          <span id="ann-reclassify-pct" style="font-size:11px;color:var(--text-muted)">0%</span>
+        </div>
+        <div style="height:6px;background:var(--border-light);border-radius:99px;overflow:hidden">
+          <div id="ann-reclassify-bar"
+               style="height:100%;width:0%;background:linear-gradient(90deg,#6366f1,#3b82f6);
+                      border-radius:99px;transition:width 0.4s ease"></div>
+        </div>
       </div>
     </div>`;
 }
@@ -851,13 +869,13 @@ async function saveAnnSettings() {
 }
 
 // ── Re-classify stored announcements with current model ───────
+let _reclassifyPoller = null;
+
 async function reclassifyAnnouncements() {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
 
-  const btn = document.getElementById('ann-reclassify-btn');
-  const msg = document.getElementById('ann-reclassify-msg');
-  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
-  if (msg) msg.style.display = 'inline';
+  const btn      = document.getElementById('ann-reclassify-btn');
+  const progress = document.getElementById('ann-reclassify-progress');
 
   // First save current settings so the backend uses the latest model
   await saveAnnSettings();
@@ -869,19 +887,69 @@ async function reclassifyAnnouncements() {
       body: JSON.stringify({ settings: state.announcements.settings || {}, days: 30 }),
     });
     const data = await r.json().catch(() => ({}));
-    if (r.ok) {
-      toast('Re-classification started — refresh in a moment to see updated models', 'success');
-      // Auto-refresh after a delay to pick up updated records
-      setTimeout(() => renderPage(), 8000);
-    } else {
-      toast(`Re-classify failed: ${data.error || r.statusText}`, 'error');
+
+    if (r.status === 409) {
+      toast('Re-classify already running', 'info');
+      _startReclassifyPoller(); // attach to already-running job
+      return;
     }
+    if (!r.ok) {
+      toast(`Re-classify failed: ${data.error || r.statusText}`, 'error');
+      return;
+    }
+
+    // Show progress UI and start polling
+    if (btn)      { btn.disabled = true; btn.style.opacity = '0.6'; }
+    if (progress) { progress.style.display = 'block'; }
+    _updateReclassifyBar(0, 0, 0);
+    _startReclassifyPoller();
+
   } catch (e) {
     toast(`Re-classify error: ${e.message}`, 'error');
-  } finally {
-    if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-    if (msg) msg.style.display = 'none';
   }
+}
+
+function _updateReclassifyBar(done, total, updated) {
+  const pct      = total > 0 ? Math.round((done / total) * 100) : 0;
+  const bar      = document.getElementById('ann-reclassify-bar');
+  const pctEl    = document.getElementById('ann-reclassify-pct');
+  const labelEl  = document.getElementById('ann-reclassify-label');
+  if (bar)     bar.style.width     = pct + '%';
+  if (pctEl)   pctEl.textContent   = pct + '%';
+  if (labelEl) labelEl.textContent = total > 0
+    ? `Re-classifying… ${done} of ${total} (${updated} updated)`
+    : 'Re-classifying…';
+}
+
+function _startReclassifyPoller() {
+  if (_reclassifyPoller) return;
+  _reclassifyPoller = setInterval(async () => {
+    try {
+      const s = await fetch(`${API}/api/announcements/reclassify-status`).then(r => r.ok ? r.json() : null);
+      if (!s) return;
+
+      _updateReclassifyBar(s.done || 0, s.total || 0, s.updated || 0);
+
+      if (!s.running) {
+        _stopReclassifyPoller();
+        const btn      = document.getElementById('ann-reclassify-btn');
+        const progress = document.getElementById('ann-reclassify-progress');
+        if (btn)      { btn.disabled = false; btn.style.opacity = ''; }
+        // Keep the bar at 100% for 2 s so the user sees completion, then hide
+        _updateReclassifyBar(s.total || 0, s.total || 0, s.last_count || 0);
+        setTimeout(() => {
+          if (progress) progress.style.display = 'none';
+        }, 2000);
+        toast(`Re-classify complete — ${s.last_count || 0} announcement${s.last_count !== 1 ? 's' : ''} updated`, 'success');
+        // Refresh cards to reflect new LLM classifications
+        setTimeout(() => renderPage(), 500);
+      }
+    } catch { /* ignore transient errors */ }
+  }, 1500);
+}
+
+function _stopReclassifyPoller() {
+  if (_reclassifyPoller) { clearInterval(_reclassifyPoller); _reclassifyPoller = null; }
 }
 
 // ── Toggle provider-specific form fields ──────────────────────
