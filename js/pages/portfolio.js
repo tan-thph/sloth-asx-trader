@@ -173,11 +173,15 @@ function renderPortfolio() {
         if (!holding || !holding.currentPrice) return;
         const buyDate = parseDate(p.date); // handles DD-MM-YYYY and YYYY-MM-DD
         if (!buyDate || isNaN(buyDate.getTime())) return;
-        const yearsHeld = Math.max((todayMs - buyDate.getTime()) / (365.25 * 24 * 3600 * 1000), 1/365);
+        const yearsHeldRaw = (todayMs - buyDate.getTime()) / (365.25 * 24 * 3600 * 1000);
+        // Floor the annualisation denominator at 1 year — dividing by a fraction of
+        // a year for recent buys (e.g. 3 days = 0.008y) explodes the annualised figure
+        // by 100×.  For positions held < 1y we show the actual total gain/loss %, which
+        // is more meaningful than a spurious extrapolated annual rate.
+        const yearsHeld = Math.max(yearsHeldRaw, 1);
         const costBase = p.remainingQty * p.costPerShare;
         const mktVal   = p.remainingQty * holding.currentPrice;
         const gain     = mktVal - costBase;
-        // Annualise: gain/year proportional to years held (linear, not CAGR — avoids distortion on short holds)
         totalCapGainAnnual += gain / yearsHeld;
         totalCostBase += costBase;
       });
@@ -253,7 +257,7 @@ function renderPortfolio() {
           <div class="text-xs text-muted" style="margin-top:3px;line-height:1.7">
             <span>Est. annual income: <strong class="text-success">$${fmt(totalAnnualIncome)}</strong>
             · Div yield: <strong>${fmt(totalFwdYield)}%</strong>
-            ${annCapGainYield !== 0 ? `· Ann. cap gain: <strong class="${annCapGainYield >= 0 ? 'text-success' : 'text-danger'}">${annCapGainYield >= 0 ? '+' : ''}${fmt(annCapGainYield)}%</strong>` : ''}
+            ${annCapGainYield !== 0 ? `· Cap gain: <strong class="${annCapGainYield >= 0 ? 'text-success' : 'text-danger'}" title="Annualised capital gain (floored at 1yr — recent buys show total unrealised %)">${annCapGainYield >= 0 ? '+' : ''}${fmt(annCapGainYield)}%</strong>` : ''}
             · <span title="Dividend yield + annualised capital appreciation">Total return: <strong class="${totalReturnYield >= rba ? 'text-success' : 'text-danger'}">${fmt(totalReturnYield)}%</strong></span>
             · vs RBA ${rba.toFixed(2)}%:
               <span title="Dividend income only vs RBA" class="text-xs" style="margin-left:2px">div <span class="${divSpread >= 0 ? 'text-success' : 'text-danger'}">${divSpread >= 0 ? '+' : ''}${fmt(divSpread)}%</span></span>
