@@ -30,6 +30,8 @@ const state = {
   apiCostFetchError: null,
   macroData: null,       // persisted — cleared/replaced only by a new run
   macroDate: null,       // DD-MM-YYYY of last macro run — prevents duplicate daily runs
+  polymarketData: null,  // {markets:[...], fetched_at:'...'} — Polymarket prediction markets
+  includePolymarket: false, // when true, Polymarket probs are appended to the AI Macro Brief prompt
   liveSignals: {},      // ticker -> full analysis from backend
   criticalAlerts: {},   // ticker -> {type, pct, days, triggeredAt} — price-decline critical alerts
   dismissedAlerts: {},  // ticker -> timestamp — user-dismissed alerts

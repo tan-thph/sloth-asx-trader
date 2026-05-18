@@ -85,6 +85,13 @@ except Exception:
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
+# pdfminer (used internally by pdfplumber) is extremely chatty at DEBUG level —
+# it logs every PDF object it touches.  Clamp it to WARNING so it doesn't drown
+# out our own debug output.
+for _noisy_lib in ("pdfminer", "pdfminer.pdfpage", "pdfminer.pdfdocument",
+                   "pdfminer.pdfinterp", "pdfminer.converter", "pdfminer.cmapdb"):
+    logging.getLogger(_noisy_lib).setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -428,6 +435,172 @@ def _markit_pdf_url(doc_key: str, date_str: str) -> str:
         return f"https://announcements.asx.com.au/asxpdf/{date_compact}/pdf/{ids_id}.pdf"
     # No date → fall back to the displayAnnouncement.do redirect chain
     return f"https://www.asx.com.au/asx/statistics/displayAnnouncement.do?display=pdf&idsId={ids_id}"
+
+
+# Cache for todayAnns.do HTML — reused within the same sync run to avoid
+# re-fetching the 681KB page once per announcement.
+_todayanns_cache: Dict[str, Any] = {"text": None, "fetched_at": 0.0}
+_TODAYANNS_CACHE_TTL = 300  # seconds (5 min — announcements page refreshes slowly)
+
+
+def _fetch_todayanns_pdf_url(ticker: str, headline: str = "", date: str = "") -> str:
+    """Find the real PDF URL for a TODAY announcement via ASX's v2 endpoints.
+
+    Two-step process (no browser required — both URLs return plain HTML via requests):
+
+    Step 1 — ``todayAnns.do``
+        Fetches https://www.asx.com.au/asx/v2/statistics/todayAnns.do, which
+        returns a 600KB+ HTML page listing all of today's announcements.  We
+        parse the table rows to find the one whose ticker + headline matches
+        and extract the numeric ``idsId`` from the ``displayAnnouncement.do``
+        link embedded in the row.  The response is cached for 5 minutes so a
+        full sync run with many tickers only pays for one HTTP request.
+
+    Step 2 — ``displayAnnouncement.do`` (v2)
+        Fetches https://www.asx.com.au/asx/v2/statistics/displayAnnouncement.do
+        ?display=pdf&idsId={idsId}, which returns another small HTML page
+        containing the real ``announcements.asx.com.au/asxpdf/…pdf`` URL
+        (including hex-filename MAP-system PDFs that cannot be inferred from
+        the idsId alone).
+
+    Returns the real PDF URL, or an empty string on any failure.
+    """
+    if not ticker:
+        return ""
+
+    _HDRS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,*/*",
+        "Referer": "https://www.asx.com.au/",
+    }
+
+    # ------------------------------------------------------------------ Step 1
+    try:
+        now = time.time()
+        if (
+            _todayanns_cache["text"] is None
+            or (now - _todayanns_cache["fetched_at"]) > _TODAYANNS_CACHE_TTL
+        ):
+            resp = requests.get(
+                "https://www.asx.com.au/asx/v2/statistics/todayAnns.do",
+                headers=_HDRS,
+                timeout=(10, 30),
+            )
+            if resp.status_code != 200:
+                logger.debug("_fetch_todayanns_pdf_url: todayAnns.do HTTP %s", resp.status_code)
+                return ""
+            _todayanns_cache["text"] = resp.text
+            _todayanns_cache["fetched_at"] = now
+            logger.debug(
+                "_fetch_todayanns_pdf_url: fetched todayAnns.do (%d bytes)",
+                len(resp.content),
+            )
+        else:
+            logger.debug("_fetch_todayanns_pdf_url: using cached todayAnns.do")
+
+        html_text = _todayanns_cache["text"]
+
+        # Parse with BeautifulSoup if available; otherwise use regex
+        ids_id = ""
+        if _HAS_BS4:
+            from bs4 import BeautifulSoup as _BS4
+            soup = _BS4(html_text, "html.parser")
+            # Each row contains the ticker code in one cell and a link to
+            # displayAnnouncement.do?…&idsId=XXXXXXXX in another.
+            ticker_upper = ticker.upper()
+            headline_lc = headline.lower().strip()
+            for row in soup.find_all("tr"):
+                cells = row.find_all("td")
+                if not cells:
+                    continue
+                row_text = row.get_text(" ", strip=True)
+                # Quick pre-filter: ticker must appear in the row
+                if ticker_upper not in row_text.upper():
+                    continue
+                # Headline match (case-insensitive, allow partial for truncated cells)
+                if headline_lc and headline_lc[:40] not in row_text.lower():
+                    continue
+                # Find displayAnnouncement link in this row
+                for a in row.find_all("a", href=True):
+                    href = a["href"]
+                    m = re.search(r"idsId=(\d+)", href)
+                    if m:
+                        ids_id = m.group(1)
+                        logger.debug(
+                            "_fetch_todayanns_pdf_url: found idsId=%s for %s / %s",
+                            ids_id, ticker, headline[:60],
+                        )
+                        break
+                if ids_id:
+                    break
+        else:
+            # Regex fallback — look for the ticker near a displayAnnouncement link
+            ticker_upper = ticker.upper()
+            # Find all displayAnnouncement.do links and their surrounding context
+            for m in re.finditer(
+                r"displayAnnouncement\.do[^\"']*idsId=(\d+)", html_text
+            ):
+                start = max(0, m.start() - 500)
+                ctx = html_text[start : m.end()]
+                if ticker_upper in ctx.upper():
+                    if not headline or headline[:30].lower() in ctx.lower():
+                        ids_id = m.group(1)
+                        logger.debug(
+                            "_fetch_todayanns_pdf_url: regex found idsId=%s for %s",
+                            ids_id, ticker,
+                        )
+                        break
+
+        if not ids_id:
+            logger.debug(
+                "_fetch_todayanns_pdf_url: no idsId found for %s / %s",
+                ticker, headline[:60],
+            )
+            return ""
+
+    except Exception as exc:
+        logger.debug("_fetch_todayanns_pdf_url [step1] failed: %s", exc)
+        return ""
+
+    # ------------------------------------------------------------------ Step 2
+    try:
+        viewer_url = (
+            f"https://www.asx.com.au/asx/v2/statistics/displayAnnouncement.do"
+            f"?display=pdf&idsId={ids_id}"
+        )
+        resp2 = requests.get(viewer_url, headers=_HDRS, timeout=(10, 20))
+        if resp2.status_code != 200:
+            logger.debug(
+                "_fetch_todayanns_pdf_url [step2]: HTTP %s for idsId=%s",
+                resp2.status_code, ids_id,
+            )
+            return ""
+
+        # Extract all asxpdf URLs from the HTML
+        pdf_urls = re.findall(
+            r"https?://announcements\.asx\.com\.au/asxpdf/[^\s\"'<>]+\.pdf",
+            resp2.text,
+        )
+        if pdf_urls:
+            pdf_url = pdf_urls[0]
+            logger.debug(
+                "_fetch_todayanns_pdf_url: resolved %s / %s → %s",
+                ticker, headline[:60], pdf_url,
+            )
+            return pdf_url
+
+        logger.debug(
+            "_fetch_todayanns_pdf_url [step2]: no asxpdf URL found for idsId=%s (response %d bytes)",
+            ids_id, len(resp2.content),
+        )
+    except Exception as exc:
+        logger.debug("_fetch_todayanns_pdf_url [step2] failed: %s", exc)
+
+    return ""
 
 
 def _fetch_markit_doc_key(ticker: str, headline: str = "", date: str = "") -> tuple:
@@ -874,11 +1047,17 @@ def download_pdf(
     """Download a PDF from `url` and return raw bytes, or None on failure.
 
     Strategy (all responses validated with %PDF- magic bytes):
-      0. If doc_key is empty but ticker is known, re-query Markit API to recover it.
-      1. Try Markit documents API: /asx-research/1.0/documents/{doc_key}/download
-      2. Try the stored pdf_url (displayAnnouncement.do or direct) with allow_redirects.
-         If response is HTML, parse it for a csf.asx.com.au CDN link and retry.
-      3. Reconstruct displayAnnouncement.do from doc_key idsId as last resort.
+      0.  If doc_key is empty but ticker is known, re-query Markit API to recover it.
+      0b. Markit document metadata endpoint (/documents/{doc_key}) — may return a url field.
+      1.  Markit documents API: /asx-research/1.0/documents/{doc_key}/download
+      2.  Stored pdf_url (direct CDN link or displayAnnouncement.do) with allow_redirects.
+          If response is HTML, parse it for an announcements.asx.com.au CDN link and retry.
+      2b. Construct direct CDN URL from doc_key idsId + date (covers old displayAnnouncement
+          records and numeric-filename PDFs within ~2 days of publication).
+      3.  Reconstruct displayAnnouncement.do from doc_key idsId (old system, last resort).
+      4.  Scrape ASX company announcements HTML page for asxpdf links matching the idsId.
+      5.  todayAnns.do + v2 displayAnnouncement viewer — resolves hex MAP-system filenames
+          that cannot be inferred from the idsId.  Works for today's announcements only.
     """
     _PDF_HEADERS = {
         **_BROWSER_HEADERS,
@@ -1098,6 +1277,19 @@ def download_pdf(
                                     return result
             except Exception as exc:
                 logger.debug("download_pdf [asx-scrape] failed: %s", exc)
+
+    # Strategy 5: todayAnns.do + v2 displayAnnouncement viewer.
+    # Handles MAP-system hex PDF filenames that cannot be derived from the idsId.
+    # Works for today's announcements (todayAnns.do only lists today's items).
+    if ticker:
+        try:
+            todayanns_url = _fetch_todayanns_pdf_url(ticker, headline=headline, date=date)
+            if todayanns_url:
+                result = _fetch(todayanns_url, "todayanns-v2")
+                if result:
+                    return result
+        except Exception as exc:
+            logger.debug("download_pdf [todayanns-v2] failed: %s", exc)
 
     logger.info("download_pdf: all strategies exhausted for url=%s doc_key=%s ticker=%s",
                 url, doc_key, ticker)
@@ -2134,6 +2326,27 @@ def run_sync(
                 # Download + extract PDF text (best-effort; may 404 for new ASX system)
                 pdf_text = ""
                 if ann.get("pdf_url") or ann.get("doc_key"):
+                    ann_date = ann.get("date", "")
+                    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+
+                    # For today's announcements whose stored URL is the Markit-derived
+                    # numeric CDN URL, proactively resolve the real URL via todayAnns.do.
+                    # MAP-system (hex) PDFs have a filename that cannot be inferred from
+                    # the numeric idsId; todayAnns.do → v2 viewer is the only way to get it.
+                    current_pdf_url = ann.get("pdf_url", "")
+                    if ann_date == today_str and current_pdf_url:
+                        resolved = _fetch_todayanns_pdf_url(
+                            ann.get("ticker", ""),
+                            headline=ann.get("headline", ""),
+                            date=ann_date,
+                        )
+                        if resolved and resolved != current_pdf_url:
+                            logger.debug(
+                                "run_sync: todayAnns resolved URL for %s: %s → %s",
+                                ann.get("ticker"), current_pdf_url, resolved,
+                            )
+                            ann["pdf_url"] = resolved
+
                     pdf_bytes = download_pdf(
                         ann.get("pdf_url", ""),
                         doc_key=ann.get("doc_key", ""),
@@ -2147,7 +2360,7 @@ def run_sync(
                         except Exception as exc:
                             logger.warning("run_sync: text extraction failed for %s — %s", ann["pdf_url"], exc)
                     else:
-                        logger.debug("run_sync: PDF not available for %s (%s)", ann.get("headline","")[:40], ann["pdf_url"])
+                        logger.debug("run_sync: PDF not available for %s (%s)", ann.get("headline","")[:40], ann.get("pdf_url",""))
 
                 ann["pdf_text"] = pdf_text
 
