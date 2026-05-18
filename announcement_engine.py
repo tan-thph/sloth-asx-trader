@@ -1017,8 +1017,10 @@ def extract_text(pdf_bytes: bytes) -> str:
 
 def _build_prompt(ticker: str, headline: str, pdf_text: str,
                   price_sensitive: bool = False) -> str:
-    # Give price-sensitive announcements more context so the LLM can extract key figures
-    max_chars = 1500 if price_sensitive else 1200
+    # PS announcements get more context for key figure extraction; non-PS still
+    # gets enough to capture full trading-update / guidance bodies (cover letter
+    # is ~500 chars; substantive content another 1000+).
+    max_chars = 2000 if price_sensitive else 1800
     content = (pdf_text or headline)[:max_chars].replace("\n", " ").strip()
     template = _LLM_PROMPT_TEMPLATE_PS if price_sensitive else _LLM_PROMPT_TEMPLATE
     return template.format(ticker=ticker, headline=headline, content=content)
@@ -1797,7 +1799,7 @@ def reclassify_all(
 
     with get_db(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, ticker, headline, pdf_text, price_sensitive "
+            "SELECT id, ticker, headline, pdf_url, doc_key, pdf_text, price_sensitive "
             "FROM announcements WHERE date >= ?",
             (cutoff,),
         ).fetchall()
@@ -1829,6 +1831,29 @@ def reclassify_all(
 
         _update_reclassify_status(done=i)
 
+        # If pdf_text is missing, try to fetch it now so the LLM gets real content
+        fetched_pdf_text = False
+        if not pdf_text:
+            pdf_url = row["pdf_url"] or ""
+            doc_key = row["doc_key"] or ""
+            if pdf_url or doc_key:
+                try:
+                    pdf_bytes = download_pdf(
+                        pdf_url, doc_key=doc_key,
+                        ticker=ticker, headline=headline,
+                        date="",
+                    )
+                    if pdf_bytes:
+                        pdf_text = extract_text(pdf_bytes)
+                        fetched_pdf_text = bool(pdf_text)
+                        if fetched_pdf_text:
+                            logger.debug(
+                                "reclassify_all: fetched PDF text for %s (%d chars)",
+                                ann_id, len(pdf_text),
+                            )
+                except Exception as exc:
+                    logger.debug("reclassify_all: PDF re-fetch failed for %s — %s", ann_id, exc)
+
         try:
             result = classify_announcement(
                 ticker, headline, pdf_text, settings,
@@ -1840,22 +1865,43 @@ def reclassify_all(
 
         try:
             with get_db(db_path) as conn:
-                conn.execute(
-                    """UPDATE announcements
-                       SET type=?, sentiment=?, impact=?, summary=?, tags=?,
-                           llm_model=?, details=?, processed=1
-                       WHERE id=?""",
-                    (
-                        result.get("type"),
-                        result.get("sentiment"),
-                        result.get("impact"),
-                        result.get("summary"),
-                        json.dumps(result.get("tags", [])),
-                        result.get("llm_model"),
-                        result.get("details", ""),
-                        ann_id,
-                    ),
-                )
+                if fetched_pdf_text:
+                    # Persist newly-fetched PDF text so future reclassify runs
+                    # don't need to re-download
+                    conn.execute(
+                        """UPDATE announcements
+                           SET type=?, sentiment=?, impact=?, summary=?, tags=?,
+                               llm_model=?, details=?, pdf_text=?, processed=1
+                           WHERE id=?""",
+                        (
+                            result.get("type"),
+                            result.get("sentiment"),
+                            result.get("impact"),
+                            result.get("summary"),
+                            json.dumps(result.get("tags", [])),
+                            result.get("llm_model"),
+                            result.get("details", ""),
+                            pdf_text,
+                            ann_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE announcements
+                           SET type=?, sentiment=?, impact=?, summary=?, tags=?,
+                               llm_model=?, details=?, processed=1
+                           WHERE id=?""",
+                        (
+                            result.get("type"),
+                            result.get("sentiment"),
+                            result.get("impact"),
+                            result.get("summary"),
+                            json.dumps(result.get("tags", [])),
+                            result.get("llm_model"),
+                            result.get("details", ""),
+                            ann_id,
+                        ),
+                    )
             updated += 1
             _update_reclassify_status(updated=updated)
         except Exception as exc:
