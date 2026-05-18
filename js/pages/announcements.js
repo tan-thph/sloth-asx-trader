@@ -339,20 +339,32 @@ function _renderAnnFilters(items) {
 
 // ── Single announcement card ──────────────────────────────────
 function _renderAnnCard(ann) {
-  const impact   = ann.impact_score != null ? Number(ann.impact_score) : null;
-  const senti    = (ann.sentiment || '').toLowerCase();
-  const annType  = ann.type || 'Other';
-  const typeColor = ANN_TYPE_COLORS[annType] || ANN_TYPE_COLORS['Other'];
-  const sentiStyle = _annSentiStyle(senti);
-  const borderColor = impact != null ? _annImpactBorder(impact) : 'var(--border-light)';
-  const tags     = ann.tags || [];
-  const ticker   = ann.ticker || '';
-  const headline = ann.headline || ann.title || '';
-  const summary  = ann.summary || '';
-  const date     = ann.date || ann.published_date || '';
+  const impact        = ann.impact_score != null ? Number(ann.impact_score) : null;
+  const senti         = (ann.sentiment || '').toLowerCase();
+  const annType       = ann.type || 'Other';
+  const typeColor     = ANN_TYPE_COLORS[annType] || ANN_TYPE_COLORS['Other'];
+  const sentiStyle    = _annSentiStyle(senti);
+  const tags          = ann.tags || [];
+  const ticker        = ann.ticker || '';
+  const headline      = ann.headline || ann.title || '';
+  const summary       = ann.summary || '';
+  const date          = ann.date || ann.published_date || '';
   const priceSensitive = ann.price_sensitive || false;
-  const llmModel = ann.llm_model || '';
-  const annId    = ann.id || '';
+  const llmModel      = ann.llm_model || '';
+  const annId         = ann.id || '';
+
+  // Parse key figures extracted by the PS LLM prompt
+  let keyFigures = {};
+  if (ann.details) {
+    try { keyFigures = JSON.parse(ann.details); } catch { keyFigures = {}; }
+  }
+  const hasKeyFigures  = Object.keys(keyFigures).length > 0;
+  const isLLMClassified = llmModel && llmModel !== 'keyword_fallback' && llmModel !== 'keyword';
+
+  // PS cards: always red left-border; use impact colour for non-PS
+  const borderColor = priceSensitive ? '#ef4444' : (impact != null ? _annImpactBorder(impact) : 'var(--border-light)');
+  // Subtle red tint background for PS announcements
+  const cardBg = priceSensitive ? 'background:#fff8f8;' : '';
 
   // Ticker badge
   const tickerBadge = ticker
@@ -372,9 +384,9 @@ function _renderAnnCard(ann) {
     ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:${borderColor}22;color:${borderColor};font-weight:700;border:1px solid ${borderColor}44" title="Impact score">⚡ ${impact}/10</span>`
     : '';
 
-  // Price sensitive dot
+  // Price sensitive badge — more prominent than a plain dot
   const psDot = priceSensitive
-    ? `<span style="font-size:11px;color:#ef4444" title="Price sensitive">● Price Sensitive</span>`
+    ? `<span style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:99px;background:#fee2e2;color:#dc2626;border:1px solid #fca5a5" title="Price sensitive">⚡ Price Sensitive</span>`
     : '';
 
   // Tags
@@ -383,13 +395,39 @@ function _renderAnnCard(ann) {
   ).join('');
 
   // LLM model attribution
-  const llmDisplay = llmModel === 'keyword_fallback' || llmModel === 'keyword'
-    ? { label: 'Keyword heuristic', color: 'var(--text-muted)', title: 'No LLM available — classified by keyword matching' }
-    : llmModel
-      ? { label: llmModel, color: 'var(--text-muted)', title: 'Classified by LLM' }
-      : null;
-  const llmBadge = llmDisplay
-    ? `<span style="font-size:10px;color:${llmDisplay.color}" title="${llmDisplay.title}">LLM: ${llmDisplay.label}</span>`
+  const isKeyword = !llmModel || llmModel === 'keyword_fallback' || llmModel === 'keyword';
+  const llmDisplay = isKeyword
+    ? { label: 'Keyword heuristic', color: '#f59e0b', title: 'LLM unavailable — classified by keyword matching' }
+    : { label: llmModel, color: 'var(--text-muted)', title: 'Classified by LLM' };
+  const llmBadge = `<span style="font-size:10px;color:${llmDisplay.color}" title="${llmDisplay.title}">
+    ${isKeyword ? '⚠ ' : ''}LLM: ${llmDisplay.label}
+  </span>`;
+
+  // ── Key Figures panel (PS + LLM-classified only) ─────────────
+  // Rendered as a compact grid of labelled chips, one per extracted metric.
+  const keyFiguresHtml = (priceSensitive && isLLMClassified && hasKeyFigures)
+    ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;padding:8px 10px;
+                  background:#eff6ff;border-radius:6px;border:1px solid #bfdbfe">
+        <span style="font-size:10px;color:#1d4ed8;font-weight:700;width:100%;margin-bottom:2px">
+          📊 Key Figures
+        </span>
+        ${Object.entries(keyFigures).map(([k, v]) => `
+          <span style="display:inline-flex;flex-direction:column;align-items:center;padding:4px 10px;
+                       background:#fff;border:1px solid #bfdbfe;border-radius:6px;min-width:60px">
+            <span style="font-size:9px;color:#6b7280;text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap">
+              ${k}
+            </span>
+            <span style="font-size:12px;font-weight:700;color:#1d4ed8;white-space:nowrap">${v}</span>
+          </span>`).join('')}
+      </div>`
+    : '';
+
+  // ── PS + keyword warning (prompts user to configure LLM) ─────
+  const psKeywordWarning = (priceSensitive && isKeyword)
+    ? `<div style="font-size:11px;color:#92400e;background:#fef3c7;border:1px solid #fde68a;
+                  border-radius:4px;padding:4px 8px;margin-bottom:6px">
+        ⚠ Price-sensitive filing — configure an LLM in Settings for detailed analysis
+      </div>`
     : '';
 
   // Summary text
@@ -397,8 +435,7 @@ function _renderAnnCard(ann) {
     ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px">${summary}</div>`
     : '';
 
-  // Search button — opens a Google search for the announcement so the user
-  // can find the ASX filing or news coverage directly (avoids broken CDN URLs)
+  // Search button
   const searchQuery = encodeURIComponent(`${ticker} ASX ${headline}`);
   const viewPdfBtn = headline
     ? `<a href="https://www.google.com/search?q=${searchQuery}" target="_blank" rel="noopener"
@@ -415,25 +452,30 @@ function _renderAnnCard(ann) {
     onclick="addAnnToContext('${safeHeadline}','${safeSummary}','${safeTicker}','${safeDate}')">+ Add to Analysis</button>`;
 
   return `
-    <div style="border:1px solid var(--border-light);border-left:3px solid ${borderColor};border-radius:var(--radius-md);padding:12px 14px;margin-bottom:10px">
+    <div style="border:1px solid var(--border-light);border-left:3px solid ${borderColor};
+                border-radius:var(--radius-md);padding:12px 14px;margin-bottom:10px;${cardBg}">
       <!-- Row 1: ticker, headline, date -->
       <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;flex-wrap:wrap">
         ${tickerBadge}
         <span style="flex:1;font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.4">${headline}</span>
         <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;flex-shrink:0">${_annFmtDate(date)}</span>
       </div>
-      <!-- Row 2: pills + price sensitive + FinBERT -->
-      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${summary ? '8px' : '6px'}">
+      <!-- Row 2: type + sentiment + impact + PS badge -->
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px">
         ${typePill}
         ${sentiPill}
         ${impactBadge}
         ${psDot}
       </div>
-      <!-- Row 3: summary -->
+      <!-- Row 3: PS keyword warning -->
+      ${psKeywordWarning}
+      <!-- Row 4: Key Figures grid (PS + LLM only) -->
+      ${keyFiguresHtml}
+      <!-- Row 5: summary -->
       ${summaryHtml}
-      <!-- Row 4: tags -->
+      <!-- Row 6: tags -->
       ${tagBadges ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${tagBadges}</div>` : ''}
-      <!-- Row 5: actions + llm attribution -->
+      <!-- Row 7: actions + llm attribution -->
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:space-between">
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           ${viewPdfBtn}

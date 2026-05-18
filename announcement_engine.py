@@ -210,6 +210,32 @@ _LLM_PROMPT_TEMPLATE = (
     '"tags":["tag1","tag2"]}}'
 )
 
+# Richer prompt for PRICE-SENSITIVE announcements — asks for structured keyFigures so
+# the UI can render a "Key Info" panel without the user having to read the full PDF.
+# keyFigures is an open dict: include only metrics explicitly stated in the content.
+# Earnings examples:  {"EPS": "18.4¢", "NPAT": "$120M", "Revenue": "$340M", "vs Prior": "+12%"}
+# Dividend examples:  {"Amount": "15¢/share", "Franking": "100%", "Ex-Date": "2026-06-01", "Pay-Date": "2026-06-15"}
+# Capital Raise:      {"Raise Amount": "$50M", "Issue Price": "$2.50", "Discount": "8%"}
+# Acquisition:        {"Target": "Company X", "Deal Value": "$120M", "Premium": "25%"}
+_LLM_PROMPT_TEMPLATE_PS = (
+    "Analyse this PRICE-SENSITIVE ASX announcement carefully. "
+    "Reply with valid JSON only, no markdown.\n\n"
+    "Ticker: {ticker}\n"
+    "Headline: {headline}\n"
+    "Content: {content}\n\n"
+    "Reply with ONLY this JSON. Extract keyFigures — only values EXPLICITLY stated in the content "
+    "(e.g. EPS, NPAT, revenue, dividend amount, franking %, ex-date, pay-date, "
+    "raise amount/price/discount, acquisition value/premium). "
+    "Omit any key not mentioned. Use short human-readable keys and values.\n"
+    '{{"type":"Earnings|Dividend|Capital Raise|CEO Change|Acquisition|AGM|'
+    'Trading Halt|Asset Sale|Guidance Update|Other",'
+    '"sentiment":"positive|neutral|negative",'
+    '"impact":8,'
+    '"summary":"Max 200 chars. Open with the single most important figure or outcome.",'
+    '"tags":["tag1","tag2"],'
+    '"keyFigures":{{"key":"value"}}}}'
+)
+
 # ---------------------------------------------------------------------------
 # Sync state (module-level)
 # ---------------------------------------------------------------------------
@@ -252,6 +278,7 @@ CREATE TABLE IF NOT EXISTS announcements (
     llm_model       TEXT,
     processed       INTEGER DEFAULT 0,
     fetched_at      TEXT,
+    details         TEXT,
     created_at      TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_ann_ticker ON announcements(ticker);
@@ -272,6 +299,7 @@ def init_db(db_path: Optional[str | Path] = None) -> None:
         # Safe migrations — no-op if column already exists
         for col_def, label in [
             ("ALTER TABLE announcements ADD COLUMN doc_key      TEXT", "doc_key"),
+            ("ALTER TABLE announcements ADD COLUMN details      TEXT", "details"),
         ]:
             try:
                 conn.execute(col_def)
@@ -983,13 +1011,13 @@ def extract_text(pdf_bytes: bytes) -> str:
 # LLM classification
 # ---------------------------------------------------------------------------
 
-def _build_prompt(ticker: str, headline: str, pdf_text: str) -> str:
-    content = (pdf_text or headline)[:1200].replace("\n", " ").strip()
-    return _LLM_PROMPT_TEMPLATE.format(
-        ticker=ticker,
-        headline=headline,
-        content=content,
-    )
+def _build_prompt(ticker: str, headline: str, pdf_text: str,
+                  price_sensitive: bool = False) -> str:
+    # Give price-sensitive announcements more context so the LLM can extract key figures
+    max_chars = 1500 if price_sensitive else 1200
+    content = (pdf_text or headline)[:max_chars].replace("\n", " ").strip()
+    template = _LLM_PROMPT_TEMPLATE_PS if price_sensitive else _LLM_PROMPT_TEMPLATE
+    return template.format(ticker=ticker, headline=headline, content=content)
 
 
 def _robust_json_parse(raw: str) -> Optional[Dict]:
@@ -1370,8 +1398,15 @@ def classify_announcement(
     headline: str,
     pdf_text: str,
     settings: Optional[Dict] = None,
+    price_sensitive: bool = False,
 ) -> Dict:
-    """Classify an announcement using the configured LLM with keyword fallback."""
+    """Classify an announcement using the configured LLM with keyword fallback.
+
+    For price-sensitive announcements (price_sensitive=True):
+      - Uses a richer prompt that asks for structured keyFigures extraction.
+      - Retries once if the first LLM call fails (transient error / JSON parse failure).
+      - keyFigures are serialised to JSON and stored in result["details"].
+    """
     settings = settings or {}
     provider = settings.get("ann_llm_provider", "ollama").lower()
 
@@ -1381,7 +1416,7 @@ def classify_announcement(
         # User explicitly wants heuristic only — skip LLM
         result = _classify_keyword(ticker, headline, pdf_text)
     else:
-        prompt = _build_prompt(ticker, headline, pdf_text)
+        prompt = _build_prompt(ticker, headline, pdf_text, price_sensitive=price_sensitive)
         provider_fns = {
             "ollama":  _classify_ollama,
             "groq":    _classify_groq,
@@ -1390,19 +1425,35 @@ def classify_announcement(
         fn = provider_fns.get(provider)
         if fn:
             result = fn(prompt, settings)
+            # Price-sensitive announcements are high-value — retry once on failure
+            if result is None and price_sensitive:
+                logger.info(
+                    "classify_announcement: PS retry for %s — first attempt failed", ticker
+                )
+                time.sleep(1.5)
+                result = fn(prompt, settings)
+
             if result:
                 logger.debug(
                     "classify_announcement: %s classified by %s",
                     ticker, result.get("llm_model"),
                 )
+                # Encode keyFigures (returned by PS prompt) into the details field
+                kf = result.pop("keyFigures", None)
+                if isinstance(kf, dict) and kf:
+                    result["details"] = json.dumps(kf)
+                else:
+                    result.setdefault("details", "")
             else:
                 logger.warning(
-                    "classify_announcement: %s — provider '%s' failed, falling back to keyword",
+                    "classify_announcement: %s — provider '%s' failed%s, falling back to keyword",
                     ticker, provider,
+                    " after PS retry" if price_sensitive else "",
                 )
 
         if not result:
             result = _classify_keyword(ticker, headline, pdf_text)
+            result.setdefault("details", "")
 
     return result
 
@@ -1425,10 +1476,10 @@ def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
             """
             INSERT INTO announcements
                 (id, ticker, date, headline, pdf_url, doc_key, pdf_text, type, sentiment, impact,
-                 price_sensitive, summary, tags, llm_model, processed, fetched_at)
+                 price_sensitive, summary, tags, llm_model, details, processed, fetched_at)
             VALUES
                 (:id, :ticker, :date, :headline, :pdf_url, :doc_key, :pdf_text, :type, :sentiment, :impact,
-                 :price_sensitive, :summary, :tags, :llm_model, :processed, :fetched_at)
+                 :price_sensitive, :summary, :tags, :llm_model, :details, :processed, :fetched_at)
             """,
             {
                 "id": ann.get("id"),
@@ -1445,8 +1496,10 @@ def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
                 "summary": ann.get("summary"),
                 "tags": json.dumps(ann.get("tags", [])),
                 "llm_model": ann.get("llm_model"),
+                "details": ann.get("details", ""),
                 "processed": ann.get("processed", 0),
-                "fetched_at": ann.get("fetched_at", datetime.utcnow().isoformat()),
+                # Always store UTC with Z so JS new Date() parses it correctly as UTC
+                "fetched_at": ann.get("fetched_at", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")),
             },
         )
     return True
@@ -1760,12 +1813,14 @@ def run_sync(
                 pre_type = _markit_type(markit_type_raw) if markit_type_raw else None
 
                 # LLM classify — passes headline + pdf_text (may be empty)
+                is_ps = bool(ann.get("price_sensitive", 0))
                 try:
                     classification = classify_announcement(
                         ticker=ticker,
                         headline=ann.get("headline", ""),
                         pdf_text=pdf_text,
                         settings=settings,
+                        price_sensitive=is_ps,
                     )
                     # Prefer Markit-derived type over keyword heuristic when LLM
                     # falls back to keyword_fallback and we have a Markit type
@@ -1780,10 +1835,12 @@ def run_sync(
                     kw = _classify_keyword(ticker, ann.get("headline", ""), pdf_text)
                     if pre_type and pre_type != "Other":
                         kw["type"] = pre_type
+                    kw.setdefault("details", "")
                     ann.update(kw)
                     ann["processed"] = 0
 
-                ann["fetched_at"] = datetime.utcnow().isoformat()
+                # Always store UTC with Z suffix so JS new Date() parses it correctly
+                ann["fetched_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 # Persist
                 try:
@@ -1807,7 +1864,10 @@ def run_sync(
 
         _update_status(
             running=False,
-            last_run=datetime.utcnow().isoformat(),
+            # Store with Z suffix so JS new Date() parses it correctly as UTC.
+            # Without Z, browsers in UTC+10 interpret a naive UTC string as local
+            # time, making the "X min ago" display 600 min (10 h) ahead.
+            last_run=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             last_count=total_saved,
             current_ticker=None,
             tickers_done=len(tickers),
