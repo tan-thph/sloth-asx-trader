@@ -1375,7 +1375,17 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
                         timeout=(30, read_timeout),
                     )
                     if r2.status_code == 200:
-                        raw = r2.json().get("response", "").strip()
+                        r2_json = r2.json()
+                        raw = r2_json.get("response", "").strip()
+                        # qwen3.5:9b STILL routes to thinking field even on retry
+                        # with format:json — check that field too
+                        if not raw:
+                            raw = r2_json.get("thinking", "").strip()
+                            if raw:
+                                logger.debug(
+                                    "_classify_ollama [%s]: retry response also empty — "
+                                    "using thinking field (%d chars)", model, len(raw),
+                                )
                         logger.debug("_classify_ollama [%s] retry raw: %s", model, raw[:300])
                         result = _parse_llm_json(raw)
                 except Exception as exc2:
