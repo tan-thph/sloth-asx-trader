@@ -454,8 +454,12 @@ def _fetch_markit_doc_key(ticker: str, headline: str = "", date: str = "") -> tu
                 logger.debug("_fetch_markit_doc_key: matched by date+prefix for %s → %s", ticker, dk)
                 matched = True
             if matched:
-                # Log all item keys once so we can see what the API provides
-                logger.debug("_fetch_markit_doc_key: item keys for %s: %s", ticker, list(item.keys()))
+                # Log the raw url value so we can see exactly what Markit returns
+                raw_url_val = item.get("url")
+                logger.debug(
+                    "_fetch_markit_doc_key: item keys=%s | url=%r",
+                    list(item.keys()), raw_url_val,
+                )
                 # Also capture direct PDF URL if Markit returns one
                 direct_url = (
                     item.get("url") or item.get("pdfUrl") or
@@ -532,8 +536,11 @@ def _strategy_markit(ticker: str, days: int) -> List[Dict]:
         if direct_url:
             logger.debug("_strategy_markit: using direct URL for %s: %s", ticker, pdf_url)
         else:
-            # Log available keys so we can find the right URL field if one is added
-            logger.debug("_strategy_markit: item keys for %s: %s", ticker, list(item.keys()))
+            # Log the url field value so we know if/when Markit starts returning it
+            logger.debug(
+                "_strategy_markit: no direct URL for %s (url=%r, keys=%s)",
+                ticker, item.get("url"), list(item.keys()),
+            )
 
         results.append({
             "id": _make_ann_id(ticker, date_str, headline),
@@ -913,6 +920,40 @@ def download_pdf(
             result = _fetch(markit_direct_url, "markit-direct-url")
             if result:
                 return result
+
+    # Strategy 0b: Markit document metadata endpoint (no /download suffix).
+    # May return JSON with a url/downloadUrl field pointing to the real PDF.
+    if doc_key:
+        meta_url = (
+            f"https://asx.api.markitdigital.com/asx-research/1.0/documents/{doc_key}"
+        )
+        try:
+            r_meta = requests.get(
+                meta_url,
+                headers=_MARKIT_HEADERS,
+                timeout=(10, 20),
+                allow_redirects=True,
+            )
+            logger.debug("download_pdf [markit-meta]: HTTP %s for %s", r_meta.status_code, meta_url)
+            if r_meta.status_code == 200 and r_meta.content:
+                try:
+                    meta_body = r_meta.json()
+                    # Navigate common response shapes
+                    meta_data = meta_body.get("data") or meta_body
+                    if isinstance(meta_data, dict):
+                        cdn_url = (
+                            meta_data.get("url") or meta_data.get("downloadUrl") or
+                            meta_data.get("pdfUrl") or meta_data.get("documentUrl") or ""
+                        )
+                        if cdn_url:
+                            logger.debug("download_pdf [markit-meta]: got URL → %s", cdn_url)
+                            result = _fetch(cdn_url, "markit-meta-url")
+                            if result:
+                                return result
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("download_pdf [markit-meta] failed: %s", exc)
 
     # Strategy 1: Markit documents API — do NOT follow redirects; capture the
     # csf.asx.com.au CDN URL from the Location header and fetch that separately.
