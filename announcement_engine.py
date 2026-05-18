@@ -1322,32 +1322,45 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
         )
         if resp.status_code == 200:
             resp_json = resp.json()
-            raw = resp_json.get("response", "")
+            raw = resp_json.get("response", "").strip()
             logger.debug("_classify_ollama [%s] raw response: %s", model, raw[:300])
 
-            # ── Fallback A: empty response from thinking model ────────────────
-            # Some Ollama versions ignore the think:False option and put ALL
-            # output into the 'thinking' field, leaving 'response' empty.
-            # e.g. qwen3.5:9b on Ollama < 0.7.x exhibits this behaviour.
-            if not raw.strip() and thinking:
-                thinking_raw = resp_json.get("thinking", "")
-                if thinking_raw.strip():
+            # ── Fallback A: check 'thinking' field when 'response' is empty ──
+            # Some Ollama versions ignore think:False and put ALL output into the
+            # 'thinking' field (qwen3.5:9b on Ollama < 0.7.x does this).
+            if not raw and thinking:
+                thinking_raw = resp_json.get("thinking", "").strip()
+                if thinking_raw:
                     logger.debug(
                         "_classify_ollama [%s]: response empty — using thinking field (%d chars)",
                         model, len(thinking_raw),
                     )
-                    raw = thinking_raw  # _parse_llm_json will strip <think> tags if any
+                    raw = thinking_raw
 
-            # ── Fallback B: still empty — retry without think constraints ─────
-            # If think:False is unsupported AND the model produces no output at
-            # all (some quantised builds), retry treating it as non-thinking:
-            # drop the /no_think prefix, drop think:False, add format:json.
-            if not raw.strip() and thinking:
-                logger.warning(
-                    "_classify_ollama [%s]: empty response with think:False — Ollama may not "
-                    "support this option; retrying without think constraints", model,
+            # Try parsing whatever we have so far
+            result = _parse_llm_json(raw) if raw else None
+
+            # ── Fallback B: retry without think constraints ───────────────────
+            # Triggers when the thinking model produced no parseable JSON — covers
+            # TWO cases the old code missed:
+            #   • response empty + thinking field also empty
+            #   • response empty + thinking field contains raw prose ("Thinking
+            #     Process: …") with no JSON object embedded in it
+            # Fix: condition is now `result is None and thinking`, NOT `not raw`.
+            if result is None and thinking:
+                reason = (
+                    "empty response and thinking field"
+                    if not raw
+                    else "thinking field contains prose with no parseable JSON"
                 )
-                clean_prompt = prompt[len("/no_think\n"):] if prompt.startswith("/no_think\n") else prompt
+                logger.warning(
+                    "_classify_ollama [%s]: %s — retrying without think constraints",
+                    model, reason,
+                )
+                clean_prompt = (
+                    prompt[len("/no_think\n"):]
+                    if prompt.startswith("/no_think\n") else prompt
+                )
                 retry_payload = {
                     "model":   model,
                     "prompt":  clean_prompt,
@@ -1362,14 +1375,12 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
                         timeout=(30, read_timeout),
                     )
                     if r2.status_code == 200:
-                        raw = r2.json().get("response", "")
-                        logger.debug(
-                            "_classify_ollama [%s] retry raw: %s", model, raw[:300]
-                        )
+                        raw = r2.json().get("response", "").strip()
+                        logger.debug("_classify_ollama [%s] retry raw: %s", model, raw[:300])
+                        result = _parse_llm_json(raw)
                 except Exception as exc2:
                     logger.debug("_classify_ollama think-retry failed: %s", exc2)
 
-            result = _parse_llm_json(raw)
             if result:
                 result["llm_model"] = f"ollama/{model}"
                 return result
