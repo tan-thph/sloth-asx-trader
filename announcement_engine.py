@@ -404,12 +404,16 @@ def _normalise_pdf_url(url: str, base: str = "https://www.asx.com.au") -> str:
 # ---------------------------------------------------------------------------
 
 def _markit_pdf_url(doc_key: str, date_str: str) -> str:
-    """Construct an ASX PDF URL from a Markit documentKey.
+    """Construct a direct ASX PDF URL from a Markit documentKey.
 
     documentKey format: "2924-{idsId}-{markitXid}"  e.g. "2924-03088504-3A693022"
-    The middle part is the ASX `idsId`.  The displayAnnouncement.do endpoint
-    accepts it and redirects (HTTP 302) to the actual obfuscated PDF filename,
-    so requests with allow_redirects=True will land on the real file.
+    The middle part is the ASX numeric idsId which doubles as the filename for
+    the majority of announcements on the announcements.asx.com.au CDN.
+
+    NOTE: A small subset of announcements (ASX new MAP system) use an opaque hex
+    filename (e.g. "06zp2v2khtz6kr") that cannot be derived from the idsId.
+    Those announcements will still fail to download via this URL; they need the
+    Markit url field (currently always empty) or another source.
     """
     if not doc_key:
         return ""
@@ -417,6 +421,12 @@ def _markit_pdf_url(doc_key: str, date_str: str) -> str:
     if len(parts) < 2:
         return ""
     ids_id = parts[1]  # e.g. "03088504"
+    # Use the direct CDN URL — works within ~2 days of publication.
+    # date_str is "YYYY-MM-DD"; CDN path uses "YYYYMMDD".
+    date_compact = date_str.replace("-", "") if date_str else ""
+    if date_compact:
+        return f"https://announcements.asx.com.au/asxpdf/{date_compact}/pdf/{ids_id}.pdf"
+    # No date → fall back to the displayAnnouncement.do redirect chain
     return f"https://www.asx.com.au/asx/statistics/displayAnnouncement.do?display=pdf&idsId={ids_id}"
 
 
@@ -1005,11 +1015,27 @@ def download_pdf(
         except Exception as exc:
             logger.warning("download_pdf [markit-api]: %s — %s", markit_dl_url, exc)
 
-    # Strategy 2: stored pdf_url (displayAnnouncement.do or direct CDN link)
+    # Strategy 2: stored pdf_url (direct CDN link or displayAnnouncement.do)
     if url:
         result = _fetch(url, "stored-url")
         if result:
             return result
+
+    # Strategy 2b: try direct CDN URL constructed from doc_key + date when the
+    # stored URL is the dead displayAnnouncement.do format.
+    # New syncs will already store the CDN URL; this covers old records.
+    if doc_key and date and "displayAnnouncement" in url:
+        parts = doc_key.split("-")
+        if len(parts) >= 2:
+            ids_id = parts[1]
+            date_compact = date.replace("-", "")
+            cdn_direct = (
+                f"https://announcements.asx.com.au/asxpdf/{date_compact}/pdf/{ids_id}.pdf"
+            )
+            if cdn_direct != url:
+                result = _fetch(cdn_direct, "cdn-direct")
+                if result:
+                    return result
 
     # Strategy 3: reconstruct displayAnnouncement.do from doc_key idsId
     # (kept as last resort — ASX may still serve some older docs this way)
