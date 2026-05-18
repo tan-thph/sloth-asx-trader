@@ -90,6 +90,8 @@ def sync_status():
             row = conn.execute("SELECT COUNT(*) FROM announcements").fetchone()
             total = row[0] if row else 0
         status['total_in_db'] = total
+        # JS reads `last_sync`; engine stores `last_run` — expose both so either works
+        status['last_sync'] = status.get('last_run')
         return jsonify(status)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
