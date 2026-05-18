@@ -1321,8 +1321,54 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
             timeout=(30, read_timeout),
         )
         if resp.status_code == 200:
-            raw = resp.json().get("response", "")
+            resp_json = resp.json()
+            raw = resp_json.get("response", "")
             logger.debug("_classify_ollama [%s] raw response: %s", model, raw[:300])
+
+            # ── Fallback A: empty response from thinking model ────────────────
+            # Some Ollama versions ignore the think:False option and put ALL
+            # output into the 'thinking' field, leaving 'response' empty.
+            # e.g. qwen3.5:9b on Ollama < 0.7.x exhibits this behaviour.
+            if not raw.strip() and thinking:
+                thinking_raw = resp_json.get("thinking", "")
+                if thinking_raw.strip():
+                    logger.debug(
+                        "_classify_ollama [%s]: response empty — using thinking field (%d chars)",
+                        model, len(thinking_raw),
+                    )
+                    raw = thinking_raw  # _parse_llm_json will strip <think> tags if any
+
+            # ── Fallback B: still empty — retry without think constraints ─────
+            # If think:False is unsupported AND the model produces no output at
+            # all (some quantised builds), retry treating it as non-thinking:
+            # drop the /no_think prefix, drop think:False, add format:json.
+            if not raw.strip() and thinking:
+                logger.warning(
+                    "_classify_ollama [%s]: empty response with think:False — Ollama may not "
+                    "support this option; retrying without think constraints", model,
+                )
+                clean_prompt = prompt[len("/no_think\n"):] if prompt.startswith("/no_think\n") else prompt
+                retry_payload = {
+                    "model":   model,
+                    "prompt":  clean_prompt,
+                    "stream":  False,
+                    "format":  "json",
+                    "options": {"temperature": 0.1, "num_predict": num_predict},
+                }
+                try:
+                    r2 = requests.post(
+                        f"{ollama_url}/api/generate",
+                        json=retry_payload,
+                        timeout=(30, read_timeout),
+                    )
+                    if r2.status_code == 200:
+                        raw = r2.json().get("response", "")
+                        logger.debug(
+                            "_classify_ollama [%s] retry raw: %s", model, raw[:300]
+                        )
+                except Exception as exc2:
+                    logger.debug("_classify_ollama think-retry failed: %s", exc2)
+
             result = _parse_llm_json(raw)
             if result:
                 result["llm_model"] = f"ollama/{model}"

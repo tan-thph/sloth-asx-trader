@@ -127,16 +127,18 @@ async function renderAnnouncementsPage(gen) {
     if (f.type       && f.type       !== 'all') params.set('type',      f.type);
     if (f.sentiment  && f.sentiment  !== 'all') params.set('sentiment', f.sentiment);
 
-    const [statusResp, feedResp] = await Promise.all([
+    const [statusResp, feedResp, reclassifyResp] = await Promise.all([
       fetch(`${API}/api/announcements/status`).then(r => r.ok ? r.json() : {}).catch(() => ({})),
       fetch(`${API}/api/announcements?${params}`).then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] })),
+      fetch(`${API}/api/announcements/reclassify-status`).then(r => r.ok ? r.json() : {}).catch(() => ({})),
     ]);
 
     if (state._renderGen !== gen) return; // stale render guard
 
-    state.announcements.status   = statusResp;
-    state.announcements.items    = feedResp.items || [];
-    state.announcements.lastSync = statusResp.last_sync || null;
+    state.announcements.status           = statusResp;
+    state.announcements.items            = feedResp.items || [];
+    state.announcements.lastSync         = statusResp.last_sync || null;
+    state.announcements.reclassifyStatus = reclassifyResp;
 
     // Always load settings from server so the form reflects what's actually saved
     if (!state.announcements._settingsLoaded) {
@@ -229,6 +231,18 @@ function _annPageHTML(status) {
   if (isRunning) {
     setTimeout(_startAnnSyncPoller, 100);
     setTimeout(() => _setAnnSyncBtn(true), 100);
+  }
+  // Restore re-classify progress bar if a job is running (survives page refresh)
+  const rc = state.announcements.reclassifyStatus || {};
+  if (rc.running) {
+    setTimeout(() => {
+      const progress = document.getElementById('ann-reclassify-progress');
+      const btn      = document.getElementById('ann-reclassify-btn');
+      if (progress) progress.style.display = 'block';
+      if (btn)      { btn.disabled = true; btn.style.opacity = '0.6'; }
+      _updateReclassifyBar(rc.done || 0, rc.total || 0, rc.updated || 0);
+      _startReclassifyPoller();
+    }, 200);
   }
 
   return `
@@ -603,20 +617,27 @@ function _annSettingsPanelHTML(status) {
         <span id="ann-settings-saved-msg" style="font-size:12px;color:#16a34a;display:none">✓ Saved</span>
       </div>
 
-      <!-- Re-classify progress (hidden until running) -->
-      <div id="ann-reclassify-progress" style="display:none;margin-top:10px">
+      <!-- Re-classify progress (hidden unless running) -->
+      ${(() => {
+        const rc  = state.announcements.reclassifyStatus || {};
+        const vis = rc.running ? 'block' : 'none';
+        const pct = rc.total > 0 ? Math.round((rc.done / rc.total) * 100) : 0;
+        const lbl = rc.running
+          ? `Re-classifying… ${rc.done || 0} of ${rc.total || 0} (${rc.updated || 0} updated)`
+          : 'Re-classifying…';
+        return `
+      <div id="ann-reclassify-progress" style="display:${vis};margin-top:10px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-          <span id="ann-reclassify-label" style="font-size:12px;color:var(--text-secondary)">
-            Re-classifying…
-          </span>
-          <span id="ann-reclassify-pct" style="font-size:11px;color:var(--text-muted)">0%</span>
+          <span id="ann-reclassify-label" style="font-size:12px;color:var(--text-secondary)">${lbl}</span>
+          <span id="ann-reclassify-pct" style="font-size:11px;color:var(--text-muted)">${pct}%</span>
         </div>
         <div style="height:6px;background:var(--border-light);border-radius:99px;overflow:hidden">
           <div id="ann-reclassify-bar"
-               style="height:100%;width:0%;background:linear-gradient(90deg,#6366f1,#3b82f6);
+               style="height:100%;width:${pct}%;background:linear-gradient(90deg,#6366f1,#3b82f6);
                       border-radius:99px;transition:width 0.4s ease"></div>
         </div>
-      </div>
+      </div>`;
+      })()}
     </div>`;
 }
 
