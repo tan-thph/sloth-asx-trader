@@ -1715,11 +1715,13 @@ _reclassify_status: Dict[str, Any] = {
     "total":      0,
     "done":       0,
     "updated":    0,
+    "stopped":    False,
     "last_run":   None,
     "last_count": 0,
     "last_error": None,
 }
 _reclassify_lock = threading.Lock()
+_reclassify_stop_flag = False   # set True to request early exit
 
 
 def get_reclassify_status() -> Dict:
@@ -1730,6 +1732,14 @@ def get_reclassify_status() -> Dict:
 def _update_reclassify_status(**kwargs: Any) -> None:
     with _reclassify_lock:
         _reclassify_status.update(kwargs)
+
+
+def request_reclassify_stop() -> None:
+    """Signal the running reclassify_all() loop to exit after the current item."""
+    global _reclassify_stop_flag
+    with _reclassify_lock:
+        _reclassify_stop_flag = True
+    logger.info("reclassify_all: stop requested")
 
 
 # ---------------------------------------------------------------------------
@@ -1752,8 +1762,12 @@ def reclassify_all(
     settings = settings or {}
     cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
 
+    global _reclassify_stop_flag
+    with _reclassify_lock:
+        _reclassify_stop_flag = False   # clear any previous stop request
+
     _update_reclassify_status(
-        running=True, done=0, updated=0, total=0, last_error=None,
+        running=True, done=0, updated=0, total=0, stopped=False, last_error=None,
     )
 
     with get_db(db_path) as conn:
@@ -1775,6 +1789,13 @@ def reclassify_all(
     updated = 0
 
     for i, row in enumerate(rows):
+        # Check stop flag before each item (set via request_reclassify_stop())
+        with _reclassify_lock:
+            if _reclassify_stop_flag:
+                logger.info("reclassify_all: stopped by user at %d/%d", i, len(rows))
+                _update_reclassify_status(stopped=True)
+                break
+
         ann_id   = row["id"]
         ticker   = row["ticker"]
         headline = row["headline"] or ""
@@ -1817,13 +1838,17 @@ def reclassify_all(
 
         time.sleep(0.1)  # avoid hammering the LLM
 
+    with _reclassify_lock:
+        was_stopped = _reclassify_stop_flag
     _update_reclassify_status(
         running=False,
         done=len(rows),
+        stopped=was_stopped,
         last_run=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         last_count=updated,
     )
-    logger.info("reclassify_all: updated %d / %d announcements", updated, len(rows))
+    logger.info("reclassify_all: updated %d / %d announcements%s",
+                updated, len(rows), " (stopped early)" if was_stopped else "")
     return updated
 
 

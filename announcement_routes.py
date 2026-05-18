@@ -189,6 +189,19 @@ def reclassify_status():
         return jsonify({"error": str(e)}), 500
 
 
+@ann_bp.route('/reclassify-stop', methods=['POST'])
+def reclassify_stop():
+    """Request the running re-classification to stop after the current item."""
+    try:
+        status = ae.get_reclassify_status()
+        if not status.get('running'):
+            return jsonify({"ok": False, "error": "No re-classify job is running"}), 400
+        ae.request_reclassify_stop()
+        return jsonify({"ok": True, "message": "Stop requested"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 DEFAULT_SETTINGS = {
     "ann_llm_provider": "ollama",
     "ann_llm_model": "qwen2.5:1.5b",

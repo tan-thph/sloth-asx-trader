@@ -629,7 +629,13 @@ function _annSettingsPanelHTML(status) {
       <div id="ann-reclassify-progress" style="display:${vis};margin-top:10px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
           <span id="ann-reclassify-label" style="font-size:12px;color:var(--text-secondary)">${lbl}</span>
-          <span id="ann-reclassify-pct" style="font-size:11px;color:var(--text-muted)">${pct}%</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="ann-reclassify-pct" style="font-size:11px;color:var(--text-muted)">${pct}%</span>
+            <button id="ann-reclassify-stop-btn" onclick="stopReclassify()"
+              class="btn btn-sm"
+              style="font-size:11px;padding:1px 8px;color:#dc2626;border-color:#fca5a5"
+              title="Stop after current announcement">⏹ Stop</button>
+          </div>
         </div>
         <div style="height:6px;background:var(--border-light);border-radius:99px;overflow:hidden">
           <div id="ann-reclassify-bar"
@@ -955,14 +961,24 @@ function _startReclassifyPoller() {
         _stopReclassifyPoller();
         const btn      = document.getElementById('ann-reclassify-btn');
         const progress = document.getElementById('ann-reclassify-progress');
-        if (btn)      { btn.disabled = false; btn.style.opacity = ''; }
-        // Keep the bar at 100% for 2 s so the user sees completion, then hide
-        _updateReclassifyBar(s.total || 0, s.total || 0, s.last_count || 0);
+        const labelEl  = document.getElementById('ann-reclassify-label');
+        if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+
+        const wasStopped = s.stopped;
+        const finalPct   = (s.total > 0 && !wasStopped) ? s.total : (s.done || 0);
+        _updateReclassifyBar(finalPct, s.total || finalPct, s.last_count || 0);
+        if (labelEl) labelEl.textContent = wasStopped
+          ? `Stopped at ${s.done || 0} of ${s.total || 0} (${s.last_count || 0} updated)`
+          : `Complete — ${s.last_count || 0} of ${s.total || 0} updated`;
+
         setTimeout(() => {
           if (progress) progress.style.display = 'none';
-        }, 2000);
-        toast(`Re-classify complete — ${s.last_count || 0} announcement${s.last_count !== 1 ? 's' : ''} updated`, 'success');
-        // Refresh cards to reflect new LLM classifications
+        }, 2500);
+
+        const msg = wasStopped
+          ? `Stopped — ${s.last_count || 0} announcement${s.last_count !== 1 ? 's' : ''} updated before stop`
+          : `Re-classify complete — ${s.last_count || 0} announcement${s.last_count !== 1 ? 's' : ''} updated`;
+        toast(msg, wasStopped ? 'info' : 'success');
         setTimeout(() => renderPage(), 500);
       }
     } catch { /* ignore transient errors */ }
@@ -971,6 +987,17 @@ function _startReclassifyPoller() {
 
 function _stopReclassifyPoller() {
   if (_reclassifyPoller) { clearInterval(_reclassifyPoller); _reclassifyPoller = null; }
+}
+
+async function stopReclassify() {
+  const stopBtn = document.getElementById('ann-reclassify-stop-btn');
+  if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = '⏹ Stopping…'; }
+  try {
+    await fetch(`${API}/api/announcements/reclassify-stop`, { method: 'POST' });
+  } catch (e) {
+    toast(`Stop request failed: ${e.message}`, 'error');
+    if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop'; }
+  }
 }
 
 // ── Toggle provider-specific form fields ──────────────────────
