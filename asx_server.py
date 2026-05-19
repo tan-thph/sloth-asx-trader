@@ -1851,6 +1851,36 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
 
         # Sort by score descending, then enforce max 4 per sector for diversification
         results.sort(key=lambda x: x["score"], reverse=True)
+
+        # ── Sector stats (from ALL liquidity-passing tickers, not just top-N) ──
+        sector_agg: dict = {}
+        for r in results:
+            sec = r["sector"]
+            if sec not in sector_agg:
+                sector_agg[sec] = {
+                    "scores": [], "ret_5d": [], "ret_20d": [],
+                    "top_ticker": "", "top_score": -1,
+                }
+            d = sector_agg[sec]
+            d["scores"].append(r["score"])
+            d["ret_5d"].append(r["ret_5d"])
+            d["ret_20d"].append(r["ret_20d"])
+            if r["score"] > d["top_score"]:
+                d["top_ticker"] = r["ticker"]
+                d["top_score"]  = r["score"]
+
+        sector_stats = sorted([
+            {
+                "sector":      sec,
+                "count":       len(d["scores"]),
+                "avg_score":   round(sum(d["scores"])   / len(d["scores"]),   1),
+                "avg_ret_5d":  round(sum(d["ret_5d"])   / len(d["ret_5d"]),   2),
+                "avg_ret_20d": round(sum(d["ret_20d"])  / len(d["ret_20d"]),  2),
+                "top_ticker":  d["top_ticker"],
+            }
+            for sec, d in sector_agg.items()
+        ], key=lambda x: x["avg_score"], reverse=True)
+
         sector_counts: dict[str, int] = {}
         diversified = []
         for r in results:
@@ -1866,6 +1896,7 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
                 "running":        False,
                 "stage":          "complete",
                 "results":        diversified,
+                "sector_stats":   sector_stats,
                 "filtered_count": len(results),
                 "scanned_at":     datetime.now().strftime("%H:%M"),
             })

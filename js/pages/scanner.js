@@ -2,9 +2,10 @@
 // MARKET SCANNER
 // ============================================================
 
-let _scanPollTimer  = null;
-let _scannerSort    = { col: 'score', dir: 'desc' };
-let _scannerUniverse = 'asx200';
+let _scanPollTimer    = null;
+let _scannerSort      = { col: 'score', dir: 'desc' };
+let _scannerUniverse  = 'asx200';
+let _scannerSector    = null;   // null = all sectors; string = filter to one sector
 
 async function renderScannerPage(gen) {
   const el = document.getElementById('main-content');
@@ -90,13 +91,80 @@ function _buildScannerHTML(s) {
     </div>
   </div>` : ''}
 
+  ${hasData ? _buildSectorOverview(s.sector_stats) : ''}
   ${hasData ? _buildResultsTable(s.results) : ''}
   `;
 }
 
+function _buildSectorOverview(sectorStats) {
+  if (!sectorStats || !sectorStats.length) return '';
+
+  const tiles = sectorStats.map(s => {
+    const active    = _scannerSector === s.sector;
+    const scoreCol  = s.avg_score >= 65 ? '#16a34a' : s.avg_score >= 45 ? '#d97706' : '#94a3b8';
+    const ret5Col   = s.avg_ret_5d  >= 0 ? '#16a34a' : '#dc2626';
+    const ret20Col  = s.avg_ret_20d >= 0 ? '#16a34a' : '#dc2626';
+    const barW      = Math.round(s.avg_score);
+    const border    = active ? '2px solid var(--accent-primary)' : '1px solid var(--border-light)';
+    const bg        = active ? 'var(--bg-tertiary,#1e293b)' : 'var(--bg-secondary)';
+
+    return `
+    <div onclick="scannerSetSector(${JSON.stringify(s.sector)})"
+         style="flex:0 0 auto;width:150px;padding:10px 12px;border-radius:var(--radius-md);
+                background:${bg};border:${border};cursor:pointer;transition:border 0.15s"
+         title="Click to filter results to ${s.sector}">
+      <div style="font-size:11px;font-weight:600;color:var(--text-primary);
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:6px">
+        ${active ? '✓ ' : ''}${s.sector}
+      </div>
+      <!-- score bar -->
+      <div style="display:flex;align-items:center;gap:5px;margin-bottom:5px">
+        <div style="flex:1;height:5px;background:var(--border-light);border-radius:2px;overflow:hidden">
+          <div style="width:${barW}%;height:100%;background:${scoreCol};border-radius:2px"></div>
+        </div>
+        <span style="font-size:11px;font-weight:700;color:${scoreCol};min-width:24px">${s.avg_score}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted)">
+        <span>5d <strong style="color:${ret5Col}">${s.avg_ret_5d >= 0 ? '+' : ''}${s.avg_ret_5d.toFixed(1)}%</strong></span>
+        <span>20d <strong style="color:${ret20Col}">${s.avg_ret_20d >= 0 ? '+' : ''}${s.avg_ret_20d.toFixed(1)}%</strong></span>
+      </div>
+      <div style="font-size:10px;color:var(--text-muted);margin-top:4px">
+        ${s.count} ticker${s.count !== 1 ? 's' : ''} · top: <strong>${s.top_ticker}</strong>
+      </div>
+    </div>`;
+  }).join('');
+
+  const allActive = _scannerSector === null;
+  return `
+  <div class="card" style="margin-bottom:14px">
+    <div class="flex-between" style="margin-bottom:10px">
+      <div>
+        <span class="card-title" style="margin:0">Sector Overview</span>
+        <span class="text-xs text-muted" style="margin-left:8px">avg score &amp; returns across all ${sectorStats.reduce((a,s)=>a+s.count,0)} liquid tickers scanned · click to filter</span>
+      </div>
+      ${!allActive ? `<button class="btn btn-sm" onclick="scannerSetSector(null)">✕ Clear filter</button>` : ''}
+    </div>
+    <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px">
+      <div onclick="scannerSetSector(null)"
+           style="flex:0 0 auto;width:80px;padding:10px 12px;border-radius:var(--radius-md);
+                  background:${allActive ? 'var(--bg-tertiary,#1e293b)' : 'var(--bg-secondary)'};
+                  border:${allActive ? '2px solid var(--accent-primary)' : '1px solid var(--border-light)'};
+                  cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px">
+        <span style="font-size:18px">◈</span>
+        <span style="font-size:11px;font-weight:600;color:${allActive ? 'var(--accent-primary)' : 'var(--text-secondary)'}">${allActive ? '✓ All' : 'All'}</span>
+      </div>
+      ${tiles}
+    </div>
+  </div>`;
+}
+
 function _buildResultsTable(results) {
-  // Apply current sort
-  const sorted = [...results].sort((a, b) => {
+  // Apply sector filter then sort
+  const filtered = _scannerSector
+    ? results.filter(r => r.sector === _scannerSector)
+    : results;
+
+  const sorted = [...filtered].sort((a, b) => {
     const v = _scannerSort.dir === 'desc' ? b[_scannerSort.col] - a[_scannerSort.col]
                                           : a[_scannerSort.col] - b[_scannerSort.col];
     return isNaN(v) ? 0 : v;
@@ -162,8 +230,17 @@ function _buildResultsTable(results) {
   <div class="card">
     <div class="flex-between" style="margin-bottom:10px">
       <div>
-        <div class="card-title" style="margin:0">Opportunities — ${sorted.length} results</div>
-        <div class="text-xs text-muted" style="margin-top:2px">Sorted by ${_scannerSort.col} ${_scannerSort.dir === 'desc' ? '↓' : '↑'} · max 4 per sector · click column headers to sort</div>
+        <div class="card-title" style="margin:0">
+          Opportunities — ${sorted.length} result${sorted.length !== 1 ? 's' : ''}
+          ${_scannerSector ? `<span style="margin-left:8px;font-size:12px;font-weight:400;
+            background:var(--accent-primary);color:#fff;padding:2px 8px;border-radius:10px">
+            ${_scannerSector} ✕</span>` : ''}
+        </div>
+        <div class="text-xs text-muted" style="margin-top:2px">
+          Sorted by ${_scannerSort.col} ${_scannerSort.dir === 'desc' ? '↓' : '↑'} ·
+          ${_scannerSector ? `filtered to ${_scannerSector}` : 'max 4 per sector'} ·
+          click column headers to sort
+        </div>
       </div>
       <button class="btn btn-sm" onclick="scannerAddAllToWatchlist(${JSON.stringify(sorted.map(r=>r.ticker))})">+ Add all to Watchlist</button>
     </div>
@@ -199,6 +276,12 @@ function _buildResultsTable(results) {
 
 function scannerSetUniverse(u) {
   _scannerUniverse = u;
+  _scannerSector   = null;   // reset sector filter when universe changes
+  renderPage();
+}
+
+function scannerSetSector(sector) {
+  _scannerSector = (_scannerSector === sector) ? null : sector;  // toggle off if same
   renderPage();
 }
 
