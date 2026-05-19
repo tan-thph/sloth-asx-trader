@@ -93,6 +93,7 @@ function _buildScannerHTML(s) {
 
   ${hasData ? _buildSectorOverview(s.sector_stats) : ''}
   ${hasData ? _buildResultsTable(s.results) : ''}
+  ${hasData && _scannerSector ? _buildSectorAllTickers(s.all_results, _scannerSector) : ''}
   `;
 }
 
@@ -109,7 +110,7 @@ function _buildSectorOverview(sectorStats) {
     const bg        = active ? 'var(--bg-tertiary,#1e293b)' : 'var(--bg-secondary)';
 
     return `
-    <div onclick="scannerSetSector(${JSON.stringify(s.sector)})"
+    <div onclick='scannerSetSector(${JSON.stringify(s.sector)})'
          style="flex:0 0 auto;width:150px;padding:10px 12px;border-radius:var(--radius-md);
                 background:${bg};border:${border};cursor:pointer;transition:border 0.15s"
          title="Click to filter results to ${s.sector}">
@@ -269,6 +270,81 @@ function _buildResultsTable(results) {
       <div><strong style="color:var(--text-primary)">Pullback</strong> = RSI zone 35-55 + position 5-20% off high</div>
       <div><strong style="color:var(--text-primary)">Volume</strong> = 5-day avg vs 20-day avg (accumulation signal)</div>
     </div>
+  </div>`;
+}
+
+function _buildSectorAllTickers(allResults, sector) {
+  if (!allResults || !sector) return '';
+  const sectorRows = [...allResults]
+    .filter(r => r.sector === sector)
+    .sort((a, b) => b.score - a.score);
+  if (!sectorRows.length) return '';
+
+  const portfolioTickers = new Set(state.portfolio.map(h => h.ticker));
+  const watchlistTickers = new Set(state.analysisConfig?.extraTickers || []);
+
+  const scoreBar = (score, w=50) => {
+    const color = score >= 70 ? '#16a34a' : score >= 50 ? '#d97706' : '#94a3b8';
+    return `<div style="display:flex;align-items:center;gap:5px">
+      <div style="width:${w}px;height:5px;background:var(--border-light);border-radius:2px;overflow:hidden">
+        <div style="width:${score}%;height:100%;background:${color};border-radius:2px"></div>
+      </div>
+      <span style="font-size:11px;font-weight:600;color:${color}">${score}</span>
+    </div>`;
+  };
+
+  const rows = sectorRows.map(r => {
+    const trendIcon  = r.trend_score >= 25 ? '↑' : r.trend_score >= 15 ? '→' : '↓';
+    const trendColor = r.trend_score >= 25 ? '#16a34a' : r.trend_score >= 15 ? '#d97706' : '#dc2626';
+    const rsiColor   = r.rsi < 35 ? '#16a34a' : r.rsi > 65 ? '#dc2626' : '#d97706';
+    const r5c        = r.ret_5d  >= 0 ? '#16a34a' : '#dc2626';
+    const r20c       = r.ret_20d >= 0 ? '#16a34a' : '#dc2626';
+    const highColor  = r.pct_from_high >= -10 ? '#d97706' : r.pct_from_high >= -20 ? '#16a34a' : '#94a3b8';
+    const tag = portfolioTickers.has(r.ticker)
+      ? `<span style="font-size:9px;background:#334155;color:#94a3b8;padding:1px 5px;border-radius:8px;margin-left:4px">held</span>`
+      : watchlistTickers.has(r.ticker)
+      ? `<span style="font-size:9px;background:#14532d;color:#86efac;padding:1px 5px;border-radius:8px;margin-left:4px">watch</span>`
+      : '';
+    return `<tr>
+      <td><strong>${r.ticker}</strong>${tag}</td>
+      <td>$${fmt(r.current_price, 3)}</td>
+      <td>${scoreBar(r.score)}</td>
+      <td style="text-align:center"><span style="color:${trendColor};font-weight:600">${trendIcon} ${r.trend_score}</span></td>
+      <td style="text-align:center"><span style="color:${rsiColor}">${fmt(r.rsi,1)}</span></td>
+      <td style="text-align:center;color:${r5c};font-weight:600">${r.ret_5d>=0?'+':''}${fmt(r.ret_5d,1)}%</td>
+      <td style="text-align:center;color:${r20c}">${r.ret_20d>=0?'+':''}${fmt(r.ret_20d,1)}%</td>
+      <td style="text-align:center;color:${highColor}">${fmt(r.pct_from_high,1)}%</td>
+      <td style="text-align:center;color:var(--text-muted);font-size:11px">${fmt(r.adv_aud,1)}M</td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="card" style="margin-top:14px">
+    <div class="flex-between" style="margin-bottom:10px">
+      <div>
+        <span class="card-title" style="margin:0">All ${sector} Tickers</span>
+        <span class="text-xs text-muted" style="margin-left:8px">${sectorRows.length} liquid tickers · no opportunity rules applied · sorted by score</span>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Ticker</th><th>Price</th>
+          <th style="min-width:100px">Score</th>
+          <th style="text-align:center">Trend</th>
+          <th style="text-align:center">RSI</th>
+          <th style="text-align:center">5d%</th>
+          <th style="text-align:center">20d%</th>
+          <th style="text-align:center">vs High</th>
+          <th style="text-align:center">Vol $M</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p class="text-xs text-muted mt-1">
+      All tickers from the scanned universe in the ${sector} sector that passed the liquidity filter.
+      No score threshold, diversification cap, or opportunity rules applied.
+    </p>
   </div>`;
 }
 

@@ -1895,7 +1895,8 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
             _scan_state.update({
                 "running":        False,
                 "stage":          "complete",
-                "results":        diversified,
+                "results":        diversified,       # top-N diversified opportunities
+                "all_results":    results,            # every liquid ticker scored (no cap)
                 "sector_stats":   sector_stats,
                 "filtered_count": len(results),
                 "scanned_at":     datetime.now().strftime("%H:%M"),
