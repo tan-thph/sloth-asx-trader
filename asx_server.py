@@ -1590,6 +1590,328 @@ def portfolio_nav_history():
         return jsonify({"error": str(exc)}), 500
 
 
+# ── Market Scanner ─────────────────────────────────────────────────────────────
+
+# Sector map for all universe tickers (used for diversification in results)
+_SECTOR_MAP: Dict[str, str] = {
+    # Financials
+    **{t: "Financials" for t in [
+        "CBA","WBC","ANZ","NAB","MQG","QBE","SUN","IAG","AMP","CGF",
+        "HUB","PPT","PTM","MFG","CIN","EQT","ASX","IFL","AUB","GQG",
+        "NWL","APE","JHG","PDL","SFG","AFG","CCP","OFX","MRM","WGB",
+    ]},
+    # Materials / Mining
+    **{t: "Materials" for t in [
+        "BHP","RIO","FMG","S32","MIN","IGO","LYC","NST","EVN","SFR",
+        "AWC","BSL","JHX","BLD","CSR","RWC","ILU","PLS","WHC","NHC",
+        "YAL","CMM","RRL","PRU","SAR","OZL","MGX","SBM","WAF","RED",
+        "DEG","GOR","AKE","CRN","TBN","CHN","RSG","MML","IPX","DDH",
+    ]},
+    # Energy
+    **{t: "Energy" for t in [
+        "WDS","STO","ORG","BPT","KAR","IPL","ORI","CEG","BOE","NHC",
+        "WHC","YAL","CRN",
+    ]},
+    # Healthcare
+    **{t: "Healthcare" for t in [
+        "CSL","RMD","COH","SHL","PME","MSB","HCA","EHE","HLS","IDX",
+        "PNV","NAN","IMB","SDR","CU6","RAH","ACL","TLX","MX1","GEN",
+    ]},
+    # Consumer Discretionary
+    **{t: "Consumer Discretionary" for t in [
+        "WES","MYR","HVN","JBH","SUL","BRG","PMV","DMP","CKF","ARB",
+        "TPW","KMD","CCX","RFG","FLT","WEB","CTD","HLO","SWM","NEC",
+        "SKT","VOC","CAT","ELD",
+    ]},
+    # Consumer Staples
+    **{t: "Consumer Staples" for t in [
+        "WOW","COL","TWE","A2M","CCL","GNC","UNI","BKL","AHY","SSG",
+    ]},
+    # REITs
+    **{t: "REITs" for t in [
+        "GMG","SCG","VCX","MGR","DXS","CHC","ARF","CIP","NSR","ABP",
+        "BWP","HDN","CLW","GDI","HPI","360","LIC","WPR","RGN","AEF",
+    ]},
+    # Industrials / Infrastructure
+    **{t: "Industrials" for t in [
+        "TCL","AZJ","QAN","ALQ","MND","CIM","DOW","SSM","NWH","GWA",
+        "LLC","LNW","PTB","ICT","SEK","REA","CAR","IEL","DGL","MMS",
+        "SIQ","SRV","CLX","NWS",
+    ]},
+    # Technology
+    **{t: "Technology" for t in [
+        "WTC","XRO","APX","CPU","ALU","MP1","TNE","DTL","DUB","ADA",
+        "NEA","BVS","LNW","PPS","NXT","FPH","SPZ","AI1","FCL","MFT",
+    ]},
+    # Communication
+    **{t: "Communication" for t in [
+        "TLS","TPG","REH","SXL","HTA","NWS","SKT","QMS",
+    ]},
+    # Utilities
+    **{t: "Utilities" for t in [
+        "AGL","APA","SKI","MEZ","RGY","AGR",
+    ]},
+}
+
+# ASX universes by tier — ordered roughly by market cap
+_ASX_UNIVERSE: Dict[str, list] = {
+    "asx20": [
+        "CBA","BHP","WBC","ANZ","NAB","WES","CSL","RIO","WTC","MQG",
+        "FMG","GMG","WOW","TLS","REA","RMD","COH","QBE","WDS","TCL",
+    ],
+}
+# Build asx50 = asx20 + 30 more, asx100 = asx50 + 50 more, asx200 = all
+_ASX_UNIVERSE["asx50"] = _ASX_UNIVERSE["asx20"] + [
+    "SUN","IAG","NST","EVN","ALL","SGP","CPU","SCG","FPH","ALQ",
+    "STO","COL","TWE","NXT","LLC","MIN","HVN","ILU","JHX","ORG",
+    "APA","MND","ALU","VCX","AZJ","DXS","APX","S32","MGR","CHC",
+]
+_ASX_UNIVERSE["asx100"] = _ASX_UNIVERSE["asx50"] + [
+    "IGO","LYC","XRO","SHL","BLD","CSR","RWC","SFR","AMP","CGF",
+    "HUB","PPT","PTM","IFL","EQT","AUB","GQG","NWL","JBH","SUL",
+    "ARB","PMV","DMP","CKF","FLT","WEB","CTD","A2M","GNC","CCL",
+    "ARF","CIP","NSR","BWP","ABP","HDN","CLW","QAN","SSM","MMS",
+    "SEK","CAR","IEL","DTL","TNE","NWH","GWA","MP1","SWM","NEC",
+]
+_ASX_UNIVERSE["asx200"] = _ASX_UNIVERSE["asx100"] + [
+    "CMM","RRL","PRU","SAR","WAF","RED","WHC","NHC","YAL","PLS",
+    "AKE","CRN","TBN","OZL","MGX","SBM","DEG","GOR","AWC","BSL",
+    "BPT","KAR","IPL","ORI","PME","MSB","HCA","EHE","HLS","IDX",
+    "PNV","NAN","IMB","SDR","MYR","BRG","TPW","KMD","CCX","RFG",
+    "HLO","SXL","HTA","TPG","REH","AGL","SKI","LNW","ICT","PTB",
+    "ALU","DUB","ADA","NEA","BVS","MFG","CIN","JHG","PDL","AFG",
+    "CCP","ASX","MQG","GDI","HPI","360","LLC","DGL","SIQ","NWS",
+    "UNI","BKL","GNC","AUB","WGB","OFX","MRM","ELD","CAT","SFG",
+]
+
+# Background scan state
+_scan_state: Dict = {
+    "running": False, "stopped": False, "stage": "idle",
+    "progress": 0, "total": 0, "results": [], "error": None,
+    "scanned_at": None, "universe": None,
+    "universe_size": 0, "filtered_count": 0,
+}
+_scan_lock = threading.Lock()
+
+
+def _simple_rsi(closes: np.ndarray, period: int = 14) -> float:
+    if len(closes) < period + 2:
+        return 50.0
+    delta = np.diff(closes[-(period + 2):])
+    gains  = np.where(delta > 0, delta, 0.0)
+    losses = np.where(delta < 0, -delta, 0.0)
+    avg_g, avg_l = gains.mean(), losses.mean()
+    return float(100 - 100 / (1 + avg_g / avg_l)) if avg_l > 0 else 100.0
+
+
+def _score_ticker(closes: np.ndarray, volumes: np.ndarray) -> Optional[Dict]:
+    n = len(closes)
+    if n < 45:
+        return None
+    cp = float(closes[-1])
+    if cp <= 0:
+        return None
+
+    # ── Trend quality (0-30) ─────────────────────────────────────────────
+    sma20    = float(np.mean(closes[-20:]))
+    sma50    = float(np.mean(closes[-50:])) if n >= 50 else sma20
+    # SMA20 slope over last 10 days
+    sma20_5d_ago = float(np.mean(closes[-25:-5])) if n >= 25 else sma20
+    sma_rising   = sma20 > sma20_5d_ago
+
+    trend = (10 if cp > sma20 else 0) + (10 if cp > sma50 else 0) + (10 if sma_rising else 0)
+
+    # ── Pullback quality (0-30): RSI zone + position from high ───────────
+    rsi      = _simple_rsi(closes)
+    high_90  = float(np.max(closes))
+    pct_high = (cp / high_90 - 1) * 100  # negative
+
+    if   35 <= rsi <= 55: rsi_score = 15
+    elif 30 <= rsi <  35: rsi_score = 12
+    elif 55 <  rsi <= 65: rsi_score = 10
+    elif rsi < 30:        rsi_score = 5
+    else:                 rsi_score = 3   # overbought
+
+    if   -20 <= pct_high <= -5:  pos_score = 15   # ideal pullback window
+    elif  -5 <  pct_high <=  0:  pos_score = 9    # near high — momentum play
+    elif -30 <= pct_high < -20:  pos_score = 10   # deeper dip, higher risk
+    else:                        pos_score = 4    # very deep — distress risk
+
+    pullback = rsi_score + pos_score
+
+    # ── Volume signal (0-20): is accumulation building? ─────────────────
+    vol_avg20  = float(np.mean(volumes[-20:])) if np.mean(volumes[-20:]) > 0 else 1
+    vol5_avg   = float(np.mean(volumes[-5:]))
+    vol5_ratio = vol5_avg / vol_avg20
+
+    if   vol5_ratio > 1.5: vol_score = 20
+    elif vol5_ratio > 1.1: vol_score = 15
+    elif vol5_ratio > 0.8: vol_score = 10
+    else:                  vol_score = 5
+
+    # ── Short-term momentum (0-20): price turning up ─────────────────────
+    ret_5d  = float((cp / closes[-6]  - 1) * 100) if n > 6  else 0.0
+    ret_20d = float((cp / closes[-21] - 1) * 100) if n > 21 else 0.0
+
+    if   ret_5d > 3:    mom_score = 20
+    elif ret_5d > 0:    mom_score = 15
+    elif ret_5d > -2:   mom_score = 10
+    else:               mom_score = 5
+
+    total = trend + pullback + vol_score + mom_score
+
+    return {
+        "score":         round(min(total, 100), 1),
+        "trend_score":   trend,
+        "pullback_score": pullback,
+        "vol_score":     vol_score,
+        "mom_score":     mom_score,
+        "rsi":           round(rsi, 1),
+        "ret_5d":        round(ret_5d, 2),
+        "ret_20d":       round(ret_20d, 2),
+        "vol_ratio":     round(vol5_ratio, 2),
+        "pct_from_high": round(pct_high, 1),
+        "current_price": round(cp, 3),
+        "sma20":         round(sma20, 3),
+        "sma50":         round(sma50, 3),
+    }
+
+
+def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_results: int) -> None:
+    global _scan_state
+    tickers = _ASX_UNIVERSE.get(universe, _ASX_UNIVERSE["asx200"])
+    asx_tickers = [f"{t}.AX" for t in tickers]
+
+    with _scan_lock:
+        _scan_state.update({
+            "running": True, "stopped": False, "stage": "downloading",
+            "progress": 0, "total": len(tickers), "results": [],
+            "error": None, "universe": universe, "universe_size": len(tickers),
+            "filtered_count": 0,
+        })
+
+    try:
+        raw = yf.download(
+            asx_tickers, period="90d", auto_adjust=True,
+            progress=False, group_by="column",
+        )
+        if raw.empty:
+            with _scan_lock:
+                _scan_state.update({"running": False, "error": "No data from yfinance", "stage": "error"})
+            return
+
+        # Extract Close and Volume DataFrames (MultiIndex columns)
+        closes_df = raw["Close"]  if "Close"  in raw.columns.get_level_values(0) else None
+        volume_df = raw["Volume"] if "Volume" in raw.columns.get_level_values(0) else None
+        if closes_df is None:
+            with _scan_lock:
+                _scan_state.update({"running": False, "error": "Unexpected data format", "stage": "error"})
+            return
+
+        with _scan_lock:
+            _scan_state["stage"] = "scoring"
+
+        results = []
+        exclude_set = set(t.upper() for t in exclude)
+
+        for i, (ticker, asx_t) in enumerate(zip(tickers, asx_tickers)):
+            if _scan_state["stopped"]:
+                break
+            with _scan_lock:
+                _scan_state["progress"] = i + 1
+
+            if ticker in exclude_set:
+                continue
+
+            col = asx_t if asx_t in closes_df.columns else None
+            if col is None:
+                continue
+
+            closes = closes_df[col].dropna().values
+            volumes = volume_df[col].dropna().values if (volume_df is not None and col in volume_df.columns) else np.ones(len(closes))
+
+            if len(closes) < 45:
+                continue
+
+            # Liquidity filter: avg daily turnover ($ value)
+            avg_price = float(np.mean(closes[-20:]))
+            avg_vol   = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0
+            adv_aud   = avg_price * avg_vol
+            if adv_aud < min_adv_aud:
+                continue
+
+            scored = _score_ticker(closes, volumes)
+            if scored is None:
+                continue
+
+            scored["ticker"]       = ticker
+            scored["sector"]       = _SECTOR_MAP.get(ticker, "Other")
+            scored["adv_aud"]      = round(adv_aud / 1_000_000, 2)  # millions
+            results.append(scored)
+
+        # Sort by score descending, then enforce max 4 per sector for diversification
+        results.sort(key=lambda x: x["score"], reverse=True)
+        sector_counts: Dict[str, int] = {}
+        diversified = []
+        for r in results:
+            sec = r["sector"]
+            if sector_counts.get(sec, 0) < 4:
+                diversified.append(r)
+                sector_counts[sec] = sector_counts.get(sec, 0) + 1
+            if len(diversified) >= max_results:
+                break
+
+        with _scan_lock:
+            _scan_state.update({
+                "running":        False,
+                "stage":          "complete",
+                "results":        diversified,
+                "filtered_count": len(results),
+                "scanned_at":     datetime.now().strftime("%H:%M"),
+            })
+
+    except Exception as exc:
+        with _scan_lock:
+            _scan_state.update({"running": False, "error": str(exc), "stage": "error"})
+
+
+@app.route("/api/market/scan", methods=["POST"])
+def market_scan_start():
+    """Start a background market scan. Returns 409 if already running."""
+    if _scan_state["running"]:
+        return jsonify({"error": "Scan already running"}), 409
+
+    data        = request.get_json() or {}
+    universe    = data.get("universe", "asx200")
+    exclude     = data.get("exclude", [])
+    min_adv_aud = float(data.get("min_adv_aud", 2_000_000))
+    max_results = int(data.get("max_results", 25))
+
+    if universe not in _ASX_UNIVERSE:
+        return jsonify({"error": f"Unknown universe: {universe}"}), 400
+
+    t = threading.Thread(
+        target=_run_market_scan,
+        args=(universe, exclude, min_adv_aud, max_results),
+        daemon=True,
+    )
+    t.start()
+    return jsonify({"ok": True, "message": f"Scan started — {len(_ASX_UNIVERSE[universe])} tickers in {universe}"})
+
+
+@app.route("/api/market/scan/status")
+def market_scan_status():
+    with _scan_lock:
+        return jsonify(dict(_scan_state))
+
+
+@app.route("/api/market/scan/stop", methods=["POST"])
+def market_scan_stop():
+    with _scan_lock:
+        _scan_state["stopped"] = True
+    return jsonify({"ok": True})
+
+
 # ── DB: State save/load (bulk) ──────────────────────────────────────────────────
 
 @app.route("/api/db/save", methods=["POST"])
