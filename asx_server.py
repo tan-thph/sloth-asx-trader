@@ -1593,7 +1593,7 @@ def portfolio_nav_history():
 # ── Market Scanner ─────────────────────────────────────────────────────────────
 
 # Sector map for all universe tickers (used for diversification in results)
-_SECTOR_MAP: Dict[str, str] = {
+_SECTOR_MAP: dict[str, str] = {
     # Financials
     **{t: "Financials" for t in [
         "CBA","WBC","ANZ","NAB","MQG","QBE","SUN","IAG","AMP","CGF",
@@ -1654,7 +1654,7 @@ _SECTOR_MAP: Dict[str, str] = {
 }
 
 # ASX universes by tier — ordered roughly by market cap
-_ASX_UNIVERSE: Dict[str, list] = {
+_ASX_UNIVERSE: dict[str, list] = {
     "asx20": [
         "CBA","BHP","WBC","ANZ","NAB","WES","CSL","RIO","WTC","MQG",
         "FMG","GMG","WOW","TLS","REA","RMD","COH","QBE","WDS","TCL",
@@ -1685,7 +1685,7 @@ _ASX_UNIVERSE["asx200"] = _ASX_UNIVERSE["asx100"] + [
 ]
 
 # Background scan state
-_scan_state: Dict = {
+_scan_state: dict = {
     "running": False, "stopped": False, "stage": "idle",
     "progress": 0, "total": 0, "results": [], "error": None,
     "scanned_at": None, "universe": None,
@@ -1704,7 +1704,7 @@ def _simple_rsi(closes: np.ndarray, period: int = 14) -> float:
     return float(100 - 100 / (1 + avg_g / avg_l)) if avg_l > 0 else 100.0
 
 
-def _score_ticker(closes: np.ndarray, volumes: np.ndarray) -> Optional[Dict]:
+def _score_ticker(closes: np.ndarray, volumes: np.ndarray) -> dict | None:
     n = len(closes)
     if n < 45:
         return None
@@ -1851,7 +1851,7 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
 
         # Sort by score descending, then enforce max 4 per sector for diversification
         results.sort(key=lambda x: x["score"], reverse=True)
-        sector_counts: Dict[str, int] = {}
+        sector_counts: dict[str, int] = {}
         diversified = []
         for r in results:
             sec = r["sector"]

@@ -304,7 +304,9 @@ function _newsPageHTML(status, sentiment) {
   const f = state.news.filter;
   const catFilter = cats.map(c => `<option value="${c}" ${f.category === c ? 'selected' : ''}>${c === 'all' ? 'All categories' : (NEWS_CATS[c]?.label || c)}</option>`).join('');
   const portfolioTickers = [...new Set(state.portfolio.map(h => h.ticker))];
-  const tickerFilter = ['all', ...portfolioTickers].map(t => `<option value="${t}" ${f.ticker === t ? 'selected' : ''}>${t === 'all' ? 'All tickers' : t}</option>`).join('');
+  const watchlistTickers = [...new Set((state.analysisConfig?.extraTickers || []).map(t => t.toUpperCase()))];
+  const allTrackedTickers = [...new Set([...portfolioTickers, ...watchlistTickers])];
+  const tickerFilter = ['all', ...allTrackedTickers].map(t => `<option value="${t}" ${f.ticker === t ? 'selected' : ''}>${t === 'all' ? 'All tickers' : t}</option>`).join('');
   const sentiFilter = [
     ['all', 'All sentiment'], ['bullish', '▲ Bullish'], ['bearish', '▼ Bearish'], ['neutral', '● Neutral'],
   ].map(([v, l]) => `<option value="${v}" ${f.sentiment === v ? 'selected' : ''}>${l}</option>`).join('');
@@ -317,7 +319,7 @@ function _newsPageHTML(status, sentiment) {
 
   // News items
   const newsCards = items.length
-    ? items.map(item => _newsCard(item, portfolioTickers)).join('')
+    ? items.map(item => _newsCard(item, portfolioTickers, watchlistTickers)).join('')
     : `<div class="card" style="text-align:center;padding:40px;color:var(--text-muted)">
         ${state.news.items.length
           ? 'No articles match the current filters.'
@@ -460,7 +462,7 @@ ollama pull llama3.2:3b     # lightweight</pre>
     </div>`;
 }
 
-function _newsCard(item, portfolioTickers) {
+function _newsCard(item, portfolioTickers, watchlistTickers = []) {
   const processed   = item.processed === 1;
   const imp         = processed ? (item.impact_score || 0) : null;
   const senti       = processed ? (item.sentiment || 'neutral') : null;
@@ -470,10 +472,15 @@ function _newsCard(item, portfolioTickers) {
   // mentioned = tickers that are NOT primary (incidental references)
   const mentionedTickers = allTickers.filter(t => !primaryTickers.map(x=>x.toUpperCase()).includes(t.toUpperCase()));
   const tags             = item.tags || [];
-  // Portfolio-relevant only when a PRIMARY ticker is in portfolio; fall back to any ticker for old articles
+  // Portfolio-relevant when a PRIMARY ticker is in portfolio; fall back to any ticker for old articles
   const isPortfolio = primaryTickers.length > 0
     ? primaryTickers.some(t => portfolioTickers.includes(t.toUpperCase()))
     : allTickers.some(t => portfolioTickers.includes(t.toUpperCase()));
+  const isWatchlist = !isPortfolio && (
+    primaryTickers.length > 0
+      ? primaryTickers.some(t => watchlistTickers.includes(t.toUpperCase()))
+      : allTickers.some(t => watchlistTickers.includes(t.toUpperCase()))
+  );
 
   // Primary tickers: bold, coloured by portfolio membership
   const primaryBadges = primaryTickers.map(t => {
@@ -516,7 +523,7 @@ function _newsCard(item, portfolioTickers) {
       : '';
 
   return `
-    <div style="border:1px solid var(--border-light);border-radius:var(--radius-md);padding:10px 12px;margin-bottom:8px;${isPortfolio ? 'border-left:3px solid #3b82f6' : ''}${!processed ? ';opacity:0.75' : ''}">
+    <div style="border:1px solid var(--border-light);border-radius:var(--radius-md);padding:10px 12px;margin-bottom:8px;${isPortfolio ? 'border-left:3px solid #3b82f6' : isWatchlist ? 'border-left:3px solid #f59e0b' : ''}${!processed ? ';opacity:0.75' : ''}">
       <div style="display:flex;align-items:flex-start;gap:8px">
         <div style="text-align:center;min-width:38px">
           ${impHtml}
@@ -533,6 +540,7 @@ function _newsCard(item, portfolioTickers) {
             ${catBadge ? '<span>·</span>' + catBadge : ''}
             ${sentiBadge}
             ${isPortfolio ? '<span style="background:#dbeafe;color:#1d4ed8;padding:1px 5px;border-radius:3px;font-size:10px">★ Portfolio</span>' : ''}
+            ${isWatchlist ? '<span style="background:#fef9c3;color:#92400e;padding:1px 5px;border-radius:3px;font-size:10px">◈ Watchlist</span>' : ''}
           </div>
           ${contentHtml}
           ${tickerBadges || tagBadges ? `<div style="display:flex;gap:4px;flex-wrap:wrap">${tickerBadges}${tagBadges}</div>` : ''}
@@ -619,7 +627,8 @@ function newsSetFilter(key, value) {
   const list = document.getElementById('news-feed-list');
   if (!list) return renderPage();
   const portfolioTickers = [...new Set(state.portfolio.map(h => h.ticker))];
-  list.innerHTML = _filteredNews().map(i => _newsCard(i, portfolioTickers)).join('') ||
+  const watchlistTickers = [...new Set((state.analysisConfig?.extraTickers || []).map(t => t.toUpperCase()))];
+  list.innerHTML = _filteredNews().map(i => _newsCard(i, portfolioTickers, watchlistTickers)).join('') ||
     `<div style="text-align:center;padding:30px;color:var(--text-muted)">No articles match the current filters.</div>`;
 }
 
@@ -643,7 +652,10 @@ async function newsScanNow() {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   toast('Starting news scan…', 'info');
   try {
-    const tickers = [...new Set(state.portfolio.map(h => h.ticker))];
+    const tickers = [...new Set([
+      ...state.portfolio.map(h => h.ticker),
+      ...(state.analysisConfig?.extraTickers || []),
+    ])];
     const r = await fetch(`${API}/api/news/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
