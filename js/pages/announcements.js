@@ -241,7 +241,7 @@ function _annPageHTML(status) {
       if (progress) progress.style.display = 'block';
       if (btn)      { btn.disabled = true; btn.style.opacity = '0.6'; }
       _updateReclassifyBar(rc.done || 0, rc.total || 0, rc.updated || 0);
-      _startReclassifyPoller();
+      _startAnnReclassifyPoller();
     }, 200);
   }
 
@@ -900,6 +900,10 @@ let _reclassifyPoller = null;
 
 async function reclassifyAnnouncements() {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  // Prevent running while news reclassify is active
+  if (typeof _reclassifyPollTimer !== 'undefined' && _reclassifyPollTimer) {
+    toast('News re-classify is running — wait for it to finish first', 'error'); return;
+  }
 
   const btn      = document.getElementById('ann-reclassify-btn');
   const progress = document.getElementById('ann-reclassify-progress');
@@ -917,7 +921,7 @@ async function reclassifyAnnouncements() {
 
     if (r.status === 409) {
       toast('Re-classify already running', 'info');
-      _startReclassifyPoller(); // attach to already-running job
+      _startAnnReclassifyPoller(); // attach to already-running job
       return;
     }
     if (!r.ok) {
@@ -929,7 +933,7 @@ async function reclassifyAnnouncements() {
     if (btn)      { btn.disabled = true; btn.style.opacity = '0.6'; }
     if (progress) { progress.style.display = 'block'; }
     _updateReclassifyBar(0, 0, 0);
-    _startReclassifyPoller();
+    _startAnnReclassifyPoller();
 
   } catch (e) {
     toast(`Re-classify error: ${e.message}`, 'error');
@@ -948,7 +952,7 @@ function _updateReclassifyBar(done, total, updated) {
     : 'Re-classifying…';
 }
 
-function _startReclassifyPoller() {
+function _startAnnReclassifyPoller() {
   if (_reclassifyPoller) return;
   _reclassifyPoller = setInterval(async () => {
     try {
@@ -958,7 +962,7 @@ function _startReclassifyPoller() {
       _updateReclassifyBar(s.done || 0, s.total || 0, s.updated || 0);
 
       if (!s.running) {
-        _stopReclassifyPoller();
+        _stopAnnReclassifyPoller();
         const btn      = document.getElementById('ann-reclassify-btn');
         const progress = document.getElementById('ann-reclassify-progress');
         const labelEl  = document.getElementById('ann-reclassify-label');
@@ -987,7 +991,7 @@ function _startReclassifyPoller() {
   }, 1500);
 }
 
-function _stopReclassifyPoller() {
+function _stopAnnReclassifyPoller() {
   if (_reclassifyPoller) { clearInterval(_reclassifyPoller); _reclassifyPoller = null; }
 }
 

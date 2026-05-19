@@ -1464,12 +1464,30 @@ def portfolio_risk():
             ret_30d = float((1 + tr.tail(21)).prod() - 1) * 100
             ret_90d = float((1 + tr).prod() - 1) * 100
 
+            # VaR / CVaR (historical simulation, 95% confidence, daily)
+            var_95  = float(tr.quantile(0.05)) * 100   # negative = daily loss %
+            cvar_95 = float(tr[tr <= tr.quantile(0.05)].mean()) * 100 if len(tr[tr <= tr.quantile(0.05)]) else var_95
+
+            # Max drawdown over the 90-day price series
+            px_series = closes[col].dropna()
+            peak_px   = px_series.iloc[0]
+            max_dd    = 0.0
+            for px_val in px_series:
+                if px_val > peak_px:
+                    peak_px = px_val
+                dd = (peak_px - px_val) / peak_px * 100 if peak_px > 0 else 0.0
+                if dd > max_dd:
+                    max_dd = dd
+
             metrics[ticker] = {
                 "volatility_ann": round(vol_ann, 2),
                 "sharpe":         round(sharpe, 3),
                 "beta":           round(beta, 3),
                 "return_30d":     round(ret_30d, 2),
                 "return_90d":     round(ret_90d, 2),
+                "var_95":         round(var_95, 2),
+                "cvar_95":        round(cvar_95, 2),
+                "max_drawdown":   round(max_dd, 2),
                 "data_points":    len(tr),
             }
 
@@ -1486,6 +1504,87 @@ def portfolio_risk():
                     correlation[t][t2] = round(float(corr.iloc[i, j]), 3)
 
         return jsonify({"metrics": metrics, "correlation": correlation, "tickers": tickers})
+
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/portfolio/nav-history", methods=["POST"])
+def portfolio_nav_history():
+    """Reconstruct portfolio NAV over time using current share quantities."""
+    data      = request.get_json() or {}
+    portfolio = data.get("portfolio", [])   # [{ticker, shares}, ...]
+    period    = data.get("period", "1y")
+    cash      = float(data.get("cash", 0))
+
+    if not portfolio:
+        return jsonify({"error": "portfolio required"}), 400
+
+    benchmark   = "VAS.AX"
+    tickers     = [h["ticker"].upper() for h in portfolio]
+    shares_map  = {h["ticker"].upper(): float(h["shares"]) for h in portfolio}
+    asx_tickers = [f"{t}.AX" for t in tickers]
+    all_dl      = list(set(asx_tickers + [benchmark]))
+
+    try:
+        raw = yf.download(all_dl, period=period, auto_adjust=True, progress=False)
+        if raw.empty:
+            return jsonify({"error": "No data returned"}), 502
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            closes = raw["Close"]
+        else:
+            closes = raw[["Close"]]
+
+        closes = closes.ffill().dropna(how="all")
+
+        # Portfolio NAV = sum of (shares × price) per day + cash constant
+        nav = pd.Series(0.0, index=closes.index)
+        for t, asx_t in zip(tickers, asx_tickers):
+            if asx_t in closes.columns:
+                nav += closes[asx_t].fillna(0) * shares_map[t]
+        nav = nav[nav > 0]
+        if nav.empty:
+            return jsonify({"error": "No valid price data"}), 502
+
+        nav_with_cash = nav + cash
+
+        # Benchmark: normalise VAS to the same starting value as the portfolio
+        bench_values = None
+        if benchmark in closes.columns:
+            bench_ser  = closes[benchmark].reindex(nav.index).ffill()
+            first_b    = bench_ser.iloc[0]
+            first_nav  = nav_with_cash.iloc[0]
+            bench_norm = (bench_ser / first_b) * first_nav
+            bench_values = [round(float(v), 2) for v in bench_norm.values]
+
+        values = [round(float(v), 2) for v in nav_with_cash.values]
+        dates  = [d.strftime("%Y-%m-%d") for d in nav_with_cash.index]
+
+        # Summary stats
+        total_return = (values[-1] - values[0]) / values[0] * 100 if values[0] else 0.0
+        peak = values[0]
+        max_dd = 0.0
+        for v in values:
+            if v > peak:
+                peak = v
+            dd = (peak - v) / peak * 100 if peak > 0 else 0.0
+            if dd > max_dd:
+                max_dd = dd
+
+        bench_return = None
+        if bench_values and bench_values[0]:
+            bench_return = round((bench_values[-1] - bench_values[0]) / bench_values[0] * 100, 2)
+
+        return jsonify({
+            "dates":         dates,
+            "values":        values,
+            "benchmark":     bench_values,
+            "total_return":  round(total_return, 2),
+            "max_drawdown":  round(max_dd, 2),
+            "bench_return":  bench_return,
+            "period":        period,
+        })
 
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500

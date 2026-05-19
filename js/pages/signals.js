@@ -44,6 +44,9 @@ async function renderSignalsPage(gen) {
       <button class="btn btn-primary btn-sm" onclick="refreshSignals()">⟳ Refresh Signals</button>
     </div>
 
+    <!-- SIGNAL CONDITION RULES -->
+    ${_buildSignalRulesCard(tickers, signals)}
+
     <!-- SUMMARY TABLE -->
     <div class="card section-gap">
       <div class="card-title">Signal Summary</div>
@@ -319,4 +322,145 @@ async function refreshSignals() {
   await fetchSignals(tickers, true);
   renderPage();
   toast('Signals refreshed','success');
+}
+
+// ── Signal Condition Rules ────────────────────────────────────────────────────
+// Built-in rules evaluated against live signal data. Each rule has a label,
+// description, and an evaluator function (signal object → true/false).
+const SIGNAL_RULES = [
+  {
+    id: 'rsi_oversold',
+    label: 'RSI Oversold',
+    desc: 'RSI(14) < 30 — potential reversal candidate',
+    color: '#16a34a',
+    type: 'buy',
+    eval: s => s.rsi_14 != null && s.rsi_14 < 30,
+    detail: s => `RSI = ${fmt(s.rsi_14, 1)}`,
+  },
+  {
+    id: 'rsi_overbought',
+    label: 'RSI Overbought',
+    desc: 'RSI(14) > 70 — consider trimming',
+    color: '#dc2626',
+    type: 'sell',
+    eval: s => s.rsi_14 != null && s.rsi_14 > 70,
+    detail: s => `RSI = ${fmt(s.rsi_14, 1)}`,
+  },
+  {
+    id: 'macd_bullish',
+    label: 'MACD Crossover ▲',
+    desc: 'MACD histogram > 0 — bullish momentum',
+    color: '#16a34a',
+    type: 'buy',
+    eval: s => s.macd_hist != null && s.macd_hist > 0 && s.macd_line != null && s.macd_line > s.macd_signal,
+    detail: s => `Hist = ${fmt(s.macd_hist, 3)}`,
+  },
+  {
+    id: 'macd_bearish',
+    label: 'MACD Crossover ▼',
+    desc: 'MACD histogram < 0 — bearish momentum',
+    color: '#dc2626',
+    type: 'sell',
+    eval: s => s.macd_hist != null && s.macd_hist < 0 && s.macd_line != null && s.macd_line < s.macd_signal,
+    detail: s => `Hist = ${fmt(s.macd_hist, 3)}`,
+  },
+  {
+    id: 'bb_squeeze_low',
+    label: 'BB Lower Touch',
+    desc: 'Price near Bollinger lower band (BB%B < 10%)',
+    color: '#16a34a',
+    type: 'buy',
+    eval: s => s.bb_pct_b != null && s.bb_pct_b < 0.10,
+    detail: s => `BB%B = ${fmt(s.bb_pct_b * 100, 0)}%`,
+  },
+  {
+    id: 'bb_upper_touch',
+    label: 'BB Upper Touch',
+    desc: 'Price near Bollinger upper band (BB%B > 90%)',
+    color: '#dc2626',
+    type: 'sell',
+    eval: s => s.bb_pct_b != null && s.bb_pct_b > 0.90,
+    detail: s => `BB%B = ${fmt(s.bb_pct_b * 100, 0)}%`,
+  },
+  {
+    id: 'strong_trend',
+    label: 'Strong Trend',
+    desc: 'ADX > 25 — directional trend confirmed',
+    color: '#3b82f6',
+    type: 'info',
+    eval: s => (s.adx || 0) > 25,
+    detail: s => `ADX = ${fmt(s.adx, 0)} (${s.trend_direction})`,
+  },
+  {
+    id: 'volume_spike',
+    label: 'Volume Spike',
+    desc: 'Volume ratio > 2× average — unusual activity',
+    color: '#d97706',
+    type: 'info',
+    eval: s => (s.volume_ratio || 0) > 2,
+    detail: s => `${fmt(s.volume_ratio, 1)}× avg volume`,
+  },
+  {
+    id: 'above_sma50',
+    label: 'Above SMA(50)',
+    desc: 'Price above 50-day moving average — uptrend',
+    color: '#16a34a',
+    type: 'buy',
+    eval: s => s.current_price != null && s.sma_50 != null && s.current_price > s.sma_50,
+    detail: s => `Price $${fmt(s.current_price, 3)} vs SMA50 $${fmt(s.sma_50, 3)}`,
+  },
+  {
+    id: 'below_sma50',
+    label: 'Below SMA(50)',
+    desc: 'Price below 50-day moving average — downtrend',
+    color: '#dc2626',
+    type: 'sell',
+    eval: s => s.current_price != null && s.sma_50 != null && s.current_price < s.sma_50,
+    detail: s => `Price $${fmt(s.current_price, 3)} vs SMA50 $${fmt(s.sma_50, 3)}`,
+  },
+];
+
+function _buildSignalRulesCard(tickers, signals) {
+  // Evaluate each rule against each ticker
+  const triggered = []; // {rule, ticker, s}
+  for (const t of tickers) {
+    const s = signals[t];
+    if (!s || s.error) continue;
+    for (const rule of SIGNAL_RULES) {
+      try {
+        if (rule.eval(s)) triggered.push({ rule, ticker: t, s });
+      } catch {}
+    }
+  }
+
+  if (!triggered.length) {
+    return `<div class="card" style="margin-bottom:14px">
+      <div class="card-title">Signal Condition Alerts</div>
+      <div class="text-xs text-muted" style="padding:8px 0">No conditions triggered across your holdings right now.</div>
+    </div>`;
+  }
+
+  const byType = { buy: [], sell: [], info: [] };
+  for (const item of triggered) byType[item.rule.type].push(item);
+
+  const renderGroup = (items, icon, headerColor) => items.map(({rule, ticker, s}) =>
+    `<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:0.5px solid var(--border-light)">
+      <span style="min-width:80px;font-weight:600;font-size:12px;color:${rule.color}">${icon} ${ticker}</span>
+      <div style="flex:1">
+        <div style="font-size:12px;font-weight:600">${rule.label}</div>
+        <div style="font-size:11px;color:var(--text-muted)">${rule.desc} · <span style="color:${rule.color}">${rule.detail(s)}</span></div>
+      </div>
+    </div>`
+  ).join('');
+
+  return `<div class="card" style="margin-bottom:14px">
+    <div class="flex-between" style="margin-bottom:10px">
+      <div class="card-title" style="margin:0">Signal Condition Alerts <span style="font-size:12px;font-weight:400;color:var(--text-muted)">(${triggered.length} triggered)</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:0 24px">
+      ${byType.buy.length  ? `<div><div style="font-size:11px;font-weight:700;color:#16a34a;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">▲ Bullish (${byType.buy.length})</div>${renderGroup(byType.buy,'↑','#16a34a')}</div>` : ''}
+      ${byType.sell.length ? `<div><div style="font-size:11px;font-weight:700;color:#dc2626;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">▼ Bearish (${byType.sell.length})</div>${renderGroup(byType.sell,'↓','#dc2626')}</div>` : ''}
+      ${byType.info.length ? `<div><div style="font-size:11px;font-weight:700;color:#3b82f6;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">◆ Notable (${byType.info.length})</div>${renderGroup(byType.info,'·','#3b82f6')}</div>` : ''}
+    </div>
+  </div>`;
 }

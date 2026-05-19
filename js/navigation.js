@@ -5,7 +5,7 @@ function showPage(page) {
   // Stop page-specific pollers when navigating away
   if (state.page === 'announcements' && page !== 'announcements') {
     if (typeof _stopAnnSyncPoller    === 'function') _stopAnnSyncPoller();
-    if (typeof _stopReclassifyPoller === 'function') _stopReclassifyPoller();
+    if (typeof _stopAnnReclassifyPoller === 'function') _stopAnnReclassifyPoller();
   }
   if (state.page === 'news' && page !== 'news') {
     if (typeof _reclassifyPollTimer !== 'undefined' && _reclassifyPollTimer) {
@@ -31,7 +31,7 @@ function renderPage() {
     case 'recommendations': el.innerHTML = renderRecommendations(); break;
     case 'signals':         renderSignalsPage(gen); break;
     case 'journal':         el.innerHTML = renderJournal(); break;
-    case 'performance':     el.innerHTML = renderPerformance(); break;
+    case 'performance':     renderPerformancePage(gen); break;
     case 'history':         el.innerHTML = renderPortfolioHistory(); setTimeout(() => { if(state._renderGen === gen) drawHistoryChart(); }, 80); break;
     case 'cgt':             el.innerHTML = renderCGT(); break;
     case 'backtest':        el.innerHTML = renderBacktest(); break;

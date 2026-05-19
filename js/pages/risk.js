@@ -2,6 +2,8 @@
 // PORTFOLIO RISK DASHBOARD
 // ============================================================
 
+let _riskPageScore = null; // set by buildRiskPage, read by renderRiskPage for gauge
+
 async function renderRiskPage(gen) {
   const el = document.getElementById('main-content');
   const merged = mergedPortfolio();
@@ -38,6 +40,7 @@ async function renderRiskPage(gen) {
   // Draw charts after DOM is ready
   setTimeout(() => {
     if (state._renderGen !== gen) return;
+    drawRiskScoreGauge(_riskPageScore);
     drawSectorPie(merged);
     drawCorrelationHeatmap(merged, riskData.correlation || {});
   }, 60);
@@ -49,7 +52,7 @@ function buildRiskPage(merged, riskData) {
   const nw          = totalNetWorth();
 
   // ── Portfolio-level weighted metrics ──────────────────────────────────────
-  let wBeta = 0, wVol = 0, wSharpe = 0, covered = 0;
+  let wBeta = 0, wVol = 0, wSharpe = 0, wVaR = 0, wMaxDD = 0, covered = 0;
   for (const h of merged) {
     const m = metrics[h.ticker];
     if (!m) continue;
@@ -57,24 +60,43 @@ function buildRiskPage(merged, riskData) {
     wBeta   += m.beta           * w;
     wVol    += m.volatility_ann * w;
     wSharpe += m.sharpe         * w;
+    wVaR    += (m.var_95  ?? 0) * w;
+    wMaxDD  += (m.max_drawdown ?? 0) * w;
     covered++;
   }
   const hasMeta = covered > 0;
 
+  // ── Composite Risk Score (0–100) ──────────────────────────────────────────
+  // 4 dimensions × 25 pts each: volatility, concentration, drawdown, beta
+  const _clamp  = (v, lo, hi) => Math.max(0, Math.min(25, (v - lo) / (hi - lo) * 25));
+  const sectorEntries0 = Object.entries((() => {
+    const m = {};
+    for (const h of merged) { const s = h.sector||'Other'; m[s]=(m[s]||0)+h.shares*h.currentPrice; }
+    return m;
+  })()).sort((a,b)=>b[1]-a[1]);
+  const topConc = pv > 0 && sectorEntries0.length ? sectorEntries0[0][1]/pv*100 : 0;
+  const compScore = hasMeta ? Math.round(
+    _clamp(wVol,   10, 35) +   // 10–35% vol range
+    _clamp(topConc,20, 60) +   // 20–60% concentration
+    _clamp(wMaxDD,  5, 25) +   // 5–25% drawdown range
+    _clamp(wBeta,  0.5,1.5)    // 0.5–1.5 beta range
+  ) : null;
+  _riskPageScore = compScore;
+  const scoreColor = compScore == null ? 'var(--text-muted)'
+    : compScore < 34 ? '#16a34a' : compScore < 67 ? '#d97706' : '#dc2626';
+  const scoreLabel = compScore == null ? '—'
+    : compScore < 34 ? 'Low Risk' : compScore < 67 ? 'Moderate' : 'High Risk';
+
   const betaColor  = wBeta < 0.8 ? '#16a34a' : wBeta < 1.2 ? '#d97706' : '#dc2626';
   const volColor   = wVol  < 15  ? '#16a34a' : wVol  < 25  ? '#d97706' : '#dc2626';
   const shColor    = wSharpe > 1  ? '#16a34a' : wSharpe > 0  ? '#d97706' : '#dc2626';
+  const varColor   = wVaR > -2 ? '#16a34a' : wVaR > -3.5 ? '#d97706' : '#dc2626';
+  const ddColor    = wMaxDD < 8  ? '#16a34a' : wMaxDD < 18  ? '#d97706' : '#dc2626';
 
-  // ── Sector concentration ──────────────────────────────────────────────────
-  const sectorMap = {};
-  for (const h of merged) {
-    const val = h.shares * h.currentPrice;
-    const sec = h.sector || 'Other';
-    sectorMap[sec] = (sectorMap[sec] || 0) + val;
-  }
-  const sectorEntries = Object.entries(sectorMap).sort((a,b) => b[1]-a[1]);
-  const topSector = sectorEntries[0];
-  const topSectorPct = pv > 0 ? topSector[1]/pv*100 : 0;
+  // ── Sector concentration (reuse sectorEntries0 computed above) ─────────────
+  const sectorEntries = sectorEntries0;
+  const topSector     = sectorEntries[0];
+  const topSectorPct  = topConc;
 
   // Assign colors to sectors in sorted order (largest first) so top sectors get
   // the most distinct colors from our palette.
@@ -105,33 +127,62 @@ function buildRiskPage(merged, riskData) {
         return `<span style="color:${sc}">${fmt(s,2)}</span>`;
       })() : '<span class="text-muted">—</span>'}</td>
       <td>${ret30 != null ? `<span style="color:${ret30Color};font-weight:600">${ret30>=0?'+':''}${fmt(ret30,1)}%</span>` : '<span class="text-muted">—</span>'}</td>
+      <td>${m?.var_95 != null ? `<span style="color:${m.var_95>-2?'#16a34a':m.var_95>-3.5?'#d97706':'#dc2626'}">${fmt(m.var_95,2)}%</span>` : '<span class="text-muted">—</span>'}</td>
+      <td>${m?.max_drawdown != null ? `<span style="color:${m.max_drawdown<8?'#16a34a':m.max_drawdown<18?'#d97706':'#dc2626'}">${fmt(m.max_drawdown,1)}%</span>` : '<span class="text-muted">—</span>'}</td>
     </tr>`;
   }).join('');
 
   const hasCorrData = Object.keys(riskData.correlation||{}).length >= 2;
 
   return `
-  <!-- Portfolio-level summary tiles -->
-  <div class="metrics-grid" style="margin-bottom:0">
-    <div class="metric-card">
-      <div class="metric-label">Portfolio Beta (vs VAS)</div>
-      <div class="metric-value" style="color:${betaColor}">${hasMeta ? fmt(wBeta,2) : '—'}</div>
-      <div class="metric-sub">${wBeta<0.8?'Defensive — less volatile than market':wBeta<1.2?'Neutral — moves with market':'Aggressive — amplifies market moves'}</div>
+  <!-- Composite Risk Score + summary tiles -->
+  <div style="display:flex;gap:14px;align-items:stretch;flex-wrap:wrap;margin-bottom:14px">
+
+    <!-- Score gauge -->
+    <div class="metric-card" style="min-width:160px;flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px">
+      <div class="metric-label">Risk Score</div>
+      <div style="position:relative;width:96px;height:96px">
+        <canvas id="risk-score-gauge" width="96" height="96"></canvas>
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+          <span style="font-size:26px;font-weight:700;color:${scoreColor}">${compScore ?? '—'}</span>
+          <span style="font-size:10px;color:${scoreColor};font-weight:600">${scoreLabel}</span>
+        </div>
+      </div>
+      <div class="text-xs text-muted" style="text-align:center">0 = safe · 100 = risky</div>
     </div>
-    <div class="metric-card">
-      <div class="metric-label">Weighted Volatility (ann.)</div>
-      <div class="metric-value" style="color:${volColor}">${hasMeta ? fmt(wVol,1)+'%' : '—'}</div>
-      <div class="metric-sub">${wVol<15?'Low — stable portfolio':wVol<25?'Moderate':'High — significant price swings expected'}</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Portfolio Sharpe Ratio</div>
-      <div class="metric-value" style="color:${shColor}">${hasMeta ? fmt(wSharpe,2) : '—'}</div>
-      <div class="metric-sub">${wSharpe>1?'Good — solid risk-adjusted return':wSharpe>0?'Acceptable — positive but modest':'Poor — return not compensating for risk'}</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Top Sector Concentration</div>
-      <div class="metric-value" style="color:${topSectorPct>40?'#ef4444':topSectorPct>25?'#d97706':'var(--text-primary)'}">${topSector[0]}</div>
-      <div class="metric-sub">${fmt(topSectorPct,1)}% of portfolio${topSectorPct>40?' — concentrated risk':''}</div>
+
+    <!-- Metric tiles -->
+    <div style="flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
+      <div class="metric-card">
+        <div class="metric-label">Portfolio Beta (vs VAS)</div>
+        <div class="metric-value" style="color:${betaColor}">${hasMeta ? fmt(wBeta,2) : '—'}</div>
+        <div class="metric-sub">${wBeta<0.8?'Defensive':wBeta<1.2?'Neutral':'Aggressive'}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Weighted Volatility (ann.)</div>
+        <div class="metric-value" style="color:${volColor}">${hasMeta ? fmt(wVol,1)+'%' : '—'}</div>
+        <div class="metric-sub">${wVol<15?'Low':wVol<25?'Moderate':'High'}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Portfolio Sharpe</div>
+        <div class="metric-value" style="color:${shColor}">${hasMeta ? fmt(wSharpe,2) : '—'}</div>
+        <div class="metric-sub">${wSharpe>1?'Good':wSharpe>0?'Acceptable':'Poor'}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Top Sector</div>
+        <div class="metric-value" style="color:${topSectorPct>40?'#ef4444':topSectorPct>25?'#d97706':'var(--text-primary)'}; font-size:16px">${topSector[0]}</div>
+        <div class="metric-sub">${fmt(topSectorPct,1)}% of portfolio${topSectorPct>40?' — concentrated':''}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">1-Day VaR (95%)</div>
+        <div class="metric-value" style="color:${varColor}">${hasMeta ? fmt(wVaR,2)+'%' : '—'}</div>
+        <div class="metric-sub">Max expected daily loss</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Avg Max Drawdown (90d)</div>
+        <div class="metric-value" style="color:${ddColor}">${hasMeta ? fmt(wMaxDD,1)+'%' : '—'}</div>
+        <div class="metric-sub">${wMaxDD<8?'Shallow':wMaxDD<18?'Moderate':'Deep decline'}</div>
+      </div>
     </div>
   </div>
 
@@ -190,6 +241,8 @@ function buildRiskPage(merged, riskData) {
           <th title="Beta vs VAS (ASX 300 ETF). >1 = amplifies market, <1 = defensive">Beta</th>
           <th title="Sharpe ratio = (return - RBA rate) / volatility. >1 = good">Sharpe</th>
           <th title="Price return over last 30 calendar days">30d Return</th>
+          <th title="1-day Value at Risk at 95% confidence (historical simulation)">VaR 1d</th>
+          <th title="Maximum peak-to-trough decline over the 90-day period">Max DD</th>
         </tr></thead>
         <tbody>${holdingRows}</tbody>
       </table>
@@ -375,4 +428,39 @@ function drawCorrelationHeatmap(merged, corr) {
     ctx.textAlign = 'right';
     ctx.fillText(tickers[i], pad - 6, pad + i * cell + (cell - 2) / 2);
   }
+}
+
+// ── Composite Risk Score arc gauge ────────────────────────────────────────────
+function drawRiskScoreGauge(score) {
+  const canvas = document.getElementById('risk-score-gauge');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H / 2 + 8;
+  const r  = Math.min(cx, cy) - 8;
+  ctx.clearRect(0, 0, W, H);
+
+  // Background arc (grey track, 210° span)
+  const startAngle = Math.PI * 0.75;
+  const endAngle   = Math.PI * 2.25;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, startAngle, endAngle);
+  ctx.strokeStyle = 'rgba(148,163,184,0.25)';
+  ctx.lineWidth   = 10;
+  ctx.lineCap     = 'round';
+  ctx.stroke();
+
+  if (score == null) return;
+
+  const frac  = Math.min(1, Math.max(0, score / 100));
+  const fillEnd = startAngle + frac * (endAngle - startAngle);
+  const color = score < 34 ? '#16a34a' : score < 67 ? '#d97706' : '#dc2626';
+
+  // Coloured fill arc
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, startAngle, fillEnd);
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = 10;
+  ctx.lineCap     = 'round';
+  ctx.stroke();
 }

@@ -105,7 +105,7 @@ async function renderNewsPage(gen) {
     if (rcStatus.running) {
       const btn = document.getElementById('reclassify-btn');
       if (btn) { btn.disabled = true; btn.textContent = '⟳ Running…'; }
-      _startReclassifyPoller();
+      _startNewsReclassifyPoller();
     } else if (rcStatus.done > 0) {
       _updateReclassifyProgress(rcStatus);
     }
@@ -670,6 +670,10 @@ function newsRefreshPage() {
 let _reclassifyPollTimer = null;
 
 async function newsReclassify() {
+  // Prevent running while announcements reclassify is active
+  if (typeof _reclassifyPoller !== 'undefined' && _reclassifyPoller) {
+    toast('Announcements re-classify is running — wait for it to finish first', 'error'); return;
+  }
   const modelEl = document.getElementById('reclassify-model');
   const daysEl  = document.getElementById('reclassify-days');
   const btn     = document.getElementById('reclassify-btn');
@@ -687,13 +691,13 @@ async function newsReclassify() {
     if (!d.ok) { toast(`Error: ${d.error}`, 'error'); return; }
     toast(`${d.message}`, 'success');
     if (btn) { btn.disabled = true; btn.textContent = '⟳ Running…'; }
-    _startReclassifyPoller();
+    _startNewsReclassifyPoller();
   } catch (e) {
     toast(`Failed: ${e.message}`, 'error');
   }
 }
 
-function _startReclassifyPoller() {
+function _startNewsReclassifyPoller() {
   if (_reclassifyPollTimer) return; // already polling — don't spawn a second interval
   _reclassifyPollTimer = setInterval(async () => {
     try {
