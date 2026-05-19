@@ -2,9 +2,16 @@
 // NAVIGATION
 // ============================================================
 function showPage(page) {
-  // Stop announcement poller when navigating away from announcements
+  // Stop page-specific pollers when navigating away
   if (state.page === 'announcements' && page !== 'announcements') {
-    if (typeof _stopAnnSyncPoller === 'function') _stopAnnSyncPoller();
+    if (typeof _stopAnnSyncPoller    === 'function') _stopAnnSyncPoller();
+    if (typeof _stopReclassifyPoller === 'function') _stopReclassifyPoller();
+  }
+  if (state.page === 'news' && page !== 'news') {
+    if (typeof _reclassifyPollTimer !== 'undefined' && _reclassifyPollTimer) {
+      clearInterval(_reclassifyPollTimer);
+      _reclassifyPollTimer = null;
+    }
   }
   state.page = page;
   state._renderGen = (state._renderGen || 0) + 1; // invalidate any in-flight async renders

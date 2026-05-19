@@ -11,8 +11,10 @@ Ollama:     https://ollama.com/download  then  ollama pull gemma3:4b
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 from contextlib import contextmanager
@@ -22,6 +24,62 @@ from pathlib import Path
 import requests
 
 log = logging.getLogger("news_engine")
+
+# ── GPU / CUDA detection ──────────────────────────────────────────────────────
+
+_gpu_cache: dict | None = None
+
+def detect_gpu() -> dict:
+    """Probe whether CUDA/GPU acceleration is available for local inference.
+
+    Works on x86 NVIDIA, Jetson Orin/Nano (Tegra CUDA), and returns False on
+    CPU-only boards such as Raspberry Pi 5.  Result is cached after first call.
+    """
+    global _gpu_cache
+    if _gpu_cache is not None:
+        return _gpu_cache
+
+    result: dict = {"cuda": False, "device": None, "driver": None, "source": None}
+
+    # 1. nvidia-smi — covers x86 NVIDIA and Jetson (returns "Orin (nvgpu)" on Tegra)
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip() and "[N/A]" not in r.stdout:
+            parts = r.stdout.strip().split("\n")[0].split(", ")
+            name   = parts[0].strip()
+            driver = parts[1].strip() if len(parts) > 1 else None
+            _gpu_cache = {"cuda": True, "device": name, "driver": driver, "source": "nvidia-smi"}
+            return _gpu_cache
+        # Jetson reports name but memory as [N/A] — name still confirms CUDA
+        if r.returncode == 0 and r.stdout.strip():
+            name = r.stdout.strip().split("\n")[0].split(",")[0].strip()
+            if name:
+                _gpu_cache = {"cuda": True, "device": name, "driver": None, "source": "nvidia-smi"}
+                return _gpu_cache
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # 2. Jetson-specific device nodes
+    for dev in ("/dev/nvhost-gpu", "/dev/nvidia0"):
+        if os.path.exists(dev):
+            _gpu_cache = {"cuda": True, "device": "Jetson embedded GPU", "driver": None, "source": dev}
+            return _gpu_cache
+
+    # 3. CUDA shared library (ARM Jetson / embedded Linux)
+    for lib in (
+        "/usr/lib/aarch64-linux-gnu/libcuda.so",
+        "/usr/lib/aarch64-linux-gnu/libcuda.so.1",
+        "/usr/local/cuda",
+    ):
+        if os.path.exists(lib):
+            _gpu_cache = {"cuda": True, "device": "CUDA (embedded)", "driver": None, "source": lib}
+            return _gpu_cache
+
+    _gpu_cache = result
+    return _gpu_cache
 
 def _safe_float(v, default: float = 0.0, max_val: float | None = None) -> float:
     """Convert LLM output to float, tolerating strings/lists/None."""
@@ -431,7 +489,7 @@ Portfolio tickers: {tickers}
 Required JSON (fill ALL fields):
 {{"summary":"2-3 sentence factual summary","category":"earnings|regulatory|macro|sector|dividend|analyst|merger|technical|other","sentiment":"bullish|bearish|neutral","sentiment_score":<float -1.0 to 1.0>,"impact_score":<float 0.0 to 10.0, how relevant to ASX investors>,"primary_tickers":<ASX codes that are the MAIN SUBJECT of this article, e.g. ["CBA"] for a CBA article; [] if the article covers the broad market with no single subject>,"mentioned_tickers":<ALL other ASX codes referenced in passing — peers, index members, unrelated mentions>,"tags":<list of 2-5 keyword tags>,"is_portfolio_relevant":<true only if a primary_tickers code appears in the portfolio list above>}}"""
 
-    def __init__(self, model: str = "gemma3:4b", base_url: str = "http://localhost:11434"):
+    def __init__(self, model: str = "", base_url: str = "http://localhost:11434"):
         self.model = model
         self.base_url = base_url.rstrip("/")
 
@@ -488,43 +546,41 @@ Required JSON (fill ALL fields):
             content=(content or "")[:content_limit],
             tickers=ticker_str,
         )
-        # /no_think suppresses the <think> block at the prompt level (Qwen3/QwQ)
-        prompt = ("/no_think\n" + base_prompt) if thinking else base_prompt
+        prompt = base_prompt
 
-        # Thinking models need a larger predict budget
-        num_predict = (250 if cpu_mode else 350) if not thinking else (400 if cpu_mode else 700)
+        # format:"json" (GBNF grammar) forces the model to output pure JSON.
+        # For thinking models on this Ollama version, JSON is routed to the
+        # chunk["thinking"] field instead of chunk["response"] — the streaming
+        # loop reads both, so this works correctly and uses only ~36–50 tokens
+        # instead of the 2048-token thinking pass that think:False triggered.
+        num_predict = 250 if cpu_mode else 400
+        num_ctx     = 1024 if cpu_mode else 2048
 
         options: dict = {
             "temperature": 0.1,
             "num_predict": num_predict,
-            "num_ctx":     1024 if cpu_mode else 2048,
-            "num_gpu":     0    if cpu_mode else 99,
+            "num_ctx":     num_ctx,
         }
-        if thinking:
-            # Ollama native flag — disables <think> blocks at the sampler level.
-            # This is the *real* fix: format:"json" uses a GBNF grammar that
-            # forces the first token to be "{", which conflicts with the thinking
-            # mechanism trying to emit "<think>" first → model stalls / fails.
-            options["think"] = False
+        if cpu_mode:
+            options["num_gpu"] = 0  # force CPU-only; omit entirely otherwise so Ollama auto-selects
 
         payload = {
-            "model":  self.model,
-            "prompt": prompt,
-            "stream": True,
-            # For thinking models: drop format:"json" (GBNF grammar conflicts with
-            # think tokens).  We rely on the prompt + regex extraction instead.
+            "model":   self.model,
+            "prompt":  prompt,
+            "stream":  True,
+            "format":  "json",
             "options": options,
         }
-        if not thinking:
-            payload["format"] = "json"  # safe to constrain for non-thinking models
         raw_parts: list[str] = []
         token_count = 0
         t_start = time.monotonic()
 
         try:
-            # connect timeout 30s; read timeout scales with model size:
-            # thinking/large models can take 2–3 min per article on mid-range GPU
-            read_timeout = 300 if cpu_mode else (180 if thinking else 90)
+            # connect timeout 30s; read timeout scales with model type:
+            # thinking models on GPU get 10 min — they run the reasoning pass
+            # internally before streaming JSON, so the "silent" phase can be long.
+            # 300 s floor for all GPU modes — Jetson cold model load alone ~60 s.
+            read_timeout = 300 if cpu_mode else (600 if thinking else 300)
             with requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
@@ -543,7 +599,9 @@ Required JSON (fill ALL fields):
                     except json.JSONDecodeError:
                         continue
 
-                    token = chunk.get("response", "")
+                    # Ollama routes JSON to "thinking" for thinking models even with
+                    # format:"json" — read both fields so we work across versions.
+                    token = chunk.get("response", "") or chunk.get("thinking", "")
                     if token:
                         raw_parts.append(token)
                         token_count += 1
@@ -553,6 +611,15 @@ Required JSON (fill ALL fields):
                             status_ref["tokens_per_sec"] = round(token_count / elapsed, 1)
 
                     if chunk.get("done"):
+                        # Use Ollama's authoritative eval_count + eval_duration for
+                        # accurate tps — important for thinking models where the
+                        # reasoning phase isn't streamed (shows as 0 tps otherwise).
+                        if status_ref is not None:
+                            eval_count = chunk.get("eval_count", token_count)
+                            eval_ns    = chunk.get("eval_duration", 0)
+                            if eval_ns > 0:
+                                status_ref["tokens_generated"] = eval_count
+                                status_ref["tokens_per_sec"]   = round(eval_count / (eval_ns / 1e9), 1)
                         break
 
         except requests.exceptions.Timeout:
@@ -568,9 +635,13 @@ Required JSON (fill ALL fields):
             return None
 
         # ── Post-processing pipeline ──────────────────────────────────────────
-        # 1. Strip ALL thinking blocks — some models emit them even with think:false
-        #    or /no_think if the sampler flag isn't honoured by the server version.
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        # 1. Strip thinking blocks.  Two patterns cover:
+        #    a) complete block  <think>...</think>
+        #    b) truncated block <think>... (model hit num_predict mid-reasoning,
+        #       no closing tag) — without this, JSON inside the block is mistakenly
+        #       extracted instead of the post-think response.
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+        raw = re.sub(r"<think>.*",          "", raw, flags=re.DOTALL).strip()
         # 2. Strip markdown code fences (``` json ... ```)
         raw = re.sub(r"```(?:json)?\s*", "", raw)
         raw = re.sub(r"```", "", raw).strip()
@@ -668,7 +739,7 @@ class NewsPipeline:
             init_news_tables(conn)
 
     def _get_llm(self, settings: dict) -> OllamaLLM:
-        model = settings.get("llm_model", "gemma3:4b")
+        model = settings.get("llm_model") or ""
         url   = settings.get("ollama_url", "http://localhost:11434")
         if self.llm is None or self.llm.model != model or self.llm.base_url != url:
             self.llm = OllamaLLM(model=model, base_url=url)
@@ -685,7 +756,8 @@ class NewsPipeline:
         self.scraper.max_age_days = int(cfg.get("max_age_days", 7))
         cpu_mode = bool(cfg.get("cpu_mode", False))
         llm = self._get_llm(cfg)
-        llm_ok = llm.is_available()
+        # Skip LLM classification if no model has been selected by the user
+        llm_ok = bool(llm.model) and llm.is_available()
         all_tickers = list({*portfolio_tickers, *(watchlist_tickers or [])})
 
         t0 = time.time()

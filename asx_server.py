@@ -2391,24 +2391,54 @@ def news():
 
 # ── News Scanner routes ───────────────────────────────────────────────────────
 
+def _get_sbc_mode() -> bool:
+    """Return True if SBC mode is currently active."""
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT value FROM blob_store WHERE key='sbc_mode'").fetchone()
+            if row:
+                return bool(json.loads(row["value"]).get("enabled", False))
+    except Exception:
+        pass
+    return False
+
+
+def _get_gpu_info() -> dict:
+    """Return cached GPU detection result (calls news_engine.detect_gpu once)."""
+    if _NE_OK:
+        return _ne.detect_gpu()
+    return {"cuda": False, "device": None, "driver": None, "source": None}
+
+
 def _news_settings_from_db() -> dict:
-    """Read news scanner settings from blob_store."""
+    """Read news scanner settings from blob_store, injecting global SBC mode.
+
+    The cpu_mode default is auto-detected from hardware: True (CPU-only) when
+    no CUDA GPU is found (e.g. Raspberry Pi 5), False when CUDA is present
+    (e.g. Jetson Orin, desktop NVIDIA).  A user-saved value always wins.
+    """
+    gpu = _get_gpu_info()
     defaults = {
-        "llm_model": "gemma3:4b",
+        "llm_model": "",
         "ollama_url": "http://localhost:11434",
         "scan_interval_hours": 6,
         "enabled": True,
         "max_age_days": 7,
-        "cpu_mode": False,
+        "cpu_mode": not gpu.get("cuda", False),  # auto: CPU-only when no GPU
+        "sbc_mode": False,
     }
     try:
         with get_db() as conn:
             row = conn.execute(
                 "SELECT value FROM blob_store WHERE key='news_settings'"
             ).fetchone()
-            if row:
-                saved = json.loads(row["value"])
-                return {**defaults, **saved}
+            saved = json.loads(row["value"]) if row else {}
+            result = {**defaults, **saved}
+            # Inject global SBC mode flag (overrides per-setting value)
+            sbc_row = conn.execute("SELECT value FROM blob_store WHERE key='sbc_mode'").fetchone()
+            if sbc_row:
+                result["sbc_mode"] = bool(json.loads(sbc_row["value"]).get("enabled", False))
+            return result
     except Exception:
         pass
     return defaults
@@ -2429,6 +2459,8 @@ def _ensure_news_scheduler():
         return
     cfg = _news_settings_from_db()
     if not cfg.get("enabled", True):
+        return
+    if cfg.get("sbc_mode", False):  # SBC mode: auto-scan disabled
         return
     if not _ne._sched_thread or not _ne._sched_thread.is_alive():
         _ne.start_scheduler(
@@ -2539,7 +2571,7 @@ def news_status():
         "last_log": dict(last_log) if last_log else None,
         "settings": cfg,
         "ollama_available": _ne.OllamaLLM(
-            model=cfg.get("llm_model", "gemma3:4b"),
+            model=cfg.get("llm_model") or "",
             base_url=cfg.get("ollama_url", "http://localhost:11434"),
         ).is_available(),
         # Live progress fields (populated during active scans)
@@ -2566,7 +2598,7 @@ def news_models():
         return jsonify({"models": [], "available": False})
     cfg = _news_settings_from_db()
     llm = _ne.OllamaLLM(
-        model=cfg.get("llm_model", "gemma3:4b"),
+        model=cfg.get("llm_model") or "",
         base_url=cfg.get("ollama_url", "http://localhost:11434"),
     )
     available = llm.is_available()
@@ -2591,10 +2623,10 @@ def news_settings_route():
             (json.dumps(updated),)
         )
 
-    # Restart scheduler if interval or enabled changed
+    # Restart scheduler if interval or enabled changed (only if not in SBC mode)
     if _NE_OK:
         _ne.stop_scheduler()
-        if updated.get("enabled", True):
+        if updated.get("enabled", True) and not _get_sbc_mode():
             _ne.start_scheduler(
                 db_path=DB_PATH,
                 interval_hours=updated.get("scan_interval_hours", 6),
@@ -2602,6 +2634,42 @@ def news_settings_route():
                 get_settings_fn=_news_settings_from_db,
             )
     return jsonify({"ok": True, "settings": updated})
+
+
+@app.route("/api/sbc-mode", methods=["POST"])
+def sbc_mode_route():
+    """Toggle SBC mode — pauses background auto-schedulers, sets 20-min price refresh hint."""
+    data    = request.get_json() or {}
+    enabled = bool(data.get("enabled", False))
+
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO blob_store (key, value, updated_at) "
+            "VALUES ('sbc_mode', ?, datetime('now','localtime'))",
+            (json.dumps({"enabled": enabled}),)
+        )
+
+    # Pause or resume the news scanner background scheduler
+    if _NE_OK:
+        if enabled:
+            _ne.stop_scheduler()
+        else:
+            cfg = _news_settings_from_db()
+            if cfg.get("enabled", True):
+                _ne.start_scheduler(
+                    db_path=DB_PATH,
+                    interval_hours=cfg.get("scan_interval_hours", 6),
+                    get_tickers_fn=_portfolio_tickers_from_db,
+                    get_settings_fn=_news_settings_from_db,
+                )
+
+    return jsonify({"ok": True, "sbc_mode": enabled})
+
+
+@app.route("/api/system/gpu")
+def system_gpu():
+    """Return cached GPU/CUDA detection result for this host."""
+    return jsonify(_get_gpu_info())
 
 
 @app.route("/api/ollama/start", methods=["POST"])
@@ -2646,7 +2714,7 @@ def news_ollama_ps():
         return jsonify({"models": [], "available": False})
     cfg = _news_settings_from_db()
     llm = _ne.OllamaLLM(
-        model=cfg.get("llm_model", "gemma3:4b"),
+        model=cfg.get("llm_model") or "",
         base_url=cfg.get("ollama_url", "http://localhost:11434"),
     )
     ps = llm.get_ps()
@@ -2875,7 +2943,12 @@ if __name__ == "__main__":
             try:
                 with get_db() as conn:
                     row = conn.execute("SELECT value FROM blob_store WHERE key='ann_settings'").fetchone()
-                    return json.loads(row["value"]) if row else {}
+                    settings = json.loads(row["value"]) if row else {}
+                    # Inject global SBC mode so the scheduler can check it
+                    sbc_row = conn.execute("SELECT value FROM blob_store WHERE key='sbc_mode'").fetchone()
+                    if sbc_row:
+                        settings["sbc_mode"] = bool(json.loads(sbc_row["value"]).get("enabled", False))
+                    return settings
             except Exception:
                 return {}
         _ae.start_scheduler(_get_ann_tickers, _get_ann_settings, DB_PATH)

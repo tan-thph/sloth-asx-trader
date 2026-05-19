@@ -979,7 +979,9 @@ function _startReclassifyPoller() {
           ? `Stopped — ${s.last_count || 0} announcement${s.last_count !== 1 ? 's' : ''} updated before stop`
           : `Re-classify complete — ${s.last_count || 0} announcement${s.last_count !== 1 ? 's' : ''} updated`;
         toast(msg, wasStopped ? 'info' : 'success');
-        setTimeout(() => renderPage(), 500);
+        // Only re-render if still on the announcements page to avoid triggering
+        // stale poller restarts on other pages
+        if (state.page === 'announcements') setTimeout(() => renderPage(), 500);
       }
     } catch { /* ignore transient errors */ }
   }, 1500);

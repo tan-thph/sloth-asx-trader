@@ -278,7 +278,7 @@ function renderCGT() {
         + '</div>';
       html += '<div class="flex-row" style="gap:6px" onclick="event.stopPropagation()">'
         + '<button class="btn btn-sm" onclick="addParcelManually()">+ Add Parcel</button>'
-        + '<button class="btn btn-sm btn-primary" onclick="exportCSV()">↓ Export CGT CSV</button>'
+        + '<button class="btn btn-sm btn-primary" onclick="exportDisposalCSV()">↓ Export CGT CSV</button>'
         + '<span class="btn btn-sm">' + (pc?'Expand':'Collapse') + '</span>'
         + '</div></div>';
       if (!pc) {

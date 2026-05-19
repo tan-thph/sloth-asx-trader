@@ -202,7 +202,7 @@ function updateSchedSetting(key,value) {
   toast('Schedule setting updated','success');
   // Refresh dashboard schedule card live when on dashboard
   const dashEl = document.getElementById('dashboard-content') || document.getElementById('page-content');
-  if (state.currentPage === 'dashboard' && dashEl) {
+  if (state.page === 'dashboard' && dashEl) {
     // Re-render just the schedule card without a full page reload
     renderPage();
   }
@@ -212,7 +212,7 @@ function applySchedulePreset(startTime, endTime, intervalMins) {
   state.settings.scheduleWindowEnd = endTime;
   state.settings.scheduleIntervalMins = intervalMins;
   scheduleSave();
-  if (state.currentPage === 'dashboard') renderPage();
+  if (state.page === 'dashboard') renderPage();
   applyScheduler();
   toast(`Applied ${startTime}–${endTime} schedule (${intervalMins}m intervals)`,'success');
 }

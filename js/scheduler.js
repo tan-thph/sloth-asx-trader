@@ -204,12 +204,12 @@ function toggleScheduler(enabled) {
   scheduleSave();
   applyScheduler();
   // Update dashboard schedule widget immediately to reflect enabled/disabled state
-  if (state.currentPage === 'dashboard') renderPage();
+  if (state.page === 'dashboard') renderPage();
 }
 
 // Refresh dashboard schedule display every minute so pill states (past/current) stay in sync
 setInterval(() => {
-  if (state.currentPage === 'dashboard') {
+  if (state.page === 'dashboard') {
     // Only re-render the schedule section, not the whole page, to avoid disrupting interactions
     const el = document.getElementById('schedule-card');
     if (el) {
@@ -224,10 +224,15 @@ setInterval(() => {
 setInterval(updateSchedulerStatus, 60000);
 
 // ============================================================
-// AUTO PRICE REFRESH (every 10 minutes)
+// AUTO PRICE REFRESH (10 min PC / 20 min SBC)
 // ============================================================
 
-const PRICE_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
+const PRICE_REFRESH_MS     = 10 * 60 * 1000; // 10 minutes — PC mode
+const SBC_PRICE_REFRESH_MS = 20 * 60 * 1000; // 20 minutes — SBC mode
+
+function _priceRefreshInterval_ms() {
+  return state.settings.sbcMode ? SBC_PRICE_REFRESH_MS : PRICE_REFRESH_MS;
+}
 
 async function autoRefreshPrices(reason) {
   if (!state.serverOk || state.portfolio.length === 0) return;
@@ -237,8 +242,10 @@ async function autoRefreshPrices(reason) {
 
 function startPriceRefresh() {
   stopPriceRefresh();
-  _priceRefreshInterval = setInterval(() => autoRefreshPrices('10-min tick'), PRICE_REFRESH_MS);
-  console.log('Price auto-refresh started (every 10 minutes)');
+  const ms = _priceRefreshInterval_ms();
+  const label = state.settings.sbcMode ? '20-min tick (SBC)' : '10-min tick';
+  _priceRefreshInterval = setInterval(() => autoRefreshPrices(label), ms);
+  console.log(`Price auto-refresh started (every ${ms/60000} minutes${state.settings.sbcMode ? ' – SBC mode' : ''})`);
 }
 
 function stopPriceRefresh() {
@@ -254,5 +261,73 @@ function stopPriceRefresh() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   const last = state.lastPriceRefresh || 0;
-  if (Date.now() - last >= PRICE_REFRESH_MS) autoRefreshPrices('tab-visible/stale');
+  if (Date.now() - last >= _priceRefreshInterval_ms()) autoRefreshPrices('tab-visible/stale');
 });
+
+// ============================================================
+// SBC MODE TOGGLE
+// ============================================================
+
+async function toggleSbcMode() {
+  const enabled = !state.settings.sbcMode;
+  state.settings.sbcMode = enabled;
+  updateSbcModeButton();
+  startPriceRefresh(); // restart with new interval
+  scheduleSave();
+
+  if (!state.serverOk) {
+    toast(enabled ? 'SBC mode on — 20 min refresh' : 'PC mode on — 10 min refresh', 'info');
+    return;
+  }
+
+  // Notify server to pause/resume background schedulers
+  fetch(`${API}/api/sbc-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  }).catch(() => {});
+
+  // Auto-configure cpu_mode based on GPU detection
+  try {
+    const gpu = await fetch(`${API}/api/system/gpu`).then(r => r.json());
+    const hasCuda = gpu?.cuda ?? false;
+    const device  = gpu?.device || (hasCuda ? 'GPU' : 'CPU');
+
+    if (enabled) {
+      // SBC mode on: cpu_mode = true only when no CUDA (e.g. RPi 5)
+      const newCpuMode = !hasCuda;
+      await fetch(`${API}/api/news/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...state.news.settings, cpu_mode: newCpuMode }),
+      });
+      state.news.settings.cpu_mode = newCpuMode;
+      const hwLabel = hasCuda ? `CUDA (${device})` : `CPU-only (${device || 'no GPU'})`;
+      toast(`SBC mode on — 20 min refresh · ${hwLabel} · auto-scan paused`, 'info');
+    } else {
+      // PC mode on: always use GPU (cpu_mode = false)
+      await fetch(`${API}/api/news/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...state.news.settings, cpu_mode: false }),
+      });
+      state.news.settings.cpu_mode = false;
+      toast(`PC mode on — 10 min refresh · ${hasCuda ? device : 'GPU'} · auto-scan enabled`, 'info');
+    }
+  } catch {
+    toast(enabled ? 'SBC mode on — 20 min refresh, auto-scan paused' : 'PC mode on — 10 min refresh', 'info');
+  }
+}
+
+function updateSbcModeButton() {
+  const btn = document.getElementById('sbc-mode-btn');
+  if (!btn) return;
+  const sbc = state.settings.sbcMode;
+  btn.textContent = sbc ? '◈ SBC' : '⬡ PC';
+  btn.style.background    = sbc ? '#7c3aed' : '';
+  btn.style.color         = sbc ? '#ffffff' : '';
+  btn.style.borderColor   = sbc ? '#7c3aed' : '';
+  btn.title = sbc
+    ? 'SBC mode active — click to switch to PC mode'
+    : 'PC mode — click to switch to SBC mode (20 min refresh, no auto-scan)';
+}

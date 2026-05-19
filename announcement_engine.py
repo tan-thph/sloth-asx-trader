@@ -1628,34 +1628,31 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
     cpu_mode = bool(settings.get("cpu_mode", False))
     thinking = _is_ann_thinking_model(model)
 
-    # Thinking models: prepend /no_think directive + suppress via API flag
-    # Also need a larger num_predict budget so <think> tokens don't starve the JSON
-    if thinking:
-        prompt = "/no_think\n" + prompt
-        num_predict = 500 if cpu_mode else 800
-    else:
-        num_predict = 250 if cpu_mode else 400
+    # format:"json" (GBNF grammar) forces pure JSON output for all models.
+    # For thinking models on this Ollama version, JSON is routed to the
+    # "thinking" response field instead of "response" — Fallback A reads it.
+    # This uses ~50 tokens instead of a full 2048-token thinking pass.
+    num_predict = 250 if cpu_mode else 400
+    num_ctx     = 1024 if cpu_mode else 2048
 
     options: Dict = {
         "temperature": 0.1,
         "num_predict": num_predict,
+        "num_ctx":     num_ctx,
     }
-    if thinking:
-        options["think"] = False  # Ollama native flag — disables think blocks at sampler level
+    if cpu_mode:
+        options["num_gpu"] = 0  # force CPU-only; omit entirely otherwise so Ollama auto-selects
 
     payload: Dict = {
         "model":   model,
         "prompt":  prompt,
         "stream":  False,
+        "format":  "json",
         "options": options,
     }
-    if not thinking:
-        # format:"json" constrains output to valid JSON — safe for non-thinking models.
-        # For thinking models, GBNF grammar conflicts with <think> token emission → skip.
-        payload["format"] = "json"
 
-    # CPU/SBC mode needs much more time — tiny models on CPU can take 3–5 min per call
-    read_timeout = 300 if cpu_mode else (180 if thinking else 120)
+    # 300 s covers model cold-load (~60 s on Jetson) + inference in all modes
+    read_timeout = 300
 
     try:
         resp = requests.post(
@@ -1669,9 +1666,8 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
             logger.debug("_classify_ollama [%s] raw response: %s", model, raw[:300])
 
             # ── Fallback A: check 'thinking' field when 'response' is empty ──
-            # Some Ollama versions ignore think:False and put ALL output into the
-            # 'thinking' field (qwen3.5:9b on Ollama < 0.7.x does this).
-            if not raw and thinking:
+            # Ollama routes JSON to 'thinking' for thinking models with format:"json".
+            if not raw:
                 thinking_raw = resp_json.get("thinking", "").strip()
                 if thinking_raw:
                     logger.debug(
@@ -1683,33 +1679,19 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
             # Try parsing whatever we have so far
             result = _parse_llm_json(raw) if raw else None
 
-            # ── Fallback B: retry without think constraints ───────────────────
-            # Triggers when the thinking model produced no parseable JSON — covers
-            # TWO cases the old code missed:
-            #   • response empty + thinking field also empty
-            #   • response empty + thinking field contains raw prose ("Thinking
-            #     Process: …") with no JSON object embedded in it
-            # Fix: condition is now `result is None and thinking`, NOT `not raw`.
-            if result is None and thinking:
-                reason = (
-                    "empty response and thinking field"
-                    if not raw
-                    else "thinking field contains prose with no parseable JSON"
-                )
-                logger.warning(
-                    "_classify_ollama [%s]: %s — retrying without think constraints",
-                    model, reason,
-                )
-                clean_prompt = (
-                    prompt[len("/no_think\n"):]
-                    if prompt.startswith("/no_think\n") else prompt
-                )
+            # ── Fallback B: retry with explicit no-stream request ─────────────
+            # Safety net: if result is still None, retry once more (rare).
+            if result is None and raw:
+                logger.warning("_classify_ollama [%s]: JSON parse failed, retrying", model)
+                retry_opts: Dict = {"temperature": 0.1, "num_predict": num_predict, "num_ctx": num_ctx}
+                if cpu_mode:
+                    retry_opts["num_gpu"] = 0
                 retry_payload = {
                     "model":   model,
-                    "prompt":  clean_prompt,
+                    "prompt":  prompt,
                     "stream":  False,
                     "format":  "json",
-                    "options": {"temperature": 0.1, "num_predict": num_predict},
+                    "options": retry_opts,
                 }
                 try:
                     r2 = requests.post(
@@ -2488,12 +2470,16 @@ def start_scheduler(
                 now = _sydney_now()
                 slot = _should_run(now, _last_run_slot)
                 if slot:
-                    _last_run_slot = slot
-                    logger.info("ann-scheduler: firing slot %s", slot)
                     try:
-                        tickers = get_tickers_fn() or []
+                        tickers  = get_tickers_fn() or []
                         settings = get_settings_fn() or {}
-                        run_sync(tickers=tickers, settings=settings, db_path=db_path)
+                        if settings.get("sbc_mode", False):
+                            # Don't mark slot as run — allow re-fire if SBC mode is disabled
+                            logger.info("ann-scheduler: SBC mode active — skipping slot %s", slot)
+                        else:
+                            _last_run_slot = slot  # Only mark run when we actually run
+                            logger.info("ann-scheduler: firing slot %s", slot)
+                            run_sync(tickers=tickers, settings=settings, db_path=db_path)
                     except Exception as exc:
                         logger.error("ann-scheduler: run_sync raised — %s", exc)
                 # Reset last_slot when minute has passed (allow re-fire next occurrence)

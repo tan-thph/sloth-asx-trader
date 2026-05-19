@@ -141,7 +141,7 @@ function renderDashboard() {
               <span>📅 ${_ss.scheduleWeekdaysOnly ? 'Mon–Fri only' : 'All days'}</span>
               <span>⏱ Every ${_intv < 60 ? _intv + 'min' : (_intv/60) + 'hr'}</span>
               <span>🕐 Window: ${_start} – ${_end}</span>
-              ${state.analysisLastRun ? '<span>⟳ Last run: ' + state.analysisLastRun + '</span>' : ''}
+              ${state.analysisLastSummary ? '<span>⟳ Last run: ' + state.analysisLastSummary.time + ' ' + state.analysisLastSummary.date + '</span>' : ''}
               ${_ss.scheduleRunOnOpen ? '<span>🚀 Runs on open</span>' : ''}
             </div>
           </div>`}

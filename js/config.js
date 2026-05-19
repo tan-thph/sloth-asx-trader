@@ -54,6 +54,7 @@ const state = {
     scheduleIntervalMins: 60,
     scheduleWeekdaysOnly: true,
     scheduleRunOnOpen: true,
+    sbcMode: false,
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary
@@ -76,9 +77,10 @@ const state = {
     lastFetch: 0,
     models: [],
     ollamaAvailable: null,
+    gpuInfo: null,
     filter: { category: 'all', ticker: 'all', sentiment: 'all', search: '', sortBy: 'relevance' },
     settings: {
-      llm_model: 'gemma3:4b',
+      llm_model: '',
       ollama_url: 'http://localhost:11434',
       scan_interval_hours: 6,
       enabled: true,

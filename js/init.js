@@ -31,6 +31,7 @@ async function initApp() {
   setInterval(() => { if (state.serverOk) saveStateToDb(); }, 2 * 60 * 1000);
   applyScheduler();
   startPriceRefresh();
+  updateSbcModeButton();
   recordPortfolioSnapshot();
   scheduleSave(); // Ensure snapshot is persisted immediately
   const reconciled = reconcileJournalParcels();

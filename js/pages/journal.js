@@ -253,8 +253,7 @@ function resetJournalFilter() {
 // Legacy shims — kept so any saved onclick refs still work
 function setJournalFilter(type, value) {
   if (type === 'all') { resetJournalFilter(); return; }
-  setJournalFilterKey(type === 'month' ? 'dateFrom' : 'dateFrom', '');
-  renderPage();
+  setJournalFilterKey(type, value || '');
 }
 function setJournalStatusFilter(status) { setJournalFilterKey('status', status); }
 function setJournalActionFilter(action) { setJournalFilterKey('action', action); }

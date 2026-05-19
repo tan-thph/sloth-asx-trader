@@ -76,11 +76,12 @@ async function renderNewsPage(gen) {
 
   // Fetch status + feed in parallel
   try {
-    const [statusResp, feedResp, modelsResp] = await Promise.all([
+    const [statusResp, feedResp, modelsResp, gpuResp] = await Promise.all([
       fetch(`${API}/api/news/status`).then(r => r.json()).catch(() => ({})),
       fetch(`${API}/api/news/feed?days=${state.news.settings.max_age_days || 7}&limit=100`)
         .then(r => r.json()).catch(() => ({ items: [], sentiment: {} })),
       fetch(`${API}/api/news/models`).then(r => r.json()).catch(() => ({ models: [], available: false })),
+      fetch(`${API}/api/system/gpu`).then(r => r.json()).catch(() => ({ cuda: false })),
     ]);
 
     if (state._renderGen !== gen) return; // page changed mid-fetch
@@ -89,6 +90,7 @@ async function renderNewsPage(gen) {
     state.news.items         = feedResp.items || [];
     state.news.models        = modelsResp.models || [];
     state.news.ollamaAvailable = modelsResp.available || false;
+    state.news.gpuInfo       = gpuResp;
     state.news.lastFetch     = Date.now();
 
     // Merge settings from server
@@ -154,11 +156,18 @@ function _livePanelHTML(status) {
   const article = status.current_article || '';
   const vram    = status.gpu_vram_mb;
 
+  // Thinking models run an internal reasoning pass before streaming JSON —
+  // the silent phase is normal, not a hang.
+  const THINKING_MODELS = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2', 'marco-o1'];
+  const isThinking = THINKING_MODELS.some(t => model.toLowerCase().includes(t));
+
   // current_article_start is an ISO string (UTC) — append Z if missing
   const artStart = status.current_article_start;
   const artStartMs = artStart ? new Date(artStart.includes('Z') || artStart.includes('+') ? artStart : artStart + 'Z').getTime() : null;
   const artAge   = artStartMs && !isNaN(artStartMs) ? Math.round((Date.now() - artStartMs) / 1000) : null;
-  const frozen   = artAge != null && artAge > 35 && tps < 0.5;
+  // Thinking models: allow up to 5 min silent (reasoning); non-thinking: 35 s
+  const frozenThreshold = isThinking ? 300 : 35;
+  const frozen   = artAge != null && artAge > frozenThreshold && tps < 0.5;
 
   const vramBadge = vram == null ? ''
     : vram === 0
@@ -169,20 +178,25 @@ function _livePanelHTML(status) {
     ? (eta < 60 ? `${eta}s` : `${Math.ceil(eta / 60)}m`)
     : '';
 
+  // Token speed display — thinking models show "Reasoning…" during silent phase
+  const tpsDisplay = tps > 0
+    ? `<span style="font-size:11px;color:#3b82f6;font-weight:600">${tps} tok/s</span>`
+    : isThinking && artAge != null && artAge > 5
+      ? `<span style="font-size:11px;color:#7c3aed">◎ Reasoning… ${artAge}s</span>`
+      : `<span style="font-size:11px;color:var(--text-muted)">waiting for tokens…</span>`;
+
   return `
     <div style="margin-top:8px;padding:8px 10px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px">
         <span style="font-size:12px;font-weight:600">◎ Classifying</span>
         <span style="font-size:12px;color:var(--text-secondary)">${done} / ${total} articles</span>
-        ${failed > 0 ? `<span style="font-size:10px;background:#fee2e2;color:#dc2626;padding:1px 5px;border-radius:3px" title="LLM returned invalid JSON — likely GPU not in use or model too slow">${failed} failed</span>` : ''}
+        ${failed > 0 ? `<span style="font-size:10px;background:#fee2e2;color:#dc2626;padding:1px 5px;border-radius:3px" title="LLM returned invalid JSON — may recover; check model selection">${failed} failed</span>` : ''}
         ${model ? `<span style="font-size:11px;color:var(--text-muted)">${model}</span>` : ''}
         ${vramBadge}
-        ${tps > 0
-          ? `<span style="font-size:11px;color:#3b82f6;font-weight:600">${tps} tok/s</span>`
-          : `<span style="font-size:11px;color:var(--text-muted)">waiting for tokens…</span>`}
+        ${tpsDisplay}
         ${avg > 0 ? `<span style="font-size:11px;color:var(--text-muted)">${avg}s/article</span>` : ''}
         ${etaStr ? `<span style="font-size:11px;color:var(--text-muted)">ETA ${etaStr}</span>` : ''}
-        ${frozen ? `<span style="font-size:11px;background:#fee2e2;color:#dc2626;padding:1px 6px;border-radius:3px">⚠ Possible hang (${artAge}s on current article)</span>` : ''}
+        ${frozen ? `<span style="font-size:11px;background:#fee2e2;color:#dc2626;padding:1px 6px;border-radius:3px">⚠ Possible hang (${artAge}s)</span>` : ''}
       </div>
       <div style="height:5px;background:var(--border-light);border-radius:3px;overflow:hidden;margin-bottom:5px">
         <div style="width:${pct}%;height:100%;background:#3b82f6;border-radius:3px;transition:width 0.4s ease"></div>
@@ -255,17 +269,28 @@ function _newsPageHTML(status, sentiment) {
 
   // Ollama status + model selector
   const modelOptions = state.news.models.length
-    ? state.news.models.map(m => `<option value="${m.name}" ${m.name === cfg.llm_model ? 'selected' : ''}>${m.name}${m.details?.parameter_size ? ' — ' + m.details.parameter_size : ''}</option>`).join('')
-    : `<option value="${cfg.llm_model}" selected>${cfg.llm_model}</option>`;
+    ? [
+        ...(cfg.llm_model ? [] : [`<option value="" selected disabled>— select a model —</option>`]),
+        ...state.news.models.map(m => `<option value="${m.name}" ${m.name === cfg.llm_model ? 'selected' : ''}>${m.name}${m.details?.parameter_size ? ' — ' + m.details.parameter_size : ''}</option>`),
+      ].join('')
+    : `<option value="${cfg.llm_model}" selected>${cfg.llm_model || '— select a model —'}</option>`;
 
   const presetButtons = NEWS_LLM_PRESETS.map(p => `
     <button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="newsSetPreset('${p.models[0]}')" title="${p.models.join(', ')}">${p.label}<br><span style="font-size:9px;color:var(--text-muted)">${p.desc}</span></button>`
   ).join('');
 
+  // GPU / CPU badge
+  const gpu = state.news.gpuInfo;
+  const gpuBadge = gpu
+    ? gpu.cuda
+      ? `<span style="font-size:11px;background:#ede9fe;color:#6d28d9;padding:2px 7px;border-radius:4px;font-weight:600" title="CUDA detected — GPU acceleration active">◈ ${gpu.device || 'CUDA GPU'}</span>`
+      : `<span style="font-size:11px;background:#f3f4f6;color:#6b7280;padding:2px 7px;border-radius:4px" title="No CUDA GPU detected — running on CPU">CPU only</span>`
+    : '';
+
   const sbcHint = cfg.cpu_mode ? `
     <div style="font-size:11px;color:#92400e;background:#fef3c7;padding:5px 8px;border-radius:var(--radius-sm);margin-bottom:6px">
-      ⚡ CPU mode: recommended models for SBC —
-      <a href="#" onclick="newsSetPreset('gemma3:1b');return false" style="color:#92400e;font-weight:600">gemma3:1b</a> (Jetson Orin / RPi 5),
+      ⚡ CPU mode${gpu && !gpu.cuda ? ' (no GPU detected)' : ''} — recommended models:
+      <a href="#" onclick="newsSetPreset('gemma3:1b');return false" style="color:#92400e;font-weight:600">gemma3:1b</a> (Jetson / RPi 5),
       <a href="#" onclick="newsSetPreset('qwen2:0.5b');return false" style="color:#92400e;font-weight:600">qwen2:0.5b</a> (RPi 5 low-mem)
     </div>` : '';
 
@@ -348,8 +373,9 @@ function _newsPageHTML(status, sentiment) {
       <!-- LLM configuration -->
       <div class="card">
         <div class="card-title">Local LLM <span class="text-xs text-muted">(via Ollama)</span></div>
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
           ${ollamaStatusHtml}
+          ${gpuBadge}
           <span style="font-size:11px;color:var(--text-muted)">${cfg.ollama_url || 'http://localhost:11434'}</span>
         </div>
         ${ollamaOk ? `
@@ -668,7 +694,7 @@ async function newsReclassify() {
 }
 
 function _startReclassifyPoller() {
-  if (_reclassifyPollTimer) clearInterval(_reclassifyPollTimer);
+  if (_reclassifyPollTimer) return; // already polling — don't spawn a second interval
   _reclassifyPollTimer = setInterval(async () => {
     try {
       const s = await fetch(`${API}/api/news/reclassify/status`).then(r => r.json());
@@ -678,8 +704,8 @@ function _startReclassifyPoller() {
         _reclassifyPollTimer = null;
         const btn = document.getElementById('reclassify-btn');
         if (btn) { btn.disabled = false; btn.textContent = '⟳ Re-classify'; }
-        // Refresh news feed to show new classifications
-        setTimeout(() => renderPage(), 1200);
+        // Only re-render if still on the news page
+        if (state.page === 'news') setTimeout(() => renderPage(), 1200);
       }
     } catch {}
   }, 2000);

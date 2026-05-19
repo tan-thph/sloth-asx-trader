@@ -26,7 +26,10 @@ async function refreshPrices(opts = {}) {
   checkPriceAlerts();
   recordPortfolioSnapshot();
   scheduleSave();
-  renderPage();
+  // Skip re-render on silent auto-refresh for async pages (news/announcements) —
+  // they manage their own render cycles and a forced re-render would interrupt pollers
+  const asyncPages = ['news', 'announcements'];
+  if (!silent || !asyncPages.includes(state.page)) renderPage();
   return updated;
 }
 
