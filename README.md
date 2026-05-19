@@ -65,11 +65,13 @@ js/
     recommendations.js    ← AI trade recs, execution workflow
     signals.js            ← Live technical indicators (RSI/MACD/BB)
     journal.js            ← Trade journal with P&L reconciliation
-    performance.js        ← Analytics, confidence calibration, win rate
+    performance.js        ← Analytics, equity curve, confidence calibration
     backtest.js           ← AI Replay + Technical strategy benchmarking
     cgt.js                ← CGT parcel tracker, disposal export
+    risk.js               ← Portfolio risk dashboard (VaR, drawdown, score)
     announcements.js      ← ASX announcements feed + LLM settings
     news.js               ← LLM-classified news scanner
+    scanner.js            ← Market scanner (ASX universe opportunity scan)
     assistant.js          ← Direct Claude AI chat
     settings.js           ← All app settings
 
@@ -117,14 +119,18 @@ AI-powered buy/sell/trim recommendations using **Claude (Anthropic API)**:
 
 - **Configurable tickers** — portfolio holdings + additional watchlist tickers
 - **Live signal data** sent to Claude: RSI, MACD, Bollinger Bands, moving averages, volume
-- **Market view textarea** — add your own commentary, themes, or constraints; the AI incorporates them into reasoning
+- **Portfolio risk context** automatically injected into every analysis prompt:
+  - Composite Risk Score, weighted VaR, Sharpe ratio, Max Drawdown
+  - Per-ticker ⚠HIGH-VAR and ⚠HIGH-DD flags for positions exceeding thresholds
+  - Hard sizing rules: quantity reduced 25–50% when VaR < −3.5%; BUYs blocked at risk score > 80
+- **Market view textarea** — add your own commentary, themes, or constraints
 - **Saved views** — store up to 5 market views and restore with one click
 - **Execution workflow** per recommendation:
   - Adjust qty, price, and brokerage before marking executed
   - Automatically updates portfolio holdings, cash balance, CGT parcels, and trade journal on execution
-  - Feedback field per rec — stored and included in the next analysis prompt for model improvement
+  - Feedback field per rec — stored and included in the next analysis prompt
 - **Trade slot cap** — configurable max trades/day with a live remaining-slots badge
-- **Recommendation history** — filterable by ticker, action, status, outcome, date range, confidence; sortable by P&L or confidence
+- **Recommendation history** — filterable by ticker, action, status, outcome, date range, confidence
 
 ---
 
@@ -136,6 +142,7 @@ Real-time technical indicator panel powered by **yfinance**:
 - **Moving averages** — 20 MA, 50 MA, 200 MA with trend labels
 - **Volume** — vs 20-day average
 - **Signal summary** — composite bull/bear score across all indicators
+- **Signal Condition Rules** — 10 named rules (RSI oversold/overbought, MACD crossover, BB touch, ADX trend, volume spike, SMA position) evaluated live and grouped into Bullish / Bearish / Notable columns
 - Parallel fetch for all tickers using `ThreadPoolExecutor`
 
 ---
@@ -150,6 +157,7 @@ Real-time technical indicator panel powered by **yfinance**:
 
 ### 📈 Performance Analytics
 - **Win rate**, total wins/losses, execution rate
+- **Portfolio Equity Curve** — 1-year NAV reconstruction vs VAS benchmark (canvas chart), showing total return, max drawdown, and benchmark return
 - **Confidence calibration chart** — are higher-confidence recs actually winning more?
 - **Realised vs unrealised** P&L breakdown
 - **Dividend income** — annualised income and yield-on-cost from holdings
@@ -197,13 +205,57 @@ Two modes in one panel:
 
 ---
 
+### ⚠️ Portfolio Risk Dashboard
+Quantitative risk metrics computed from 90 days of yfinance price history:
+
+**Per-holding metrics**
+- **VaR 1d (95%)** — historical simulation: 5th-percentile daily loss
+- **CVaR (95%)** — expected shortfall beyond VaR
+- **Max Drawdown** — peak-to-trough decline over 90-day window
+- **Beta** — relative to XJO
+- **Sharpe Ratio** — annualised, risk-free rate 4.35%
+- **Volatility** — annualised daily return std dev
+
+**Portfolio-level aggregates**
+- 6-tile summary: weighted Volatility, Beta, Sharpe, VaR, Max Drawdown, top-holding concentration
+- **Composite Risk Score (0–100)** gauge — arc gauge (green / amber / red) built from four dimensions:
+  - Volatility (0–35 pts), Concentration (0–25 pts), Max Drawdown (0–25 pts), Beta (0–15 pts)
+- **Sector allocation** breakdown from a built-in ~150-ticker ASX sector map
+
+---
+
+### 🔭 Market Scanner  *(new)*
+On-demand opportunity scanner across the **ASX20 / ASX50 / ASX100 / ASX200** universe:
+
+**How it works**
+1. **Batch download** — one `yf.download()` call fetches 90 days of OHLCV for all tickers in the selected universe (~15 s for ASX200)
+2. **Liquidity filter** — drops tickers with average daily volume below the configured ADV floor (default $500k)
+3. **Opportunity scoring (0–100)** per ticker across four dimensions:
+   - **Trend (0–30)** — price above SMA20 (10 pts), above SMA50 (10 pts), SMA slope rising (10 pts)
+   - **Pullback quality (0–30)** — RSI in 35–55 zone (15 pts), price 5–20% off 90-day high (15 pts)
+   - **Volume accumulation (0–20)** — 5-day avg volume vs 20-day avg
+   - **Momentum (0–20)** — 5-day price return
+4. **Sector diversification** — top results capped at 4 per sector to avoid 10 bank stocks
+
+**UI**
+- Universe selector (ASX20 / 50 / 100 / 200) and ADV filter
+- Live progress bar with stage label, updated via polling
+- Sortable results table with score bars, RSI, 5d/20d returns, distance from high
+- **Add to Watchlist** — pushes ticker into the analysis watchlist for inclusion in the next AI run and News Scanner
+- **Run Signals** — adds ticker to watchlist and jumps to the Live Signals page pre-loaded for that ticker
+
+---
+
 ### 📰 News Scanner
 LLM-powered ASX news pipeline:
 - Ingests **RSS feeds** and ASX company filings
+- Scans for news on **portfolio holdings + watchlist tickers** (combined)
 - Classifies each article using a local LLM (Ollama) or cloud API (Groq/Gemini)
 - **Hardware-tiered model presets** — from 4 GB RAM (gemma3:1b) to 32 GB+ (gemma3:27b)
 - Deduplication via **TF-IDF cosine similarity** (scikit-learn) — no near-duplicate articles
-- Filterable by ticker, category, sentiment, impact score
+- Filterable by ticker (portfolio + watchlist), category, sentiment, impact score
+- **Portfolio badge** (blue left border + ★) for articles about held tickers
+- **Watchlist badge** (amber left border + ◈) for articles about watchlist-only tickers
 - High-impact articles surface on the Dashboard as alert banners
 - Stored in SQLite with 30-day retention
 
@@ -232,16 +284,14 @@ Supports three LLM backends — choose in Settings:
 | **Gemini** | Cloud, free tier |
 | **Keyword only** | No LLM — fast heuristic fallback |
 
-**Ollama model picker** — detects locally downloaded models via `/api/tags` and lists them in a dropdown, sorted by size (smallest first for low-RAM machines).
-
 **UI features**
 - Live progress banner during sync (per-ticker progress bar, count of new items found)
 - Filter by ticker, type, sentiment, free-text search
-- Price-sensitive dot — highlighted directly from Markit's `isPriceSensitive` flag (no inference needed)
+- Price-sensitive dot — highlighted directly from Markit's `isPriceSensitive` flag
 - Impact-coloured left border on cards (red = 8+, amber = 6+, blue = 4+)
-- **↺ Re-classify All** — re-runs LLM on all stored announcements with the current model; updates displayed model name on every card
-- **PDF proxy** — `GET /api/announcements/{id}/pdf` fetches and streams the actual ASX PDF via `displayAnnouncement.do` redirect (works around obfuscated ASX filenames)
-- **+ Add to Analysis** — pushes headline + summary into the market-view context field for the next Claude analysis run
+- **↺ Re-classify All** — re-runs LLM on all stored announcements (independent of News re-classify; both jobs are mutually exclusive)
+- **PDF proxy** — `GET /api/announcements/{id}/pdf` fetches and streams the actual ASX PDF
+- **+ Add to Analysis** — pushes headline + summary into the market-view context field
 - Scheduled auto-sync at **10:30 AEST** and **15:00 AEST** on weekdays
 
 ---
@@ -313,6 +363,7 @@ The app is designed to work with a **free Groq or Gemini API key** for news/anno
 - Markit Digital API returns only the ~5 most recent announcements per company — sufficient for a 3-day lookback
 - yfinance data has a 15-minute delay and occasional gaps for smaller ASX stocks
 - The Claude API call for recommendations costs approximately $0.05–0.15 per run depending on portfolio size
+- Market Scanner fetches 90 days of data for up to 200 tickers — takes ~20–30 s on a good connection; not suitable for very slow or metered links
 
 ---
 
