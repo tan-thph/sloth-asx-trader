@@ -171,11 +171,10 @@ function _buildResultsTable(results) {
       <table>
         <thead><tr>
           <th>#</th>
-          ${colHdr('score','Score','Composite opportunity score (0-100): trend + pullback quality + volume + momentum')}
           <th>Ticker</th>
           <th>Sector</th>
           <th>Price</th>
-          <th style="min-width:110px">Score</th>
+          <th title="Composite opportunity score (0-100): trend + pullback quality + volume + momentum" style="min-width:110px;cursor:pointer;user-select:none${_scannerSort.col==='score'?';color:var(--accent-primary)':''}" onclick="scannerSort('score')">Score${_scannerSort.col==='score'?(_scannerSort.dir==='desc'?' ↓':' ↑'):''}</th>
           ${colHdr('trend_score','Trend','Price vs SMA20/50, SMA slope (0-30)')}
           ${colHdr('rsi','RSI','RSI-14: 35-55 is ideal opportunity zone')}
           ${colHdr('ret_5d','5d%','5-day price return')}
