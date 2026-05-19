@@ -111,6 +111,36 @@ Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"a
   // technical data (bypasses the 15-min fetchSignals cache).
   if(state.serverOk && allTickers.length) { try { await fetchSignals(allTickers, true); } catch {} }
 
+  // ── Step 2b: fetch portfolio risk metrics ───────────────────────────────────
+  // Run in parallel with the rest of context building — non-blocking failure.
+  let _riskMetrics = {};   // {TICKER: {var_95, cvar_95, max_drawdown, beta, sharpe, volatility_ann}}
+  let _riskComposite = null; // portfolio-level weighted values
+  if (state.serverOk && portfolioTickers.length) {
+    try {
+      const rf = state.rbaRate || 4.35;
+      const riskResp = await fetch(`${API}/api/risk?tickers=${portfolioTickers.join(',')}&rf=${rf}`);
+      if (riskResp.ok) {
+        const rd = await riskResp.json();
+        _riskMetrics = rd.metrics || {};
+        // Compute portfolio-weighted composites for the prompt
+        const pv = portfolioValue();
+        let wVol=0, wBeta=0, wVaR=0, wDD=0, wSharpe=0, covered=0;
+        for (const h of mergedPortfolio()) {
+          const m = _riskMetrics[h.ticker];
+          if (!m) continue;
+          const w = pv > 0 ? (h.shares * h.currentPrice) / pv : 0;
+          wVol    += m.volatility_ann * w;
+          wBeta   += m.beta           * w;
+          wVaR    += (m.var_95  || 0) * w;
+          wDD     += (m.max_drawdown || 0) * w;
+          wSharpe += m.sharpe         * w;
+          covered++;
+        }
+        if (covered > 0) _riskComposite = { wVol, wBeta, wVaR, wDD, wSharpe };
+      }
+    } catch { /* non-fatal — analysis continues without risk data */ }
+  }
+
   // Build indicator context (full detail per ticker)
   let indicatorCtx = '';
   const loaded = allTickers.filter(t=>state.liveSignals[t]&&!state.liveSignals[t].error);
@@ -233,6 +263,31 @@ Key drivers: ${(_m.keyDrivers||'n/a').slice(0,200)}` : '';
   }
 
 
+  // ── Risk metrics context ─────────────────────────────────────────────────────
+  let riskCtx = '';
+  if (_riskComposite) {
+    const rc = _riskComposite;
+    // Per-ticker risk rows (portfolio holdings only)
+    const riskRows = mergedPortfolio().map(h => {
+      const m = _riskMetrics[h.ticker];
+      if (!m) return `  ${h.ticker}: no risk data`;
+      const ddWarn  = m.max_drawdown > 25 ? ' ⚠HIGH-DD' : '';
+      const varWarn = m.var_95 < -3.5    ? ' ⚠HIGH-VAR' : '';
+      return `  ${h.ticker}: Vol=${m.volatility_ann.toFixed(1)}%ann | Beta=${m.beta.toFixed(2)} | Sharpe=${m.sharpe.toFixed(2)} | VaR1d=${m.var_95.toFixed(2)}%${varWarn} | CVaR=${m.cvar_95.toFixed(2)}% | MaxDD90d=${m.max_drawdown.toFixed(1)}%${ddWarn}`;
+    }).join('\n');
+    // Portfolio composite risk score (same formula as risk page)
+    const clamp  = (v, lo, hi) => Math.max(0, Math.min(25, (v - lo) / (hi - lo) * 25));
+    const sectorMap2 = {};
+    for (const h of mergedPortfolio()) { const s=h.sector||'Other'; sectorMap2[s]=(sectorMap2[s]||0)+h.shares*h.currentPrice; }
+    const topConc2 = portfolioValue()>0 ? Math.max(...Object.values(sectorMap2))/portfolioValue()*100 : 0;
+    const compScore2 = Math.round(clamp(rc.wVol,10,35)+clamp(topConc2,20,60)+clamp(rc.wDD,5,25)+clamp(rc.wBeta,0.5,1.5));
+    const scoreLabel2 = compScore2 < 34 ? 'Low' : compScore2 < 67 ? 'Moderate' : 'High';
+    riskCtx = `\n\nPORTFOLIO RISK METRICS (90-day, yfinance — use for sizing and conviction):
+Composite risk score: ${compScore2}/100 (${scoreLabel2}) | Weighted: Vol=${rc.wVol.toFixed(1)}%ann | Beta=${rc.wBeta.toFixed(2)} | VaR1d=${rc.wVaR.toFixed(2)}% | AvgMaxDD=${rc.wDD.toFixed(1)}% | Sharpe=${rc.wSharpe.toFixed(2)}
+Per-ticker:
+${riskRows}`;
+  }
+
   // Extra tickers context
   const extraTickersCtx = extraTickers.length ? `\n\nADDITIONAL WATCHLIST TICKERS (assess for entry, not yet in portfolio): ${extraTickers.join(', ')}` : '';
 
@@ -274,7 +329,7 @@ LIVE PORTFOLIO STATE:
 Holdings: ${portfolioJson}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
 RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
-${recCtx}${pendingFeedbackCtx}${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${indicatorCtx}
+${recCtx}${pendingFeedbackCtx}${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${indicatorCtx}
 
 
 ANALYSIS INSTRUCTIONS — follow in order, do not skip steps
@@ -369,6 +424,13 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
   12. MACRO OVERRIDE: If macroData.sentiment = "bearish" AND bullish < 35 (both conditions required), do NOT generate any BUY or TOP_UP regardless of individual ticker signals. Recommend cash vs RBA rate in summary.
   13. CGT DISCOUNT WINDOW: Never recommend SELL/TRIM on a position held 11–12 months without explicitly flagging the CGT discount window. Suggest waiting for the 12-month mark unless the thesis is permanently broken. Note: CGT discount applies to gains only — does not block tax-loss harvesting on loss positions.
   14. DATA FRESHNESS: Before issuing any rec, verify live indicator data is present for that ticker. If indicator data is absent or clearly stale, do NOT issue a rec — add to dataGaps[] with the missing field noted.
+  15. RISK-ADJUSTED SIZING: When PORTFOLIO RISK METRICS are present in the user message, apply these sizing modifiers to every BUY/TOP_UP before finalising qty:
+      - Ticker VaR1d < -3.5% (flagged ⚠HIGH-VAR): reduce qty by 25%. Note in reasoning[].
+      - Ticker VaR1d < -5.0%: reduce qty by 50%. Note in reasoning[].
+      - Ticker MaxDD90d > 25% (flagged ⚠HIGH-DD): mandatory stop-loss note at 1.5×ATR in reasoning[].
+      - If portfolio composite risk score > 67 (High): raise minimum confidence threshold to 0.75 for all BUYs.
+      - If portfolio composite risk score > 80: issue NO new BUY positions. TOP_UP on existing winners only if confidence ≥ 0.80. Explain in summary.
+  16. RISK-REWARD CONTEXT: When reporting factorsUsed[], always include one entry citing the ticker's Sharpe ratio and whether it justifies the expected return vs the RBA risk-free rate. A negative Sharpe (< 0) requires explicit justification for any BUY rec.
 
   SECTION 2 — ANTI-CHURN RULES
 
