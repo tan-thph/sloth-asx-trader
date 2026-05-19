@@ -294,19 +294,25 @@ function _buildSectorAllTickers(allResults, sector) {
   };
 
   const rows = sectorRows.map(r => {
+    const inPortfolio = portfolioTickers.has(r.ticker);
+    const inWatchlist = watchlistTickers.has(r.ticker);
     const trendIcon  = r.trend_score >= 25 ? '↑' : r.trend_score >= 15 ? '→' : '↓';
     const trendColor = r.trend_score >= 25 ? '#16a34a' : r.trend_score >= 15 ? '#d97706' : '#dc2626';
     const rsiColor   = r.rsi < 35 ? '#16a34a' : r.rsi > 65 ? '#dc2626' : '#d97706';
     const r5c        = r.ret_5d  >= 0 ? '#16a34a' : '#dc2626';
     const r20c       = r.ret_20d >= 0 ? '#16a34a' : '#dc2626';
     const highColor  = r.pct_from_high >= -10 ? '#d97706' : r.pct_from_high >= -20 ? '#16a34a' : '#94a3b8';
-    const tag = portfolioTickers.has(r.ticker)
-      ? `<span style="font-size:9px;background:#334155;color:#94a3b8;padding:1px 5px;border-radius:8px;margin-left:4px">held</span>`
-      : watchlistTickers.has(r.ticker)
-      ? `<span style="font-size:9px;background:#14532d;color:#86efac;padding:1px 5px;border-radius:8px;margin-left:4px">watch</span>`
-      : '';
+    const actionBtn = inPortfolio
+      ? `<span class="badge badge-neutral" style="font-size:10px">In portfolio</span>`
+      : inWatchlist
+        ? `<span class="badge" style="background:#dcfce7;color:#15803d;font-size:10px">✓ Watchlist</span>
+           <button class="btn btn-sm" style="font-size:10px" onclick="scannerRunSignals('${r.ticker}')">→ Signals</button>`
+        : `<button class="btn btn-sm btn-primary" style="font-size:10px;padding:2px 8px"
+             onclick="scannerAddToWatchlist('${r.ticker}')">+ Watchlist</button>
+           <button class="btn btn-sm" style="font-size:10px;padding:2px 8px"
+             onclick="scannerRunSignals('${r.ticker}')">→ Signals</button>`;
     return `<tr>
-      <td><strong>${r.ticker}</strong>${tag}</td>
+      <td><strong>${r.ticker}</strong></td>
       <td>$${fmt(r.current_price, 3)}</td>
       <td>${scoreBar(r.score)}</td>
       <td style="text-align:center"><span style="color:${trendColor};font-weight:600">${trendIcon} ${r.trend_score}</span></td>
@@ -315,6 +321,7 @@ function _buildSectorAllTickers(allResults, sector) {
       <td style="text-align:center;color:${r20c}">${r.ret_20d>=0?'+':''}${fmt(r.ret_20d,1)}%</td>
       <td style="text-align:center;color:${highColor}">${fmt(r.pct_from_high,1)}%</td>
       <td style="text-align:center;color:var(--text-muted);font-size:11px">${fmt(r.adv_aud,1)}M</td>
+      <td style="white-space:nowrap">${actionBtn}</td>
     </tr>`;
   }).join('');
 
@@ -337,6 +344,7 @@ function _buildSectorAllTickers(allResults, sector) {
           <th style="text-align:center">20d%</th>
           <th style="text-align:center">vs High</th>
           <th style="text-align:center">Vol $M</th>
+          <th>Action</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
