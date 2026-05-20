@@ -337,6 +337,11 @@ function _newsPageHTML(status, sentiment) {
           <span style="font-size:11px;color:var(--text-muted)">${totalArt} articles · ${procArt} classified</span>
           <span style="font-size:11px;color:var(--text-muted)">Last: ${lastScan ? _relativeTime(lastScan) : 'never'}</span>
           ${nextScan && !running ? `<span style="font-size:11px;color:var(--text-muted)">Next: ${_relativeTime(nextScan).replace('ago','').trim() || 'soon'}</span>` : ''}
+          <input type="text" id="news-scan-ticker" value="${state.news?.scanTicker||''}"
+            placeholder="Ticker(s) or blank for all"
+            oninput="if(state.news) state.news.scanTicker=this.value"
+            title="Comma-separated ASX codes to scan, or leave blank to scan all portfolio/watchlist tickers"
+            style="width:160px;font-size:12px;padding:2px 7px;border:1px solid var(--border-light);border-radius:var(--radius-md);background:var(--bg-secondary);color:var(--text-primary)">
           <span id="news-scan-btns">${running
             ? `<button class="btn btn-sm" disabled style="opacity:0.6">⟳ Scanning…</button>
                <button class="btn btn-sm btn-danger" onclick="newsScanStop()">■ Stop</button>`
@@ -654,10 +659,16 @@ async function newsScanNow() {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   toast('Starting news scan…', 'info');
   try {
-    const tickers = [...new Set([
-      ...state.portfolio.map(h => h.ticker),
-      ...(state.analysisConfig?.extraTickers || []),
-    ])];
+    const scanTickerRaw = (document.getElementById('news-scan-ticker')?.value ?? state.news?.scanTicker ?? '').trim();
+    let tickers;
+    if (scanTickerRaw) {
+      tickers = scanTickerRaw.split(/[\s,]+/).map(t => t.trim().toUpperCase()).filter(Boolean);
+    } else {
+      tickers = [...new Set([
+        ...state.portfolio.map(h => h.ticker),
+        ...(state.analysisConfig?.extraTickers || []),
+      ])];
+    }
     const r = await fetch(`${API}/api/news/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

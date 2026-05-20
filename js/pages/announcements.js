@@ -98,9 +98,13 @@ async function renderAnnouncementsPage(gen) {
       lastSync: null,
       settingsOpen: false,
       filter: { ticker: 'all', type: 'all', sentiment: 'all', search: '' },
+      syncDays: 3,
+      syncTicker: '',
     };
   }
   if (state.announcements.settingsOpen === undefined) state.announcements.settingsOpen = false;
+  if (state.announcements.syncDays    === undefined) state.announcements.syncDays    = 3;
+  if (state.announcements.syncTicker  === undefined) state.announcements.syncTicker  = '';
 
   // Show skeleton immediately
   el.innerHTML = _annSkeletonHTML();
@@ -257,6 +261,16 @@ function _annPageHTML(status) {
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           ${countBadge}
+          <select id="ann-sync-days" onchange="state.announcements.syncDays=parseInt(this.value)"
+            title="Lookback window for this sync"
+            style="font-size:12px;padding:2px 6px;border-radius:var(--radius-md);border:1px solid var(--border-light);background:var(--bg-secondary);color:var(--text-primary)">
+            ${[1,3,7,14,30].map(d => `<option value="${d}" ${d===(state.announcements.syncDays||3)?'selected':''}>${d}d</option>`).join('')}
+          </select>
+          <input type="text" id="ann-scan-ticker" value="${state.announcements.syncTicker||''}"
+            placeholder="Ticker(s) or blank for all"
+            oninput="state.announcements.syncTicker=this.value"
+            title="Comma-separated ASX codes to scan, or leave blank to scan all portfolio/watchlist tickers"
+            style="width:170px;font-size:12px;padding:2px 7px;border:1px solid var(--border-light);border-radius:var(--radius-md);background:var(--bg-secondary);color:var(--text-primary)">
           <span id="ann-sync-btns">
             <button class="btn btn-primary btn-sm" id="ann-sync-btn"
               onclick="syncAnnouncements()"
@@ -785,12 +799,19 @@ async function syncAnnouncements() {
     return;
   }
 
-  const portfolioTickers = mergedPortfolio().map(h => h.ticker);
-  const extraTickers     = state.analysisConfig?.extraTickers || [];
-  const allTickers       = [...new Set([...portfolioTickers, ...extraTickers])];
+  const syncDays = parseInt(document.getElementById('ann-sync-days')?.value) || state.announcements.syncDays || 3;
+  const syncTickerRaw = (document.getElementById('ann-scan-ticker')?.value ?? state.announcements.syncTicker ?? '').trim();
+  let allTickers;
+  if (syncTickerRaw) {
+    allTickers = syncTickerRaw.split(/[\s,]+/).map(t => t.trim().toUpperCase()).filter(Boolean);
+  } else {
+    const portfolioTickers = mergedPortfolio().map(h => h.ticker);
+    const extraTickers     = state.analysisConfig?.extraTickers || [];
+    allTickers = [...new Set([...portfolioTickers, ...extraTickers])];
+  }
 
   if (!allTickers.length) {
-    toast('No tickers in portfolio or watchlist to sync', 'info');
+    toast('No tickers specified — enter ticker codes or add holdings to portfolio', 'info');
     return;
   }
 
@@ -801,6 +822,7 @@ async function syncAnnouncements() {
       body: JSON.stringify({
         tickers:  allTickers,
         settings: state.announcements.settings || {},
+        days:     syncDays,
       }),
     });
 
@@ -814,9 +836,6 @@ async function syncAnnouncements() {
     _setAnnSyncBtn(true);
     const banner = document.getElementById('ann-sync-banner');
     if (banner) {
-      const extraLabel = extraTickers.length
-        ? ` &nbsp;·&nbsp; <span style="color:#6366f1">${extraTickers.length} watchlist</span>`
-        : '';
       banner.style.display = 'block';
       banner.innerHTML = `
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -825,8 +844,9 @@ async function syncAnnouncements() {
             Starting scan…
           </span>
           <span style="font-size:12px;color:var(--text-secondary)">
-            <span style="color:#1d4ed8;font-weight:600">${portfolioTickers.length} portfolio</span>${extraLabel}
-            &nbsp;=&nbsp; <strong>${allTickers.length} tickers</strong>
+            <span style="color:#1d4ed8;font-weight:600">${allTickers.join(', ')}</span>
+            &nbsp;·&nbsp; <strong>${allTickers.length} ticker${allTickers.length !== 1 ? 's' : ''}</strong>
+            &nbsp;·&nbsp; <span style="color:#1d4ed8;font-weight:600">${syncDays}d</span> lookback
           </span>
         </div>`;
     }
