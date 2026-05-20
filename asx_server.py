@@ -3312,9 +3312,11 @@ def news_brief():
     tickers = [t.strip().upper() for t in tickers if t.strip()]
     if not tickers:
         tickers = _portfolio_tickers_from_db()
-    days  = int(request.args.get("days", 2))
-    limit = int(request.args.get("limit", 15))
-    items = _ne.get_news_brief(DB_PATH, tickers, days=days, limit=limit)
+    days       = int(request.args.get("days", 2))
+    limit      = int(request.args.get("limit", 15))
+    max_direct = max(1, limit * 2 // 3)   # ~2/3 of limit for portfolio-direct
+    max_wide   = max(1, limit - max_direct)
+    items = _ne.get_news_brief(DB_PATH, tickers, days=days, max_direct=max_direct, max_wide=max_wide)
     return jsonify({"items": items})
 
 
