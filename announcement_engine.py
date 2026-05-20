@@ -2105,11 +2105,13 @@ def reclassify_all(
     settings: Optional[Dict] = None,
     days: int = 30,
     db_path: Optional[str | Path] = None,
+    tickers: Optional[list] = None,
 ) -> int:
     """Re-run LLM classification on stored announcements and update DB.
 
-    Only touches announcements within `days` (default 30).  Returns the
-    number of records updated.
+    Only touches announcements within `days` (default 30).  If `tickers` is
+    given, further restricts to those ASX codes.  Returns the number of
+    records updated.
 
     Progress is tracked in _reclassify_status so the frontend can poll it.
     Price-sensitive announcements use the richer PS prompt + retry logic.
@@ -2126,11 +2128,19 @@ def reclassify_all(
     )
 
     with get_db(db_path) as conn:
-        rows = conn.execute(
-            "SELECT id, ticker, headline, pdf_url, doc_key, pdf_text, price_sensitive "
-            "FROM announcements WHERE date >= ?",
-            (cutoff,),
-        ).fetchall()
+        if tickers:
+            placeholders = ','.join('?' * len(tickers))
+            rows = conn.execute(
+                f"SELECT id, ticker, headline, pdf_url, doc_key, pdf_text, price_sensitive "
+                f"FROM announcements WHERE date >= ? AND UPPER(ticker) IN ({placeholders})",
+                (cutoff, *[t.upper() for t in tickers]),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, ticker, headline, pdf_url, doc_key, pdf_text, price_sensitive "
+                "FROM announcements WHERE date >= ?",
+                (cutoff,),
+            ).fetchall()
 
     if not rows:
         _update_reclassify_status(

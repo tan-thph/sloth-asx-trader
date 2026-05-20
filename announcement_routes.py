@@ -177,9 +177,11 @@ def reclassify_announcements():
                 settings = dict(DEFAULT_SETTINGS)
 
         days = int(body.get('days', 30))
+        tickers_raw = body.get('tickers') or []
+        tickers = [t.strip().upper() for t in tickers_raw if t.strip()] if tickers_raw else None
 
         def run():
-            ae.reclassify_all(settings=settings, days=days, db_path=DB_PATH)
+            ae.reclassify_all(settings=settings, days=days, tickers=tickers, db_path=DB_PATH)
 
         t = threading.Thread(target=run, daemon=True)
         t.start()

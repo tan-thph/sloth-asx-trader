@@ -100,11 +100,15 @@ async function renderAnnouncementsPage(gen) {
       filter: { ticker: 'all', type: 'all', sentiment: 'all', search: '' },
       syncDays: 3,
       syncTicker: '',
+      reclassifyDays: 30,
+      reclassifyTicker: '',
     };
   }
   if (state.announcements.settingsOpen === undefined) state.announcements.settingsOpen = false;
-  if (state.announcements.syncDays    === undefined) state.announcements.syncDays    = 3;
-  if (state.announcements.syncTicker  === undefined) state.announcements.syncTicker  = '';
+  if (state.announcements.syncDays         === undefined) state.announcements.syncDays         = 3;
+  if (state.announcements.syncTicker       === undefined) state.announcements.syncTicker       = '';
+  if (state.announcements.reclassifyDays   === undefined) state.announcements.reclassifyDays   = 30;
+  if (state.announcements.reclassifyTicker === undefined) state.announcements.reclassifyTicker = '';
 
   // Show skeleton immediately
   el.innerHTML = _annSkeletonHTML();
@@ -627,11 +631,27 @@ function _annSettingsPanelHTML(status) {
       <!-- Save row -->
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <button class="btn btn-primary btn-sm" onclick="saveAnnSettings()">💾 Save Settings</button>
-        <button class="btn btn-sm" id="ann-reclassify-btn" onclick="reclassifyAnnouncements()"
-          title="Re-run LLM classification on all stored announcements using current settings">
-          ↺ Re-classify All
-        </button>
         <span id="ann-settings-saved-msg" style="font-size:12px;color:#16a34a;display:none">✓ Saved</span>
+      </div>
+
+      <!-- Re-classify row -->
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:12px;color:var(--text-secondary);font-weight:600">Re-classify:</span>
+        <select id="ann-reclassify-days-sel" onchange="state.announcements.reclassifyDays=parseInt(this.value)"
+          title="Lookback window"
+          style="font-size:12px;padding:2px 6px;border-radius:var(--radius-md);border:1px solid var(--border-light);background:var(--bg-secondary);color:var(--text-primary)">
+          ${[1,7,14,30,90].map(d => `<option value="${d}" ${d===(state.announcements.reclassifyDays||30)?'selected':''}>${d}d</option>`).join('')}
+        </select>
+        <input type="text" id="ann-reclassify-ticker-inp"
+          value="${state.announcements.reclassifyTicker||''}"
+          placeholder="Ticker(s) or blank for all"
+          oninput="state.announcements.reclassifyTicker=this.value"
+          title="Comma-separated ASX codes to re-classify, or leave blank for all in the window"
+          style="width:170px;font-size:12px;padding:2px 7px;border:1px solid var(--border-light);border-radius:var(--radius-md);background:var(--bg-secondary);color:var(--text-primary)">
+        <button class="btn btn-sm" id="ann-reclassify-btn" onclick="reclassifyAnnouncements()"
+          title="Re-run LLM classification on stored announcements using current settings">
+          ↺ Re-classify
+        </button>
       </div>
 
       <!-- Re-classify progress (hidden unless running) -->
@@ -935,6 +955,12 @@ async function reclassifyAnnouncements() {
   const btn      = document.getElementById('ann-reclassify-btn');
   const progress = document.getElementById('ann-reclassify-progress');
 
+  const rcDays = parseInt(document.getElementById('ann-reclassify-days-sel')?.value) || state.announcements.reclassifyDays || 30;
+  const rcTickerRaw = (document.getElementById('ann-reclassify-ticker-inp')?.value ?? state.announcements.reclassifyTicker ?? '').trim();
+  const rcTickers = rcTickerRaw
+    ? rcTickerRaw.split(/[\s,]+/).map(t => t.trim().toUpperCase()).filter(Boolean)
+    : [];
+
   // First save current settings so the backend uses the latest model
   await saveAnnSettings();
 
@@ -942,7 +968,11 @@ async function reclassifyAnnouncements() {
     const r = await fetch(`${API}/api/announcements/reclassify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: state.announcements.settings || {}, days: 30 }),
+      body: JSON.stringify({
+        settings: state.announcements.settings || {},
+        days:     rcDays,
+        tickers:  rcTickers,
+      }),
     });
     const data = await r.json().catch(() => ({}));
 
@@ -957,6 +987,10 @@ async function reclassifyAnnouncements() {
     }
 
     // Show progress UI and start polling
+    const scopeLabel = rcTickers.length
+      ? `${rcTickers.join(', ')} — ${rcDays}d`
+      : `all tickers — ${rcDays}d`;
+    toast(`Re-classify started (${scopeLabel})`, 'success');
     if (btn)      { btn.disabled = true; btn.style.opacity = '0.6'; }
     if (progress) { progress.style.display = 'block'; }
     _updateReclassifyBar(0, 0, 0);
