@@ -924,6 +924,70 @@ final = min(10.0, sum of applicable steps)>,\
         return result
 
 
+class GroqLLM:
+    """Groq cloud LLM — implements the same classify() interface as OllamaLLM."""
+
+    GROQ_MODEL = "llama-3.1-8b-instant"
+
+    # Reuse the same prompt as OllamaLLM
+    CLASSIFY_PROMPT = OllamaLLM.CLASSIFY_PROMPT
+
+    def __init__(self, api_key: str = ""):
+        self.api_key = api_key
+        self.model   = f"groq/{self.GROQ_MODEL}"
+
+    def is_available(self) -> bool:
+        return bool(self.api_key)
+
+    def classify(
+        self,
+        title: str,
+        content: str,
+        portfolio_tickers: list[str],
+        status_ref: dict | None = None,
+        cpu_mode: bool = False,
+        stop_event=None,
+    ) -> dict | None:
+        if not self.api_key:
+            return None
+        ticker_str = ", ".join(portfolio_tickers[:20]) if portfolio_tickers else "none"
+        prompt = self.CLASSIFY_PROMPT.format(
+            title=title[:200],
+            content=(content or "")[:700],
+            tickers=ticker_str,
+            context="",
+        )
+        try:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model":       self.GROQ_MODEL,
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens":  400,
+                },
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                log.debug("GroqLLM HTTP %s: %s", resp.status_code, resp.text[:200])
+                return None
+            raw = resp.json()["choices"][0]["message"]["content"]
+            # Strip markdown fences and isolate first JSON object
+            raw = re.sub(r"```(?:json)?\s*", "", raw)
+            raw = re.sub(r"```", "", raw).strip()
+            m = re.search(r"\{.*?\}", raw, re.DOTALL) or re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                raw = m.group(0)
+            return _robust_json_parse(raw)
+        except Exception as exc:
+            log.debug("GroqLLM classify failed: %s", exc)
+            return None
+
+
 # ── Decay weighting ───────────────────────────────────────────────────────────
 
 def compute_decay(published_iso: str, half_life_days: float = 3.0) -> float:
@@ -997,10 +1061,17 @@ class NewsPipeline:
         with news_db(db_path) as conn:
             init_news_tables(conn)
 
-    def _get_llm(self, settings: dict) -> OllamaLLM:
+    def _get_llm(self, settings: dict) -> OllamaLLM | GroqLLM:
+        provider = settings.get("llm_provider", "ollama").lower()
+        if provider == "groq":
+            api_key = settings.get("groq_api_key", "")
+            if not isinstance(self.llm, GroqLLM) or self.llm.api_key != api_key:
+                self.llm = GroqLLM(api_key=api_key)
+            return self.llm
+        # default: Ollama
         model = settings.get("llm_model") or ""
         url   = settings.get("ollama_url", "http://localhost:11434")
-        if self.llm is None or self.llm.model != model or self.llm.base_url != url:
+        if not isinstance(self.llm, OllamaLLM) or self.llm.model != model or self.llm.base_url != url:
             self.llm = OllamaLLM(model=model, base_url=url)
         return self.llm
 
@@ -1077,6 +1148,8 @@ class NewsPipeline:
                 _scan_status["phase"]                 = "classifying"
 
                 def _probe_gpu():
+                    if not isinstance(llm, OllamaLLM):
+                        return
                     ps = llm.get_ps()
                     if ps is not None:
                         models_running = ps.get("models") or []

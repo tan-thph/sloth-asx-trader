@@ -267,7 +267,9 @@ function _newsPageHTML(status, sentiment) {
         </div>`;
     }).join('');
 
-  // Ollama status + model selector
+  // Provider + model selector
+  const provider = cfg.llm_provider || 'ollama';
+
   const modelOptions = state.news.models.length
     ? [
         ...(cfg.llm_model ? [] : [`<option value="" selected disabled>— select a model —</option>`]),
@@ -298,6 +300,11 @@ function _newsPageHTML(status, sentiment) {
     ? `<span class="badge" style="background:#dcfce7;color:#16a34a">✓ Ollama running</span>`
     : `<span class="badge" style="background:#fee2e2;color:#dc2626">✗ Ollama not found</span>
        <button class="btn btn-sm btn-primary" id="ollama-start-btn" onclick="newsStartOllama()" style="font-size:11px;padding:3px 10px">▶ Start Ollama</button>`;
+
+  const groqKeyMasked = cfg.groq_api_key ? cfg.groq_api_key.slice(0,8) + '…' : '';
+  const groqStatusHtml = cfg.groq_api_key
+    ? `<span class="badge" style="background:#dcfce7;color:#16a34a">✓ Key saved</span>`
+    : `<span class="badge" style="background:#fef9c3;color:#92400e">No key set</span>`;
 
   // Filter bar
   const cats = ['all', ...Object.keys(NEWS_CATS)];
@@ -379,29 +386,59 @@ function _newsPageHTML(status, sentiment) {
 
       <!-- LLM configuration -->
       <div class="card">
-        <div class="card-title">Local LLM <span class="text-xs text-muted">(via Ollama)</span></div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-          ${ollamaStatusHtml}
-          ${gpuBadge}
-          <span style="font-size:11px;color:var(--text-muted)">${cfg.ollama_url || 'http://localhost:11434'}</span>
+          <div class="card-title" style="margin:0">LLM Provider</div>
+          <select onchange="newsSetProvider(this.value)" style="font-size:12px;padding:2px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
+            <option value="ollama" ${provider==='ollama'?'selected':''}>Ollama (local)</option>
+            <option value="groq"   ${provider==='groq'  ?'selected':''}>Groq (cloud)</option>
+          </select>
         </div>
-        ${ollamaOk ? `
+
+        ${provider === 'groq' ? `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            ${groqStatusHtml}
+            <span style="font-size:11px;color:var(--text-muted)">llama-3.1-8b-instant · free tier</span>
+          </div>
           <div class="form-row" style="margin-bottom:8px">
-            <div class="form-label">Model</div>
-            <select onchange="newsSetModel(this.value)" style="width:100%">${modelOptions}</select>
+            <div class="form-label" style="font-size:11px">Groq API Key</div>
+            <div style="display:flex;gap:4px">
+              <input type="password" id="groq-key-input" value="${cfg.groq_api_key || ''}" placeholder="gsk_…"
+                style="flex:1;font-size:12px;padding:3px 7px;border:1px solid var(--border-light);border-radius:var(--radius-sm);background:var(--bg-secondary);color:var(--text-primary)">
+              <button class="btn btn-sm btn-primary" onclick="newsSaveGroqKey()" style="font-size:11px">Save</button>
+            </div>
           </div>
-          ${sbcHint}
-          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${presetButtons}</div>
         ` : `
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
-            Install Ollama, then pull a model:
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            ${ollamaStatusHtml}
+            ${gpuBadge}
+            <span style="font-size:11px;color:var(--text-muted)">${cfg.ollama_url || 'http://localhost:11434'}</span>
           </div>
-          <pre class="code-block" style="font-size:11px;margin-bottom:6px"># Install: https://ollama.com/download
+          ${ollamaOk ? `
+            <div class="form-row" style="margin-bottom:8px">
+              <div class="form-label">Model</div>
+              <select onchange="newsSetModel(this.value)" style="width:100%">${modelOptions}</select>
+            </div>
+            ${sbcHint}
+            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${presetButtons}</div>
+          ` : `
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+              Install Ollama, then pull a model:
+            </div>
+            <pre class="code-block" style="font-size:11px;margin-bottom:6px"># Install: https://ollama.com/download
 ollama pull gemma3:4b       # 8 GB RAM (recommended)
 ollama pull gemma3:12b      # 16 GB RAM
 ollama pull llama3.2:3b     # lightweight</pre>
+          `}
+          <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer" title="Use CPU for inference — for Jetson Orin, Raspberry Pi 5, or machines without a GPU.">
+              <input type="checkbox" ${cfg.cpu_mode ? 'checked' : ''} onchange="newsToggleCpuMode(this.checked)">
+              CPU mode <span style="color:var(--text-muted)">(SBC / no GPU)</span>
+            </label>
+            ${cfg.cpu_mode ? `<span style="font-size:10px;background:#fef9c3;color:#854d0e;padding:1px 6px;border-radius:3px">batch 20 · ctx 1024</span>` : ''}
+          </div>
         `}
-        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px">
           <div class="form-row" style="flex:1;margin:0">
             <div class="form-label" style="font-size:11px">Scan interval</div>
             <select onchange="newsSetInterval(this.value)" style="width:100%;font-size:12px">
@@ -421,24 +458,18 @@ ollama pull llama3.2:3b     # lightweight</pre>
             Auto-scan enabled (${cfg.scan_interval_hours || 6}× per day)
           </label>
         </div>
-        <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer" title="Use CPU for inference — for Jetson Orin, Raspberry Pi 5, or machines without a GPU. Reduces context and batch size for manageable scan times.">
-            <input type="checkbox" ${cfg.cpu_mode ? 'checked' : ''} onchange="newsToggleCpuMode(this.checked)">
-            CPU mode <span style="color:var(--text-muted)">(SBC / no GPU)</span>
-          </label>
-          ${cfg.cpu_mode ? `<span style="font-size:10px;background:#fef9c3;color:#854d0e;padding:1px 6px;border-radius:3px">batch 20 · ctx 1024</span>` : ''}
-        </div>
 
         <!-- Re-classify section -->
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-light)">
-          <div style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Re-classify with different model</div>
-          <p class="text-xs text-muted" style="margin-bottom:8px">Re-run LLM classification on all articles in the retention window. Useful for comparing model quality.</p>
+          <div style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Re-classify articles</div>
+          <p class="text-xs text-muted" style="margin-bottom:8px">Re-run LLM classification on stored articles.</p>
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            ${provider !== 'groq' ? `
             <select id="reclassify-model" style="font-size:12px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
               ${state.news.models.length
                 ? state.news.models.map(m => `<option value="${m.name}">${m.name}${m.details?.parameter_size ? ' — '+m.details.parameter_size : ''}</option>`).join('')
-                : `<option value="${cfg.llm_model}">${cfg.llm_model} (current)</option>`}
-            </select>
+                : `<option value="${cfg.llm_model}">${cfg.llm_model || '— select model —'}</option>`}
+            </select>` : `<span style="font-size:11px;color:var(--text-muted)">groq/llama-3.1-8b-instant</span>`}
             <select id="reclassify-days" style="font-size:12px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
               ${[1,3,7,14].map(d => `<option value="${d}" ${d === (cfg.max_age_days||7) ? 'selected':''}>${d}d</option>`).join('')}
             </select>
@@ -700,17 +731,22 @@ async function newsReclassify() {
   if (typeof _reclassifyPoller !== 'undefined' && _reclassifyPoller) {
     toast('Announcements re-classify is running — wait for it to finish first', 'error'); return;
   }
-  const modelEl = document.getElementById('reclassify-model');
-  const daysEl  = document.getElementById('reclassify-days');
-  const btn     = document.getElementById('reclassify-btn');
-  const model   = modelEl?.value?.trim();
-  const days    = parseInt(daysEl?.value || 7);
-  if (!model) { toast('Select a model first', 'error'); return; }
+  const provider = state.news.settings.llm_provider || 'ollama';
+  const modelEl  = document.getElementById('reclassify-model');
+  const daysEl   = document.getElementById('reclassify-days');
+  const btn      = document.getElementById('reclassify-btn');
+  const days     = parseInt(daysEl?.value || 7);
+  const body     = { days };
+  if (provider !== 'groq') {
+    const model = modelEl?.value?.trim();
+    if (!model) { toast('Select a model first', 'error'); return; }
+    body.model = model;
+  }
   try {
     const r = await fetch(`${API}/api/news/reclassify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, days }),
+      body: JSON.stringify(body),
     });
     if (r.status === 404) { toast('Restart asx_server.py — endpoint not loaded', 'error'); return; }
     const d = await r.json();
@@ -789,6 +825,22 @@ async function newsStartOllama() {
     toast(`Flask server not reachable (${e.message})`, 'error');
     if (btn) { btn.disabled = false; btn.textContent = '▶ Start Ollama'; }
   }
+}
+
+async function newsSetProvider(provider) {
+  state.news.settings.llm_provider = provider;
+  await _saveNewsSettings();
+  toast(`News LLM provider set to ${provider}`, 'success');
+  renderPage();
+}
+
+async function newsSaveGroqKey() {
+  const input = document.getElementById('groq-key-input');
+  const key   = input?.value?.trim() || '';
+  state.news.settings.groq_api_key = key;
+  await _saveNewsSettings();
+  toast(key ? 'Groq API key saved' : 'Groq API key cleared', 'success');
+  renderPage();
 }
 
 async function newsSetModel(model) {

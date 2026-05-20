@@ -80,8 +80,10 @@ const state = {
     gpuInfo: null,
     filter: { category: 'all', ticker: 'all', sentiment: 'all', search: '', sortBy: 'relevance' },
     settings: {
+      llm_provider: 'ollama',
       llm_model: '',
       ollama_url: 'http://localhost:11434',
+      groq_api_key: '',
       scan_interval_hours: 6,
       enabled: true,
       max_age_days: 7,

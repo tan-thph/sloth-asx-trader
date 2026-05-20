@@ -2872,13 +2872,15 @@ def _news_settings_from_db() -> dict:
     """
     gpu = _get_gpu_info()
     defaults = {
-        "llm_model": "",
-        "ollama_url": "http://localhost:11434",
+        "llm_provider":        "ollama",
+        "llm_model":           "",
+        "ollama_url":          "http://localhost:11434",
+        "groq_api_key":        "",
         "scan_interval_hours": 6,
-        "enabled": True,
-        "max_age_days": 7,
-        "cpu_mode": not gpu.get("cuda", False),  # auto: CPU-only when no GPU
-        "sbc_mode": False,
+        "enabled":             True,
+        "max_age_days":        7,
+        "cpu_mode":            not gpu.get("cuda", False),
+        "sbc_mode":            False,
     }
     try:
         with get_db() as conn:
@@ -3027,6 +3029,7 @@ def news_status():
             model=cfg.get("llm_model") or "",
             base_url=cfg.get("ollama_url", "http://localhost:11434"),
         ).is_available(),
+        "groq_available": bool(cfg.get("groq_api_key", "")),
         # Live progress fields (populated during active scans)
         "articles_to_classify":  status.get("articles_to_classify", 0),
         "articles_classified":   status.get("articles_classified", 0),
@@ -3193,7 +3196,11 @@ def _run_reclassify(model: str, days: int):
     })
     try:
         cfg      = _news_settings_from_db()
-        llm      = _ne.OllamaLLM(model=model, base_url=cfg.get("ollama_url", "http://localhost:11434"))
+        provider = cfg.get("llm_provider", "ollama").lower()
+        if provider == "groq":
+            llm = _ne.GroqLLM(api_key=cfg.get("groq_api_key", ""))
+        else:
+            llm = _ne.OllamaLLM(model=model, base_url=cfg.get("ollama_url", "http://localhost:11434"))
         all_tick = _portfolio_tickers_from_db()
         cutoff   = (datetime.utcnow() - timedelta(days=days)).isoformat()
 
@@ -3272,11 +3279,18 @@ def news_reclassify():
     """Re-run LLM classification on all articles in the retention window using a chosen model."""
     if not _NE_OK:
         return jsonify({"ok": False, "error": "news_engine not available"}), 503
-    data  = request.get_json() or {}
-    model = data.get("model", "").strip()
-    days  = int(data.get("days", 7))
-    if not model:
-        return jsonify({"ok": False, "error": "model is required"}), 400
+    data     = request.get_json() or {}
+    days     = int(data.get("days", 7))
+    cfg      = _news_settings_from_db()
+    provider = cfg.get("llm_provider", "ollama").lower()
+    if provider == "groq":
+        if not cfg.get("groq_api_key"):
+            return jsonify({"ok": False, "error": "Groq API key not set in News Scanner settings"}), 400
+        model = f"groq/{_ne.GroqLLM.GROQ_MODEL}"
+    else:
+        model = data.get("model", "").strip()
+        if not model:
+            return jsonify({"ok": False, "error": "model is required"}), 400
     if _reclassify_status["running"]:
         return jsonify({"ok": False, "error": "Reclassification already running"}), 409
     threading.Thread(target=_run_reclassify, args=(model, days), daemon=True, name="Reclassify").start()
