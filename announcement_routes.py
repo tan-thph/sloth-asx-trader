@@ -146,6 +146,15 @@ def get_ann_brief():
         return jsonify({"error": str(e)}), 500
 
 
+@ann_bp.route('/sync/stop', methods=['POST'])
+def sync_stop():
+    try:
+        result = ae.stop_sync()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @ann_bp.route('/reclassify', methods=['POST'])
 def reclassify_announcements():
     """Re-run LLM classification on stored announcements using current settings."""

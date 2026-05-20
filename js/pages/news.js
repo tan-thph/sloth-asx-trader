@@ -337,11 +337,11 @@ function _newsPageHTML(status, sentiment) {
           <span style="font-size:11px;color:var(--text-muted)">${totalArt} articles · ${procArt} classified</span>
           <span style="font-size:11px;color:var(--text-muted)">Last: ${lastScan ? _relativeTime(lastScan) : 'never'}</span>
           ${nextScan && !running ? `<span style="font-size:11px;color:var(--text-muted)">Next: ${_relativeTime(nextScan).replace('ago','').trim() || 'soon'}</span>` : ''}
-          ${running
+          <span id="news-scan-btns">${running
             ? `<button class="btn btn-sm" disabled style="opacity:0.6">⟳ Scanning…</button>
-               <button class="btn btn-sm btn-danger" onclick="newsScanStop()" title="Stop after current article">■ Stop</button>`
+               <button class="btn btn-sm btn-danger" onclick="newsScanStop()">■ Stop</button>`
             : `<button class="btn btn-primary btn-sm" onclick="newsScanNow()">▶ Scan Now</button>`
-          }
+          }</span>
           <button class="btn btn-sm" onclick="newsRefreshPage()" title="Refresh page">⟳</button>
         </div>
       </div>
@@ -614,10 +614,12 @@ function _startNewsPoller(gen) {
 function _updateLiveProgress(status) {
   const wrap = document.getElementById('news-live-progress-wrap');
   if (wrap) wrap.innerHTML = _livePanelHTML(status);
-  const btn = document.querySelector('[onclick="newsScanNow()"]');
-  if (btn) {
-    btn.disabled = status.running;
-    btn.textContent = status.running ? '⟳ Scanning…' : '▶ Scan Now';
+  const btns = document.getElementById('news-scan-btns');
+  if (btns) {
+    btns.innerHTML = status.running
+      ? `<button class="btn btn-sm" disabled style="opacity:0.6">⟳ Scanning…</button>
+         <button class="btn btn-sm btn-danger" onclick="newsScanStop()">■ Stop</button>`
+      : `<button class="btn btn-primary btn-sm" onclick="newsScanNow()">▶ Scan Now</button>`;
   }
 }
 
@@ -664,8 +666,9 @@ async function newsScanNow() {
     const d = await r.json();
     if (d.ok || d.message) {
       toast('Scan started — tracking live progress…', 'success');
-      const btn = document.querySelector('[onclick="newsScanNow()"]');
-      if (btn) { btn.disabled = true; btn.textContent = '⟳ Scanning…'; }
+      const btns = document.getElementById('news-scan-btns');
+      if (btns) btns.innerHTML = `<button class="btn btn-sm" disabled style="opacity:0.6">⟳ Scanning…</button>
+               <button class="btn btn-sm btn-danger" onclick="newsScanStop()">■ Stop</button>`;
       _startNewsPoller(state._renderGen);
     } else {
       toast(d.error || 'Scan failed', 'error');

@@ -257,11 +257,14 @@ function _annPageHTML(status) {
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           ${countBadge}
-          <button class="btn btn-primary btn-sm" id="ann-sync-btn"
-            onclick="syncAnnouncements()"
-            ${isRunning ? 'disabled style="opacity:0.6;cursor:not-allowed"' : ''}>
-            ⟳ ${isRunning ? 'Scanning…' : 'Sync Now'}
-          </button>
+          <span id="ann-sync-btns">
+            <button class="btn btn-primary btn-sm" id="ann-sync-btn"
+              onclick="syncAnnouncements()"
+              ${isRunning ? 'disabled style="opacity:0.6;cursor:not-allowed"' : ''}>
+              ⟳ ${isRunning ? 'Scanning…' : 'Sync Now'}
+            </button>
+            ${isRunning ? `<button class="btn btn-sm btn-danger" onclick="stopAnnSync()">■ Stop</button>` : ''}
+          </span>
           <button class="btn btn-sm" onclick="renderPage()" title="Refresh view">↺</button>
         </div>
       </div>
@@ -747,24 +750,28 @@ function _updateAnnProgressBanner(s) {
         <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#3b82f6,#6366f1);border-radius:99px;transition:width 0.4s ease"></div>
       </div>
       <span style="font-size:11px;color:var(--text-muted)">${pct}%</span>
+      <button class="btn btn-sm btn-danger" onclick="stopAnnSync()" style="margin-left:4px">■ Stop</button>
     </div>`;
 }
 
 // ── Sync button state helpers ─────────────────────────────────
 function _setAnnSyncBtn(running) {
-  const btn = document.getElementById('ann-sync-btn');
-  if (!btn) return;
+  const wrap = document.getElementById('ann-sync-btns');
+  if (!wrap) return;
   if (running) {
-    btn.disabled = true;
-    btn.textContent = '⟳ Scanning…';
-    btn.style.opacity = '0.6';
-    btn.style.cursor = 'not-allowed';
+    wrap.innerHTML = `<button class="btn btn-primary btn-sm" id="ann-sync-btn" disabled style="opacity:0.6;cursor:not-allowed">⟳ Scanning…</button>
+      <button class="btn btn-sm btn-danger" onclick="stopAnnSync()">■ Stop</button>`;
   } else {
-    btn.disabled = false;
-    btn.textContent = '⟳ Sync Now';
-    btn.style.opacity = '';
-    btn.style.cursor = '';
+    wrap.innerHTML = `<button class="btn btn-primary btn-sm" id="ann-sync-btn" onclick="syncAnnouncements()">⟳ Sync Now</button>`;
   }
+}
+
+async function stopAnnSync() {
+  try {
+    const r = await fetch(`${API}/api/announcements/sync/stop`, { method: 'POST' });
+    const d = await r.json();
+    toast(d.ok ? 'Stop signal sent — finishing current ticker…' : `Error: ${d.error}`, d.ok ? 'info' : 'error');
+  } catch (e) { toast('Could not reach server', 'error'); }
 }
 
 // ── Sync announcements from ASX ───────────────────────────────

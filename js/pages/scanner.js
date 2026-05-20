@@ -41,7 +41,7 @@ function _buildScannerHTML(s) {
         <span style="font-size:12px;color:var(--text-muted)">Universe:</span>
         ${['asx20','asx50','asx100','asx200'].map(u => `
           <button onclick="scannerSetUniverse('${u}')" class="btn btn-sm"
-            style="${(_scannerUniverse===u)?'background:var(--accent-primary);color:#fff;':''}">
+            style="${(_scannerUniverse===u)?'background:#3b82f6;color:#fff;':''}">
             ${universeLabels[u]}
           </button>`).join('')}
       </div>
@@ -72,7 +72,7 @@ function _buildScannerHTML(s) {
         <span>${pct}%</span>
       </div>
       <div style="height:4px;background:var(--border-light);border-radius:2px;overflow:hidden">
-        <div style="width:${pct}%;height:100%;background:var(--accent-primary);border-radius:2px;transition:width 0.3s"></div>
+        <div style="width:${pct}%;height:100%;background:#3b82f6;border-radius:2px;transition:width 0.3s"></div>
       </div>
     </div>` : ''}
   </div>
@@ -106,7 +106,7 @@ function _buildSectorOverview(sectorStats) {
     const ret5Col   = s.avg_ret_5d  >= 0 ? '#16a34a' : '#dc2626';
     const ret20Col  = s.avg_ret_20d >= 0 ? '#16a34a' : '#dc2626';
     const barW      = Math.round(s.avg_score);
-    const border    = active ? '2px solid var(--accent-primary)' : '1px solid var(--border-light)';
+    const border    = active ? '2px solid #3b82f6' : '1px solid var(--border-light)';
     const bg        = active ? 'var(--bg-tertiary,#1e293b)' : 'var(--bg-secondary)';
 
     return `
@@ -149,10 +149,10 @@ function _buildSectorOverview(sectorStats) {
       <div onclick="scannerSetSector(null)"
            style="flex:0 0 auto;width:80px;padding:10px 12px;border-radius:var(--radius-md);
                   background:${allActive ? 'var(--bg-tertiary,#1e293b)' : 'var(--bg-secondary)'};
-                  border:${allActive ? '2px solid var(--accent-primary)' : '1px solid var(--border-light)'};
+                  border:${allActive ? '2px solid #3b82f6' : '1px solid var(--border-light)'};
                   cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px">
         <span style="font-size:18px">◈</span>
-        <span style="font-size:11px;font-weight:600;color:${allActive ? 'var(--accent-primary)' : 'var(--text-secondary)'}">${allActive ? '✓ All' : 'All'}</span>
+        <span style="font-size:11px;font-weight:600;color:${allActive ? '#3b82f6' : 'var(--text-secondary)'}">${allActive ? '✓ All' : 'All'}</span>
       </div>
       ${tiles}
     </div>
@@ -177,7 +177,7 @@ function _buildResultsTable(results) {
   const colHdr = (col, label, title='') => {
     const active = _scannerSort.col === col;
     const arrow  = active ? (_scannerSort.dir === 'desc' ? ' ↓' : ' ↑') : '';
-    return `<th title="${title}" style="cursor:pointer;user-select:none${active?';color:var(--accent-primary)':''}"
+    return `<th title="${title}" style="cursor:pointer;user-select:none${active?';color:#3b82f6':''}"
       onclick="scannerSort('${col}')">${label}${arrow}</th>`;
   };
 
@@ -234,7 +234,7 @@ function _buildResultsTable(results) {
         <div class="card-title" style="margin:0">
           Opportunities — ${sorted.length} result${sorted.length !== 1 ? 's' : ''}
           ${_scannerSector ? `<span style="margin-left:8px;font-size:12px;font-weight:400;
-            background:var(--accent-primary);color:#fff;padding:2px 8px;border-radius:10px">
+            background:#3b82f6;color:#fff;padding:2px 8px;border-radius:10px">
             ${_scannerSector} ✕</span>` : ''}
         </div>
         <div class="text-xs text-muted" style="margin-top:2px">
@@ -252,7 +252,7 @@ function _buildResultsTable(results) {
           <th>Ticker</th>
           <th>Sector</th>
           <th>Price</th>
-          <th title="Composite opportunity score (0-100): trend + pullback quality + volume + momentum" style="min-width:110px;cursor:pointer;user-select:none${_scannerSort.col==='score'?';color:var(--accent-primary)':''}" onclick="scannerSort('score')">Score${_scannerSort.col==='score'?(_scannerSort.dir==='desc'?' ↓':' ↑'):''}</th>
+          <th title="Composite opportunity score (0-100): trend + pullback quality + volume + momentum" style="min-width:110px;cursor:pointer;user-select:none${_scannerSort.col==='score'?';color:#3b82f6':''}" onclick="scannerSort('score')">Score${_scannerSort.col==='score'?(_scannerSort.dir==='desc'?' ↓':' ↑'):''}</th>
           ${colHdr('trend_score','Trend','Price vs SMA20/50, SMA slope (0-30)')}
           ${colHdr('rsi','RSI','RSI-14: 35-55 is ideal opportunity zone')}
           ${colHdr('ret_5d','5d%','5-day price return')}

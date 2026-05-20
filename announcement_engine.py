@@ -263,6 +263,7 @@ _sync_status: Dict[str, Any] = {
     "current_ticker_new": 0,  # new announcements found for current ticker
 }
 _sync_lock = threading.Lock()
+_sync_stop_event = threading.Event()   # set to request mid-sync abort
 
 _scheduler_thread: Optional[threading.Thread] = None
 _last_run_slot: Optional[str] = None  # "HH:MM" of last fired slot
@@ -2047,6 +2048,14 @@ def get_sync_status() -> Dict:
         return dict(_sync_status)
 
 
+def stop_sync() -> dict:
+    """Signal the running sync to stop before the next ticker/announcement."""
+    if not _sync_status.get("running"):
+        return {"ok": False, "error": "No sync running"}
+    _sync_stop_event.set()
+    return {"ok": True, "message": "Stop signal sent"}
+
+
 def _update_status(**kwargs: Any) -> None:
     with _sync_lock:
         _sync_status.update(kwargs)
@@ -2269,11 +2278,17 @@ def run_sync(
     logger.info("run_sync: starting for %d tickers (days=%d)", len(tickers), days)
 
     total_saved = 0
+    _sync_stop_event.clear()   # reset any previous stop request
 
     try:
         init_db(db_path)
 
         for i, ticker in enumerate(tickers):
+            # Check for user-requested stop before each ticker
+            if _sync_stop_event.is_set():
+                logger.info("run_sync: stopped by user after %d/%d tickers", i, len(tickers))
+                _update_status(running=False, last_error=None)
+                return total_saved
             if i > 0:
                 time.sleep(0.8)
 
@@ -2345,6 +2360,12 @@ def run_sync(
                         logger.debug("run_sync: PDF not available for %s (%s)", ann.get("headline","")[:40], ann.get("pdf_url",""))
 
                 ann["pdf_text"] = pdf_text
+
+                # Check stop flag before each LLM call
+                if _sync_stop_event.is_set():
+                    logger.info("run_sync: stopped by user mid-ticker %s", ticker)
+                    _update_status(running=False, last_error=None)
+                    return total_saved
 
                 # Pre-classify from Markit type if available (free, no LLM needed)
                 pre_type = _markit_type(markit_type_raw) if markit_type_raw else None

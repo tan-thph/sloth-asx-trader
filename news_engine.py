@@ -475,6 +475,215 @@ def _robust_json_parse(raw: str) -> dict | None:
     return None
 
 
+# ── Earnings / Dividend Context Enrichment ───────────────────────────────────
+
+# Sector peer groups for major ASX stocks — used to give the LLM comparison context
+_TICKER_PEERS: dict[str, list[str]] = {
+    # Big-4 banks + Macquarie
+    'CBA': ['ANZ','NAB','WBC','MQG'], 'ANZ': ['CBA','NAB','WBC','MQG'],
+    'NAB': ['CBA','ANZ','WBC','MQG'], 'WBC': ['CBA','ANZ','NAB','MQG'],
+    'MQG': ['CBA','ANZ','NAB','WBC'], 'BEN': ['BOQ','ANZ'],
+    'BOQ': ['BEN','ANZ'],
+    # Insurers
+    'SUN': ['IAG','QBE'], 'IAG': ['SUN','QBE'], 'QBE': ['IAG','SUN'],
+    # Healthcare
+    'CSL': ['RMD','COH','SHL'], 'RMD': ['CSL','COH','SHL'],
+    'COH': ['CSL','RMD','SHL'], 'SHL': ['CSL','RMD','COH'],
+    # Miners
+    'BHP': ['RIO','FMG','MIN','S32'], 'RIO': ['BHP','FMG','S32'],
+    'FMG': ['BHP','RIO','MIN'],       'MIN': ['BHP','FMG'],
+    'S32': ['BHP','RIO'],             'NST': ['NCM','EVN'],
+    # Energy
+    'WDS': ['STO','BPT'], 'STO': ['WDS','BPT'],
+    # Retailers / Consumer
+    'WOW': ['COL','WES'],    'COL': ['WOW','WES'],    'WES': ['WOW','COL'],
+    'JBH': ['HVN','MYR'],
+    # REITs
+    'GMG': ['SCG','GPT','SGP'], 'SCG': ['GMG','GPT','SGP'],
+    'SGP': ['GMG','GPT','SCG'],
+    # Tech
+    'WTC': ['XRO','TYR'], 'XRO': ['WTC','TYR'],
+    # Telcos
+    'TLS': ['TPG'],
+    # Utilities
+    'AGL': ['ORG','APA'], 'ORG': ['AGL','APA'],
+}
+
+# In-memory cache: ticker -> (context_str, fetch_timestamp)
+_ticker_ctx_cache: dict[str, tuple[str, float]] = {}
+_CTX_CACHE_TTL = 6 * 3600  # 6 hours
+
+_ED_KEYWORDS = frozenset([
+    'earnings', 'profit', 'revenue', 'sales result', 'eps', 'npat',
+    'net profit', 'net income', 'half year', 'full year', 'annual result',
+    'quarterly result', 'dividend', 'dps', 'payout', 'distribution',
+    'interim dividend', 'final dividend', 'guidance', 'outlook', 'forecast',
+    'beat', 'miss', 'exceeded', 'below expectations', 'above expectations',
+    'results season', 'operating result', 'half-year', 'full-year', 'results',
+])
+
+
+def _is_earnings_dividend_article(title: str, content: str) -> bool:
+    """Quick keyword gate — true if article is likely about earnings or dividends."""
+    text = (title + ' ' + (content or '')).lower()
+    return sum(1 for kw in _ED_KEYWORDS if kw in text) >= 2
+
+
+def _extract_article_tickers(title: str, content: str,
+                              portfolio_tickers: list[str]) -> list[str]:
+    """Return portfolio tickers that appear as the primary subject of the article."""
+    title_u  = title.upper()
+    early_u  = (content or '')[:400].upper()
+    title_hits   = [t for t in portfolio_tickers if t.upper() in title_u]
+    content_hits = [t for t in portfolio_tickers
+                    if t.upper() in early_u and t not in title_hits]
+    return (title_hits + content_hits)[:2]  # cap at 2 tickers to control prompt size
+
+
+def _fmt_large(v: float) -> str:
+    """Format a large dollar figure compactly."""
+    if abs(v) >= 1e9:
+        return f'${v/1e9:.2f}B'
+    return f'${v/1e6:.0f}M'
+
+
+def _fetch_ticker_context(ticker: str) -> str:
+    """
+    Build a compact fundamentals snapshot for a single ASX ticker.
+
+    Pulls from yfinance: net profit / revenue trend (3 FY), EPS metrics,
+    dividend history with YoY change, analyst consensus & price target, and
+    sector peers.  Returns '' on any failure.  Results are cached for 6 hours
+    to avoid hammering yfinance during a batch re-classify run.
+    """
+    now = time.time()
+    cached = _ticker_ctx_cache.get(ticker)
+    if cached and (now - cached[1]) < _CTX_CACHE_TTL:
+        return cached[0]
+
+    lines: list[str] = []
+    try:
+        import yfinance as yf
+        t = yf.Ticker(f'{ticker}.AX')
+        info = t.info or {}
+
+        # ── Net profit & revenue trend (last 3 FY from annual income statement) ──
+        try:
+            fin = t.income_stmt
+            if fin is not None and not fin.empty:
+                ni_row = next(
+                    (r for r in fin.index
+                     if 'net income' in r.lower()
+                     and 'discontinu' not in r.lower()
+                     and 'minority' not in r.lower()),
+                    None)
+                rev_row = next(
+                    (r for r in fin.index
+                     if r.lower() in ('total revenue', 'operating revenue')),
+                    None)
+                # Use the 3 most recent columns that have a non-null net income value
+                if ni_row:
+                    valid_cols = [c for c in fin.columns
+                                  if fin.loc[ni_row, c] is not None][:3]
+                    if len(valid_cols) >= 2:
+                        ni_vals = [fin.loc[ni_row, c] for c in valid_cols]
+                        trend   = ' → '.join(_fmt_large(v) for v in reversed(ni_vals))
+                        yoy     = (ni_vals[0] - ni_vals[1]) / abs(ni_vals[1]) * 100 \
+                                  if ni_vals[1] else 0
+                        lines.append(f'Net profit (FY): {trend} | YoY: {yoy:+.1f}%')
+                if rev_row:
+                    valid_cols = [c for c in fin.columns
+                                  if fin.loc[rev_row, c] is not None][:3]
+                    if len(valid_cols) >= 2:
+                        rv_vals = [fin.loc[rev_row, c] for c in valid_cols]
+                        rtend   = ' → '.join(_fmt_large(v) for v in reversed(rv_vals))
+                        ryoy    = (rv_vals[0] - rv_vals[1]) / abs(rv_vals[1]) * 100 \
+                                  if rv_vals[1] else 0
+                        lines.append(f'Revenue (FY): {rtend} | YoY: {ryoy:+.1f}%')
+        except Exception:
+            pass
+
+        # ── EPS snapshot ────────────────────────────────────────────────────────
+        eps_parts: list[str] = []
+        if info.get('trailingEps'):
+            eps_parts.append(f'TTM ${info["trailingEps"]:.2f}')
+        if info.get('epsCurrentYear'):
+            eps_parts.append(f'CY est ${info["epsCurrentYear"]:.2f}')
+        if info.get('forwardEps'):
+            eps_parts.append(f'fwd ${info["forwardEps"]:.2f}')
+        if info.get('earningsGrowth') is not None:
+            eps_parts.append(f'YoY earnings {info["earningsGrowth"]*100:+.1f}%')
+        if info.get('earningsQuarterlyGrowth') is not None:
+            eps_parts.append(f'QoQ {info["earningsQuarterlyGrowth"]*100:+.1f}%')
+        if eps_parts:
+            lines.append('EPS: ' + ' | '.join(eps_parts))
+
+        # ── Dividend history ─────────────────────────────────────────────────────
+        try:
+            divs = t.dividends
+            if divs is not None and len(divs) >= 2:
+                recent   = divs.tail(4)
+                div_strs = [f'${v:.3f}' for v in recent]
+                yoy_div  = None
+                if len(recent) >= 4:
+                    last = float(recent.iloc[-1]) + float(recent.iloc[-2])
+                    prev = float(recent.iloc[-3]) + float(recent.iloc[-4])
+                    yoy_div = (last - prev) / abs(prev) * 100 if prev else None
+                line = f'Dividends (recent payments): {" → ".join(div_strs)}'
+                if yoy_div is not None:
+                    line += f' | YoY: {yoy_div:+.1f}%'
+                dy = info.get('dividendYield') or 0
+                # yfinance returns dividendYield as a percentage (e.g. 3.04)
+                # on some versions and as a fraction (0.0304) on others —
+                # normalise to percentage for display
+                dy_pct = dy if dy > 1 else dy * 100
+                if dy_pct:
+                    line += f' | yield {dy_pct:.1f}%'
+                    fya = info.get('fiveYearAvgDividendYield') or 0
+                    if fya:
+                        # same normalisation
+                        fya_pct = fya if fya > 1 else fya * 100
+                        line += f' (5yr avg {fya_pct:.1f}%)'
+                if info.get('payoutRatio'):
+                    line += f' | payout ratio {info["payoutRatio"]*100:.0f}%'
+                lines.append(line)
+        except Exception:
+            if info.get('dividendRate'):
+                line = f'Dividend: ${info["dividendRate"]:.2f}/yr'
+                dy = info.get('dividendYield') or 0
+                dy_pct = dy if dy > 1 else dy * 100
+                if dy_pct:
+                    line += f' ({dy_pct:.1f}% yield)'
+                lines.append(line)
+
+        # ── Analyst consensus & price target ─────────────────────────────────────
+        rec = (info.get('recommendationKey') or '').upper()
+        tgt = info.get('targetMeanPrice')
+        cur = info.get('currentPrice') or info.get('regularMarketPrice')
+        a_parts: list[str] = []
+        if rec:
+            a_parts.append(f'consensus {rec}')
+        if tgt and cur:
+            upside = (tgt - cur) / cur * 100
+            a_parts.append(f'mean target ${tgt:.2f} vs current ${cur:.2f} ({upside:+.1f}%)')
+        elif tgt:
+            a_parts.append(f'mean target ${tgt:.2f}')
+        if a_parts:
+            lines.append('Analysts: ' + ' | '.join(a_parts))
+
+        # ── Sector peers ──────────────────────────────────────────────────────────
+        peers = _TICKER_PEERS.get(ticker.upper(), [])
+        if peers:
+            lines.append(f'Sector peers for comparison: {", ".join(peers)}')
+
+    except Exception as ex:
+        log.debug('_fetch_ticker_context failed for %s: %s', ticker, ex)
+
+    result = '\n'.join(lines)
+    _ticker_ctx_cache[ticker] = (result, time.time())
+    return result
+
+
 # ── Ollama LLM ────────────────────────────────────────────────────────────────
 
 class OllamaLLM:
@@ -485,9 +694,22 @@ Analyse the article below and respond with ONLY valid JSON — no markdown fence
 Title: {title}
 Content: {content}
 Portfolio tickers: {tickers}
-
+{context}
 Required JSON (fill ALL fields):
-{{"summary":"2-3 sentence factual summary","category":"earnings|regulatory|macro|sector|dividend|analyst|merger|technical|other","sentiment":"bullish|bearish|neutral","sentiment_score":<float -1.0 to 1.0>,"impact_score":<float 0.0 to 10.0, how relevant to ASX investors>,"primary_tickers":<ASX codes that are the MAIN SUBJECT of this article, e.g. ["CBA"] for a CBA article; [] if the article covers the broad market with no single subject>,"mentioned_tickers":<ALL other ASX codes referenced in passing — peers, index members, unrelated mentions>,"tags":<list of 2-5 keyword tags>,"is_portfolio_relevant":<true only if a primary_tickers code appears in the portfolio list above>}}"""
+{{"summary":"2-3 sentence factual summary",\
+"category":"earnings|regulatory|macro|sector|dividend|analyst|merger|technical|other",\
+"sentiment":"bullish|bearish|neutral",\
+"sentiment_score":<float -1.0 to 1.0>,\
+"impact_score":<float 0.0-10.0; score the REAL PORTFOLIO IMPACT using this rubric — \
+STEP 1 — article type: if this is commentary/opinion/question with NO new company data (e.g. 'should I buy X?', 'top stocks for 2025', listicles), set score to 0.5-2.0 and stop; \
+STEP 2 — base score by event class: trading-halt/M&A-bid/regulatory-decision=7-9, earnings-result/dividend-change/capital-raise/guidance-update=6-8, CEO-exec-change/analyst-PT-revision=4-6, RBA-APRA-macro-policy=3-5, operational-company-update=2-4, broad-sector-commentary=1-3; \
+STEP 3 — specificity: add +1.5 if a portfolio ticker is the PRIMARY subject of this article; subtract 2 if it is only mentioned in passing or as part of an index list; \
+STEP 4 — magnitude: add +1 if specific large figures are cited (earnings change >5%, deal >$500M, dividend cut >20%); \
+final = min(10.0, sum of applicable steps)>,\
+"primary_tickers":<ASX codes that are the MAIN SUBJECT — e.g. ["CBA"] for a CBA earnings article; [] for broad-market articles>,\
+"mentioned_tickers":<ALL other ASX codes referenced in passing>,\
+"tags":<list of 2-5 keyword tags>,\
+"is_portfolio_relevant":<true only if a primary_tickers code appears in the portfolio list above>}}"""
 
     def __init__(self, model: str = "", base_url: str = "http://localhost:11434"):
         self.model = model
@@ -534,17 +756,50 @@ Required JSON (fill ALL fields):
         portfolio_tickers: list[str],
         status_ref: dict | None = None,
         cpu_mode: bool = False,
+        stop_event=None,
     ) -> dict | None:
         """Classify via streaming Ollama — status_ref gets live token counts."""
         ticker_str = ", ".join(portfolio_tickers[:20]) if portfolio_tickers else "none"
         # Trim inputs more aggressively on CPU/SBC to reduce inference time
         content_limit = 400 if cpu_mode else 700
 
+        # ── Earnings/dividend context enrichment ─────────────────────────────
+        # Fetch historical fundamentals for portfolio tickers that are the
+        # primary subject of this article so the model can compare reported
+        # figures against trend rather than guessing from article tone alone.
+        context_block = ""
+        if _is_earnings_dividend_article(title, content):
+            tickers_to_enrich = _extract_article_tickers(
+                title, content, portfolio_tickers)
+            if tickers_to_enrich:
+                ctx_parts: list[str] = []
+                for tk in tickers_to_enrich:
+                    ctx = _fetch_ticker_context(tk)
+                    if ctx:
+                        ctx_parts.append(
+                            f'--- Historical data for {tk} ---\n{ctx}')
+                if ctx_parts:
+                    context_block = (
+                        '\n'.join(ctx_parts)
+                        + '\n\nSentiment calibration rules (apply when historical data above is present):\n'
+                        '- Earnings / profit: reported > prior FY or > forward EPS estimate → bullish; '
+                        'reported < prior FY or significant miss → bearish; in-line → neutral\n'
+                        '- Revenue: acceleration in YoY growth → bullish lean; deceleration or decline → bearish lean\n'
+                        '- Dividends: increase vs recent history → bullish; cut or suspension → bearish; '
+                        'maintained / in-line → neutral\n'
+                        '- Analyst consensus BUY + price well below mean target → bullish supporting signal\n'
+                        '- Override article tone if the hard data contradicts it (e.g. article is cautious '
+                        'but earnings clearly beat trend → still bullish)\n'
+                    )
+        # Strip any stray curly braces from context to avoid breaking .format()
+        context_block = context_block.replace('{', '(').replace('}', ')')
+
         thinking = self._is_thinking_model()
         base_prompt = self.CLASSIFY_PROMPT.format(
             title=title[:200],
             content=(content or "")[:content_limit],
             tickers=ticker_str,
+            context=context_block,
         )
         prompt = base_prompt
 
@@ -592,6 +847,10 @@ Required JSON (fill ALL fields):
                     return None
 
                 for line in resp.iter_lines():
+                    # Abort mid-stream if user requested stop
+                    if stop_event is not None and stop_event.is_set():
+                        log.info("Classify aborted mid-stream by stop_event")
+                        break
                     if not line:
                         continue
                     try:
@@ -848,6 +1107,7 @@ class NewsPipeline:
                         row["title"], row["content"] or "", all_tickers,
                         status_ref=_scan_status,
                         cpu_mode=cpu_mode,
+                        stop_event=stop_event,
                     )
                     art_elapsed = time.monotonic() - art_t0
                     art_times.append(art_elapsed)

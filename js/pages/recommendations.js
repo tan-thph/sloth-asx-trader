@@ -398,23 +398,32 @@ function renderPendingRecs(recs) {
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text-secondary);white-space:nowrap">Qty</label>
           <input type="number" id="exec-qty-${r.id}" value="${execQty}" step="1" min="1"
-            onchange="persistExecField('${r.id}','_execQty',Number(this.value))"
+            oninput="persistExecField('${r.id}','_execQty',Number(this.value));updateExecTotal('${r.id}')"
             style="width:72px;padding:4px 8px;border:1.5px solid #f59e0b;border-radius:6px;font-size:13px;font-weight:600;background:var(--bg-primary);color:var(--text-primary)"
             title="Shares ${isReducing?'sold':'bought'}">
         </div>
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text-secondary);white-space:nowrap">Price $</label>
           <input type="number" id="exec-price-${r.id}" value="${execPrice}" step="0.001" min="0"
-            onchange="persistExecField('${r.id}','_execPrice',Number(this.value))"
+            oninput="persistExecField('${r.id}','_execPrice',Number(this.value));updateExecTotal('${r.id}')"
             style="width:90px;padding:4px 8px;border:1.5px solid #3b82f6;border-radius:6px;font-size:13px;font-weight:600;background:var(--bg-primary);color:var(--text-primary)"
             title="Actual execution price">
         </div>
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text-secondary);white-space:nowrap">Brokerage $</label>
           <input type="number" id="exec-fee-${r.id}" value="${execFee}" step="0.01" min="0"
-            onchange="persistExecField('${r.id}','_execFee',Number(this.value))"
+            oninput="persistExecField('${r.id}','_execFee',Number(this.value));updateExecTotal('${r.id}')"
             style="width:72px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:6px;font-size:13px;background:var(--bg-primary);color:var(--text-primary)"
             title="Brokerage fee">
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-left:auto">
+          <span style="font-size:12px;color:var(--text-secondary);white-space:nowrap">${isReducing ? 'Net proceeds:' : 'Total cost:'}</span>
+          <span id="exec-total-${r.id}" style="font-size:14px;font-weight:700;color:${isReducing?'#16a34a':'#f59e0b'};white-space:nowrap">${(()=>{
+            const q=Number(execQty)||0, p=Number(execPrice)||0, f=Number(execFee)||0;
+            if(!q||!p) return '—';
+            const total = isReducing ? q*p - f : q*p + f;
+            return '$' + total.toFixed(2);
+          })()}</span>
         </div>
       </div>
 
@@ -644,6 +653,20 @@ function renderRecHistory() {
 function persistExecField(recId, field, value) {
   const rec = state.recommendations.find(r => r.id === recId);
   if (rec) { rec[field] = value; scheduleSave(); }
+}
+
+// Recalculate and display total cost / net proceeds in the execution details box
+function updateExecTotal(recId) {
+  const qty   = parseFloat(document.getElementById(`exec-qty-${recId}`)?.value)   || 0;
+  const price = parseFloat(document.getElementById(`exec-price-${recId}`)?.value) || 0;
+  const fee   = parseFloat(document.getElementById(`exec-fee-${recId}`)?.value)   || 0;
+  const el    = document.getElementById(`exec-total-${recId}`);
+  if (!el) return;
+  if (!qty || !price) { el.textContent = '—'; return; }
+  const rec = state.recommendations.find(r => r.id === recId);
+  const isReducing = rec && (rec.action === 'SELL' || rec.action === 'TRIM');
+  const total = isReducing ? qty * price - fee : qty * price + fee;
+  el.textContent = '$' + total.toFixed(2);
 }
 
 function confirmExecute(recId) {
