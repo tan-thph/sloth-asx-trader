@@ -2154,9 +2154,24 @@ def reclassify_all(
     updated = 0
 
     for i, row in enumerate(rows):
-        # Check stop flag before each item (set via request_reclassify_stop())
+        # Check stop flag before each item (set via request_reclassify_stop()).
+        # Read flag while holding the lock, then call _update_reclassify_status
+        # outside it — that function also acquires the lock and Lock is not reentrant.
         with _reclassify_lock:
-            if _reclassify_stop_flag:
+            should_stop = _reclassify_stop_flag
+        if should_stop:
+            logger.info("reclassify_all: stopped by user at %d/%d", i, len(rows))
+            _update_reclassify_status(stopped=True)
+            break
+
+        # Paced delay between items: keeps Flask responsive to stop/status
+        # requests and avoids cloud API rate limits (Groq free: 6k tokens/min).
+        if i > 0:
+            time.sleep(0.5)
+            # Re-check stop after the sleep so clicking Stop is always fast
+            with _reclassify_lock:
+                should_stop = _reclassify_stop_flag
+            if should_stop:
                 logger.info("reclassify_all: stopped by user at %d/%d", i, len(rows))
                 _update_reclassify_status(stopped=True)
                 break
@@ -2169,28 +2184,9 @@ def reclassify_all(
 
         _update_reclassify_status(done=i)
 
-        # If pdf_text is missing, try to fetch it now so the LLM gets real content
-        fetched_pdf_text = False
-        if not pdf_text:
-            pdf_url = row["pdf_url"] or ""
-            doc_key = row["doc_key"] or ""
-            if pdf_url or doc_key:
-                try:
-                    pdf_bytes = download_pdf(
-                        pdf_url, doc_key=doc_key,
-                        ticker=ticker, headline=headline,
-                        date="",
-                    )
-                    if pdf_bytes:
-                        pdf_text = extract_text(pdf_bytes)
-                        fetched_pdf_text = bool(pdf_text)
-                        if fetched_pdf_text:
-                            logger.debug(
-                                "reclassify_all: fetched PDF text for %s (%d chars)",
-                                ann_id, len(pdf_text),
-                            )
-                except Exception as exc:
-                    logger.debug("reclassify_all: PDF re-fetch failed for %s — %s", ann_id, exc)
+        # Reclassify uses only what is already stored — no ASX HTTP calls.
+        # PDF fetching belongs to the sync job; doing it here would block the
+        # server for up to 45 s per item and make the Stop button unresponsive.
 
         try:
             result = classify_announcement(
@@ -2203,49 +2199,26 @@ def reclassify_all(
 
         try:
             with get_db(db_path) as conn:
-                if fetched_pdf_text:
-                    # Persist newly-fetched PDF text so future reclassify runs
-                    # don't need to re-download
-                    conn.execute(
-                        """UPDATE announcements
-                           SET type=?, sentiment=?, impact=?, summary=?, tags=?,
-                               llm_model=?, details=?, pdf_text=?, processed=1
-                           WHERE id=?""",
-                        (
-                            result.get("type"),
-                            result.get("sentiment"),
-                            result.get("impact"),
-                            result.get("summary"),
-                            json.dumps(result.get("tags", [])),
-                            result.get("llm_model"),
-                            result.get("details", ""),
-                            pdf_text,
-                            ann_id,
-                        ),
-                    )
-                else:
-                    conn.execute(
-                        """UPDATE announcements
-                           SET type=?, sentiment=?, impact=?, summary=?, tags=?,
-                               llm_model=?, details=?, processed=1
-                           WHERE id=?""",
-                        (
-                            result.get("type"),
-                            result.get("sentiment"),
-                            result.get("impact"),
-                            result.get("summary"),
-                            json.dumps(result.get("tags", [])),
-                            result.get("llm_model"),
-                            result.get("details", ""),
-                            ann_id,
-                        ),
-                    )
+                conn.execute(
+                    """UPDATE announcements
+                       SET type=?, sentiment=?, impact=?, summary=?, tags=?,
+                           llm_model=?, details=?, processed=1
+                       WHERE id=?""",
+                    (
+                        result.get("type"),
+                        result.get("sentiment"),
+                        result.get("impact"),
+                        result.get("summary"),
+                        json.dumps(result.get("tags", [])),
+                        result.get("llm_model"),
+                        result.get("details", ""),
+                        ann_id,
+                    ),
+                )
             updated += 1
             _update_reclassify_status(updated=updated)
         except Exception as exc:
             logger.warning("reclassify_all: DB update failed for %s — %s", ann_id, exc)
-
-        time.sleep(0.1)  # avoid hammering the LLM
 
     with _reclassify_lock:
         was_stopped = _reclassify_stop_flag
