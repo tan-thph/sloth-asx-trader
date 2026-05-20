@@ -218,6 +218,7 @@ DEFAULT_SETTINGS = {
     "ann_llm_model": "qwen2.5:1.5b",
     "ollama_url": "http://localhost:11434",
     "groq_api_key": "",
+    "ann_groq_model":  "llama-3.1-8b-instant",
     "gemini_api_key": "",
 }
 

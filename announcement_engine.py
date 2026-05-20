@@ -1730,7 +1730,7 @@ def _classify_groq(prompt: str, settings: Dict) -> Optional[Dict]:
     api_key = settings.get("groq_api_key", "")
     if not api_key:
         return None
-    model = "llama-3.1-8b-instant"
+    model = settings.get("ann_groq_model") or "llama-3.1-8b-instant"
     try:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",

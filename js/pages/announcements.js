@@ -308,7 +308,7 @@ function _annPageHTML(status) {
 
     <!-- LLM Settings panel — ABOVE filter/cards so user sees it first -->
     <details id="ann-settings-panel" style="margin-bottom:12px" ${state.announcements.settingsOpen ? 'open' : ''}
-      ontoggle="state.announcements.settingsOpen=this.open; if(this.open) _maybeLoadOllamaModels()">
+      ontoggle="state.announcements.settingsOpen=this.open; if(this.open) { _maybeLoadOllamaModels(); const _p=(state.announcements.settings||{}).ann_llm_provider||'ollama'; if(_p==='groq') _loadGroqModels('ann-groq-model',(state.announcements.settings||{}).ann_groq_model||'llama-3.1-8b-instant'); }">
       <summary class="card" style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 16px;border-radius:var(--radius-md);font-size:13px;font-weight:600;color:var(--text-primary);user-select:none">
         <span>⚙</span>
         <span>LLM Settings</span>
@@ -531,8 +531,9 @@ function _annSettingsPanelHTML(status) {
   const provider = cfg.ann_llm_provider || 'ollama';
   const model    = cfg.ann_llm_model    || 'qwen2.5:1.5b';
   const url      = cfg.ollama_url       || 'http://localhost:11434';
-  const groqKey  = cfg.groq_api_key     || '';
-  const gemKey   = cfg.gemini_api_key   || '';
+  const groqKey   = cfg.groq_api_key    || '';
+  const groqModel = cfg.ann_groq_model  || 'llama-3.1-8b-instant';
+  const gemKey    = cfg.gemini_api_key  || '';
 
   const inSt  = 'width:100%;box-sizing:border-box;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)';
   const lblSt = 'font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px';
@@ -615,6 +616,12 @@ function _annSettingsPanelHTML(status) {
             <a href="https://console.groq.com/keys" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a>
           </label>
           <input type="password" id="ann-groq-key" value="${groqKey}" placeholder="gsk_…" style="${inSt}">
+        </div>
+        <div>
+          <label style="${lblSt}">Groq Model</label>
+          <select id="ann-groq-model" style="${inSt}" onchange="">
+            <option value="">Loading…</option>
+          </select>
         </div>
       </div>
 
@@ -899,6 +906,7 @@ async function saveAnnSettings() {
     : (modelSelect?.value || 'qwen2.5:1.5b');
   const ollamaUrl   = document.getElementById('ann-ollama-url')?.value?.trim()   || 'http://localhost:11434';
   const groqKey     = document.getElementById('ann-groq-key')?.value?.trim()     || '';
+  const groqModel   = document.getElementById('ann-groq-model')?.value?.trim()   || 'llama-3.1-8b-instant';
   const geminiKey   = document.getElementById('ann-gemini-key')?.value?.trim()   || '';
 
   // Use the SAME key names as state.announcements.settings and the backend DEFAULT_SETTINGS
@@ -907,6 +915,7 @@ async function saveAnnSettings() {
     ann_llm_model:    ollamaModel,
     ollama_url:       ollamaUrl,
     groq_api_key:     groqKey,
+    ann_groq_model:   groqModel,
     gemini_api_key:   geminiKey,
   };
 
@@ -1078,6 +1087,28 @@ function toggleAnnProviderFields() {
   if (urlWrapEl) urlWrapEl.style.display = provider === 'ollama' ? 'block' : 'none';
   if (groqEl)    groqEl.style.display    = provider === 'groq'   ? 'flex'  : 'none';
   if (geminiEl)  geminiEl.style.display  = provider === 'gemini' ? 'flex'  : 'none';
+  if (provider === 'groq') {
+    const savedModel = (state.announcements.settings || {}).ann_groq_model || 'llama-3.1-8b-instant';
+    _loadGroqModels('ann-groq-model', savedModel);
+  }
+}
+
+// ── Load Groq models from backend ────────────────────────────
+async function _loadGroqModels(selectId, savedModel) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  try {
+    const d = await fetch(`${API}/api/groq/models`).then(r => r.json());
+    if (d.models && d.models.length) {
+      el.innerHTML = d.models.map(m =>
+        `<option value="${m}" ${m === savedModel ? 'selected' : ''}>${m}</option>`
+      ).join('');
+    } else {
+      el.innerHTML = `<option value="${savedModel || 'llama-3.1-8b-instant'}" selected>${savedModel || 'llama-3.1-8b-instant'}</option>`;
+    }
+  } catch {
+    el.innerHTML = `<option value="${savedModel || 'llama-3.1-8b-instant'}" selected>${savedModel || 'llama-3.1-8b-instant'}</option>`;
+  }
 }
 
 // ── Show/hide custom model input ──────────────────────────────

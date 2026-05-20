@@ -2876,6 +2876,7 @@ def _news_settings_from_db() -> dict:
         "llm_model":           "",
         "ollama_url":          "http://localhost:11434",
         "groq_api_key":        "",
+        "groq_model":          "llama-3.1-8b-instant",
         "scan_interval_hours": 6,
         "enabled":             True,
         "max_age_days":        7,
@@ -3062,6 +3063,41 @@ def news_models():
     return jsonify({"models": models, "available": available})
 
 
+@app.route("/api/groq/models")
+def groq_models():
+    """Return available Groq models using the saved API key (news or announcements)."""
+    # Try news settings first, then announcements settings
+    news_cfg = _news_settings_from_db()
+    api_key  = news_cfg.get("groq_api_key", "")
+    if not api_key:
+        try:
+            with get_db() as conn:
+                row = conn.execute("SELECT value FROM blob_store WHERE key='ann_settings'").fetchone()
+            if row:
+                api_key = json.loads(row["value"]).get("groq_api_key", "")
+        except Exception:
+            pass
+    if not api_key:
+        return jsonify({"models": [], "available": False, "error": "No Groq API key saved"})
+    try:
+        resp = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if not resp.ok:
+            return jsonify({"models": [], "available": False, "error": f"Groq API error {resp.status_code}"})
+        _exclude = ("whisper", "guard", "safeguard", "orpheus")
+        models = [
+            m["id"] for m in resp.json().get("data", [])
+            if not any(x in m["id"].lower() for x in _exclude)
+        ]
+        models.sort()
+        return jsonify({"models": models, "available": True})
+    except Exception as exc:
+        return jsonify({"models": [], "available": False, "error": str(exc)})
+
+
 @app.route("/api/news/settings", methods=["GET", "POST"])
 def news_settings_route():
     """GET or update news scanner settings."""
@@ -3198,7 +3234,7 @@ def _run_reclassify(model: str, days: int):
         cfg      = _news_settings_from_db()
         provider = cfg.get("llm_provider", "ollama").lower()
         if provider == "groq":
-            llm = _ne.GroqLLM(api_key=cfg.get("groq_api_key", ""))
+            llm = _ne.GroqLLM(api_key=cfg.get("groq_api_key", ""), model=cfg.get("groq_model", ""))
         else:
             llm = _ne.OllamaLLM(model=model, base_url=cfg.get("ollama_url", "http://localhost:11434"))
         all_tick = _portfolio_tickers_from_db()

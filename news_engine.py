@@ -932,9 +932,11 @@ class GroqLLM:
     # Reuse the same prompt as OllamaLLM
     CLASSIFY_PROMPT = OllamaLLM.CLASSIFY_PROMPT
 
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-        self.model   = f"groq/{self.GROQ_MODEL}"
+    def __init__(self, api_key: str = "", model: str = ""):
+        self.api_key    = api_key
+        _model          = model or self.GROQ_MODEL
+        self.model      = f"groq/{_model}"
+        self._api_model = _model   # bare model name for API calls
 
     def is_available(self) -> bool:
         return bool(self.api_key)
@@ -965,7 +967,7 @@ class GroqLLM:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model":       self.GROQ_MODEL,
+                    "model":       self._api_model,
                     "messages":    [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
                     "max_tokens":  400,
@@ -1064,9 +1066,12 @@ class NewsPipeline:
     def _get_llm(self, settings: dict) -> OllamaLLM | GroqLLM:
         provider = settings.get("llm_provider", "ollama").lower()
         if provider == "groq":
-            api_key = settings.get("groq_api_key", "")
-            if not isinstance(self.llm, GroqLLM) or self.llm.api_key != api_key:
-                self.llm = GroqLLM(api_key=api_key)
+            api_key    = settings.get("groq_api_key", "")
+            groq_model = settings.get("groq_model", "")
+            if (not isinstance(self.llm, GroqLLM)
+                    or self.llm.api_key != api_key
+                    or self.llm._api_model != (groq_model or GroqLLM.GROQ_MODEL)):
+                self.llm = GroqLLM(api_key=api_key, model=groq_model)
             return self.llm
         # default: Ollama
         model = settings.get("llm_model") or ""

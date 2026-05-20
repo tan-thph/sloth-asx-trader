@@ -99,6 +99,10 @@ async function renderNewsPage(gen) {
     }
 
     el.innerHTML = _newsPageHTML(statusResp, feedResp.sentiment || {});
+    // Populate Groq model dropdown if Groq is the active provider
+    if ((state.news.settings.llm_provider || 'ollama') === 'groq') {
+      _loadGroqModels('news-groq-model-select', state.news.settings.groq_model || 'llama-3.1-8b-instant');
+    }
     if (statusResp.running) _startNewsPoller(gen);
     // Restore reclassify poller if a job was already running before page render
     const rcStatus = await fetch(`${API}/api/news/reclassify/status`).then(r=>r.json()).catch(()=>({}));
@@ -397,7 +401,6 @@ function _newsPageHTML(status, sentiment) {
         ${provider === 'groq' ? `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             ${groqStatusHtml}
-            <span style="font-size:11px;color:var(--text-muted)">llama-3.1-8b-instant · free tier</span>
           </div>
           <div class="form-row" style="margin-bottom:8px">
             <div class="form-label" style="font-size:11px">Groq API Key</div>
@@ -406,6 +409,13 @@ function _newsPageHTML(status, sentiment) {
                 style="flex:1;font-size:12px;padding:3px 7px;border:1px solid var(--border-light);border-radius:var(--radius-sm);background:var(--bg-secondary);color:var(--text-primary)">
               <button class="btn btn-sm btn-primary" onclick="newsSaveGroqKey()" style="font-size:11px">Save</button>
             </div>
+          </div>
+          <div class="form-row" style="margin-bottom:8px">
+            <div class="form-label" style="font-size:11px">Groq Model</div>
+            <select id="news-groq-model-select" onchange="newsSetGroqModel(this.value)"
+              style="width:100%;font-size:12px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
+              <option value="${cfg.groq_model || 'llama-3.1-8b-instant'}" selected>${cfg.groq_model || 'llama-3.1-8b-instant'}</option>
+            </select>
           </div>
         ` : `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
@@ -469,7 +479,7 @@ ollama pull llama3.2:3b     # lightweight</pre>
               ${state.news.models.length
                 ? state.news.models.map(m => `<option value="${m.name}">${m.name}${m.details?.parameter_size ? ' — '+m.details.parameter_size : ''}</option>`).join('')
                 : `<option value="${cfg.llm_model}">${cfg.llm_model || '— select model —'}</option>`}
-            </select>` : `<span style="font-size:11px;color:var(--text-muted)">groq/llama-3.1-8b-instant</span>`}
+            </select>` : `<span style="font-size:11px;color:var(--text-muted)">groq/${cfg.groq_model || 'llama-3.1-8b-instant'}</span>`}
             <select id="reclassify-days" style="font-size:12px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
               ${[1,3,7,14].map(d => `<option value="${d}" ${d === (cfg.max_age_days||7) ? 'selected':''}>${d}d</option>`).join('')}
             </select>
@@ -841,6 +851,29 @@ async function newsSaveGroqKey() {
   await _saveNewsSettings();
   toast(key ? 'Groq API key saved' : 'Groq API key cleared', 'success');
   renderPage();
+}
+
+async function newsSetGroqModel(model) {
+  state.news.settings.groq_model = model;
+  await _saveNewsSettings();
+  toast(`Groq model set to ${model}`, 'success');
+}
+
+async function _loadGroqModels(selectId, savedModel) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  try {
+    const d = await fetch(`${API}/api/groq/models`).then(r => r.json());
+    if (d.models && d.models.length) {
+      el.innerHTML = d.models.map(m =>
+        `<option value="${m}" ${m === savedModel ? 'selected' : ''}>${m}</option>`
+      ).join('');
+    } else {
+      el.innerHTML = `<option value="${savedModel || 'llama-3.1-8b-instant'}" selected>${savedModel || 'llama-3.1-8b-instant'}</option>`;
+    }
+  } catch {
+    el.innerHTML = `<option value="${savedModel || 'llama-3.1-8b-instant'}" selected>${savedModel || 'llama-3.1-8b-instant'}</option>`;
+  }
 }
 
 async function newsSetModel(model) {
