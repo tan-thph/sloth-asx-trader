@@ -676,8 +676,5 @@ function _renderUniverseProgressHtml() {
       <div style="height:5px;background:var(--bg-secondary);border-radius:3px;overflow:hidden">
         <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px;transition:width .3s"></div>
       </div>
-      ${p.phase === 'fetching' && p.current < p.total
-        ? `<button class="btn btn-sm" onclick="cancelUniverseScan()" style="margin-top:6px;font-size:11px;color:#ef4444;border-color:#ef4444">✕ Cancel</button>`
-        : ''}
     </div>`;
 }
