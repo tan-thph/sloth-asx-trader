@@ -279,7 +279,7 @@ function renderPendingRecs(recs) {
       <div style="font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px">
         Analyst Summary · ${state.analysisLastSummary.time} ${state.analysisLastSummary.date}
       </div>
-      <p style="font-size:13px;line-height:1.7;color:var(--text-primary)">${state.analysisLastSummary.text}</p>
+      <p style="font-size:13px;line-height:1.7;color:var(--text-primary);white-space:pre-wrap">${state.analysisLastSummary.text}</p>
     </div>` : '';
 
   const tile = (label, body, sub) => `

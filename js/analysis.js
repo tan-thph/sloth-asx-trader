@@ -336,9 +336,9 @@ ANALYSIS INSTRUCTIONS — follow in order, do not skip steps
 
 STEP 1 — CALIBRATION CHECK
 Review RECENT RECOMMENDATION HISTORY. Compute hit-rate per confidence band.
-If any band hit-rate < 60%, state the −0.10 adjustment you will apply to today's recs in that band.
-Write this calibration note FIRST in the summary field.
-If < 5 closed recs with actualPnL, write "insufficient history for calibration" in summary and proceed.
+If any band hit-rate < 60%, apply −0.10 confidence adjustment to today's recs in that band.
+Only mention calibration in the summary if an adjustment was actually applied (one short note at the end).
+If < 5 closed recs with actualPnL, skip calibration entirely — do not mention it in the summary.
 
 STEP 2 — FAILED REC REVIEW
 For any ticker with a previous loss outcome or negative feedback:
@@ -517,10 +517,10 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
     Review RECENT RECOMMENDATION HISTORY with actualPnL from the user message.
     Compute hit-rate for each confidence band previously used (e.g. 0.70–0.80, 0.80–0.90).
     If hit-rate in a band < 60%, you were overconfident in that band — apply −0.10 confidence
-    adjustment to today's recs in that band and disclose in summary.
-    Place the calibration note FIRST in the summary field so it is never truncated.
+    adjustment to today's recs in that band silently (do not list win/loss stats in the summary).
+    Only add one short calibration note to the summary if an adjustment was applied.
     If RECENT RECOMMENDATION HISTORY has fewer than 5 closed recs with actualPnL,
-    skip calibration and note "insufficient history for calibration" in summary.
+    skip calibration entirely — do not mention it in the summary.
 
   SECTION 6 — LEARNING FROM HISTORY
 
@@ -587,9 +587,11 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
   Do NOT use literal { or } characters inside any string field value.
   Shape: {"recs": [...], "summary": "string", "portfolioAnalysis": {...}}
 
-  summary: MAX 400 chars. Write in this order: (1) calibration note if applicable, (2) macro regime
-           in one line, (3) top 2–3 actionable insights, (4) cash stance.
-           Do not narrate individual holdings.
+  summary: MAX 400 chars. Lead with the recommendations themselves — one line per rec in the format
+           "TICKER: ACTION — key reason (≤60 chars)". After listing recs, add one line for macro regime
+           and one line for cash stance. If a calibration adjustment was applied, append one short note:
+           "Calibration: −0.10 applied to X%-band." Do NOT list raw win/loss statistics or enumerate
+           individual calibration data points — only mention calibration if a band was adjusted.
 
   Each rec object — ALL fields required unless marked optional:
   {
@@ -933,8 +935,40 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
     }
 
     state.recommendations = [...cappedDedupedRecs, ...survivingPending];
+
+    // Build structured summary from actual recs — never rely on AI free-text for this
+    const recLines = cappedDedupedRecs.map(r => {
+      const reason = (r.reasoning || '').replace(/\n/g, ' ').trim().slice(0, 70);
+      return `${r.ticker}: ${r.action}${reason ? ' — ' + reason : ''}`;
+    });
+
+    // Extract [system notes] appended to summary string (e.g. confidence floor drops, conflicts)
+    const bracketNotes = summary ? (summary.match(/\[[^\]]+\]/g) || []) : [];
+
+    // Extract macro + cash context from AI summary; strip calibration stats and rec enumeration
+    let contextLine = '';
+    if (summary) {
+      // Strip from "Calibration:" to the next known section header (case-sensitive to avoid
+      // matching "Wins:", "Losses:" etc. which have mixed case)
+      const stripped = summary
+        .replace(/Calibration:.*?(?=Macro:|Key actions:|Cash:)/s, '')
+        .replace(/Calibration:.*?adjustment applied[.,]?\s*/s, '')
+        .replace(/insufficient history for calibration[.,]?\s*/i, '')
+        .replace(/Key actions:.*?(?=Macro:|Cash:|$)/s, '')
+        .replace(/\[[^\]]+\]/g, '')
+        .trim();
+      if (stripped) contextLine = stripped.slice(0, 180).trim();
+    }
+
+    const allParts = [
+      ...(recLines.length ? recLines : ['No actionable setups — holding cash.']),
+      ...(contextLine ? [contextLine] : []),
+      ...(bracketNotes.length ? [bracketNotes.join(' ')] : []),
+    ];
+    const structuredText = allParts.join('\n');
+
     state.analysisLastSummary = {
-      text: summary,
+      text: structuredText,
       date: todayStr(),
       time: nowSydney(),
       recCount: cappedDedupedRecs.length,
