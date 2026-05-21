@@ -237,7 +237,7 @@ function _renderUniverseScannerCard() {
     return `<button
       class="btn btn-sm"
       onclick="state.dayTrading.universeKey='${k}';scheduleSave();renderPage()"
-      style="font-size:11px;font-weight:${active ? '700' : '400'};background:${active ? 'var(--accent)' : 'var(--bg-secondary)'};color:${active ? '#fff' : 'var(--text-secondary)'};border-color:${active ? 'var(--accent)' : 'var(--border-medium)'}"
+      style="font-size:11px;font-weight:${active ? '700' : '400'};background:${active ? '#6366f1' : 'var(--bg-secondary)'};color:${active ? '#fff' : 'var(--text-secondary)'};border-color:${active ? '#6366f1' : 'var(--border-medium)'}"
       ${isScanning ? 'disabled' : ''}
       title="${meta.desc}"
     >${meta.label} <span style="opacity:.7">(${count})</span></button>`;
