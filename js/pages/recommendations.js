@@ -8,6 +8,7 @@ function renderRecommendations() {
       <button class="tab active" id="tab-pending" onclick="switchRecTab('pending')">Pending (${pending.length})</button>
       <button class="tab" id="tab-run" onclick="switchRecTab('run')">▶ Run Analysis</button>
       <button class="tab" id="tab-history" onclick="switchRecTab('history')">History (${state.recHistory.length})</button>
+      <button class="tab" id="tab-rules" onclick="switchRecTab('rules')">⚙ Rules</button>
     </div>
     <div id="rec-content">${renderPendingRecs(pending)}</div>
   `;
@@ -18,7 +19,8 @@ function switchRecTab(tab) {
   if(activeTab) activeTab.classList.add('active');
   if(tab==='pending') document.getElementById('rec-content').innerHTML=renderPendingRecs(state.recommendations.filter(r=>r.status==='pending'));
   else if(tab==='run') document.getElementById('rec-content').innerHTML=renderRunAnalysisPanel();
-  else document.getElementById('rec-content').innerHTML=renderRecHistory();
+  else if(tab==='history') document.getElementById('rec-content').innerHTML=renderRecHistory();
+  else document.getElementById('rec-content').innerHTML=renderRecRulesPanel();
 }
 
 function renderRunAnalysisPanel() {
@@ -914,4 +916,170 @@ function updateSizer(recId) {
 
   const out = document.getElementById(`${sId}-output`);
   if (out) out.innerHTML = sizerOutput(qty, posValue, posWeight, maxLoss, potGain, rr, fees, nw);
+}
+
+// ============================================================
+// RECOMMENDATIONS — RULES PANEL
+// ============================================================
+
+const _REC_RULE_DEFAULTS = {
+  minConfidence: 0.62, minIndepFactors: 3, bearCaseThreshold: 0.70,
+  highRiskMinConf: 0.75, veryHighRiskMinConf: 0.80,
+  minRrRatio: 2.0, stopAtrMultiple: 1.5,
+  maxPositionPct: 15, maxSectorPct: 30,
+  sameTickerWindowDays: 7, minHoldingDays: 1,
+  minChurnProfitAud: 100, minChurnProfitPct: 2,
+  dividendYieldPremium: 1.5, highConvYieldPremium: 2.5,
+  highVarThreshold1: -3.5, highVarThreshold2: -5.0, highDdThreshold: 25,
+  compositeRiskHighScore: 67, compositeRiskVeryHighScore: 80,
+  exDivProtectDays: 5, exDivFlagDays: 10,
+  cgtHoldMonthsMin: 11, cgtHoldMonthsMax: 12,
+  customRules: '',
+};
+
+function _recRuleVal(key) {
+  return state.analysisConfig.rules?.[key] ?? _REC_RULE_DEFAULTS[key];
+}
+
+function renderRecRulesPanel() {
+  const v = _recRuleVal;
+
+  const nf = (label, key, min, max, step, hint) => `
+    <div>
+      <div class="form-label">${label}</div>
+      <input type="number" value="${v(key)}" min="${min}" max="${max}" step="${step}"
+        style="width:110px" title="${hint}"
+        onchange="setRecRule('${key}', Number(this.value))">
+      <div class="text-xs text-muted mt-1" style="max-width:200px">${hint}</div>
+    </div>`;
+
+  const isModified = Object.keys(_REC_RULE_DEFAULTS).some(
+    k => k !== 'customRules' && (state.analysisConfig.rules?.[k] ?? _REC_RULE_DEFAULTS[k]) !== _REC_RULE_DEFAULTS[k]
+  );
+
+  return `
+    <div style="display:flex;flex-direction:column;gap:14px">
+
+      ${isModified ? `
+      <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:#92400e;display:flex;align-items:center;justify-content:space-between">
+        <span>Custom rules active — defaults have been modified. These are applied on every analysis run.</span>
+        <button class="btn btn-sm" onclick="resetRecRules()" style="white-space:nowrap">↺ Reset all</button>
+      </div>` : `
+      <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--text-muted)">
+        Using default rules. Edit any value below to override — changes are applied immediately on the next run.
+      </div>`}
+
+      <!-- Confidence & Conviction -->
+      <div class="card">
+        <div class="card-title">Confidence &amp; Conviction</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('Min confidence floor', 'minConfidence', 0.40, 1.0, 0.01, 'Recs below this are dropped client-side')}
+          ${nf('Min independent factors', 'minIndepFactors', 1, 5, 1, 'Non-technical factors required before any rec')}
+          ${nf('Bear case threshold', 'bearCaseThreshold', 0.50, 1.0, 0.05, 'Confidence above which a bear case is required')}
+          ${nf('High-risk min confidence', 'highRiskMinConf', 0.50, 1.0, 0.05, 'Applied when portfolio risk score > compositeRiskHighScore')}
+          ${nf('Very-high-risk min conf', 'veryHighRiskMinConf', 0.50, 1.0, 0.05, 'Applied when portfolio risk score > compositeRiskVeryHighScore (no new BUYs threshold)')}
+        </div>
+      </div>
+
+      <!-- Risk / Reward -->
+      <div class="card">
+        <div class="card-title">Risk / Reward</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('Min R:R ratio', 'minRrRatio', 1.0, 5.0, 0.5, 'Minimum reward:risk — recs below this are rejected')}
+          ${nf('Stop ATR multiple', 'stopAtrMultiple', 0.5, 5.0, 0.5, 'Stop-loss = entry − N×ATR14')}
+        </div>
+      </div>
+
+      <!-- Position Sizing -->
+      <div class="card">
+        <div class="card-title">Position Sizing</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('Max position size (%)', 'maxPositionPct', 5, 50, 1, 'Single-position weight ceiling')}
+          ${nf('Max sector concentration (%)', 'maxSectorPct', 10, 80, 5, 'Max portfolio weight in any one sector')}
+        </div>
+      </div>
+
+      <!-- Anti-churn -->
+      <div class="card">
+        <div class="card-title">Anti-churn Rules</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('Same-ticker window (days)', 'sameTickerWindowDays', 1, 30, 1, 'No BUY→SELL flip on same ticker within this window')}
+          ${nf('Min holding days', 'minHoldingDays', 0, 30, 1, 'Minimum hold period before SELL/TRIM is valid')}
+          ${nf('Min churn profit ($AUD)', 'minChurnProfitAud', 0, 1000, 10, 'Reject SELL/TRIM if net profit below this dollar amount')}
+          ${nf('Min churn profit (%)', 'minChurnProfitPct', 0, 20, 0.5, 'Reject SELL/TRIM if net profit below this % of position')}
+        </div>
+      </div>
+
+      <!-- Dividend & Income -->
+      <div class="card">
+        <div class="card-title">Dividend &amp; Income Rules</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('Dividend yield premium (%)', 'dividendYieldPremium', 0, 5, 0.25, 'Minimum yield premium over RBA rate for income classification')}
+          ${nf('High-conviction yield premium (%)', 'highConvYieldPremium', 0, 6, 0.25, 'Premium required for high-conviction overweight income plays')}
+        </div>
+      </div>
+
+      <!-- Portfolio Risk Thresholds -->
+      <div class="card">
+        <div class="card-title">Portfolio Risk Thresholds</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('VaR1d threshold 1 (%)', 'highVarThreshold1', -20, 0, 0.5, 'VaR1d below this → reduce qty by 25%')}
+          ${nf('VaR1d threshold 2 (%)', 'highVarThreshold2', -20, 0, 0.5, 'VaR1d below this → reduce qty by 50%')}
+          ${nf('MaxDD90d threshold (%)', 'highDdThreshold', 5, 60, 1, 'Max drawdown above this → mandatory stop-loss note')}
+          ${nf('Composite risk high score', 'compositeRiskHighScore', 30, 95, 1, 'Risk score above this → raise min confidence')}
+          ${nf('Composite risk very-high score', 'compositeRiskVeryHighScore', 50, 100, 1, 'Risk score above this → no new BUY positions')}
+        </div>
+      </div>
+
+      <!-- Ex-dividend & CGT -->
+      <div class="card">
+        <div class="card-title">Ex-dividend &amp; CGT Rules</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('Ex-div protect window (days)', 'exDivProtectDays', 0, 30, 1, 'No TRIM/SELL within this many days before ex-div')}
+          ${nf('Ex-div flag window (days)', 'exDivFlagDays', 0, 60, 1, 'Flag TRIM/SELL when ex-div is within this range')}
+          ${nf('CGT window start (months)', 'cgtHoldMonthsMin', 6, 12, 1, 'Start of CGT discount warning window')}
+          ${nf('CGT window end (months)', 'cgtHoldMonthsMax', 10, 18, 1, 'End of CGT discount window — flag any SELL before this')}
+        </div>
+      </div>
+
+      <!-- Custom Rules -->
+      <div class="card">
+        <div class="card-title">Custom Rule Injection</div>
+        <p class="text-xs text-muted" style="margin-bottom:10px">Appended verbatim to every analysis run as additional AI instructions. Plain English only — no JSON.</p>
+        <textarea rows="5" placeholder="e.g. Never recommend commodity stocks while iron ore spot < $100/t. Always favour dividend payers over growth stocks in the current macro regime."
+          style="font-size:13px;line-height:1.65;width:100%"
+          oninput="setRecRule('customRules', this.value)">${v('customRules')}</textarea>
+      </div>
+
+      <!-- Footer -->
+      <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:13px;font-weight:600">Rules applied on next run</div>
+          <div class="text-xs text-muted">Confidence floor is enforced client-side · all other rules injected into AI user message</div>
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-sm" onclick="resetRecRules()">↺ Reset to defaults</button>
+          <button class="btn btn-primary btn-sm" onclick="switchRecTab('run');setTimeout(runAnalysisFromPanel,50)">▶ Run Analysis Now</button>
+        </div>
+      </div>
+
+    </div>
+  `;
+}
+
+function setRecRule(key, value) {
+  if (!state.analysisConfig.rules) state.analysisConfig.rules = {};
+  state.analysisConfig.rules[key] = value;
+  scheduleSave();
+}
+
+function resetRecRules() {
+  state.analysisConfig.rules = { ..._REC_RULE_DEFAULTS };
+  scheduleSave();
+  const el = document.getElementById('rec-content');
+  if (el) el.innerHTML = renderRecRulesPanel();
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  const tab = document.getElementById('tab-rules');
+  if (tab) tab.classList.add('active');
+  toast('Analysis rules reset to defaults', 'success');
 }

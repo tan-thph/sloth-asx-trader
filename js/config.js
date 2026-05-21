@@ -58,6 +58,7 @@ const state = {
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary
+  currentRegime: null,         // { regime, confidence, signals[], fetchedAt } — set by regime-engine.js
   serverOk: false,
   rbaRate: 4.35,               // auto-fetched from /api/rba-rate on init
   rbaRateSource: 'fallback',   // 'live-rba' | 'cached' | 'fallback'
@@ -70,6 +71,42 @@ const state = {
     extraTickers: [],
     marketView: '',
     savedViews: [],
+    rules: {
+      // Confidence & conviction
+      minConfidence:          0.62,
+      minIndepFactors:        3,
+      bearCaseThreshold:      0.70,
+      highRiskMinConf:        0.75,
+      veryHighRiskMinConf:    0.80,
+      // Risk / reward
+      minRrRatio:             2.0,
+      stopAtrMultiple:        1.5,
+      // Position sizing
+      maxPositionPct:         15,
+      maxSectorPct:           30,
+      // Anti-churn
+      sameTickerWindowDays:   7,
+      minHoldingDays:         1,
+      minChurnProfitAud:      100,
+      minChurnProfitPct:      2,
+      // Dividend / income
+      dividendYieldPremium:   1.5,
+      highConvYieldPremium:   2.5,
+      // Portfolio risk thresholds
+      highVarThreshold1:      -3.5,
+      highVarThreshold2:      -5.0,
+      highDdThreshold:        25,
+      compositeRiskHighScore: 67,
+      compositeRiskVeryHighScore: 80,
+      // Ex-dividend
+      exDivProtectDays:       5,
+      exDivFlagDays:          10,
+      // CGT
+      cgtHoldMonthsMin:       11,
+      cgtHoldMonthsMax:       12,
+      // Free-text custom rules (appended to every analysis run)
+      customRules:            '',
+    },
   },
   news: {
     items: [],
@@ -115,5 +152,22 @@ const state = {
     extraTickers: [],      // watchlist tickers for day-trade scans only
     universeKey: 'asx200', // selected universe for universe scan
     scanProgress: null,    // {phase:'fetching'|'analysing', current, total, candidates} | null
+    activeTab: 'setups',   // 'setups' | 'rules'
+    filterParams: {        // pre-filter thresholds (applied client-side)
+      maxBbPctB:   0.20,
+      minAdvAud:   1500000,
+      sma200Floor: 0.985,
+      maxAdx:      35,
+    },
+    aiParams: {            // signal thresholds (injected into AI prompt)
+      stopAtrMultiple: 2.5,
+      minRrRatio:      2.0,
+      minConfidence:   0.50,
+      maxPositionPct:  20,
+      rsiThreshold:    35,
+      volZScore:       1.5,
+      fibReturnMin:    -20,
+      fibReturnMax:    -5,
+    },
   },
 };

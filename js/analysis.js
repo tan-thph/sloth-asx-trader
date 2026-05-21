@@ -81,18 +81,11 @@ async function runAnalysis() {
       }
 
 
-      const macroSystem = MACRO_SYSTEM_PROMPT;
-      const macroResp = await fetch('https://api.anthropic.com/v1/messages', {
-        method:'POST',
-        headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body: JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1000,system:macroSystem,
-          messages:[{role:'user',content:`Provide current macro analysis for ASX morning brief. Today: ${todayStr()}${liveCtx?'. Live market data: '+liveCtx:'. Use realistic current estimates.'}  Return only JSON.`}]})
-      });
-      const macroData = await macroResp.json();
-      if(!macroData.error) {
-        const macroText = macroData.content?.[0]?.text || '{}';
-        const macroAI = JSON.parse(macroText.replace(/```json|```/g,'').trim());
-        state.macroData = {...(state.macroData||{}), ...macroAI, _source: state.macroData?._source==='live'?'live':'ai'};
+      const macroUserMsg = `Provide current macro analysis for ASX morning brief. Today: ${todayStr()}${liveCtx ? '. Live market data: ' + liveCtx : '. Use realistic current estimates.'}  Return only JSON.`;
+      const { text: macroText } = await callClaude('macro', macroUserMsg, { noCache: true });
+      const { ok: macroOk, data: macroAI } = parseClaudeJSON(macroText);
+      if (macroOk && macroAI) {
+        state.macroData = { ...(state.macroData || {}), ...macroAI, _source: state.macroData?._source === 'live' ? 'live' : 'ai' };
         state.macroDate = macroToday;
       }
     } catch(e) { console.warn('Macro brief failed silently:', e.message); }
@@ -320,42 +313,49 @@ ${riskRows}`;
   const earningsCtx = earningsLines.length ? `\n\nEARNINGS CALENDAR (use for catalyst timing and pre-earnings positioning):\n${earningsLines.join('\n')}` : '';
 
 
-  // ── Calibration: computed client-side so the AI receives a deterministic instruction
-  //    rather than being asked to do arithmetic on the history itself.
-  const calibrationNote = (() => {
-    const closed = state.recHistory.filter(r => r.actualProfit != null);
-    if (closed.length < 5) return '';
-    const bands = {};
-    for (const r of closed) {
-      const conf = r.confidence || 0;
-      const band = conf >= 0.9 ? '0.90+' : conf >= 0.8 ? '0.80-0.89' : conf >= 0.7 ? '0.70-0.79' : '0.60-0.69';
-      if (!bands[band]) bands[band] = { hits: 0, total: 0 };
-      bands[band].total++;
-      if (r.actualProfit > 0) bands[band].hits++;
-    }
-    const lines = Object.entries(bands)
-      .filter(([, s]) => s.total >= 3)
-      .map(([band, s]) => {
-        const hr = Math.round(s.hits / s.total * 100);
-        return hr < 60
-          ? `  ${band}: ${s.hits}/${s.total} = ${hr}% hit rate → apply −0.10 confidence to new recs in this band`
-          : `  ${band}: ${s.hits}/${s.total} = ${hr}% hit rate → no adjustment needed`;
-      });
-    return lines.length
-      ? `\n\nCALIBRATION (pre-computed — apply adjustments below before setting confidence scores):\n${lines.join('\n')}`
-      : '';
-  })();
+  // ── Calibration via learning-loop.js — richer stats with regime performance + decay detection
+  const calibrationNote = buildCalibrationPromptBlock(state.recHistory);
 
   // ── userMessage carries ALL dynamic/live context; systemPrompt stays fully static
   //    for stable prompt-cache hits across the entire trading day.
-  const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()}
+  const _now = new Date();
+  const _month = _now.getMonth() + 1;
+  const inHarvestWindow = _month >= 5 && _month <= 6;
+
+  // ── Build rule-override block from state.analysisConfig.rules ──────────────
+  const _r = state.analysisConfig.rules || {};
+  const rulesCtx = (() => {
+    const def = { minConfidence:0.62, minIndepFactors:3, bearCaseThreshold:0.70,
+      highRiskMinConf:0.75, veryHighRiskMinConf:0.80, minRrRatio:2.0,
+      stopAtrMultiple:1.5, maxPositionPct:15, maxSectorPct:30,
+      sameTickerWindowDays:7, minHoldingDays:1, minChurnProfitAud:100,
+      minChurnProfitPct:2, dividendYieldPremium:1.5, highConvYieldPremium:2.5,
+      highVarThreshold1:-3.5, highVarThreshold2:-5.0, highDdThreshold:25,
+      compositeRiskHighScore:67, compositeRiskVeryHighScore:80,
+      exDivProtectDays:5, exDivFlagDays:10, cgtHoldMonthsMin:11, cgtHoldMonthsMax:12 };
+    const lines = [
+      `Min confidence: ${_r.minConfidence ?? def.minConfidence} | Min R:R: ${_r.minRrRatio ?? def.minRrRatio}:1 | Stop ATR: ${_r.stopAtrMultiple ?? def.stopAtrMultiple}×ATR14`,
+      `Max position: ${_r.maxPositionPct ?? def.maxPositionPct}% | Max sector: ${_r.maxSectorPct ?? def.maxSectorPct}% | Min independent factors: ${_r.minIndepFactors ?? def.minIndepFactors}`,
+      `Bear case required above: ${_r.bearCaseThreshold ?? def.bearCaseThreshold} conf | Same-ticker BUY→SELL window: ${_r.sameTickerWindowDays ?? def.sameTickerWindowDays} days`,
+      `Anti-churn: min hold ${_r.minHoldingDays ?? def.minHoldingDays}d | min profit $${_r.minChurnProfitAud ?? def.minChurnProfitAud} OR ${_r.minChurnProfitPct ?? def.minChurnProfitPct}% of position`,
+      `Dividend yield premium: ≥${_r.dividendYieldPremium ?? def.dividendYieldPremium}% (high-conv: ≥${_r.highConvYieldPremium ?? def.highConvYieldPremium}%)`,
+      `VaR1d thresholds: <${_r.highVarThreshold1 ?? def.highVarThreshold1}% → qty−25%; <${_r.highVarThreshold2 ?? def.highVarThreshold2}% → qty−50% | MaxDD90d >${_r.highDdThreshold ?? def.highDdThreshold}% → mandatory stop note`,
+      `Portfolio risk score: >${_r.compositeRiskHighScore ?? def.compositeRiskHighScore} → raise min conf to ${_r.highRiskMinConf ?? def.highRiskMinConf}; >${_r.compositeRiskVeryHighScore ?? def.compositeRiskVeryHighScore} → no new BUYs (min conf ${_r.veryHighRiskMinConf ?? def.veryHighRiskMinConf} for TOP_UP)`,
+      `Ex-div protection: no TRIM/SELL within ${_r.exDivProtectDays ?? def.exDivProtectDays} days; flag within ${_r.exDivFlagDays ?? def.exDivFlagDays} days`,
+      `CGT discount window: flag positions held ${_r.cgtHoldMonthsMin ?? def.cgtHoldMonthsMin}–${_r.cgtHoldMonthsMax ?? def.cgtHoldMonthsMax} months`,
+    ];
+    const block = `\n\nACTIVE RULE OVERRIDES (apply these thresholds — override system prompt defaults):\n${lines.join('\n')}`;
+    return _r.customRules ? block + `\n\nCUSTOM RULES (apply in addition to all above):\n${_r.customRules}` : block;
+  })();
+
+  const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()} | TAX_LOSS_HARVEST_ACTIVE: ${inHarvestWindow}
 Account settings: brokerage $${state.settings.brokerage}/trade (round-trip $${state.settings.brokerage * 2}) | max ${state.settings.maxTradesPerDay} trades/day | min trade $${state.settings.minTradeSize}
 
 LIVE PORTFOLIO STATE:
 Holdings: ${portfolioJson}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
 RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
-${recCtx}${pendingFeedbackCtx}${calibrationNote}${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${indicatorCtx}
+${recCtx}${pendingFeedbackCtx}${calibrationNote}${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${indicatorCtx}${rulesCtx}
 
 TASK:
 1. Apply any CALIBRATION adjustments above to confidence scores before output.
@@ -365,113 +365,92 @@ TASK:
 5. Apply Section 7 pre-flight checks. Fix all failures before writing JSON.
 6. Return JSON only — no preamble, no markdown.`;
 
-  // ── systemPrompt is defined in js/prompts.js — edit there, not here.
-  const systemPrompt = ANALYSIS_SYSTEM_PROMPT;
-
-  // ── Wait for macro to finish, then send main analysis ──
+  // ── Wait for macro to finish, then classify regime ──────────────────────────
   await macroPromise;
+  const _regimeResult = await fetchAndClassifyRegime();
+  const _activeRegime = _regimeResult.regime;
+
+  // Regime gate: panic → no new positions, skip AI call
+  if (_activeRegime === 'panic') {
+    toast('PANIC regime detected — no new positions. Holding cash.', 'error');
+    state.analysisRunning = false;
+    state.analysisLastSummary = {
+      text: `PANIC regime (VIX extreme + breadth collapse). No new positions. Cash vs RBA rate ${state.rbaRate?.toFixed(2) ?? '?'}%.`,
+      date: todayStr(), recCount: 0,
+    };
+    renderPage();
+    return;
+  }
+
   toast('Running AI trade analysis...','info');
 
+  // ── Assemble dynamic system prompt (core cached + regime/date modules) ──────
+  const _systemArray = typeof buildSystemArray === 'function'
+    ? buildSystemArray({ regime: _activeRegime, portfolio: mergedPortfolio() })
+    : [{ type: 'text', text: ANALYSIS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
+
+  // Append regime context to user message
+  const regimeCtx = _activeRegime && _activeRegime !== 'unknown'
+    ? `\nACTIVE_REGIME: ${_activeRegime} (confidence: ${(_regimeResult.confidence * 100).toFixed(0)}%)`
+    : '';
+
+  const fullUserMessage = userMessage + regimeCtx;
+
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'prompt-caching-2024-07-31',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        // portfolioAnalysis removed — responses are now recs[] + summary + dataGaps only.
-        // 6000 tokens is generous for up to ~8 recs; raise if truncation reappears.
-        max_tokens: 6000,
-        system: [
-          // FIX #9: Only static rules are cached — no live portfolio state.
-          // This cache is now stable across the entire trading day regardless of trades executed.
-          { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }
-        ],
-        messages: [{
-          role: 'user',
-          content: userMessage
-        }]
-      })
+    const { text, usage: _usage } = await callClaude('portfolio', fullUserMessage, {
+      systemArray: _systemArray,
+      maxTokens: 6000,
     });
 
-    const data = await resp.json();
-    if(data.error) throw new Error(data.error.message);
-
-    // Track cache usage for cost display
-    const usage = data.usage || {};
-    if(usage.cache_read_input_tokens || usage.cache_creation_input_tokens) {
-      const saved = usage.cache_read_input_tokens || 0;
-      const created = usage.cache_creation_input_tokens || 0;
-      console.log(`Prompt cache: ${saved} tokens read from cache, ${created} tokens written to cache`);
-    }
-    // Log context breakdown to help diagnose token usage
     console.log(`[Token audit] recHistory sent: ${recentRecs.length} entries (last5=${last5.length} withPnl=${withPnl.length} withFeedback=${withFeedback.length})`);
     console.log(`[Token audit] indicatorCtx chars: ${indicatorCtx.length} | macroCtx chars: ${macroCtx.length} | divCtx chars: ${dividendCtx.length} | earningsCtx chars: ${earningsCtx.length}`);
 
-    const text = data.content?.[0]?.text || '{"recs":[],"summary":""}';
     // Save raw response to DB for debugging
     if (text) {
-        fetch(`${API}/api/log/ai_response`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ text })
-        }).catch(() => {});
+      fetch(`${API}/api/log/ai_response`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ text })
+      }).catch(() => {});
     }
-    const cleaned = text.replace(/```json|```/g,'').trim();
 
+    // ── Parse with safe parser, fall back to brace-depth recovery on failure ──
     let recs = [], summary = null;
-    try {
-      const parsed = JSON.parse(cleaned);
-      recs = Array.isArray(parsed) ? parsed : (parsed.recs || []);
-      summary = Array.isArray(parsed) ? null : (parsed.summary || null);
-      // Hard-truncate to prevent bloating history context on subsequent runs
+    const _parsed = parseClaudeJSON(text);
+    if (_parsed.ok) {
+      const d = _parsed.data;
+      recs    = Array.isArray(d) ? d : (d.recs || []);
+      summary = Array.isArray(d) ? null : (d.summary || null);
       if (summary && summary.length > 600) summary = summary.slice(0, 597) + '...';
-    } catch(parseErr) {
-      console.warn('Direct JSON parse failed, attempting recovery:', parseErr.message);
+    } else {
+      console.warn('parseClaudeJSON failed, attempting brace-depth recovery:', _parsed.error);
+      const cleaned = (text || '').replace(/```json|```/g, '').trim();
 
-      // Try to extract summary first (appears at end — may be truncated)
+      // Try to extract summary
       const summaryMatchClosed = cleaned.match(/"summary"\s*:\s*"([\s\S]*?)"\s*[,}]\s*?$/);
-      let summaryRaw = null;
-      if (summaryMatchClosed) {
-          summaryRaw = summaryMatchClosed[1];
-      } else {
-          // Try to grab up to the end of the (possibly truncated) string
-          const summaryMatchPartial = cleaned.match(/"summary"\s*:\s*"([\s\S]*?)$/);
-          if (summaryMatchPartial) {
-              summaryRaw = summaryMatchPartial[1];
-              // Tag it as partial so the user knows
-              summaryRaw += ' … [summary truncated]';
-          }
+      let summaryRaw = summaryMatchClosed ? summaryMatchClosed[1] : null;
+      if (!summaryRaw) {
+        const summaryMatchPartial = cleaned.match(/"summary"\s*:\s*"([\s\S]*?)$/);
+        if (summaryMatchPartial) summaryRaw = summaryMatchPartial[1] + ' … [summary truncated]';
       }
       if (summaryRaw) {
-          summary = summaryRaw.replace(/\\n/g,'\n').replace(/\\"/g,'"');
-          if (summary.length > 600) summary = summary.slice(0, 597) + '...';
+        summary = summaryRaw.replace(/\\n/g, '\n').replace(/\\"/g, '"');
+        if (summary.length > 600) summary = summary.slice(0, 597) + '...';
       }
 
-      // Extract all complete rec objects using a brace-depth tracker.
-      // FIX #11: This parser can miscount if string values contain literal { or } chars.
-      // The prompt now instructs the model not to use { or } in string values (Pre-flight check h),
-      // which eliminates that failure mode. If truncation persists, increase max_tokens first.
+      // Extract complete rec objects via brace-depth tracker
       const recsArrayMatch = cleaned.match(/"recs"\s*:\s*\[/);
-      if(recsArrayMatch) {
+      if (recsArrayMatch) {
         const arrayStart = cleaned.indexOf('[', recsArrayMatch.index + recsArrayMatch[0].length - 1);
         const arrayContent = cleaned.slice(arrayStart + 1);
         let depth = 0, objStart = -1, recovered = [];
-        for(let i = 0; i < arrayContent.length; i++) {
+        for (let i = 0; i < arrayContent.length; i++) {
           const ch = arrayContent[i];
-          if(ch === '{') { if(depth === 0) objStart = i; depth++; }
-          else if(ch === '}') {
+          if (ch === '{') { if (depth === 0) objStart = i; depth++; }
+          else if (ch === '}') {
             depth--;
-            if(depth === 0 && objStart >= 0) {
-              try {
-                const obj = JSON.parse(arrayContent.slice(objStart, i + 1));
-                recovered.push(obj);
-              } catch {}
+            if (depth === 0 && objStart >= 0) {
+              try { recovered.push(JSON.parse(arrayContent.slice(objStart, i + 1))); } catch {}
               objStart = -1;
             }
           }
@@ -479,11 +458,55 @@ TASK:
         recs = recovered;
       }
 
-      if(!summary && recs.length === 0) {
-        summary = `Response was truncated before JSON could be fully parsed (${recs.length} partial recs recovered). Try running again — if this persists the portfolio may have too many tickers for a single run.`;
-      } else if(!summary) {
-        summary = `Response truncated — ${recs.length} recommendation(s) were recovered. Summary unavailable.`;
+      if (!summary && recs.length === 0) {
+        summary = `Response was truncated before JSON could be fully parsed (${recs.length} partial recs recovered). Try running again.`;
+      } else if (!summary) {
+        summary = `Response truncated — ${recs.length} recommendation(s) recovered. Summary unavailable.`;
       }
+    }
+
+    // ── Quant Engine post-processing: override AI sizing with deterministic math (3.1) ──
+    // computeTradeParams() replaces AI-computed qty/stopLoss/rrRatio/riskAUD/rewardAUD
+    // for BUY/TOP_UP recs. The AI's confidence (winProb proxy) drives Kelly sizing.
+    if (typeof computeTradeParams === 'function') {
+      const _portfolioCtx = {
+        allocatedCash: state.cash,
+        portfolioValue: portfolioValue(),
+        brokerage: state.settings.brokerage,
+        rbaRate: state.rbaRate || 4.35,
+      };
+      recs = recs.map(r => {
+        const action = (r.action || '').toUpperCase();
+        if (action !== 'BUY' && action !== 'TOP_UP') return r;
+        const signals = state.liveSignals[r.ticker];
+        if (!signals || signals.error) return r;
+        const qt = computeTradeParams(r.ticker, signals, _portfolioCtx, {
+          winProb: r.confidence ?? 0.6,
+          expectedTimeToTarget: r.holdDays ?? 10,
+          priceRange: r.priceRange,
+          target: r.target,
+        });
+        if (!qt.ok) return r;  // keep AI values if quant rejects
+        return {
+          ...r,
+          qty: qt.qty,
+          stopLoss: qt.stopLoss,
+          target: qt.target,
+          rrRatio: qt.rrRatio,
+          riskAUD: qt.riskAUD,
+          rewardAUD: qt.rewardAUD,
+          _quantEngine: true,
+          _constraintBinding: qt.constraintBinding,
+        };
+      });
+    }
+
+    // ── Apply regime size modifiers ─────────────────────────────────────────────
+    if (typeof applyRegimeModifiers === 'function' && _activeRegime && _activeRegime !== 'unknown') {
+      recs = recs.map(r => {
+        const action = (r.action || '').toUpperCase();
+        return (action === 'BUY' || action === 'TOP_UP') ? applyRegimeModifiers(r, _activeRegime) : r;
+      });
     }
 
     // ── Post-process AI recs: recompute SELL/TRIM P&L from real avg cost,
@@ -529,8 +552,8 @@ TASK:
     }
     recs = cleanedRecs;
 
-    // ── HARD CONFIDENCE FLOOR: drop any rec below 0.62 that slipped through ──
-    const MIN_CONFIDENCE = 0.62;
+    // ── HARD CONFIDENCE FLOOR: drop any rec below threshold that slipped through ──
+    const MIN_CONFIDENCE = state.analysisConfig.rules?.minConfidence ?? 0.62;
     let lowConfDropped = 0;
     recs = recs.filter(r => {
       if ((r.confidence || 0) < MIN_CONFIDENCE) { lowConfDropped++; return false; }

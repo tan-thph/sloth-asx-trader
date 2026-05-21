@@ -129,10 +129,12 @@ RESPONSE FRAMEWORK — tailor depth to the question:
 • Be direct and actionable. Avoid generic disclaimers. Lead with your view, then support it with data.`;
 
   try {
-    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1200,system,messages:state.chatHistory.map(m=>({role:m.role,content:m.content}))})});
-    const data=await resp.json();
-    if(data.error) throw new Error(data.error.message);
-    const reply=data.content?.[0]?.text||'No response.';
+    const { text: reply } = await callClaude('assistant', '', {
+      systemPrompt: system,
+      messages: state.chatHistory.map(m => ({ role: m.role, content: m.content })),
+      maxTokens: 1200,
+      noCache: true,
+    });
     state.chatHistory.push({role:'assistant',content:reply});
     document.getElementById('typing').outerHTML=`<div class="msg msg-ai" style="white-space:pre-wrap">${reply}</div>`;
   } catch(err) {

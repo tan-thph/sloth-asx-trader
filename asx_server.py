@@ -209,7 +209,11 @@ def analyse_batch():
 
 @app.route("/api/macro")
 def macro():
-    """Return real market data for macro dashboard using yfinance."""
+    """Return real market data for macro dashboard using yfinance.
+    Extended with regime-detection fields:
+      asx200_5d_return, asx200_20d_return, asx200_atr_pct, asx200_adx,
+      advance_decline_ratio, aud_usd_change_5d, iron_ore_change_5d
+    """
     symbols = {
         "sp500": "^GSPC",
         "nasdaq": "^IXIC",
@@ -245,6 +249,92 @@ def macro():
     with ThreadPoolExecutor(max_workers=len(symbols)) as pool:
         for name, result in pool.map(_fetch_symbol, symbols.items()):
             macro_data[name] = result
+
+    # ── Regime detection fields — extended ASX200 stats ──────────────────────
+    try:
+        import numpy as np
+        asx_hist = yf.Ticker("^AXJO").history(period="3mo")
+        if not asx_hist.empty and len(asx_hist) >= 22:
+            close = asx_hist["Close"]
+            high  = asx_hist["High"]
+            low   = asx_hist["Low"]
+
+            latest_price = float(close.iloc[-1])
+
+            # 5d and 20d returns
+            ret5d  = float((close.iloc[-1] / close.iloc[-6]  - 1) * 100) if len(close) >= 6  else None
+            ret20d = float((close.iloc[-1] / close.iloc[-21] - 1) * 100) if len(close) >= 21 else None
+
+            # ATR% (14-day)
+            tr_list = []
+            for i in range(1, min(15, len(close))):
+                tr = max(
+                    float(high.iloc[-i]) - float(low.iloc[-i]),
+                    abs(float(high.iloc[-i]) - float(close.iloc[-i-1])),
+                    abs(float(low.iloc[-i])  - float(close.iloc[-i-1])),
+                )
+                tr_list.append(tr)
+            atr14 = float(np.mean(tr_list)) if tr_list else None
+            atr_pct = float(atr14 / latest_price * 100) if atr14 and latest_price else None
+
+            # ADX (14-day, simplified)
+            adx_val = None
+            try:
+                if len(close) >= 28:
+                    plus_dm  = np.maximum(np.diff(high.values[-28:]),  0)
+                    minus_dm = np.maximum(-np.diff(low.values[-28:]), 0)
+                    tr_vals  = np.array([
+                        max(float(high.iloc[-28+i]) - float(low.iloc[-28+i]),
+                            abs(float(high.iloc[-28+i]) - float(close.iloc[-29+i])),
+                            abs(float(low.iloc[-28+i])  - float(close.iloc[-29+i])))
+                        for i in range(1, 28)
+                    ])
+                    atr_sm  = np.mean(tr_vals[-14:])
+                    pdi_sm  = np.mean(plus_dm[-14:])
+                    mdi_sm  = np.mean(minus_dm[-14:])
+                    if atr_sm > 0:
+                        pdi = 100 * pdi_sm / atr_sm
+                        mdi = 100 * mdi_sm / atr_sm
+                        dx  = 100 * abs(pdi - mdi) / (pdi + mdi) if (pdi + mdi) > 0 else 0
+                        adx_val = round(float(dx), 1)
+            except Exception:
+                pass
+
+            macro_data["asx200_5d_return"]  = round(ret5d,  2) if ret5d  is not None else None
+            macro_data["asx200_20d_return"] = round(ret20d, 2) if ret20d is not None else None
+            macro_data["asx200_atr_pct"]    = round(atr_pct, 3) if atr_pct is not None else None
+            macro_data["asx200_adx"]        = adx_val
+    except Exception as e:
+        print(f"[macro] ASX200 regime fields error: {e}")
+
+    # ── AUD/USD 5d change and Iron Ore 5d change ─────────────────────────────
+    try:
+        for field, sym in [("aud_usd_change_5d", "AUDUSD=X"), ("iron_ore_change_5d", "TIO=F")]:
+            h = yf.Ticker(sym).history(period="10d")
+            if h is not None and not h.empty and len(h) >= 6:
+                macro_data[field] = round(float((h["Close"].iloc[-1] / h["Close"].iloc[-6] - 1) * 100), 2)
+            else:
+                macro_data[field] = None
+    except Exception:
+        macro_data.setdefault("aud_usd_change_5d", None)
+        macro_data.setdefault("iron_ore_change_5d", None)
+
+    # ── Advance / Decline ratio (proxy via ETF breadth) ───────────────────────
+    # True A/D ratio requires live ASX exchange data; use XJO vs XJOA spread as proxy.
+    # Falls back to None if unavailable — regime engine handles gracefully.
+    try:
+        xjoa = yf.Ticker("^XJOA").history(period="5d")
+        xjo  = yf.Ticker("^AXJO").history(period="5d")
+        if not xjoa.empty and not xjo.empty:
+            adv = float(xjoa["Close"].iloc[-1])
+            idx = float(xjo["Close"].iloc[-1])
+            # Proxy: if accumulation index outpaces price index, breadth is positive
+            adv_ratio = round(adv / idx, 4) if idx > 0 else None
+            macro_data["advance_decline_ratio"] = adv_ratio
+        else:
+            macro_data["advance_decline_ratio"] = None
+    except Exception:
+        macro_data["advance_decline_ratio"] = None
 
     return jsonify(macro_data)
 

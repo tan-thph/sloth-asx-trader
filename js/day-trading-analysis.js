@@ -125,14 +125,23 @@ async function runDayTradeAnalysis() {
   // ── System prompt is defined in js/prompts.js — edit there, not here.
   const systemPrompt = getDayTradeSystemPrompt();
 
+  // ── Merge user-tuned AI params over defaults ──────────────────────────────
+  const _ap = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}) };
+  const _fp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}) };
+
   // ── User message ─────────────────────────────────────────────────────────────
   const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()}
 
 SWING TRADE ALLOCATION:
 Allocated cash: $${fmt(allocated)} of $${fmt(state.cash)} total available
 Risk per trade: ${riskPct}% = $${fmt(riskPerTrade)} max loss per trade
-Stop distance: 2.5×ATR per trade
+Stop distance: ${_ap.stopAtrMultiple}×ATR per trade
 Brokerage: $${state.settings.brokerage}/trade
+
+ACTIVE SCANNER PARAMS (override prompt defaults if different):
+Pre-filter: BB %B ≤ ${_fp.maxBbPctB} | ADV ≥ $${(_fp.minAdvAud/1000).toFixed(0)}k | SMA200 floor ${(_fp.sma200Floor*100).toFixed(1)}% | ADX ≤ ${_fp.maxAdx}
+Signal thresholds: RSI < ${_ap.rsiThreshold} | Vol Z-score ≥ ${_ap.volZScore} | Fib return ${_ap.fibReturnMin}% to ${_ap.fibReturnMax}%
+Position: Stop = entry − ${_ap.stopAtrMultiple}×ATR | Min R:R ${_ap.minRrRatio}:1 | Max position ${_ap.maxPositionPct}% of allocated | Min confidence ${_ap.minConfidence}
 
 TICKERS TO SCAN: ${allTickers.join(', ')}
 ${indicatorCtx}${newsOutlook}${annCtx}${earningsCtx}
@@ -140,48 +149,34 @@ ${indicatorCtx}${newsOutlook}${annCtx}${earningsCtx}
 TASK:
 For each ticker, apply all 4 hard filters first — skip any ticker that fails.
 Then check the 5 entry signals. Output a rec only if:
-  Signal #1 (BB Primary) fires + ≥2 more signals fire + all filters pass + R:R ≥ 2.0.
-Compute stop = entry − 2.5×ATR. Compute qty = floor(riskPerTrade / (2.5×ATR)).
+  Signal #1 (BB Primary) fires + ≥2 more signals fire + all filters pass + R:R ≥ ${_ap.minRrRatio}.
+Compute stop = entry − ${_ap.stopAtrMultiple}×ATR. Compute qty = floor(riskPerTrade / (${_ap.stopAtrMultiple}×ATR)).
 Return only the JSON.`;
 
-  // ── Call Claude API ──────────────────────────────────────────────────────────
+  // ── Call Claude API via centralised wrapper (with retry + caching) ──────────
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'prompt-caching-2024-07-31',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
-        system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: userMessage }],
-      }),
+    const _dtSystemArray = typeof buildDtSystemArray === 'function'
+      ? buildDtSystemArray({ regime: state.currentRegime?.regime })
+      : undefined;
+
+    const { text } = await callClaude('dayTrade', userMessage, {
+      systemArray: _dtSystemArray,
+      maxTokens: 4000,
     });
 
-    const data = await resp.json();
-    if (data.error) throw new Error(data.error.message);
-
-    const text = data.content?.[0]?.text || '{"recs":[],"summary":""}';
-    const cleaned = text.replace(/```json|```/g, '').trim();
-
     let recs = [], summary = null;
-    try {
-      const parsed = JSON.parse(cleaned);
-      recs = parsed.recs || [];
-      summary = parsed.summary || null;
-    } catch {
+    const _dtParsed = parseClaudeJSON(text);
+    if (_dtParsed.ok) {
+      recs    = _dtParsed.data?.recs || [];
+      summary = _dtParsed.data?.summary || null;
+    } else {
       // Brace-depth recovery for truncated responses
+      const cleaned = (text || '').replace(/```json|```/g, '').trim();
       const m = cleaned.match(/"recs"\s*:\s*\[/);
       if (m) {
         const start = cleaned.indexOf('[', m.index + m[0].length - 1);
         const content = cleaned.slice(start + 1);
         let depth = 0, objStart = -1;
-        recs = [];
         for (let i = 0; i < content.length; i++) {
           const ch = content[i];
           if (ch === '{') { if (depth === 0) objStart = i; depth++; }
@@ -198,14 +193,48 @@ Return only the JSON.`;
     }
 
     // Stamp each rec with id and metadata
+    const _minConf = state.dayTrading.aiParams?.minConfidence ?? DT_AI_PARAMS.minConfidence;
+    const _dtRegime = state.currentRegime?.regime;
+
+    // Quant engine: override AI sizing with deterministic math for BUY recs
+    if (typeof computeTradeParams === 'function') {
+      const _dtPortCtx = {
+        allocatedCash: allocated,
+        portfolioValue: portfolioValue(),
+        brokerage: state.settings.brokerage,
+        rbaRate: state.rbaRate || 4.35,
+        riskPct: riskPct,
+      };
+      recs = recs.map(r => {
+        if (r.action !== 'BUY') return r;
+        const signals = state.liveSignals[r.ticker];
+        if (!signals || signals.error) return r;
+        const qt = computeTradeParams(r.ticker, signals, _dtPortCtx, {
+          winProb: r.confidence ?? 0.6,
+          expectedTimeToTarget: r.holdDays ?? 8,
+          priceRange: r.priceRange,
+          target: r.target,
+        });
+        if (!qt.ok) return r;
+        return { ...r, qty: qt.qty, stopLoss: qt.stopLoss, target: qt.target,
+          rrRatio: qt.rrRatio, riskAUD: qt.riskAUD, rewardAUD: qt.rewardAUD, _quantEngine: true };
+      });
+    }
+
+    // Regime size modifiers
+    if (typeof applyRegimeModifiers === 'function' && _dtRegime) {
+      recs = recs.map(r => r.action === 'BUY' ? applyRegimeModifiers(r, _dtRegime) : r);
+    }
+
     const newRecs = recs
-      .filter(r => r.action === 'BUY' && (r.confidence || 0) >= 0.50)
+      .filter(r => r.action === 'BUY' && (r.confidence || 0) >= _minConf)
       .map((r, i) => ({
         ...r,
         id: `DT-${Date.now()}-${i}`,
         status: 'pending',
         date: todayStr(),
         generatedAt: nowSydney(),
+        regime: _dtRegime || 'unknown',
       }));
 
     state.dayTrading.recommendations = newRecs;
@@ -437,6 +466,10 @@ async function runUniverseScan() {
   const riskPct = state.dayTrading.riskPct || 1.5;
   const riskPerTrade = allocated * riskPct / 100;
 
+  // ── Merge user-tuned AI params over defaults ──────────────────────────────
+  const _uAp = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}) };
+  const _uFp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}) };
+
   // ── System prompt is defined in js/prompts.js — edit there, not here.
   const systemPrompt = getDayTradeUniverseScanPrompt();
 
@@ -446,48 +479,40 @@ Universe: ${meta.label} — ${candidates.length} tickers passed pre-filter, top 
 SWING TRADE ALLOCATION: $${fmt(allocated)} allocated | ${riskPct}% risk = $${fmt(riskPerTrade)}/trade
 BROKERAGE: $${state.settings.brokerage}/trade
 
+ACTIVE SCANNER PARAMS (override prompt defaults if different):
+Pre-filter: BB %B ≤ ${_uFp.maxBbPctB} | ADV ≥ $${(_uFp.minAdvAud/1000).toFixed(0)}k | SMA200 floor ${(_uFp.sma200Floor*100).toFixed(1)}% | ADX ≤ ${_uFp.maxAdx}
+Signal thresholds: RSI < ${_uAp.rsiThreshold} | Vol Z-score ≥ ${_uAp.volZScore} | Fib return ${_uAp.fibReturnMin}% to ${_uAp.fibReturnMax}%
+Position: Stop = entry − ${_uAp.stopAtrMultiple}×ATR | Min R:R ${_uAp.minRrRatio}:1 | Max position ${_uAp.maxPositionPct}% of allocated | Min confidence ${_uAp.minConfidence}
+
 CANDIDATES TO ANALYSE: ${top.join(', ')}
 ${indicatorCtx}${newsOutlook}${annCtx}${earningsCtx}
 
 TASK: Apply the full signal stack to each candidate. Output a rec only if Signal #1 fires + ≥2 confirms + R:R ≥ 2.0.
 Return only JSON.`;
 
-  // ── Call Claude API ──────────────────────────────────────────────────────────
+  // ── Call Claude API via centralised wrapper (with retry + caching) ──────────
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'prompt-caching-2024-07-31',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
-        system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: userMessage }],
-      }),
+    const _uSystemArray = typeof buildDtSystemArray === 'function'
+      ? buildDtSystemArray({ regime: state.currentRegime?.regime })
+      : undefined;
+
+    const { text: _uText } = await callClaude('universe', userMessage, {
+      systemArray: _uSystemArray,
+      maxTokens: 4000,
     });
 
-    const data = await resp.json();
-    if (data.error) throw new Error(data.error.message);
-
-    const text = data.content?.[0]?.text || '{"recs":[],"summary":""}';
-    const cleaned = text.replace(/```json|```/g, '').trim();
     let recs = [], summary = null;
-    try {
-      const parsed = JSON.parse(cleaned);
-      recs = parsed.recs || [];
-      summary = parsed.summary || null;
-    } catch {
+    const _uParsed = parseClaudeJSON(_uText);
+    if (_uParsed.ok) {
+      recs    = _uParsed.data?.recs || [];
+      summary = _uParsed.data?.summary || null;
+    } else {
+      const cleaned = (_uText || '').replace(/```json|```/g, '').trim();
       const m = cleaned.match(/"recs"\s*:\s*\[/);
       if (m) {
         const start = cleaned.indexOf('[', m.index + m[0].length - 1);
         const content = cleaned.slice(start + 1);
         let depth = 0, objStart = -1;
-        recs = [];
         for (let i = 0; i < content.length; i++) {
           const ch = content[i];
           if (ch === '{') { if (depth === 0) objStart = i; depth++; }
@@ -504,8 +529,9 @@ Return only JSON.`;
     }
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
+    const _uMinConf = state.dayTrading.aiParams?.minConfidence ?? DT_AI_PARAMS.minConfidence;
     const newRecs = recs
-      .filter(r => r.action === 'BUY' && (r.confidence || 0) >= 0.50)
+      .filter(r => r.action === 'BUY' && (r.confidence || 0) >= _uMinConf)
       .map((r, i) => ({
         ...r,
         id: `DT-${Date.now()}-${i}`,

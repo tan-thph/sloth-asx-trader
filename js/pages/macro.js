@@ -358,25 +358,9 @@ Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"a
     + '  Return only JSON.';
 
   try {
-    const r=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'x-api-key':key,
-        'anthropic-version':'2023-06-01',
-        'anthropic-dangerous-direct-browser-access':'true'
-      },
-      body:JSON.stringify({
-        model:'claude-sonnet-4-6',
-        max_tokens:1000,
-        system,
-        messages:[{role:'user', content: userMsg}]
-      })
-    });
-    const data=await r.json();
-    if(data.error) throw new Error(data.error.message);
-    const text=data.content?.[0]?.text||'{}';
-    const ai=JSON.parse(text.replace(/```json|```/g,'').trim());
+    const { text } = await callClaude('macro', userMsg, { systemPrompt: system, noCache: true });
+    const { ok: macroOk, data: ai } = parseClaudeJSON(text);
+    if (!macroOk) throw new Error('Failed to parse macro response: ' + text?.slice(0, 200));
     state.macroData={...state.macroData, ...ai, _source:'ai'};
     state.macroDate = today;
     scheduleSave();

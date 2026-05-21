@@ -56,3 +56,27 @@ function toast(msg, type='info') {
   c.appendChild(el);
   setTimeout(()=>el.remove(), 3500);
 }
+
+// parseClaudeJSON — safe JSON parser for Claude API responses (2.5)
+// Strips markdown fences and trailing commas before parsing.
+// Returns { ok:true, data } or { ok:false, error, raw }
+function parseClaudeJSON(rawText) {
+  const cleaned = (rawText || '')
+    .replace(/^```json\s*/im, '')
+    .replace(/^```\s*/im, '')
+    .replace(/```\s*$/im, '')
+    .trim();
+
+  try {
+    return { ok: true, data: JSON.parse(cleaned) };
+  } catch (firstErr) {
+    // Try to recover: remove trailing commas before ] or }
+    const repaired = cleaned.replace(/,(\s*[}\]])/g, '$1');
+    try {
+      return { ok: true, data: JSON.parse(repaired) };
+    } catch {
+      console.error('[parseClaudeJSON] failed — first 500 chars:', rawText?.slice(0, 500));
+      return { ok: false, error: firstErr.message, raw: rawText };
+    }
+  }
+}

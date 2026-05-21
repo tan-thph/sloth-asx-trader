@@ -15,6 +15,35 @@ function renderDayTradingPage(gen) {
 
 function _renderDayTrading() {
   const dt = state.dayTrading;
+  const activeTab = dt.activeTab || 'setups';
+  return `
+    <div class="tabs" style="margin-bottom:14px">
+      <button class="tab ${activeTab === 'setups' ? 'active' : ''}" id="dt-tab-setups" onclick="switchDtTab('setups')">Setups</button>
+      <button class="tab ${activeTab === 'rules'  ? 'active' : ''}" id="dt-tab-rules"  onclick="switchDtTab('rules')">⚙ Rules</button>
+    </div>
+    <div id="dt-tab-content">
+      ${activeTab === 'setups' ? _renderDtSetupsTab() : _renderDtRulesTab()}
+    </div>
+  `;
+}
+
+function switchDtTab(tab) {
+  state.dayTrading.activeTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  const tabEl = document.getElementById('dt-tab-' + tab);
+  if (tabEl) tabEl.classList.add('active');
+  const el = document.getElementById('dt-tab-content');
+  if (!el) return;
+  if (tab === 'setups') {
+    el.innerHTML = _renderDtSetupsTab();
+    _renderDtExtraChips();
+  } else {
+    el.innerHTML = _renderDtRulesTab();
+  }
+}
+
+function _renderDtSetupsTab() {
+  const dt = state.dayTrading;
   const allocated = dt.allocatedCash != null ? dt.allocatedCash : Math.round(state.cash * 0.20);
   const riskPct = dt.riskPct || 1.5;
   const riskPerTrade = allocated * riskPct / 100;
@@ -29,6 +58,11 @@ function _renderDayTrading() {
          <div style="font-size:13px;line-height:1.5">${(dt.lastSummary.text || '').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
        </div>`
     : '<div class="text-xs text-muted">No scan run yet.</div>';
+
+  // Build active-params summary line from current state
+  const fp = { ...DT_FILTER, ...(dt.filterParams || {}) };
+  const ap = { ...DT_AI_PARAMS, ...(dt.aiParams || {}) };
+  const paramsLine = `BB %B ≤ ${fp.maxBbPctB} · ADV ≥ $${(fp.minAdvAud/1000).toFixed(0)}k · SMA200 floor ${(fp.sma200Floor*100).toFixed(1)}% · ADX ≤ ${fp.maxAdx} · Stop ${ap.stopAtrMultiple}×ATR · Min R:R ${ap.minRrRatio}:1`;
 
   return `
     <!-- Config + Run -->
@@ -67,7 +101,7 @@ function _renderDayTrading() {
 
       <div class="card" style="display:flex;flex-direction:column;gap:10px">
         <div class="card-title">Run Day Trade Scan</div>
-          <p class="text-xs text-muted" style="margin:0">
+        <p class="text-xs text-muted" style="margin:0">
           Scans portfolio + watchlist tickers for swing-trade setups (5–15 day holds) using orthogonal confluence.
           Requires BB Primary + ≥2 of 4 confirmations, plus all hard filters (liquidity, SMA200, ADX, no catalyst).
         </p>
@@ -87,14 +121,15 @@ function _renderDayTrading() {
 
     <!-- Signal legend -->
     <div class="card" style="margin-bottom:14px;padding:10px 14px">
-      <div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:12px">
-        <span><b>#1 PRIMARY:</b> BB reclaim (price closes back inside lower BB)</span>
-        <span><b>#2:</b> RSI&lt;35 turning up</span>
-        <span><b>#3:</b> Vol Z-Score &gt;1.5σ</span>
-        <span><b>#4:</b> Fib 50–61.8% zone</span>
+      <div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+        <span><b>#1 PRIMARY:</b> BB reclaim</span>
+        <span><b>#2:</b> RSI&lt;${ap.rsiThreshold} turning up</span>
+        <span><b>#3:</b> Vol Z-Score &gt;${ap.volZScore}σ</span>
+        <span><b>#4:</b> Fib zone (60d return ${ap.fibReturnMin}% to ${ap.fibReturnMax}%)</span>
         <span><b>#5:</b> OBV div. (bonus)</span>
-        <span style="margin-left:auto">Primary + ≥2 confirms • R:R ≥ 2:1 • Stop = entry − 2.5×ATR</span>
+        <span style="margin-left:auto;color:var(--text-tertiary)"><button class="btn btn-sm" style="font-size:10px;padding:2px 7px" onclick="switchDtTab('rules')">⚙ Edit rules</button></span>
       </div>
+      <div style="font-size:10px;color:var(--text-tertiary);margin-top:6px;border-top:0.5px solid var(--border-light);padding-top:6px">Active: ${paramsLine}</div>
     </div>
 
     <!-- Pending setups -->
@@ -127,6 +162,139 @@ function _renderDayTrading() {
         </div>
       </div>` : ''}
   `;
+}
+
+// ── Day Trading Rules Panel ────────────────────────────────────────────────────
+
+const _DT_FILTER_DEFAULTS = { maxBbPctB: 0.20, minAdvAud: 1500000, sma200Floor: 0.985, maxAdx: 35 };
+const _DT_AI_DEFAULTS     = { stopAtrMultiple: 2.5, minRrRatio: 2.0, minConfidence: 0.50, maxPositionPct: 20, rsiThreshold: 35, volZScore: 1.5, fibReturnMin: -20, fibReturnMax: -5 };
+
+function _renderDtRulesTab() {
+  const fp = { ..._DT_FILTER_DEFAULTS, ...(state.dayTrading.filterParams || {}) };
+  const ap = { ..._DT_AI_DEFAULTS,     ...(state.dayTrading.aiParams     || {}) };
+
+  const fpModified = Object.keys(_DT_FILTER_DEFAULTS).some(k => fp[k] !== _DT_FILTER_DEFAULTS[k]);
+  const apModified = Object.keys(_DT_AI_DEFAULTS).some(k => ap[k] !== _DT_AI_DEFAULTS[k]);
+  const anyModified = fpModified || apModified;
+
+  const nf = (label, group, key, value, min, max, step, hint) => `
+    <div>
+      <div class="form-label">${label}</div>
+      <input type="number" value="${value}" min="${min}" max="${max}" step="${step}"
+        style="width:120px" title="${hint}"
+        onchange="setDtParam('${group}','${key}',this.value)">
+      <div class="text-xs text-muted mt-1" style="max-width:210px">${hint}</div>
+    </div>`;
+
+  return `
+    <div style="display:flex;flex-direction:column;gap:14px">
+
+      ${anyModified ? `
+      <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:#92400e;display:flex;align-items:center;justify-content:space-between">
+        <span>Custom scanner rules active. Pre-filter applied immediately — AI params injected on next scan.</span>
+        <button class="btn btn-sm" onclick="resetDtRules()" style="white-space:nowrap">↺ Reset all</button>
+      </div>` : `
+      <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--text-muted)">
+        Using default scanner rules. Edit any value below — pre-filter applies immediately, AI params on next scan.
+      </div>`}
+
+      <!-- Pre-filter thresholds -->
+      <div class="card">
+        <div class="card-title">
+          Pre-filter Thresholds
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">applied client-side — AI never sees tickers that fail these</span>
+        </div>
+        <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
+          Active: BB %B ≤ <b>${fp.maxBbPctB}</b> · ADV ≥ <b>$${(fp.minAdvAud/1000).toFixed(0)}k</b> · SMA200 floor <b>${(fp.sma200Floor*100).toFixed(1)}%</b> · ADX ≤ <b>${fp.maxAdx}</b>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px">
+          ${nf('Max BB %B', 'filterParams', 'maxBbPctB', fp.maxBbPctB, 0, 1, 0.01,
+            'Price must be at or below this Bollinger %B level (0 = at lower band)')}
+          ${nf('Min ADV ($AUD)', 'filterParams', 'minAdvAud', fp.minAdvAud, 0, 50000000, 100000,
+            '20-day average daily value — liquidity floor')}
+          ${nf('SMA200 floor (ratio)', 'filterParams', 'sma200Floor', fp.sma200Floor, 0.80, 1.05, 0.005,
+            'Price must be ≥ SMA200 × this (0.985 = within 1.5% below SMA200)')}
+          ${nf('Max ADX', 'filterParams', 'maxAdx', fp.maxAdx, 10, 60, 1,
+            'ADX ceiling — skip stocks already in a strong trend')}
+        </div>
+      </div>
+
+      <!-- AI Signal Thresholds -->
+      <div class="card">
+        <div class="card-title">
+          AI Signal Thresholds
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">injected into AI prompt on every scan</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('Stop ATR multiple', 'aiParams', 'stopAtrMultiple', ap.stopAtrMultiple, 0.5, 6, 0.5,
+            'Stop = entry − N×ATR14')}
+          ${nf('Min R:R ratio', 'aiParams', 'minRrRatio', ap.minRrRatio, 1, 5, 0.5,
+            'Reject setups with reward:risk below this')}
+          ${nf('Min confidence', 'aiParams', 'minConfidence', ap.minConfidence, 0.20, 1, 0.05,
+            'AI recs below this confidence are dropped client-side')}
+          ${nf('Max position (% of allocated)', 'aiParams', 'maxPositionPct', ap.maxPositionPct, 5, 100, 5,
+            'Max single position as % of allocated day-trade capital')}
+        </div>
+      </div>
+
+      <!-- Entry Signal Thresholds -->
+      <div class="card">
+        <div class="card-title">
+          Entry Signal Thresholds
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">shape which confirmations qualify</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('RSI threshold (Signal #2)', 'aiParams', 'rsiThreshold', ap.rsiThreshold, 20, 55, 1,
+            'RSI must have dipped below this level in the past 5 days')}
+          ${nf('Vol Z-score floor (Signal #3)', 'aiParams', 'volZScore', ap.volZScore, 0.5, 4, 0.25,
+            'Minimum volume Z-score for Signal #3 confirmation')}
+          ${nf('Fib return min (%, Signal #4)', 'aiParams', 'fibReturnMin', ap.fibReturnMin, -60, -5, 1,
+            '60-day return lower bound for Fibonacci retracement zone')}
+          ${nf('Fib return max (%, Signal #4)', 'aiParams', 'fibReturnMax', ap.fibReturnMax, -30, -1, 1,
+            '60-day return upper bound for Fibonacci retracement zone')}
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:13px;font-weight:600">Scanner rules applied</div>
+          <div class="text-xs text-muted">Pre-filter is live · AI params injected on next scan run</div>
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-sm" onclick="resetDtRules()">↺ Reset to defaults</button>
+          <button class="btn btn-primary btn-sm" onclick="switchDtTab('setups');setTimeout(runDayTradeAnalysis,50)">▶ Run Scan Now</button>
+        </div>
+      </div>
+
+    </div>
+  `;
+}
+
+function setDtParam(group, key, rawValue) {
+  const value = Number(rawValue);
+  if (!state.dayTrading[group]) state.dayTrading[group] = {};
+  state.dayTrading[group][key] = value;
+  scheduleSave();
+  // Refresh the active-params summary line on the setups tab if visible
+  const el = document.getElementById('dt-tab-content');
+  if (el && (state.dayTrading.activeTab || 'setups') === 'rules') {
+    // Re-render just the active-filter badge inside the rules panel
+    const badge = el.querySelector('[data-dt-active-params]');
+    if (badge) {
+      const fp = { ..._DT_FILTER_DEFAULTS, ...(state.dayTrading.filterParams || {}) };
+      badge.textContent = `Active: BB %B ≤ ${fp.maxBbPctB} · ADV ≥ $${(fp.minAdvAud/1000).toFixed(0)}k · SMA200 floor ${(fp.sma200Floor*100).toFixed(1)}% · ADX ≤ ${fp.maxAdx}`;
+    }
+  }
+}
+
+function resetDtRules() {
+  state.dayTrading.filterParams = { ..._DT_FILTER_DEFAULTS };
+  state.dayTrading.aiParams     = { ..._DT_AI_DEFAULTS };
+  scheduleSave();
+  const el = document.getElementById('dt-tab-content');
+  if (el) el.innerHTML = _renderDtRulesTab();
+  toast('Day trade scanner rules reset to defaults', 'success');
 }
 
 function _renderDtRec(r, compact = false) {
