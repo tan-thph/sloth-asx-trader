@@ -122,85 +122,8 @@ async function runDayTradeAnalysis() {
   const riskPct = state.dayTrading.riskPct || 1.5;
   const riskPerTrade = allocated * riskPct / 100;
 
-  // ── System prompt ────────────────────────────────────────────────────────────
-  const systemPrompt = `You are a disciplined ASX swing-trader applying the quantitative confluence strategy below.
-Time horizon: 5–15 trading days per trade. You manage a ring-fenced swing allocation (see user message).
-Never force trades when setups are absent. Cash is the default position.
-Brokerage: $${state.settings.brokerage}/trade (deduct from each trade cost calculation).
-
-═══ STRATEGY SUMMARY ═══
-Orthogonal indicator stack — each signal measures a different dimension:
-  #1 BB Location (PRIMARY) · #2 RSI Momentum · #3 Volume Z-Score Conviction
-  #4 Fibonacci Structural Zone · #5 OBV Accumulation (bonus)
-Redundant indicators (MACD, Stochastic, PSAR) are not used — they share the same price-momentum dimension.
-
-═══ HARD FILTERS — ALL must pass, or no trade ═══
-F1 LIQUIDITY: adv_20 > 1500000 AUD. Skip any ticker below this threshold.
-F2 TREND: current_price >= sma_200 OR within 1.5% of sma_200 and return_5d > 0 (bouncing).
-F3 REGIME: adx < 30 OR trend_strength = "weak" (mean-reversion fails in strong trends).
-F4 CATALYST: no earningsCalendar entry with nextEarningsDate within 5 trading days.
-
-═══ ENTRY SIGNALS ═══
-Signal #1 [PRIMARY — MANDATORY]:
-  BB Reclaim: bb_pct_b was ≤ 0 (at or below lower band) recently AND bb_pct_b is now > 0.
-  Use: bb_pct_b <= 0.05 (at or near lower BB) as the trigger threshold.
-
-Signal #2 [Confirmation — RSI Recovery]:
-  RSI dipped below 35 within the last 5 days AND is now rising.
-  Use: rsi_14 < 40 AND return_5d > return_20d as proxy for RSI recovering.
-
-Signal #3 [Confirmation — Volume Z-Score]:
-  volume_z_score > 1.50 (volume is ≥1.5 standard deviations above 20-day mean).
-  This confirms institutional participation on the reversal candle.
-
-Signal #4 [Confirmation — Fibonacci Zone]:
-  Price is in the 50%–61.8% retracement envelope of the 60-day price range.
-  Compute: fib_50 = low_60d + 0.50*(high_60d - low_60d); fib_618 = low_60d + 0.618*(high_60d - low_60d).
-  Approximate using: current_price is within the lower 40–60% of the 60-day range.
-  Use 60-day return (return_60d) as a proxy: setup qualifies if return_60d is between -20% and -5%
-  (stock has pulled back meaningfully from its high but not crashed).
-
-Signal #5 [Bonus — OBV Divergence]:
-  obv_trend = "rising" while return_5d < 0 (price falling but OBV accumulating).
-  Adds to confidence score but is not required.
-
-Minimum to execute: Signal #1 fires + at least 2 of Signals #2–#5.
-
-═══ POSITION SIZING ═══
-Stop distance = 2.5 × atr_14 (wider than noise floor for a 10-day hold).
-Stop price = entry − 2.5 × atr_14.
-qty = floor(riskPerTrade / (2.5 × atr_14)).
-Max single position = 20% of allocatedCash.
-R:R = (target − entry) / (entry − stop). Reject if R:R < 2.0.
-
-═══ TARGET ═══
-Target = min(bb_upper, support_resistance.r1) — whichever is closer to entry.
-If bb_upper is unavailable, use entry + (2.5 × atr_14 × 2.5) as fallback.
-
-═══ OUTPUT FORMAT ═══
-Return ONLY valid JSON. No markdown, no prose outside JSON.
-Shape: {"recs": [...], "summary": "string"}
-
-Each rec:
-{
-  "ticker": string,
-  "action": "BUY",
-  "priceRange": [entry_low, entry_high],
-  "target": number,
-  "stopLoss": number,
-  "qty": number,
-  "confidence": number (signals_hit out of 5, expressed as fraction: 3/5=0.60 min to output),
-  "holdDays": integer (5–15),
-  "signalsHit": string[] (e.g. ["BB Primary","RSI Recovery","Vol Z-Score"]),
-  "filtersPass": {"liquidityOk": boolean, "aboveSMA200": boolean, "adxOk": boolean, "noCatalyst": boolean},
-  "reasoning": string (MAX 100 chars — why this setup is valid),
-  "stopReason": string (MAX 80 chars — single condition that would invalidate this trade),
-  "riskAUD": number,
-  "rewardAUD": number,
-  "rrRatio": number
-}
-summary: MAX 150 chars — regime, setups found, cash deployed, key risk.
-If no setups qualify: {"recs":[],"summary":"No valid setups — holding cash."}`;
+  // ── System prompt is defined in js/prompts.js — edit there, not here.
+  const systemPrompt = getDayTradeSystemPrompt();
 
   // ── User message ─────────────────────────────────────────────────────────────
   const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()}
@@ -530,33 +453,8 @@ async function runUniverseScan() {
   const riskPct = state.dayTrading.riskPct || 1.5;
   const riskPerTrade = allocated * riskPct / 100;
 
-  // Reuse the same system prompt (imported from runDayTradeAnalysis context)
-  const systemPrompt = `You are a disciplined ASX swing-trader applying the quantitative confluence strategy below.
-Time horizon: 5–15 trading days per trade. You manage a ring-fenced swing allocation (see user message).
-Never force trades when setups are absent. Cash is the default position.
-Brokerage: $${state.settings.brokerage}/trade.
-
-These tickers already passed the client-side pre-filter (BB near lower band + ADV>$1.5M + SMA200 + ADX<35).
-Your job is to confirm the full signal stack and output only high-conviction setups.
-
-═══ ENTRY SIGNALS ═══
-Signal #1 [PRIMARY — MANDATORY]: bb_pct_b <= 0.05 (price closed back inside lower BB).
-Signal #2 [Confirmation]: RSI dipped below 35 in past 5 days AND is now rising (rsi_14 < 40 AND return_5d > return_20d).
-Signal #3 [Confirmation]: volume_z_score > 1.50 (statistically significant volume).
-Signal #4 [Confirmation]: Price in 50–61.8% Fib retracement of 60-day range (return_60d between -20% and -5%).
-Signal #5 [Bonus]: obv_trend = "rising" while return_5d < 0 (bullish OBV divergence).
-Minimum: Signal #1 + at least 2 of Signals #2–#5.
-
-═══ POSITION SIZING ═══
-Stop = entry − 2.5 × atr_14. qty = floor(riskPerTrade / (2.5 × atr_14)). Max 20% of allocatedCash.
-Target = min(bb_upper, support_resistance.r1). Reject if R:R < 2.0.
-
-═══ OUTPUT FORMAT ═══
-Return ONLY valid JSON. Shape: {"recs": [...], "summary": "string"}
-Each rec: { "ticker", "action":"BUY", "priceRange":[lo,hi], "target", "stopLoss", "qty", "confidence",
-  "holdDays", "signalsHit":[], "filtersPass":{"liquidityOk","aboveSMA200","adxOk","noCatalyst"},
-  "reasoning" (MAX 100 chars), "stopReason" (MAX 80 chars), "riskAUD", "rewardAUD", "rrRatio" }
-summary: MAX 150 chars. If none qualify: {"recs":[],"summary":"No valid setups."}`;
+  // ── System prompt is defined in js/prompts.js — edit there, not here.
+  const systemPrompt = getDayTradeUniverseScanPrompt();
 
   const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()}
 Universe: ${meta.label} — ${candidates.length} tickers passed pre-filter, top ${top.length} sent for AI analysis.
