@@ -279,23 +279,7 @@ function cancelUniverseScan() {
   toast('Cancelling universe scan…', 'info');
 }
 
-// Client-side pre-filter — must pass to be sent to AI
-function _dtPreFilter(tickers) {
-  return tickers.filter(t => {
-    const s = state.liveSignals[t];
-    if (!s || s.error) return false;
-    // Primary signal: price at or near lower Bollinger Band
-    if ((s.bb_pct_b ?? 1) > 0.20) return false;
-    // Liquidity: ADV > $1.5M AUD
-    if ((s.adv_20 ?? 0) < 1_500_000) return false;
-    // Trend: price >= SMA200 * 98.5% (or SMA50 if SMA200 unavailable)
-    const ref = s.sma_200 ?? s.sma_50;
-    if (ref && s.current_price < ref * 0.985) return false;
-    // Regime: not in a strong rising trend (ADX filter)
-    if ((s.adx ?? 0) > 35 && s.trend_strength === 'strong' && (s.return_5d ?? 0) > 0) return false;
-    return true;
-  });
-}
+// _dtPreFilter is defined in js/strategy.js — edit thresholds there.
 
 function _updateUniverseProgress(msg) {
   const el = document.getElementById('dt-universe-progress');
