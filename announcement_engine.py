@@ -1761,7 +1761,7 @@ def _classify_gemini(prompt: str, settings: Dict) -> Optional[Dict]:
     api_key = settings.get("gemini_api_key", "")
     if not api_key:
         return None
-    model = "gemini-1.5-flash"
+    model = settings.get("gemini_model", "gemini-2.0-flash")
     try:
         resp = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
