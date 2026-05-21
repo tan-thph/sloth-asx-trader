@@ -534,6 +534,7 @@ function _annSettingsPanelHTML(status) {
   const groqKey   = cfg.groq_api_key    || '';
   const groqModel = cfg.ann_groq_model  || 'llama-3.1-8b-instant';
   const gemKey    = cfg.gemini_api_key  || '';
+  const gemModel  = cfg.gemini_model   || 'gemini-2.0-flash-lite';
 
   const inSt  = 'width:100%;box-sizing:border-box;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)';
   const lblSt = 'font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px';
@@ -632,6 +633,19 @@ function _annSettingsPanelHTML(status) {
             <a href="https://aistudio.google.com/apikey" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a>
           </label>
           <input type="password" id="ann-gemini-key" value="${gemKey}" placeholder="AIza…" style="${inSt}">
+        </div>
+        <div>
+          <label style="${lblSt}">Model <span style="font-size:10px;color:var(--text-muted)">(flash-lite has higher free-tier rate limits)</span></label>
+          <select id="ann-gemini-model" style="${inSt}">
+            ${[
+              'gemini-2.0-flash-lite',
+              'gemini-2.0-flash',
+              'gemini-2.5-flash',
+              'gemini-2.5-flash-lite',
+              'gemini-3.1-flash-lite',
+              'gemini-3.5-flash',
+            ].map(m => `<option value="${m}" ${gemModel===m?'selected':''}>${m}</option>`).join('')}
+          </select>
         </div>
       </div>
 
@@ -908,6 +922,7 @@ async function saveAnnSettings() {
   const groqKey     = document.getElementById('ann-groq-key')?.value?.trim()     || '';
   const groqModel   = document.getElementById('ann-groq-model')?.value?.trim()   || 'llama-3.1-8b-instant';
   const geminiKey   = document.getElementById('ann-gemini-key')?.value?.trim()   || '';
+  const geminiModel = document.getElementById('ann-gemini-model')?.value?.trim() || 'gemini-2.0-flash-lite';
 
   // Use the SAME key names as state.announcements.settings and the backend DEFAULT_SETTINGS
   const payload = {
@@ -917,6 +932,7 @@ async function saveAnnSettings() {
     groq_api_key:     groqKey,
     ann_groq_model:   groqModel,
     gemini_api_key:   geminiKey,
+    gemini_model:     geminiModel,
   };
 
   // Update in-memory state immediately so next sync picks it up

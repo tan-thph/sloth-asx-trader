@@ -103,6 +103,7 @@ const state = {
       groq_api_key: '',
       ann_groq_model: 'llama-3.1-8b-instant',
       gemini_api_key: '',
+      gemini_model: 'gemini-2.0-flash-lite',
     },
   },
   dayTrading: {
