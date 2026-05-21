@@ -1762,27 +1762,38 @@ def _classify_gemini(prompt: str, settings: Dict) -> Optional[Dict]:
     if not api_key:
         return None
     model = settings.get("gemini_model", "gemini-2.0-flash")
-    try:
-        resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            params={"key": api_key},
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 250},
-            },
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            candidates = resp.json().get("candidates", [])
-            if candidates:
-                raw = candidates[0]["content"]["parts"][0]["text"]
-                result = _parse_llm_json(raw)
-                if result:
-                    result["llm_model"] = f"gemini/{model}"
-                    return result
-    except Exception as exc:
-        logger.debug("gemini classify failed: %s", exc)
+    # free tier: ~15 RPM — retry once after back-off on 429
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": api_key},
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 250},
+                },
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                candidates = resp.json().get("candidates", [])
+                if candidates:
+                    raw = candidates[0]["content"]["parts"][0]["text"]
+                    result = _parse_llm_json(raw)
+                    if result:
+                        result["llm_model"] = f"gemini/{model}"
+                        return result
+                return None
+            if resp.status_code == 429:
+                wait = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                logger.debug("gemini 429 rate-limit, waiting %ss (attempt %d)", wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            logger.debug("gemini classify HTTP %s", resp.status_code)
+            return None
+        except Exception as exc:
+            logger.debug("gemini classify failed: %s", exc)
+            return None
     return None
 
 
