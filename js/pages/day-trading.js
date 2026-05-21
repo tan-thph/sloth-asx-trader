@@ -3,9 +3,9 @@
 // ============================================================
 
 // Signal display labels — must match what the AI returns in signalsHit[]
-const _DT_SIGNALS = ['BB Primary', 'RSI<40', 'MACD hist', 'Stoch<25', 'Volume', 'OBV div'];
-// Keywords used to match AI-returned signal strings (case-insensitive prefix)
-const _DT_SIG_KEYS = ['bb', 'rsi', 'macd', 'stoch', 'volume', 'obv'];
+const _DT_SIGNALS = ['BB Primary', 'RSI<35', 'Vol Z-Score', 'Fib Zone', 'OBV div'];
+// Keywords used to match AI-returned signal strings (case-insensitive)
+const _DT_SIG_KEYS = ['bb', 'rsi', 'vol', 'fib', 'obv'];
 
 function renderDayTradingPage(gen) {
   const el = document.getElementById('main-content');
@@ -67,9 +67,9 @@ function _renderDayTrading() {
 
       <div class="card" style="display:flex;flex-direction:column;gap:10px">
         <div class="card-title">Run Day Trade Scan</div>
-        <p class="text-xs text-muted" style="margin:0">
-          Scans portfolio + watchlist tickers for swing-trade setups using Bollinger Band + RSI + MACD confluence.
-          Requires ≥3 of 6 signals (BB Primary is mandatory) plus all entry filters.
+          <p class="text-xs text-muted" style="margin:0">
+          Scans portfolio + watchlist tickers for swing-trade setups (5–15 day holds) using orthogonal confluence.
+          Requires BB Primary + ≥2 of 4 confirmations, plus all hard filters (liquidity, SMA200, ADX, no catalyst).
         </p>
         ${summaryHtml}
         <button class="btn btn-primary" ${dt.analysisRunning ? 'disabled' : ''}
@@ -85,13 +85,12 @@ function _renderDayTrading() {
     <!-- Signal legend -->
     <div class="card" style="margin-bottom:14px;padding:10px 14px">
       <div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:12px">
-        <span><b>#1 PRIMARY:</b> BB lower band</span>
-        <span><b>#2:</b> RSI&lt;40 turning up</span>
-        <span><b>#3:</b> MACD hist improving</span>
-        <span><b>#4:</b> Stoch&lt;25 crossing up</span>
-        <span><b>#5:</b> Volume spike (&gt;1.2×)</span>
-        <span><b>#6:</b> OBV bullish div.</span>
-        <span style="margin-left:auto">Need ≥3 incl. #1 • R:R ≥ 2:1 • Stop = entry − 1.5×ATR</span>
+        <span><b>#1 PRIMARY:</b> BB reclaim (price closes back inside lower BB)</span>
+        <span><b>#2:</b> RSI&lt;35 turning up</span>
+        <span><b>#3:</b> Vol Z-Score &gt;1.5σ</span>
+        <span><b>#4:</b> Fib 50–61.8% zone</span>
+        <span><b>#5:</b> OBV div. (bonus)</span>
+        <span style="margin-left:auto">Primary + ≥2 confirms • R:R ≥ 2:1 • Stop = entry − 2.5×ATR</span>
       </div>
     </div>
 
@@ -149,9 +148,10 @@ function _renderDtRec(r, compact = false) {
   }).join('');
 
   const filterIcons = [
-    { label: 'Above SMA200', ok: filtersPass.aboveSMA200 },
-    { label: 'ADX ok',       ok: filtersPass.adxOk },
-    { label: 'No catalyst',  ok: filtersPass.noCatalyst },
+    { label: 'Liquidity',   ok: filtersPass.liquidityOk },
+    { label: 'SMA200',      ok: filtersPass.aboveSMA200 },
+    { label: 'ADX ok',      ok: filtersPass.adxOk },
+    { label: 'No catalyst', ok: filtersPass.noCatalyst },
   ].map(f =>
     `<span style="font-size:10px;color:${f.ok ? '#10b981' : '#ef4444'}">${f.ok ? '✓' : '✗'} ${f.label}</span>`
   ).join(' ');

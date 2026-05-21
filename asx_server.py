@@ -429,6 +429,10 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     # ── Volume ────────────────────────────────────────────────────────────────
     vol_sma_20 = volume.rolling(20).mean()
     vol_ratio = (volume.iloc[-1] / vol_sma_20.iloc[-1]) if vol_sma_20.iloc[-1] > 0 else 1
+    vol_std_20 = volume.rolling(20).std()
+    _vol_std = vol_std_20.iloc[-1]
+    vol_z_score = float((volume.iloc[-1] - vol_sma_20.iloc[-1]) / _vol_std) if (not pd.isna(_vol_std) and _vol_std > 0) else 0.0
+    adv_20 = float((close * volume).rolling(20).mean().iloc[-1]) if len(close) >= 20 else 0.0
     obv = compute_obv(close, volume)
     obv_signal = "rising" if obv.iloc[-1] > obv.rolling(10).mean().iloc[-1] else "falling"
 
@@ -645,6 +649,8 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "volume_today": int(volume.iloc[-1]),
         "volume_avg_20": int(vol_sma_20.iloc[-1]) if not pd.isna(vol_sma_20.iloc[-1]) else None,
         "volume_ratio": round(vol_ratio, 2),
+        "volume_z_score": round(vol_z_score, 2),
+        "adv_20": round(adv_20, 0),
         "obv_trend": obv_signal,
         "vwap_20d": safe_float(vwap_20.iloc[-1]),
         "price_vs_vwap": "above" if cp > (vwap_20.iloc[-1] or cp) else "below",

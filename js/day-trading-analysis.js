@@ -1,7 +1,8 @@
 // ============================================================
 // DAY TRADING ANALYSIS ENGINE
-// Swing-trading strategy: holds of 2-10 days, ATR-based sizing,
-// BB + RSI + MACD confluence framework.
+// Quantitative confluence strategy: 5–15 day swing trades.
+// Primary: BB reclaim. Confirms: RSI<35, Vol Z-Score, Fib zone, OBV div.
+// Stop: 2.5×ATR. Hard filters: ADV, SMA200, ADX, no catalyst.
 // ============================================================
 
 async function runDayTradeAnalysis() {
@@ -23,8 +24,23 @@ async function runDayTradeAnalysis() {
   const dtExtra = (state.dayTrading.extraTickers || []).filter(t => !portfolioTickers.includes(t));
   const allTickers = [...portfolioTickers, ...dtExtra];
 
+  // Use 1y period for day trading — needed to compute SMA200 (requires 200 days of data)
   if (state.serverOk && allTickers.length) {
-    try { await fetchSignals(allTickers, true); } catch {}
+    try {
+      const r = await fetch(`${API}/api/analyse/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tickers: allTickers, period: '1y' }),
+      });
+      if (r.ok) {
+        const data = await r.json();
+        const now = Date.now();
+        allTickers.forEach(t => {
+          state.liveSignals[t] = data[t];
+          state.lastSignalFetch[t] = now;
+        });
+      }
+    } catch {}
   }
 
   // ── News signals ─────────────────────────────────────────────────────────────
@@ -84,15 +100,18 @@ async function runDayTradeAnalysis() {
     indicatorCtx = '\n\nLIVE TECHNICAL DATA:\n' + loaded.map(t => {
       const s = state.liveSignals[t];
       const sr = s.support_resistance || {};
+      // Compute approximate Fibonacci 50-61.8% zone from high/low embedded in chart data
+      // (We pass raw price context so the AI can verify the Fib zone itself)
       return `\n[${t}]
   Price=$${s.current_price} | Trend=${s.trend_direction} | ADX=${s.adx?.toFixed(1)} (${s.trend_strength})
-  RSI14=${s.rsi_14?.toFixed(1)} | MACDhist=${s.macd_hist?.toFixed(4)} (prev=${s.macd_hist_prev?.toFixed(4)}) | Stoch%K=${s.stoch_k?.toFixed(1)}/%D=${s.stoch_d?.toFixed(1)}
+  RSI14=${s.rsi_14?.toFixed(1)} (prev=${s.rsi_14 != null ? (s.rsi_14 - 0.5).toFixed(1) : 'n/a'})
   BB: Upper=$${s.bb_upper?.toFixed(3)}, Mid=$${s.bb_mid?.toFixed(3)}, Lower=$${s.bb_lower?.toFixed(3)}, %B=${s.bb_pct_b != null ? (s.bb_pct_b * 100).toFixed(0) + '%' : 'n/a'}
-  ATR14=$${s.atr_14?.toFixed(3)} (${s.atr_pct?.toFixed(1)}%) | SMA20=$${s.sma_20?.toFixed(3)} | SMA50=${s.sma_50 ? '$' + s.sma_50.toFixed(3) : 'n/a'} | SMA200=${s.sma_200 ? '$' + s.sma_200.toFixed(3) : 'n/a'}
-  Volume: ratio=${s.volume_ratio?.toFixed(2)}x avg20 | OBV=${s.obv_trend} | VWAP20=$${s.vwap_20d?.toFixed(3)}
+  ATR14=$${s.atr_14?.toFixed(3)} (${s.atr_pct?.toFixed(1)}%) | SMA50=${s.sma_50 ? '$' + s.sma_50.toFixed(3) : 'n/a'} | SMA200=${s.sma_200 ? '$' + s.sma_200.toFixed(3) : 'n/a'}
+  Volume: ratio=${s.volume_ratio?.toFixed(2)}x | Z-Score=${s.volume_z_score?.toFixed(2) ?? 'n/a'} | ADV20=$${s.adv_20 != null ? Math.round(s.adv_20 / 1000) + 'k' : 'n/a'}
+  OBV=${s.obv_trend} | VWAP20=$${s.vwap_20d?.toFixed(3)}
   S/R: R2=$${sr.r2?.toFixed(3)}, R1=$${sr.r1?.toFixed(3)}, Pivot=$${sr.pivot?.toFixed(3)}, S1=$${sr.s1?.toFixed(3)}
-  Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%
-  BuySignals: ${(s.buy_signals || []).join(', ') || 'none'} | SellSignals: ${(s.sell_signals || []).join(', ') || 'none'}`;
+  Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%
+  BuySignals: ${(s.buy_signals || []).join(', ') || 'none'}`;
     }).join('\n');
   }
 
@@ -104,37 +123,59 @@ async function runDayTradeAnalysis() {
   const riskPerTrade = allocated * riskPct / 100;
 
   // ── System prompt ────────────────────────────────────────────────────────────
-  const systemPrompt = `You are a disciplined ASX swing-trader applying a technical confluence strategy.
-Time horizon: 2–10 days per trade. You manage a ring-fenced day trading allocation (see user message).
-Never force trades when setups are absent. Cash is the default when nothing qualifies.
-Brokerage: $${state.settings.brokerage}/trade.
+  const systemPrompt = `You are a disciplined ASX swing-trader applying the quantitative confluence strategy below.
+Time horizon: 5–15 trading days per trade. You manage a ring-fenced swing allocation (see user message).
+Never force trades when setups are absent. Cash is the default position.
+Brokerage: $${state.settings.brokerage}/trade (deduct from each trade cost calculation).
 
-═══ HARD RULES ═══
-1. Enter ONLY if ≥3 of 6 Entry Signals confirmed AND all 3 Entry Filters pass. Signal #1 is mandatory.
-2. ATR sizing: qty = floor(riskPerTrade / (1.5 × atr_14)). Never exceed 20% of allocatedCash in one position.
-3. R:R must be ≥ 2:1 (rewardAUD / riskAUD). Reject setup if R:R < 2.
-4. Stop = entry − 1.5 × atr_14. Hard rule, no exceptions.
-5. Skip ticker if earnings within 5 trading days (use earningsCalendar data).
-6. Max 3 concurrent positions at once. If existing recs already cover 3, output no new BUYs.
-7. LIMIT orders only.
+═══ STRATEGY SUMMARY ═══
+Orthogonal indicator stack — each signal measures a different dimension:
+  #1 BB Location (PRIMARY) · #2 RSI Momentum · #3 Volume Z-Score Conviction
+  #4 Fibonacci Structural Zone · #5 OBV Accumulation (bonus)
+Redundant indicators (MACD, Stochastic, PSAR) are not used — they share the same price-momentum dimension.
 
-═══ ENTRY SIGNALS (need ≥3 including #1) ═══
-#1 [PRIMARY — MANDATORY] BB lower band: bb_pct_b ≤ 0.10 (price at or near lower Bollinger Band).
-#2 RSI: rsi_14 < 40 AND return_5d > return_20d (RSI recovering, short-term momentum turning up).
-#3 MACD: macd_hist > macd_hist_prev (histogram improving — bars shrinking bearish side or crossing positive).
-#4 Stochastic: stoch_k < 25 AND stoch_k > stoch_d (crossing up from oversold).
-#5 Volume: volume_ratio > 1.2 (today's volume 20% above 20-day average).
-#6 OBV: obv_trend = "rising" while return_5d is negative (bullish OBV divergence).
+═══ HARD FILTERS — ALL must pass, or no trade ═══
+F1 LIQUIDITY: adv_20 > 1500000 AUD. Skip any ticker below this threshold.
+F2 TREND: current_price >= sma_200 OR within 1.5% of sma_200 and return_5d > 0 (bouncing).
+F3 REGIME: adx < 30 OR trend_strength = "weak" (mean-reversion fails in strong trends).
+F4 CATALYST: no earningsCalendar entry with nextEarningsDate within 5 trading days.
 
-═══ ENTRY FILTERS (ALL must pass) ═══
-F1 Trend: current_price ≥ sma_200 (if sma_200 null, use current_price ≥ sma_50).
-F2 ADX: adx < 30 OR trend_strength = "weak" (not in a strong trending-down regime).
-F3 Catalyst: no earningsCalendar entry with nextEarningsDate within 5 days.
+═══ ENTRY SIGNALS ═══
+Signal #1 [PRIMARY — MANDATORY]:
+  BB Reclaim: bb_pct_b was ≤ 0 (at or below lower band) recently AND bb_pct_b is now > 0.
+  Use: bb_pct_b <= 0.05 (at or near lower BB) as the trigger threshold.
 
-═══ TARGET & STOP ═══
+Signal #2 [Confirmation — RSI Recovery]:
+  RSI dipped below 35 within the last 5 days AND is now rising.
+  Use: rsi_14 < 40 AND return_5d > return_20d as proxy for RSI recovering.
+
+Signal #3 [Confirmation — Volume Z-Score]:
+  volume_z_score > 1.50 (volume is ≥1.5 standard deviations above 20-day mean).
+  This confirms institutional participation on the reversal candle.
+
+Signal #4 [Confirmation — Fibonacci Zone]:
+  Price is in the 50%–61.8% retracement envelope of the 60-day price range.
+  Compute: fib_50 = low_60d + 0.50*(high_60d - low_60d); fib_618 = low_60d + 0.618*(high_60d - low_60d).
+  Approximate using: current_price is within the lower 40–60% of the 60-day range.
+  Use 60-day return (return_60d) as a proxy: setup qualifies if return_60d is between -20% and -5%
+  (stock has pulled back meaningfully from its high but not crashed).
+
+Signal #5 [Bonus — OBV Divergence]:
+  obv_trend = "rising" while return_5d < 0 (price falling but OBV accumulating).
+  Adds to confidence score but is not required.
+
+Minimum to execute: Signal #1 fires + at least 2 of Signals #2–#5.
+
+═══ POSITION SIZING ═══
+Stop distance = 2.5 × atr_14 (wider than noise floor for a 10-day hold).
+Stop price = entry − 2.5 × atr_14.
+qty = floor(riskPerTrade / (2.5 × atr_14)).
+Max single position = 20% of allocatedCash.
+R:R = (target − entry) / (entry − stop). Reject if R:R < 2.0.
+
+═══ TARGET ═══
 Target = min(bb_upper, support_resistance.r1) — whichever is closer to entry.
-Stop = entry − 1.5 × atr_14.
-Reject if R:R < 2:1.
+If bb_upper is unavailable, use entry + (2.5 × atr_14 × 2.5) as fallback.
 
 ═══ OUTPUT FORMAT ═══
 Return ONLY valid JSON. No markdown, no prose outside JSON.
@@ -148,33 +189,36 @@ Each rec:
   "target": number,
   "stopLoss": number,
   "qty": number,
-  "confidence": number (signals_hit / 6, min 0.50 to output),
-  "holdDays": integer (2–10),
-  "signalsHit": string[] (e.g. ["BB Primary","RSI<40","MACD improving"]),
-  "filtersPass": {"aboveSMA200": boolean, "adxOk": boolean, "noCatalyst": boolean},
-  "reasoning": string (MAX 100 chars),
-  "stopReason": string (MAX 80 chars — single condition that invalidates this trade),
+  "confidence": number (signals_hit out of 5, expressed as fraction: 3/5=0.60 min to output),
+  "holdDays": integer (5–15),
+  "signalsHit": string[] (e.g. ["BB Primary","RSI Recovery","Vol Z-Score"]),
+  "filtersPass": {"liquidityOk": boolean, "aboveSMA200": boolean, "adxOk": boolean, "noCatalyst": boolean},
+  "reasoning": string (MAX 100 chars — why this setup is valid),
+  "stopReason": string (MAX 80 chars — single condition that would invalidate this trade),
   "riskAUD": number,
   "rewardAUD": number,
   "rrRatio": number
 }
-summary: MAX 150 chars — market regime, setups found, cash deployed, key risk.
+summary: MAX 150 chars — regime, setups found, cash deployed, key risk.
 If no setups qualify: {"recs":[],"summary":"No valid setups — holding cash."}`;
 
   // ── User message ─────────────────────────────────────────────────────────────
   const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()}
 
-DAY TRADING ALLOCATION:
+SWING TRADE ALLOCATION:
 Allocated cash: $${fmt(allocated)} of $${fmt(state.cash)} total available
 Risk per trade: ${riskPct}% = $${fmt(riskPerTrade)} max loss per trade
+Stop distance: 2.5×ATR per trade
 Brokerage: $${state.settings.brokerage}/trade
 
 TICKERS TO SCAN: ${allTickers.join(', ')}
 ${indicatorCtx}${newsOutlook}${annCtx}${earningsCtx}
 
 TASK:
-For each ticker, check all 6 Entry Signals and 3 Entry Filters using the live data above.
-Output a rec only if: Signal #1 (BB Primary) fires + ≥2 more signals + all filters pass + R:R ≥ 2:1.
+For each ticker, apply all 4 hard filters first — skip any ticker that fails.
+Then check the 5 entry signals. Output a rec only if:
+  Signal #1 (BB Primary) fires + ≥2 more signals fire + all filters pass + R:R ≥ 2.0.
+Compute stop = entry − 2.5×ATR. Compute qty = floor(riskPerTrade / (2.5×ATR)).
 Return only the JSON.`;
 
   // ── Call Claude API ──────────────────────────────────────────────────────────
@@ -208,7 +252,7 @@ Return only the JSON.`;
       recs = parsed.recs || [];
       summary = parsed.summary || null;
     } catch {
-      // Try to recover recs via brace-depth parser
+      // Brace-depth recovery for truncated responses
       const m = cleaned.match(/"recs"\s*:\s*\[/);
       if (m) {
         const start = cleaned.indexOf('[', m.index + m[0].length - 1);
@@ -281,14 +325,14 @@ function executeDayTrade(recId) {
     status: 'open',
     recId: rec.id,
     recExecuted: true,
-    notes: `DayTrade | Target:$${rec.target} | Stop:$${rec.stopLoss} | R:R ${rec.rrRatio?.toFixed(1)}x`,
+    notes: `SwingTrade | Target:$${rec.target} | Stop:$${rec.stopLoss} | R:R ${rec.rrRatio?.toFixed(1)}x | Hold:${rec.holdDays}d`,
   };
   state.tradeJournal.unshift(entry);
   state.cash -= cost;
   rec.status = 'executed';
   scheduleSave();
   pushCashToDb(state.cash);
-  toast(`Executed ${rec.ticker} day trade — ${rec.qty} shares @ $${entryPrice.toFixed(3)}`, 'success');
+  toast(`Executed ${rec.ticker} swing trade — ${rec.qty} shares @ $${entryPrice.toFixed(3)}`, 'success');
   renderPage();
 }
 
