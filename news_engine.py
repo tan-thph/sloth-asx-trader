@@ -924,6 +924,90 @@ final = min(10.0, sum of applicable steps)>,\
         return result
 
 
+class GoogleLLM:
+    """Google Gemini cloud LLM — implements the same classify() interface as OllamaLLM."""
+
+    GOOGLE_MODEL = "gemini-2.0-flash"
+    _BASE_URL    = "https://generativelanguage.googleapis.com/v1beta"
+
+    CLASSIFY_PROMPT = OllamaLLM.CLASSIFY_PROMPT
+
+    def __init__(self, api_key: str = "", model: str = ""):
+        self.api_key = api_key
+        self.model   = model or self.GOOGLE_MODEL
+
+    def is_available(self) -> bool:
+        return bool(self.api_key)
+
+    def list_models(self) -> list[dict]:
+        """Return available Gemini models that support generateContent."""
+        if not self.api_key:
+            return []
+        try:
+            r = requests.get(
+                f"{self._BASE_URL}/models",
+                params={"key": self.api_key},
+                timeout=10,
+            )
+            if not r.ok:
+                return []
+            models = r.json().get("models", [])
+            return [
+                {"name": m["name"].removeprefix("models/"), "displayName": m.get("displayName", "")}
+                for m in models
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+                and "gemini" in m.get("name", "").lower()
+            ]
+        except Exception as ex:
+            log.debug("GoogleLLM.list_models failed: %s", ex)
+            return []
+
+    def classify(
+        self,
+        title: str,
+        content: str,
+        portfolio_tickers: list[str],
+        status_ref: dict | None = None,
+        cpu_mode: bool = False,
+        stop_event=None,
+    ) -> dict | None:
+        if not self.api_key:
+            return None
+        ticker_str = ", ".join(portfolio_tickers[:20]) if portfolio_tickers else "none"
+        prompt = self.CLASSIFY_PROMPT.format(
+            title=title[:200],
+            content=(content or "")[:700],
+            tickers=ticker_str,
+            context="",
+        )
+        try:
+            resp = requests.post(
+                f"{self._BASE_URL}/models/{self.model}:generateContent",
+                params={"key": self.api_key},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature":     0.1,
+                        "maxOutputTokens": 400,
+                    },
+                },
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                log.debug("GoogleLLM HTTP %s: %s", resp.status_code, resp.text[:200])
+                return None
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            raw = re.sub(r"```(?:json)?\s*", "", raw)
+            raw = re.sub(r"```", "", raw).strip()
+            m = re.search(r"\{.*?\}", raw, re.DOTALL) or re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                raw = m.group(0)
+            return _robust_json_parse(raw)
+        except Exception as exc:
+            log.debug("GoogleLLM classify failed: %s", exc)
+            return None
+
+
 class GroqLLM:
     """Groq cloud LLM — implements the same classify() interface as OllamaLLM."""
 
@@ -1063,7 +1147,7 @@ class NewsPipeline:
         with news_db(db_path) as conn:
             init_news_tables(conn)
 
-    def _get_llm(self, settings: dict) -> OllamaLLM | GroqLLM:
+    def _get_llm(self, settings: dict) -> OllamaLLM | GroqLLM | GoogleLLM:
         provider = settings.get("llm_provider", "ollama").lower()
         if provider == "groq":
             api_key    = settings.get("groq_api_key", "")
@@ -1072,6 +1156,14 @@ class NewsPipeline:
                     or self.llm.api_key != api_key
                     or self.llm._api_model != (groq_model or GroqLLM.GROQ_MODEL)):
                 self.llm = GroqLLM(api_key=api_key, model=groq_model)
+            return self.llm
+        if provider == "google":
+            api_key      = settings.get("google_api_key", "")
+            google_model = settings.get("google_model", "")
+            if (not isinstance(self.llm, GoogleLLM)
+                    or self.llm.api_key != api_key
+                    or self.llm.model != (google_model or GoogleLLM.GOOGLE_MODEL)):
+                self.llm = GoogleLLM(api_key=api_key, model=google_model)
             return self.llm
         # default: Ollama
         model = settings.get("llm_model") or ""

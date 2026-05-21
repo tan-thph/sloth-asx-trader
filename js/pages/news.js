@@ -99,9 +99,12 @@ async function renderNewsPage(gen) {
     }
 
     el.innerHTML = _newsPageHTML(statusResp, feedResp.sentiment || {});
-    // Populate Groq model dropdown if Groq is the active provider
-    if ((state.news.settings.llm_provider || 'ollama') === 'groq') {
+    // Populate model dropdown for cloud providers
+    const _curProvider = state.news.settings.llm_provider || 'ollama';
+    if (_curProvider === 'groq') {
       _loadGroqModels('news-groq-model-select', state.news.settings.groq_model || 'llama-3.1-8b-instant');
+    } else if (_curProvider === 'google') {
+      _loadGoogleModels('news-google-model-select', state.news.settings.google_model || 'gemini-2.0-flash');
     }
     if (statusResp.running) _startNewsPoller(gen);
     // Restore reclassify poller if a job was already running before page render
@@ -305,8 +308,10 @@ function _newsPageHTML(status, sentiment) {
     : `<span class="badge" style="background:#fee2e2;color:#dc2626">✗ Ollama not found</span>
        <button class="btn btn-sm btn-primary" id="ollama-start-btn" onclick="newsStartOllama()" style="font-size:11px;padding:3px 10px">▶ Start Ollama</button>`;
 
-  const groqKeyMasked = cfg.groq_api_key ? cfg.groq_api_key.slice(0,8) + '…' : '';
   const groqStatusHtml = cfg.groq_api_key
+    ? `<span class="badge" style="background:#dcfce7;color:#16a34a">✓ Key saved</span>`
+    : `<span class="badge" style="background:#fef9c3;color:#92400e">No key set</span>`;
+  const googleStatusHtml = cfg.google_api_key
     ? `<span class="badge" style="background:#dcfce7;color:#16a34a">✓ Key saved</span>`
     : `<span class="badge" style="background:#fef9c3;color:#92400e">No key set</span>`;
 
@@ -393,8 +398,9 @@ function _newsPageHTML(status, sentiment) {
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
           <div class="card-title" style="margin:0">LLM Provider</div>
           <select onchange="newsSetProvider(this.value)" style="font-size:12px;padding:2px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
-            <option value="ollama" ${provider==='ollama'?'selected':''}>Ollama (local)</option>
-            <option value="groq"   ${provider==='groq'  ?'selected':''}>Groq (cloud)</option>
+            <option value="ollama" ${provider==='ollama' ?'selected':''}>Ollama (local)</option>
+            <option value="groq"   ${provider==='groq'   ?'selected':''}>Groq (cloud)</option>
+            <option value="google" ${provider==='google' ?'selected':''}>Google Gemini</option>
           </select>
         </div>
 
@@ -417,6 +423,26 @@ function _newsPageHTML(status, sentiment) {
               <option value="${cfg.groq_model || 'llama-3.1-8b-instant'}" selected>${cfg.groq_model || 'llama-3.1-8b-instant'}</option>
             </select>
           </div>
+        ` : provider === 'google' ? `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            ${googleStatusHtml}
+          </div>
+          <div class="form-row" style="margin-bottom:8px">
+            <div class="form-label" style="font-size:11px">Google API Key</div>
+            <div style="display:flex;gap:4px">
+              <input type="password" id="google-key-input" value="${cfg.google_api_key || ''}" placeholder="AIza…"
+                style="flex:1;font-size:12px;padding:3px 7px;border:1px solid var(--border-light);border-radius:var(--radius-sm);background:var(--bg-secondary);color:var(--text-primary)">
+              <button class="btn btn-sm btn-primary" onclick="newsSaveGoogleKey()" style="font-size:11px">Save</button>
+            </div>
+          </div>
+          <div class="form-row" style="margin-bottom:8px">
+            <div class="form-label" style="font-size:11px">Gemini Model</div>
+            <select id="news-google-model-select" onchange="newsSetGoogleModel(this.value)"
+              style="width:100%;font-size:12px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
+              <option value="${cfg.google_model || 'gemini-2.0-flash'}" selected>${cfg.google_model || 'gemini-2.0-flash'}</option>
+            </select>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted)">Get a free API key at <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#4285f4">aistudio.google.com</a></div>
         ` : `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             ${ollamaStatusHtml}
@@ -474,12 +500,15 @@ ollama pull llama3.2:3b     # lightweight</pre>
           <div style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Re-classify articles</div>
           <p class="text-xs text-muted" style="margin-bottom:8px">Re-run LLM classification on stored articles.</p>
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-            ${provider !== 'groq' ? `
-            <select id="reclassify-model" style="font-size:12px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
+            ${provider === 'groq'
+              ? `<span style="font-size:11px;color:var(--text-muted)">groq/${cfg.groq_model || 'llama-3.1-8b-instant'}</span>`
+              : provider === 'google'
+              ? `<span style="font-size:11px;color:var(--text-muted)">google/${cfg.google_model || 'gemini-2.0-flash'}</span>`
+              : `<select id="reclassify-model" style="font-size:12px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
               ${state.news.models.length
                 ? state.news.models.map(m => `<option value="${m.name}">${m.name}${m.details?.parameter_size ? ' — '+m.details.parameter_size : ''}</option>`).join('')
                 : `<option value="${cfg.llm_model}">${cfg.llm_model || '— select model —'}</option>`}
-            </select>` : `<span style="font-size:11px;color:var(--text-muted)">groq/${cfg.groq_model || 'llama-3.1-8b-instant'}</span>`}
+            </select>`}
             <select id="reclassify-days" style="font-size:12px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
               ${[1,3,7,14].map(d => `<option value="${d}" ${d === (cfg.max_age_days||7) ? 'selected':''}>${d}d</option>`).join('')}
             </select>
@@ -873,6 +902,39 @@ async function _loadGroqModels(selectId, savedModel) {
     }
   } catch {
     el.innerHTML = `<option value="${savedModel || 'llama-3.1-8b-instant'}" selected>${savedModel || 'llama-3.1-8b-instant'}</option>`;
+  }
+}
+
+async function newsSaveGoogleKey() {
+  const input = document.getElementById('google-key-input');
+  const key   = input?.value?.trim() || '';
+  state.news.settings.google_api_key = key;
+  await _saveNewsSettings();
+  toast(key ? 'Google API key saved' : 'Google API key cleared', 'success');
+  if (key) _loadGoogleModels('news-google-model-select', state.news.settings.google_model || 'gemini-2.0-flash');
+  renderPage();
+}
+
+async function newsSetGoogleModel(model) {
+  state.news.settings.google_model = model;
+  await _saveNewsSettings();
+  toast(`Gemini model set to ${model}`, 'success');
+}
+
+async function _loadGoogleModels(selectId, savedModel) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  try {
+    const d = await fetch(`${API}/api/google/models`).then(r => r.json());
+    if (d.models && d.models.length) {
+      el.innerHTML = d.models.map(m =>
+        `<option value="${m}" ${m === savedModel ? 'selected' : ''}>${m}</option>`
+      ).join('');
+    } else {
+      el.innerHTML = `<option value="${savedModel || 'gemini-2.0-flash'}" selected>${savedModel || 'gemini-2.0-flash'}</option>`;
+    }
+  } catch {
+    el.innerHTML = `<option value="${savedModel || 'gemini-2.0-flash'}" selected>${savedModel || 'gemini-2.0-flash'}</option>`;
   }
 }
 

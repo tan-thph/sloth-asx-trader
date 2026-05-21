@@ -2884,6 +2884,8 @@ def _news_settings_from_db() -> dict:
         "ollama_url":          "http://localhost:11434",
         "groq_api_key":        "",
         "groq_model":          "llama-3.1-8b-instant",
+        "google_api_key":      "",
+        "google_model":        "gemini-2.0-flash",
         "scan_interval_hours": 6,
         "enabled":             True,
         "max_age_days":        7,
@@ -3105,6 +3107,21 @@ def groq_models():
         return jsonify({"models": [], "available": False, "error": str(exc)})
 
 
+@app.route("/api/google/models")
+def google_models():
+    """Return available Gemini models using the saved Google API key."""
+    if not _NE_OK:
+        return jsonify({"models": [], "available": False, "error": "news_engine not available"})
+    api_key = _news_settings_from_db().get("google_api_key", "")
+    if not api_key:
+        return jsonify({"models": [], "available": False, "error": "No Google API key saved"})
+    llm = _ne.GoogleLLM(api_key=api_key)
+    models = llm.list_models()
+    if not models:
+        return jsonify({"models": [], "available": False, "error": "Could not fetch models — check API key"})
+    return jsonify({"models": [m["name"] for m in models], "available": True})
+
+
 @app.route("/api/news/settings", methods=["GET", "POST"])
 def news_settings_route():
     """GET or update news scanner settings."""
@@ -3242,6 +3259,8 @@ def _run_reclassify(model: str, days: int):
         provider = cfg.get("llm_provider", "ollama").lower()
         if provider == "groq":
             llm = _ne.GroqLLM(api_key=cfg.get("groq_api_key", ""), model=cfg.get("groq_model", ""))
+        elif provider == "google":
+            llm = _ne.GoogleLLM(api_key=cfg.get("google_api_key", ""), model=cfg.get("google_model", ""))
         else:
             llm = _ne.OllamaLLM(model=model, base_url=cfg.get("ollama_url", "http://localhost:11434"))
         all_tick = _portfolio_tickers_from_db()
@@ -3330,6 +3349,10 @@ def news_reclassify():
         if not cfg.get("groq_api_key"):
             return jsonify({"ok": False, "error": "Groq API key not set in News Scanner settings"}), 400
         model = f"groq/{_ne.GroqLLM.GROQ_MODEL}"
+    elif provider == "google":
+        if not cfg.get("google_api_key"):
+            return jsonify({"ok": False, "error": "Google API key not set in News Scanner settings"}), 400
+        model = f"google/{cfg.get('google_model', _ne.GoogleLLM.GOOGLE_MODEL)}"
     else:
         model = data.get("model", "").strip()
         if not model:
