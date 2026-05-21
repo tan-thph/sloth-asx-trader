@@ -112,5 +112,7 @@ const state = {
     allocatedCash: null,   // null = auto (20% of state.cash); user can override
     riskPct: 1.5,          // max risk per trade as % of allocatedCash
     extraTickers: [],      // watchlist tickers for day-trade scans only
+    universeKey: 'asx200', // selected universe for universe scan
+    scanProgress: null,    // {phase:'fetching'|'analysing', current, total, candidates} | null
   },
 };

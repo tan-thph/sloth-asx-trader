@@ -82,6 +82,9 @@ function _renderDayTrading() {
       </div>
     </div>
 
+    <!-- Universe Scanner -->
+    ${_renderUniverseScannerCard()}
+
     <!-- Signal legend -->
     <div class="card" style="margin-bottom:14px;padding:10px 14px">
       <div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:12px">
@@ -216,6 +219,72 @@ function _renderDtRec(r, compact = false) {
         </div>
       </div>
     </div>`;
+}
+
+// ── Universe Scanner Card ─────────────────────────────────────────────────────
+
+function _renderUniverseScannerCard() {
+  const dt = state.dayTrading;
+  const uKey = dt.universeKey || 'asx200';
+  const isRunning = dt.analysisRunning;
+  const isScanning = isRunning && dt.scanProgress != null;
+  const universeKeys = ['asx20','asx50','asx100','asx200'];
+
+  const selectorHtml = universeKeys.map(k => {
+    const meta = ASX_UNIVERSE_META[k];
+    const count = getUniverseTickers(k).length;
+    const active = k === uKey;
+    return `<button
+      class="btn btn-sm"
+      onclick="state.dayTrading.universeKey='${k}';scheduleSave();renderPage()"
+      style="font-size:11px;font-weight:${active ? '700' : '400'};background:${active ? 'var(--accent)' : 'var(--bg-secondary)'};color:${active ? '#fff' : 'var(--text-secondary)'};border-color:${active ? 'var(--accent)' : 'var(--border-medium)'}"
+      ${isScanning ? 'disabled' : ''}
+      title="${meta.desc}"
+    >${meta.label} <span style="opacity:.7">(${count})</span></button>`;
+  }).join('');
+
+  const progressHtml = isScanning
+    ? `<div id="dt-universe-progress">${_renderUniverseProgressHtml()}</div>`
+    : '<div id="dt-universe-progress"></div>';
+
+  // Last universe scan summary (shown below progress)
+  const lastSummary = dt.lastSummary?.source === 'universe'
+    ? `<div style="margin-top:8px;font-size:12px;color:var(--text-secondary);line-height:1.45">
+         <span style="color:var(--text-muted);font-size:11px">Last universe scan: ${dt.lastSummary.date} ${dt.lastSummary.time || ''}</span><br>
+         ${(dt.lastSummary.text || '').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+       </div>`
+    : '';
+
+  const meta = ASX_UNIVERSE_META[uKey] || {};
+  const tickerCount = getUniverseTickers(uKey).length;
+
+  return `
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title" style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <span style="background:#6366f1;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;letter-spacing:.5px">UNIVERSE</span>
+      ASX Index Scanner
+    </div>
+    <p class="text-xs text-muted" style="margin:0 0 10px 0">
+      Scans an entire ASX index for BB confluence setups. Pre-filters ${tickerCount} tickers client-side
+      (BB near lower band + ADV>$1.5M + SMA200 + ADX), then sends only candidates to AI.
+    </p>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px">
+      ${selectorHtml}
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="runUniverseScan()"
+        ${isRunning ? 'disabled' : ''}
+        style="background:#6366f1;border-color:#6366f1;display:flex;align-items:center;gap:6px">
+        ${isScanning
+          ? '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Scanning…'
+          : '⬡ Scan ' + meta.label}
+      </button>
+      ${isScanning ? `<button class="btn btn-sm" onclick="cancelUniverseScan()" style="color:#ef4444;border-color:#ef4444;font-size:11px">✕ Cancel</button>` : ''}
+      <span class="text-xs text-muted">${meta.desc}</span>
+    </div>
+    ${progressHtml}
+    ${lastSummary}
+  </div>`;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────

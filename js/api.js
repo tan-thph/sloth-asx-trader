@@ -167,6 +167,7 @@ async function loadStateFromDb() {
       state.dayTrading = { ...state.dayTrading, ...data.dayTrading };
       // Reset transient fields
       state.dayTrading.analysisRunning = false;
+      state.dayTrading.scanProgress = null;
     }
     return true;
   } catch(e) {
