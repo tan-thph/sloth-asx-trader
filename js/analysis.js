@@ -723,6 +723,7 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
       }
       if (summaryRaw) {
           summary = summaryRaw.replace(/\\n/g,'\n').replace(/\\"/g,'"');
+          if (summary.length > 600) summary = summary.slice(0, 597) + '...';
       }
 
       // Extract all complete rec objects using a brace-depth tracker.
@@ -943,7 +944,10 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
     });
 
     // Extract [system notes] appended to summary string (e.g. confidence floor drops, conflicts)
-    const bracketNotes = summary ? (summary.match(/\[[^\]]+\]/g) || []) : [];
+    // Filter out JSON array patterns like ["value","growth"] that the AI may dump in the summary field
+    const bracketNotes = summary
+      ? (summary.match(/\[[^\]]+\]/g) || []).filter(n => !/^\[["{\d]/.test(n))
+      : [];
 
     // Extract macro + cash context from AI summary; strip calibration stats and rec enumeration
     let contextLine = '';
@@ -956,8 +960,19 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
         .replace(/insufficient history for calibration[.,]?\s*/i, '')
         .replace(/Key actions:.*?(?=Macro:|Cash:|$)/s, '')
         .replace(/\[[^\]]+\]/g, '')
+        // Remove lines that look like raw JSON (object braces, quoted keys, array wrappers)
+        .split('\n')
+        .filter(line => line.trim() && !/^\s*[{}\[\]"\\]/.test(line) && !/^\s*"[^"]+"\s*:/.test(line))
+        .join(' ')
         .trim();
-      if (stripped) contextLine = stripped.slice(0, 180).trim();
+      // Skip if remaining content looks like a JSON fragment
+      if (stripped && !/^\s*[{\[]/.test(stripped)) {
+        contextLine = stripped.slice(0, 180).trim();
+      }
+    }
+    // Suppress contradictory "no actionable" note when recs were actually generated
+    if (recLines.length > 0 && /no actionable setup/i.test(contextLine)) {
+      contextLine = '';
     }
 
     const allParts = [
