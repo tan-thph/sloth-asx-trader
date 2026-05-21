@@ -5,8 +5,7 @@ Runs entirely on your machine — no subscriptions, no cloud fees beyond your ow
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)
 ![Flask](https://img.shields.io/badge/Flask-3.0-lightgrey?logo=flask)
-![Claude](https://img.shields.io/badge/Claude-Anthropic-orange)
-![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-purple)
+![Claude](https://img.shields.io/badge/Claude-Sonnet_4.6-orange)
 ![SQLite](https://img.shields.io/badge/SQLite-WAL-green)
 
 ---
@@ -48,22 +47,26 @@ python asx_server.py
 asx_trading.html          ← Single-page frontend (no framework)
 asx_trading.css           ← Stylesheet (CSS variables, dark/light)
 js/
-  config.js               ← API base URL, global constants
+  config.js               ← API base URL, global state definition
   init.js                 ← App boot, state hydration, server health check
   navigation.js           ← Page router (showPage / renderPage)
-  analysis.js             ← Claude API call + recommendation parser
-  api.js                  ← REST helpers (prices, news, signals, macro)
+  analysis.js             ← Claude API call, rec parser, confidence calibration
+  api.js                  ← REST helpers (prices, news, signals, macro, blobs)
   prices.js               ← yfinance price refresh + dividend fetch
   portfolio-helpers.js    ← FIFO parcel logic, buy/sell apply, P&L
+  reconcile.js            ← Journal → CGT parcel reconciliation (auto-repair)
   scheduler.js            ← In-browser auto-run scheduler (Sydney time)
   charts.js               ← Lightweight canvas chart helpers
   utils.js                ← Formatting, date helpers, toast notifications
+  day-trading-analysis.js ← Day/swing trade AI engine (BB+confluence strategy)
+  asx-universe.js         ← ASX20/50/100/200 ticker lists for Market Scanner
   pages/
-    dashboard.js          ← Portfolio summary, schedule timeline
-    portfolio.js          ← Holdings table, manual trade entry
+    dashboard.js          ← Portfolio summary, alert banners, schedule timeline
+    portfolio.js          ← Holdings table, manual trade entry, broker import
     macro.js              ← Morning macro brief + earnings calendar
-    recommendations.js    ← AI trade recs, execution workflow
-    signals.js            ← Live technical indicators (RSI/MACD/BB)
+    recommendations.js    ← AI trade recs, position sizer, execution workflow
+    day-trading.js        ← Day/swing trade scan UI + recommendations
+    signals.js            ← Live technical indicators (RSI/MACD/BB/OBV/MFI/VWAP)
     journal.js            ← Trade journal with P&L reconciliation
     performance.js        ← Analytics, equity curve, confidence calibration
     backtest.js           ← AI Replay + Technical strategy benchmarking
@@ -80,6 +83,7 @@ announcement_engine.py    ← ASX announcement scraper + LLM classifier
 announcement_routes.py    ← Blueprint: /api/announcements/*
 news_engine.py            ← RSS/filing scraper + LLM news classifier
 asx_trader.db             ← SQLite (portfolio, journal, news, announcements)
+ai_responses/             ← Saved raw AI response logs (debug)
 requirements.txt
 ```
 
@@ -100,7 +104,7 @@ requirements.txt
 - Auto-refresh live prices from **yfinance** for all holdings
 - Per-holding unrealised P&L, cost basis, current value, weight
 - Dividend data fetched automatically before every analysis run
-- Supports **merged view** (portfolio + broker import reconciliation)
+- **Broker import reconciliation** — import broker CSV export and merge with tracked holdings
 
 ---
 
@@ -115,35 +119,71 @@ requirements.txt
 ---
 
 ### 🤖 Trade Recommendations  *(core feature)*
-AI-powered buy/sell/trim recommendations using **Claude (Anthropic API)**:
+AI-powered buy/sell/trim recommendations using **Claude Sonnet 4.6** with **prompt caching**:
 
 - **Configurable tickers** — portfolio holdings + additional watchlist tickers
-- **Live signal data** sent to Claude: RSI, MACD, Bollinger Bands, moving averages, volume
+- **Live signal data** sent to Claude: RSI, MACD, Bollinger Bands, moving averages, OBV, MFI, VWAP, volume
 - **Portfolio risk context** automatically injected into every analysis prompt:
   - Composite Risk Score, weighted VaR, Sharpe ratio, Max Drawdown
   - Per-ticker ⚠HIGH-VAR and ⚠HIGH-DD flags for positions exceeding thresholds
   - Hard sizing rules: quantity reduced 25–50% when VaR < −3.5%; BUYs blocked at risk score > 80
+- **Prompt caching** — static system rules cached via Anthropic ephemeral cache; significantly reduces cost on repeat runs in the same session
 - **Market view textarea** — add your own commentary, themes, or constraints
 - **Saved views** — store up to 5 market views and restore with one click
+- **Position Sizer** — per-recommendation panel showing position value, portfolio weight, max loss, potential gain, and risk/reward ratio at the configured qty
 - **Execution workflow** per recommendation:
   - Adjust qty, price, and brokerage before marking executed
   - Automatically updates portfolio holdings, cash balance, CGT parcels, and trade journal on execution
   - Feedback field per rec — stored and included in the next analysis prompt
 - **Trade slot cap** — configurable max trades/day with a live remaining-slots badge
 - **Recommendation history** — filterable by ticker, action, status, outcome, date range, confidence
+- **AI response logging** — raw responses saved to `ai_responses/` for debugging; accessible via `/api/log/ai_response`
+
+---
+
+### 📈 Day / Swing Trade Scan  *(new)*
+Separate AI-powered scan optimised for **5–15 day swing trades** using an orthogonal confluence strategy:
+
+**Entry criteria**
+- **BB Primary** (required) — price reclaims lower Bollinger Band
+- **≥ 2 of 4 confirmations**: RSI < 35, Volume Z-Score spike, Fibonacci retracement zone, OBV divergence
+
+**Hard filters** (all must pass)
+- Minimum average daily volume (liquidity gate)
+- Price above SMA200 (no downtrends)
+- ADX trend strength check
+- No active catalyst or halt flag
+
+**UI**
+- Configurable **allocated capital** and **max risk % per trade**
+- Separate watchlist for day-trade-only tickers (won't pollute the main portfolio analysis)
+- Recommendation cards showing: signal confluence badges, entry zone, stop (2.5×ATR), target, risk/reward
+- Execute / Dismiss workflow with confirmation tracking
+- Integrated **Mini Market Scanner** — scans the ASX universe for day-trade setups directly from this page
 
 ---
 
 ### 📡 Live Signals (yfinance)
 Real-time technical indicator panel powered by **yfinance**:
+
+**Momentum & trend**
 - **RSI** (14) with overbought/oversold thresholds
 - **MACD** with signal line and histogram
 - **Bollinger Bands** (20, 2σ) — price position relative to bands
-- **Moving averages** — 20 MA, 50 MA, 200 MA with trend labels
-- **Volume** — vs 20-day average
-- **Signal summary** — composite bull/bear score across all indicators
-- **Signal Condition Rules** — 10 named rules (RSI oversold/overbought, MACD crossover, BB touch, ADX trend, volume spike, SMA position) evaluated live and grouped into Bullish / Bearish / Notable columns
-- Parallel fetch for all tickers using `ThreadPoolExecutor`
+- **Moving averages** — SMA20, SMA50, SMA200 with trend labels
+- **ADX** — trend strength
+
+**Volume & flow**
+- **OBV** (On-Balance Volume) trend: rising / falling
+- **MFI** (Money Flow Index, 14) — volume-weighted RSI; flags accumulation/distribution
+- **VWAP (20d)** — price vs rolling VWAP with above/below label
+- **Volume** — current vs 20-day average
+
+**Composite scoring**
+- **Signal Condition Rules** — 10 named rules (RSI oversold/overbought, MACD crossover, BB touch, ADX trend, volume spike, SMA positions, OBV/MFI extremes) evaluated live and grouped into Bullish / Bearish / Notable columns
+- **Bull/bear score** — composite across all indicators
+
+Parallel fetch for all tickers using `ThreadPoolExecutor`.
 
 ---
 
@@ -151,11 +191,12 @@ Real-time technical indicator panel powered by **yfinance**:
 - Full trade history with entry price, exit price, fees, realised P&L
 - Linked to recommendations (recId cross-reference)
 - Open/closed position tracking
+- **Auto-reconcile** (`reconcile.js`) — on load, repairs any BUY journal entries that are missing a CGT parcel link
 - Inline feedback notes
 
 ---
 
-### 📈 Performance Analytics
+### 📊 Performance Analytics
 - **Win rate**, total wins/losses, execution rate
 - **Portfolio Equity Curve** — 1-year NAV reconstruction vs VAS benchmark (canvas chart), showing total return, max drawdown, and benchmark return
 - **Confidence calibration chart** — are higher-confidence recs actually winning more?
@@ -163,13 +204,6 @@ Real-time technical indicator panel powered by **yfinance**:
 - **Dividend income** — annualised income and yield-on-cost from holdings
 - **Fee drag** — total brokerage paid
 - **Skipped rec analysis** — what did you leave on the table?
-
----
-
-### 📉 Portfolio Value History
-- Manual snapshot logging of portfolio value over time
-- Canvas line chart with date labels
-- Useful for tracking net worth trajectory without an API connection
 
 ---
 
@@ -224,7 +258,7 @@ Quantitative risk metrics computed from 90 days of yfinance price history:
 
 ---
 
-### 🔭 Market Scanner  *(new)*
+### 🔭 Market Scanner
 On-demand opportunity scanner across the **ASX20 / ASX50 / ASX100 / ASX200** universe:
 
 **How it works**
@@ -241,7 +275,7 @@ On-demand opportunity scanner across the **ASX20 / ASX50 / ASX100 / ASX200** uni
 - Universe selector (ASX20 / 50 / 100 / 200) and ADV filter
 - Live progress bar with stage label, updated via polling
 - Sortable results table with score bars, RSI, 5d/20d returns, distance from high
-- **Add to Watchlist** — pushes ticker into the analysis watchlist for inclusion in the next AI run and News Scanner
+- **Add to Watchlist** — pushes ticker into the analysis watchlist for the next AI run and News Scanner
 - **Run Signals** — adds ticker to watchlist and jumps to the Live Signals page pre-loaded for that ticker
 
 ---
@@ -276,20 +310,23 @@ Full announcement pipeline using the **Markit Digital API** (powers www2.asx.com
 - **Summary**: one-sentence AI summary
 - **Tags**: auto-generated keyword tags
 
-Supports three LLM backends — choose in Settings:
+Supports three LLM backends — choose in Settings with a **live model picker** that fetches available models from each provider:
+
 | Provider | Notes |
 |----------|-------|
 | **Ollama** (default) | Fully local, free. Recommended: `qwen2.5:1.5b` |
-| **Groq** | Cloud, free tier. Fast inference |
-| **Gemini** | Cloud, free tier |
+| **Groq** | Cloud, free tier. Dynamic model list fetched from Groq API |
+| **Gemini** | Cloud, free tier. Default: `gemini-2.0-flash-lite`. Live model picker fetches available Gemini models |
 | **Keyword only** | No LLM — fast heuristic fallback |
+
+All cloud providers implement **retry with exponential backoff** on rate-limit (429) responses.
 
 **UI features**
 - Live progress banner during sync (per-ticker progress bar, count of new items found)
 - Filter by ticker, type, sentiment, free-text search
 - Price-sensitive dot — highlighted directly from Markit's `isPriceSensitive` flag
 - Impact-coloured left border on cards (red = 8+, amber = 6+, blue = 4+)
-- **↺ Re-classify All** — re-runs LLM on all stored announcements (independent of News re-classify; both jobs are mutually exclusive)
+- **↺ Re-classify All** — re-runs LLM on all stored announcements
 - **PDF proxy** — `GET /api/announcements/{id}/pdf` fetches and streams the actual ASX PDF
 - **+ Add to Analysis** — pushes headline + summary into the market-view context field
 - Scheduled auto-sync at **10:30 AEST** and **15:00 AEST** on weekdays
@@ -306,7 +343,7 @@ Direct chat interface with Claude — send ad-hoc questions about your portfolio
 - **Brokerage fee** default (applied to all execution calculations)
 - **Max trades per day** cap
 - **Auto-scheduler** — configure window (start/end time) and interval; runs analysis automatically on weekdays during ASX hours
-- **LLM settings** for news + announcements (provider, model, API keys)
+- **LLM settings** for news + announcements (provider, model, API keys with live model pickers)
 - **Scheduler log** — timestamped history of automatic runs
 
 ---
@@ -315,11 +352,12 @@ Direct chat interface with Claude — send ad-hoc questions about your portfolio
 
 | Feature | Provider options |
 |---------|-----------------|
-| Trade recommendations + macro brief | **Claude** (Anthropic API key required) |
+| Trade recommendations + macro brief + AI chat | **Claude Sonnet 4.6** (Anthropic API key required) |
+| Day trade scan | **Claude Sonnet 4.6** (same key) |
 | News classification | Ollama · Groq · Gemini |
 | Announcement classification | Ollama · Groq · Gemini · Keyword |
 
-The app is designed to work with a **free Groq or Gemini API key** for news/announcements if you don't want to run Ollama locally.
+The app works with a **free Groq or Gemini API key** for news/announcements if you don't want to run Ollama locally.
 
 ---
 
@@ -327,11 +365,11 @@ The app is designed to work with a **free Groq or Gemini API key** for news/anno
 
 | Data | Source | Cost |
 |------|--------|------|
-| Live prices + dividends + indicators | yfinance | Free |
+| Live prices, dividends, indicators | yfinance | Free |
 | ASX announcements | Markit Digital API (via www2.asx.com.au) | Free |
 | News articles | RSS feeds + ASX filings | Free |
 | RBA cash rate | RBA website (scraped) | Free |
-| Trade analysis | Claude API (Anthropic) | Pay-per-use (~$0.08/run) |
+| Trade analysis + day trade scan | Claude API (Anthropic) | Pay-per-use (~$0.05–0.15/run) |
 
 ---
 
@@ -344,7 +382,7 @@ The app is designed to work with a **free Groq or Gemini API key** for news/anno
 - **PDF extraction**: pdfplumber (primary), PyMuPDF (fallback)
 - **News scraping**: feedparser, BeautifulSoup4, cloudscraper
 - **NLP dedup**: scikit-learn TF-IDF cosine similarity
-- **AI**: Anthropic Claude API, Ollama (local), Groq API, Gemini API
+- **AI**: Anthropic Claude API (with prompt caching), Ollama (local), Groq API, Gemini API
 
 ---
 
@@ -353,16 +391,16 @@ The app is designed to work with a **free Groq or Gemini API key** for news/anno
 - **State persistence**: all app state (portfolio, journal, recs, settings) is saved to the Flask backend's SQLite DB via `scheduleSave()` debounce on every mutation
 - **No framework**: the UI is a hand-rolled SPA — each page is a render function that returns an HTML string; navigation replaces `#main-content` innerHTML
 - **Stale render guard**: every async render function receives a `gen` token; if the user navigates away mid-fetch the result is discarded
+- **Prompt caching**: the static Claude system prompt is sent with `cache_control: ephemeral`; dynamic portfolio data goes in the user message only, keeping cache hit rates high across intraday re-runs
 - **Port**: backend defaults to `http://localhost:5000`
 
 ---
 
-## Roadmap / Known Limitations
+## Known Limitations
 
-- ASX PDF filenames are obfuscated by ASX — the app uses `displayAnnouncement.do` redirect to resolve them; some older records may still 404
+- ASX PDF filenames are obfuscated by ASX — the app uses `displayAnnouncement.do` redirect to resolve them; some older records may 404
 - Markit Digital API returns only the ~5 most recent announcements per company — sufficient for a 3-day lookback
 - yfinance data has a 15-minute delay and occasional gaps for smaller ASX stocks
-- The Claude API call for recommendations costs approximately $0.05–0.15 per run depending on portfolio size
 - Market Scanner fetches 90 days of data for up to 200 tickers — takes ~20–30 s on a good connection; not suitable for very slow or metered links
 
 ---
