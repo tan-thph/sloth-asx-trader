@@ -105,4 +105,12 @@ const state = {
       gemini_api_key: '',
     },
   },
+  dayTrading: {
+    recommendations: [],   // active day-trade setups from AI
+    analysisRunning: false,
+    lastSummary: null,     // {text, date, recCount}
+    allocatedCash: null,   // null = auto (20% of state.cash); user can override
+    riskPct: 1.5,          // max risk per trade as % of allocatedCash
+    extraTickers: [],      // watchlist tickers for day-trade scans only
+  },
 };

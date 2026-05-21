@@ -126,6 +126,7 @@ async function saveStateToDb() {
         macroData: state.macroData,
         macroDate: state.macroDate,
         analysisLastSummary: state.analysisLastSummary,
+        dayTrading: state.dayTrading,
       })
     });
   } catch(e) { /* silent — don't interrupt UX */ }
@@ -161,6 +162,11 @@ async function loadStateFromDb() {
     if (Array.isArray(data.recommendations)) {
       // Only restore pending recs — executed/skipped ones are already in recHistory
       state.recommendations = data.recommendations.filter(r => r.status === 'pending');
+    }
+    if (data.dayTrading != null) {
+      state.dayTrading = { ...state.dayTrading, ...data.dayTrading };
+      // Reset transient fields
+      state.dayTrading.analysisRunning = false;
     }
     return true;
   } catch(e) {

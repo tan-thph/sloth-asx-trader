@@ -2017,7 +2017,7 @@ def db_save():
         BLOB_KEYS = [
             'analysisConfig', 'macroData', 'macroDate', 'analysisLastSummary',
             'portfolioHistory', 'cgtParcels', 'cgtDisposals', 'cgtMethod', 'activityLog',
-            'recommendations', 'priceAlerts',
+            'recommendations', 'priceAlerts', 'dayTrading',
         ]
         for key in BLOB_KEYS:
             if key in data:
@@ -2127,6 +2127,7 @@ def db_load():
         "cgtMethod":            blobs.get("cgtMethod"),
         "activityLog":          blobs.get("activityLog"),
         "recommendations":      blobs.get("recommendations"),
+        "dayTrading":           blobs.get("dayTrading"),
     })
 
 
