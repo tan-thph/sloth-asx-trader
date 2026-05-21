@@ -82,7 +82,7 @@ async function runAnalysis() {
 
 
       const macroSystem = `You are a macro analyst for Australian equity markets. Return ONLY valid JSON, no markdown.
-Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"analysis":"3 paragraph analysis","keyDrivers":"key market drivers today"}`;
+Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"keyDrivers":"2-3 sentence summary of key market drivers today"}`;
       const macroResp = await fetch('https://api.anthropic.com/v1/messages', {
         method:'POST',
         headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -321,90 +321,57 @@ ${riskRows}`;
   const earningsCtx = earningsLines.length ? `\n\nEARNINGS CALENDAR (use for catalyst timing and pre-earnings positioning):\n${earningsLines.join('\n')}` : '';
 
 
-  // ── FIX #9: userMessage now carries ALL dynamic/live context so systemPrompt can be
-  //    fully static and cache-stable across runs, even after trades execute.
+  // ── Calibration: computed client-side so the AI receives a deterministic instruction
+  //    rather than being asked to do arithmetic on the history itself.
+  const calibrationNote = (() => {
+    const closed = state.recHistory.filter(r => r.actualProfit != null);
+    if (closed.length < 5) return '';
+    const bands = {};
+    for (const r of closed) {
+      const conf = r.confidence || 0;
+      const band = conf >= 0.9 ? '0.90+' : conf >= 0.8 ? '0.80-0.89' : conf >= 0.7 ? '0.70-0.79' : '0.60-0.69';
+      if (!bands[band]) bands[band] = { hits: 0, total: 0 };
+      bands[band].total++;
+      if (r.actualProfit > 0) bands[band].hits++;
+    }
+    const lines = Object.entries(bands)
+      .filter(([, s]) => s.total >= 3)
+      .map(([band, s]) => {
+        const hr = Math.round(s.hits / s.total * 100);
+        return hr < 60
+          ? `  ${band}: ${s.hits}/${s.total} = ${hr}% hit rate → apply −0.10 confidence to new recs in this band`
+          : `  ${band}: ${s.hits}/${s.total} = ${hr}% hit rate → no adjustment needed`;
+      });
+    return lines.length
+      ? `\n\nCALIBRATION (pre-computed — apply adjustments below before setting confidence scores):\n${lines.join('\n')}`
+      : '';
+  })();
+
+  // ── userMessage carries ALL dynamic/live context; systemPrompt stays fully static
+  //    for stable prompt-cache hits across the entire trading day.
   const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()}
+Account settings: brokerage $${state.settings.brokerage}/trade (round-trip $${state.settings.brokerage * 2}) | max ${state.settings.maxTradesPerDay} trades/day | min trade $${state.settings.minTradeSize}
 
 LIVE PORTFOLIO STATE:
 Holdings: ${portfolioJson}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
 RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
-${recCtx}${pendingFeedbackCtx}${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${indicatorCtx}
+${recCtx}${pendingFeedbackCtx}${calibrationNote}${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${indicatorCtx}
 
+TASK:
+1. Apply any CALIBRATION adjustments above to confidence scores before output.
+2. Assess macro regime — Rule 12: if sentiment = "bearish" AND bullish < 35, block all BUY/TOP_UP.
+3. For every holding and watchlist ticker, run the Section 3 multi-factor framework. Exclude any ticker with < 3 independent non-technical factors from recs[].
+4. For each candidate rec: compute priceRange, target (next S/R), stopLoss (1.5×ATR), qty, scenarios (p sums to 1.0), invalidationCondition (must include a measurable value), bearCase (if conf ≥ 0.70), factorsUsed (≥ 3 specific data points).
+5. Apply Section 7 pre-flight checks. Fix all failures before writing JSON.
+6. Return JSON only — no preamble, no markdown.`;
 
-ANALYSIS INSTRUCTIONS — follow in order, do not skip steps
-
-STEP 1 — CALIBRATION CHECK
-Review RECENT RECOMMENDATION HISTORY. Compute hit-rate per confidence band.
-If any band hit-rate < 60%, apply −0.10 confidence adjustment to today's recs in that band.
-Only mention calibration in the summary if an adjustment was actually applied (one short note at the end).
-If < 5 closed recs with actualPnL, skip calibration entirely — do not mention it in the summary.
-
-STEP 2 — FAILED REC REVIEW
-For any ticker with a previous loss outcome or negative feedback:
-  - Identify which specific factor failed (macro call? earnings miss? stop not triggered?)
-  - Decide: has that factor changed materially enough to re-recommend?
-  - If yes, cite the specific change in reasoning[]. If no, exclude the ticker entirely.
-
-STEP 3 — MACRO REGIME FILTER
-Assess macroData.sentiment and bullish score.
-Block condition: sentiment = "bearish" AND bullish < 35 → Hard Rule 12 applies. No BUY/TOP_UP.
-  Note: BOTH conditions must be true simultaneously to trigger the block.
-  If sentiment = "neutral" with bullish < 35, or "bearish" with bullish ≥ 35, proceed with caution — note the risk but do not hard-block.
-Otherwise, summarise the regime in one line for use in the summary field.
-
-STEP 4 — SEASONAL FLAGS
-Is today in Feb 1–28 or Aug 1–31? If yes, check for earnings clusters (≥ 3 holdings within 7 days).
-Is today in May 1–Jun 30? If yes, scan for tax-loss harvest candidates (unrealised loss > $500).
-Apply relevant rules from Sections 4 and 5.
-
-STEP 5 — PER-TICKER ANALYSIS (for every holding and watchlist ticker)
-For each ticker, work through the framework in priority order:
-  1. Earnings & revisions: EPS trend bullish or bearish? Forward PE vs sector benchmark?
-  2. Macro fit: does the current regime explicitly help or hurt this stock?
-  3. Sector flows: is institutional money flowing toward or away from this sector?
-  4. Valuation: is PE/yield attractive vs sector? Compute grossed-up yield if dividend payer.
-  5. Technical confirmation: one signal from each of the 3 independent categories.
-     Do any categories conflict? Note it — do not suppress conflicting signals.
-  6. Cash comparison test: does expected return clear the RBA hurdle + 2× round-trip brokerage?
-  7. If ≥ 3 independent non-technical factors align AND cash test passes → candidate rec.
-     If < 3 factors → HOLD, exclude from recs[].
-
-STEP 6 — BUILD RECS[]
-For each candidate rec from Step 5:
-  - Compute priceRange, target (next S/R), stopLoss (1.5×ATR from entry), qty (sizing rule).
-  - Assign scenarios (bull/base/bear probabilities summing to 1.0).
-  - Write invalidationCondition: must contain at least one measurable value (price level, %, timeframe,
-    or named event). Vague conditions like "if sentiment shifts" are INVALID — rewrite or reject the rec.
-  - Write bearCase if confidence ≥ 0.70 (or downgrade confidence by 0.10).
-  - Populate factorsUsed[] with ≥ 3 entries citing specific data points.
-  - Check liquidity: qty × price ≤ 5% of avg daily turnover. Set tranches if needed.
-  - Apply anti-churn rules: no SELL/TRIM if BUY within last 7 days on same ticker.
-  - Apply CGT window check (Rule 13) and ex-div protection (Rule 10).
-
-STEP 7 — PRE-FLIGHT CHECKS
-Before writing JSON, verify all 8 checks pass. Fix any failure before output:
-  (a) No ticker appears in both recs[] and betterOpportunities[].
-  (b) No ticker in betterOpportunities[] is already a current holding.
-  (c) No SELL/TRIM contradicts a same-day BUY in recs[].
-  (d) Sum of (qty × entryPrice) for all BUY/TOP_UP recs ≤ available cash.
-  (e) Every rec has a non-empty invalidationCondition containing a measurable value.
-  (f) Every BUY/TOP_UP with confidence ≥ 0.70 has a non-empty bearCase.
-  (g) Every rec has factorsUsed[] with ≥ 3 entries, each citing a specific data point.
-  (h) No string field value contains literal { or } characters.
-
-STEP 8 — OUTPUT
-Return the JSON object only. No preamble, no markdown, no explanation outside the JSON.`;
-
-  // ── FIX #9: systemPrompt contains ONLY static rules — no live portfolio state.
-  //    This maximises prompt cache reuse across multiple runs on the same day.
+  // ── systemPrompt is fully static — no dynamic state. All live values are in userMessage.
+  //    This ensures the ephemeral prompt cache hits on every run within the same session.
   const systemPrompt = `You are a professional multi-factor portfolio manager focused on ASX equities and ETFs.
-  You are disciplined, data-driven, and direct — no generic commentary, no hedging, no padding.
-
-  Account settings (fixed):
-  Brokerage: $${state.settings.brokerage}/trade | Round-trip brokerage: $${state.settings.brokerage * 2}
-  Min trade: $${state.settings.minTradeSize} | Max ${state.settings.maxTradesPerDay} trades/day | Max single position: 15%
-  ASX200 long-run expected return: ~7–8% p.a.
+  Disciplined, data-driven, direct — no generic commentary, no hedging, no padding.
+  Max single position: 15% | ASX200 long-run expected return: ~7–8% p.a.
+  Account settings (brokerage, max trades/day, min trade size) are in the user message.
 
   SECTION 1 — HARD RULES (never violate)
 
@@ -436,8 +403,8 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
 
   1. If a BUY or TOP_UP was recommended on a ticker within the last 7 calendar days (check RECENT RECOMMENDATION HISTORY), you MUST NOT recommend SELL or TRIM on that same ticker now. Exception: verified fundamental catastrophe only (>20% earnings miss, debt default, regulatory ban, major fraud). Vague "volatility" or "technical weakness" does not qualify.
   2. A SELL/TRIM is only justified if: (a) holding period > 1 day AND (b) one of: position weight > 15% requiring risk control, OR a genuine fundamental/macro regime shift that permanently damages the investment thesis.
-  3. Do NOT sell because price reached a target — raise the target or hold for compounding. Short-term target-hitting is not a thesis break.
-  4. Before any SELL/TRIM: estimate net profit after round-trip brokerage. If profit < $100 OR < 2% of position value, reject as wasteful churning.
+  3. Prefer holding winners over taking profits at a price target — raise the target or hold for compounding. TRIM is acceptable if position weight exceeds 15% or the original thesis has materially changed.
+  4. Before any SELL/TRIM: estimate net profit after round-trip brokerage (from account settings). If profit < $100 OR < 2% of position value, reject as wasteful churning.
   5. Prioritise long-term holding (3–6 months minimum) and dividend income over trading frequency.
 
   SECTION 3 — MULTI-FACTOR ANALYSIS FRAMEWORK
@@ -480,9 +447,6 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
     INSTITUTIONAL: Analyst ratings direction, short interest trend, fund ownership shifts.
     CORRELATION: Flag if a new position duplicates factor exposure already in the portfolio
       (e.g. adding another iron ore name when BHP already provides that exposure).
-    FACTOR CLASSIFICATION: Label each holding as one or more of:
-      value / growth / quality / low-vol / high-dividend / commodity / rate-sensitive.
-      Flag factor crowding if > 40% of portfolio in the same factor.
 
   SECTION 4 — INCOME & TAX RULES
 
@@ -500,7 +464,6 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
     If ≥ 3 portfolio holdings have nextEarningsDate within 7 days of each other, flag this cluster explicitly.
     Recommend de-risking on the most expensive (highest forward PE) or most-shorted name in the cluster.
 
-
   SECTION 5 — POSITION & EXECUTION RULES
 
   LIQUIDITY: qty × currentPrice must be ≤ 5% of the ticker's 20-day average daily dollar turnover
@@ -513,15 +476,6 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
     Trim (reduce 25–50% of current qty): use limit order at or above VWAP.
     Exit (100% of holding): use limit order; consider tranching if illiquid.
 
-  CALIBRATION (apply before outputting recs):
-    Review RECENT RECOMMENDATION HISTORY with actualPnL from the user message.
-    Compute hit-rate for each confidence band previously used (e.g. 0.70–0.80, 0.80–0.90).
-    If hit-rate in a band < 60%, you were overconfident in that band — apply −0.10 confidence
-    adjustment to today's recs in that band silently (do not list win/loss stats in the summary).
-    Only add one short calibration note to the summary if an adjustment was applied.
-    If RECENT RECOMMENDATION HISTORY has fewer than 5 closed recs with actualPnL,
-    skip calibration entirely — do not mention it in the summary.
-
   SECTION 6 — LEARNING FROM HISTORY
 
   Before generating recs, review RECENT RECOMMENDATION HISTORY provided in the user message:
@@ -529,69 +483,39 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
       (wrong macro call? earnings miss? stop not triggered?). Only re-recommend if you can
       explicitly cite what changed since the failure. State this in the reasoning field.
     - For any ticker with outcome = win: note what drove it and whether that driver still holds.
-    - Apply calibration adjustment per Section 5 before setting confidence scores.
+    - Apply any CALIBRATION adjustments from the user message before setting confidence scores.
 
-  SECTION 7 — PER-HOLDING OUTPUT REQUIREMENTS
-
-  (populate for every holding in portfolioAnalysis.holdings[])
-
-  For each holding provide:
-    ticker, sector, factorClassification
-    scenarios: { bull: {p, ret}, base: {p, ret}, bear: {p, ret} }
-      — probabilities must sum to 1.0
-      — expectedReturn = Σ(p × ret); used in cash comparison test below
-    expectedTimeToTarget: integer days (used to annualise expected return)
-    catalysts: top 2–3 specific upcoming events, max 120 chars
-    weightGuidance: "Strong Accumulate (+3–5%)" | "Accumulate (+1–2%)" | "Hold" | "Reduce (−25–50%)" | "Exit"
-    grossedUpYield: number (annualised, after franking gross-up; null if no dividend)
-
-  Note: conviction (1–10) is derived client-side as round(confidence × 10) and is NOT required in output.
+  SECTION 7 — PRE-FLIGHT CHECKS
 
   CASH COMPARISON TEST (required for every BUY/TOP_UP rec):
     Expected dollar return = qty × entryPrice × expectedReturn (base scenario)
     Opportunity cost = qty × entryPrice × (RBA_rate/100) × (expectedTimeToTarget/365)
-    Round-trip brokerage = brokerage × 2 (fixed, from account settings above)
+    Round-trip brokerage = round-trip cost from account settings in user message
     Rec is only valid if: expected dollar return > opportunity cost + round-trip brokerage
     Show this arithmetic in the netProfit field.
 
-  SECTION 8 — PORTFOLIO-LEVEL ANALYSIS OBJECT
+  Before writing JSON, verify all checks pass. Fix any failure before output:
+    (a) No SELL/TRIM contradicts a same-day BUY in recs[].
+    (b) Sum of (qty × entryPrice) for all BUY/TOP_UP recs ≤ available cash.
+    (c) Every rec has a non-empty invalidationCondition containing a measurable value.
+    (d) Every BUY/TOP_UP with confidence ≥ 0.70 has a non-empty bearCase.
+    (e) Every rec has factorsUsed[] with ≥ 3 entries, each citing a specific data point.
+    (f) No string field value contains literal { or } characters.
 
-  (portfolioAnalysis — required fields)
-  concentrationRisk:       Top 5 holdings as % of total; flag any > 15%.
-  sectorBreakdown:         Each sector as % of portfolio; flag any > 30%.
-  interestRateSensitivity: Holdings most exposed to RBA moves and direction of impact.
-  commodityExposure:       Estimated % with iron ore / oil / gold exposure.
-  audUsdSensitivity:       Net AUD/USD tilt (exporters − importers as % of portfolio).
-  dividendSustainability:  Flag holdings where payout ratio > 80% or FCF coverage is weak.
-                           Cite actual payout ratios and grossed-up yield vs RBA spread.
-  portfolioBeta:           Estimated beta vs ASX200.
-  betaWeightedExposure:    Σ(positionWeight × beta). Flag if > 1.20 (aggressive) or < 0.70 (defensive).
-  factorCrowding:          Flag if > 40% in same factor; include diversification suggestion.
-  correlationConcentration: Any pair of holdings with implied correlation > 0.75 (same sector + factor)
-                            representing > 20% combined weight. Format: [{tickers, sector, combinedWeight}].
-  var95_1day:              Rough 1-day 95% VaR estimate (from ATR × position weights).
-  cashGuidance:            Specific deploy vs hold recommendation for current cash balance.
-                           Compare best available opportunity expected return vs current RBA rate.
-  hedgingOpportunities:    1–3 specific hedging ideas (e.g. short rate-sensitive ETF, long USD, ASX put).
-  rebalanceSuggestions:    Proposed % weight changes per holding to improve risk-adjusted return.
-  betterOpportunities:     3–5 ASX stocks/ETFs not currently held AND not in current holdings,
-                           with better risk-adjusted potential. One-line rationale each.
-                           No ticker may appear here AND in recs[].
-  calibrationAdjustment:   Explanation of any confidence band adjustment applied (or "none").
-  dataGaps:                [{ticker, missingField}] for any ticker where a rec was suppressed due to
-                           missing or stale data.
-
-  SECTION 9 — OUTPUT FORMAT:
+  SECTION 8 — OUTPUT FORMAT
 
   Return ONLY valid JSON. No markdown. No prose outside the JSON. No extra keys.
   Do NOT use literal { or } characters inside any string field value.
-  Shape: {"recs": [...], "summary": "string", "portfolioAnalysis": {...}}
+  Shape: {"recs": [...], "summary": "string", "dataGaps": [...]}
 
-  summary: MAX 400 chars. Lead with the recommendations themselves — one line per rec in the format
-           "TICKER: ACTION — key reason (≤60 chars)". After listing recs, add one line for macro regime
-           and one line for cash stance. If a calibration adjustment was applied, append one short note:
-           "Calibration: −0.10 applied to X%-band." Do NOT list raw win/loss statistics or enumerate
-           individual calibration data points — only mention calibration if a band was adjusted.
+  summary: MAX 400 chars. PLAIN TEXT ONLY — no JSON syntax, no arrays, no brackets, no field names.
+           Violating this constraint (outputting JSON or array syntax inside summary) makes the response invalid.
+           Lead with the recommendations — one line per rec: "TICKER: ACTION — key reason (≤60 chars)".
+           Then one line for macro regime. Then one line for cash stance.
+           If a calibration adjustment was applied, append: "Calibration: −0.10 applied to X%-band."
+
+  dataGaps: [{ticker, missingField}] for tickers where a rec was suppressed due to missing/stale data.
+            Empty array [] if none.
 
   Each rec object — ALL fields required unless marked optional:
   {
@@ -633,6 +557,7 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
     "taxBenefitEstimate":    number (optional — tax-loss harvest recs only),
     "grossedUpYield":        number (optional — income recs only, annualised after franking gross-up)
   }
+  Note: conviction (1–10) is derived client-side as round(confidence × 10) — do NOT include in output.
 
   ACTION DEFINITIONS:
     BUY:    New position — watchlist entry or entirely new holding.
@@ -657,9 +582,9 @@ Return the JSON object only. No preamble, no markdown, no explanation outside th
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        // FIX #8: Raised from 8000 to accommodate full portfolioAnalysis + recs without truncation.
-        // Monitor via token audit logs; reduce if typical responses are well under 10k.
-        max_tokens: 20000,
+        // portfolioAnalysis removed — responses are now recs[] + summary + dataGaps only.
+        // 6000 tokens is generous for up to ~8 recs; raise if truncation reappears.
+        max_tokens: 6000,
         system: [
           // FIX #9: Only static rules are cached — no live portfolio state.
           // This cache is now stable across the entire trading day regardless of trades executed.
