@@ -308,7 +308,7 @@ function _annPageHTML(status) {
 
     <!-- LLM Settings panel — ABOVE filter/cards so user sees it first -->
     <details id="ann-settings-panel" style="margin-bottom:12px" ${state.announcements.settingsOpen ? 'open' : ''}
-      ontoggle="state.announcements.settingsOpen=this.open; if(this.open) { _maybeLoadOllamaModels(); const _p=(state.announcements.settings||{}).ann_llm_provider||'ollama'; if(_p==='groq') _loadGroqModels('ann-groq-model',(state.announcements.settings||{}).ann_groq_model||'llama-3.1-8b-instant'); }">
+      ontoggle="state.announcements.settingsOpen=this.open; if(this.open) { _maybeLoadOllamaModels(); const _p=(state.announcements.settings||{}).ann_llm_provider||'ollama'; if(_p==='groq') _loadGroqModels('ann-groq-model',(state.announcements.settings||{}).ann_groq_model||'llama-3.1-8b-instant'); if(_p==='gemini') _loadAnnGeminiModels(); }">
       <summary class="card" style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 16px;border-radius:var(--radius-md);font-size:13px;font-weight:600;color:var(--text-primary);user-select:none">
         <span>⚙</span>
         <span>LLM Settings</span>
@@ -534,7 +534,7 @@ function _annSettingsPanelHTML(status) {
   const groqKey   = cfg.groq_api_key    || '';
   const groqModel = cfg.ann_groq_model  || 'llama-3.1-8b-instant';
   const gemKey    = cfg.gemini_api_key  || '';
-  const gemModel  = cfg.gemini_model   || 'gemini-2.0-flash-lite';
+  const gemModel  = cfg.gemini_model   || 'gemini-3.5-flash';
 
   const inSt  = 'width:100%;box-sizing:border-box;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)';
   const lblSt = 'font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px';
@@ -635,16 +635,11 @@ function _annSettingsPanelHTML(status) {
           <input type="password" id="ann-gemini-key" value="${gemKey}" placeholder="AIza…" style="${inSt}">
         </div>
         <div>
-          <label style="${lblSt}">Model <span style="font-size:10px;color:var(--text-muted)">(flash-lite has higher free-tier rate limits)</span></label>
+          <label style="${lblSt}">Model
+            <span id="ann-gemini-model-status" style="font-size:10px;color:var(--text-muted);margin-left:6px"></span>
+          </label>
           <select id="ann-gemini-model" style="${inSt}">
-            ${[
-              'gemini-2.0-flash-lite',
-              'gemini-2.0-flash',
-              'gemini-2.5-flash',
-              'gemini-2.5-flash-lite',
-              'gemini-3.1-flash-lite',
-              'gemini-3.5-flash',
-            ].map(m => `<option value="${m}" ${gemModel===m?'selected':''}>${m}</option>`).join('')}
+            <option value="${gemModel}" selected>${gemModel}</option>
           </select>
         </div>
       </div>
@@ -922,7 +917,7 @@ async function saveAnnSettings() {
   const groqKey     = document.getElementById('ann-groq-key')?.value?.trim()     || '';
   const groqModel   = document.getElementById('ann-groq-model')?.value?.trim()   || 'llama-3.1-8b-instant';
   const geminiKey   = document.getElementById('ann-gemini-key')?.value?.trim()   || '';
-  const geminiModel = document.getElementById('ann-gemini-model')?.value?.trim() || 'gemini-2.0-flash-lite';
+  const geminiModel = document.getElementById('ann-gemini-model')?.value?.trim() || 'gemini-3.5-flash';
 
   // Use the SAME key names as state.announcements.settings and the backend DEFAULT_SETTINGS
   const payload = {
@@ -1107,6 +1102,7 @@ function toggleAnnProviderFields() {
     const savedModel = (state.announcements.settings || {}).ann_groq_model || 'llama-3.1-8b-instant';
     _loadGroqModels('ann-groq-model', savedModel);
   }
+  if (provider === 'gemini') _loadAnnGeminiModels();
 }
 
 // ── Load Groq models from backend ────────────────────────────
@@ -1124,6 +1120,30 @@ async function _loadGroqModels(selectId, savedModel) {
     }
   } catch {
     el.innerHTML = `<option value="${savedModel || 'llama-3.1-8b-instant'}" selected>${savedModel || 'llama-3.1-8b-instant'}</option>`;
+  }
+}
+
+// ── Load Gemini models from backend ──────────────────────────
+async function _loadAnnGeminiModels() {
+  const el     = document.getElementById('ann-gemini-model');
+  const status = document.getElementById('ann-gemini-model-status');
+  if (!el) return;
+  const saved = el.value || (state.announcements.settings || {}).gemini_model || 'gemini-3.5-flash';
+  if (status) status.textContent = 'loading…';
+  try {
+    const d = await fetch(`${API}/api/ann/gemini/models`).then(r => r.json());
+    if (d.models && d.models.length) {
+      el.innerHTML = d.models.map(m =>
+        `<option value="${m}" ${m === saved ? 'selected' : ''}>${m}</option>`
+      ).join('');
+      if (status) status.textContent = `${d.models.length} models`;
+    } else {
+      if (status) status.textContent = d.error || 'no models';
+      el.innerHTML = `<option value="${saved}" selected>${saved}</option>`;
+    }
+  } catch {
+    if (status) status.textContent = 'fetch failed';
+    el.innerHTML = `<option value="${saved}" selected>${saved}</option>`;
   }
 }
 

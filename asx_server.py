@@ -3122,6 +3122,41 @@ def google_models():
     return jsonify({"models": [m["name"] for m in models], "available": True})
 
 
+@app.route("/api/ann/gemini/models")
+def ann_gemini_models():
+    """Return available Gemini models using the announcements gemini_api_key."""
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT value FROM blob_store WHERE key='ann_settings'").fetchone()
+            api_key = json.loads(row["value"]).get("gemini_api_key", "") if row else ""
+    except Exception:
+        api_key = ""
+    if not api_key:
+        return jsonify({"models": [], "available": False, "error": "No Gemini API key saved"})
+    if _NE_OK:
+        llm = _ne.GoogleLLM(api_key=api_key)
+        models = llm.list_models()
+    else:
+        # Fallback: fetch directly without news_engine
+        try:
+            resp = requests.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                params={"key": api_key}, timeout=10,
+            )
+            models = [
+                {"name": m["name"].replace("models/", "")}
+                for m in (resp.json().get("models", []) if resp.ok else [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+                and "gemini" in m["name"].lower()
+            ]
+        except Exception:
+            models = []
+    if not models:
+        return jsonify({"models": [], "available": False, "error": "Could not fetch models — check API key"})
+    names = [m["name"].replace("models/", "") if isinstance(m, dict) else m.replace("models/", "") for m in models]
+    return jsonify({"models": names, "available": True})
+
+
 @app.route("/api/news/settings", methods=["GET", "POST"])
 def news_settings_route():
     """GET or update news scanner settings."""

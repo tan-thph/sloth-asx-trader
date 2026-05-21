@@ -1761,7 +1761,7 @@ def _classify_gemini(prompt: str, settings: Dict) -> Optional[Dict]:
     api_key = settings.get("gemini_api_key", "")
     if not api_key:
         return None
-    model = settings.get("gemini_model", "gemini-2.0-flash-lite")
+    model = settings.get("gemini_model", "gemini-3.5-flash")
     # free tier: ~15 RPM — retry once after back-off on 429
     for attempt in range(3):
         try:
