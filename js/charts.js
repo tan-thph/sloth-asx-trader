@@ -344,6 +344,266 @@ function drawSparkline(canvasId, data, color='#3b82f6') {
 }
 
 // ============================================================
+// CANDLESTICK / OHLCV CHART  (Technical Screener Sandbox)
+// ============================================================
+
+// _sma(arr, n) — simple moving average series, result[i] = null for i < n-1
+function _sma(arr, n) {
+  return arr.map((_, i) => {
+    if (i < n - 1) return null;
+    let s = 0; for (let j = i - n + 1; j <= i; j++) s += arr[j];
+    return s / n;
+  });
+}
+
+// _bbands(closes, n, mult) — {upper[], mid[], lower[]}
+function _bbands(closes, n = 20, mult = 2) {
+  const mid = _sma(closes, n);
+  const upper = [], lower = [];
+  closes.forEach((_, i) => {
+    if (i < n - 1) { upper.push(null); lower.push(null); return; }
+    const slice = closes.slice(i - n + 1, i + 1);
+    const mean = mid[i];
+    const std = Math.sqrt(slice.reduce((s, v) => s + (v - mean) ** 2, 0) / n);
+    upper.push(mean + mult * std);
+    lower.push(mean - mult * std);
+  });
+  return { upper, mid, lower };
+}
+
+/**
+ * drawCandleChart(canvasId, chartData, options)
+ *
+ * chartData: [{date, open, high, low, close, volume}, ...]
+ * options: {
+ *   mode: 'candle' | 'line',
+ *   showBB: bool,   showSMA50: bool,   showPivots: bool,
+ *   pivots: {r2, r1, pivot, s1, s2},
+ *   height: number (default 320),
+ * }
+ */
+function drawCandleChart(canvasId, chartData, options = {}) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !chartData || chartData.length < 2) return;
+
+  const {
+    mode      = 'candle',
+    showBB    = true,
+    showSMA50 = true,
+    showPivots = false,
+    pivots    = null,
+    height    = 320,
+  } = options;
+
+  const dpr = window.devicePixelRatio || 1;
+  const W   = canvas.offsetWidth || 700;
+  const H   = height;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const PAD_L = 8, PAD_R = 62, PAD_T = 12, PAD_B = 22;
+  const VOL_H = Math.round(H * 0.18);   // bottom strip for volume
+  const PRICE_H = H - PAD_T - VOL_H - PAD_B - 6;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const n      = chartData.length;
+  const closes = chartData.map(d => d.close);
+  const opens  = chartData.map(d => d.open);
+  const highs  = chartData.map(d => d.high);
+  const lows   = chartData.map(d => d.low);
+  const vols   = chartData.map(d => d.volume);
+
+  // Compute overlays
+  const sma20Series  = _sma(closes, 20);
+  const sma50Series  = showSMA50  ? _sma(closes, 50)          : null;
+  const bb           = showBB     ? _bbands(closes, 20, 2)     : null;
+
+  // Price range — include overlays
+  const allPriceVals = [...highs, ...lows];
+  if (bb)       { bb.upper.filter(Boolean).forEach(v => allPriceVals.push(v)); bb.lower.filter(Boolean).forEach(v => allPriceVals.push(v)); }
+  if (pivots && showPivots) { [pivots.r2, pivots.r1, pivots.pivot, pivots.s1, pivots.s2].filter(Boolean).forEach(v => allPriceVals.push(v)); }
+  const priceMin = Math.min(...allPriceVals);
+  const priceMax = Math.max(...allPriceVals);
+  const priceRange = priceMax - priceMin || 1;
+
+  const volMax = Math.max(...vols) || 1;
+
+  // Coordinate helpers
+  const chartX0 = PAD_L;
+  const chartX1 = W - PAD_R;
+  const chartW  = chartX1 - chartX0;
+
+  const priceY0 = PAD_T;
+  const priceY1 = PAD_T + PRICE_H;
+  const volY0   = priceY1 + 6;
+  const volY1   = volY0 + VOL_H;
+
+  const xAt  = i  => chartX0 + (i + 0.5) / n * chartW;
+  const pyAt = v  => priceY0 + (1 - (v - priceMin) / priceRange) * PRICE_H;
+  const vyAt = v  => volY1   - (v / volMax) * VOL_H;
+
+  // candleW — slightly narrower than slot
+  const slotW   = chartW / n;
+  const candleW = Math.max(1, Math.min(slotW * 0.7, 10));
+
+  // ── Grid lines ──────────────────────────────────────────────────────────
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  ctx.lineWidth   = 0.5;
+  const gridSteps = 5;
+  for (let g = 0; g <= gridSteps; g++) {
+    const y = priceY0 + (g / gridSteps) * PRICE_H;
+    ctx.beginPath(); ctx.moveTo(chartX0, y); ctx.lineTo(chartX1, y); ctx.stroke();
+  }
+
+  // ── Volume bars ──────────────────────────────────────────────────────────
+  chartData.forEach((d, i) => {
+    const x   = xAt(i);
+    const vh  = volY1 - vyAt(d.volume);
+    const up  = d.close >= d.open;
+    ctx.fillStyle = up ? 'rgba(22,163,74,0.35)' : 'rgba(220,38,38,0.35)';
+    ctx.fillRect(x - candleW / 2, vyAt(d.volume), candleW, vh);
+  });
+
+  // ── BB fill ──────────────────────────────────────────────────────────────
+  if (bb) {
+    ctx.beginPath();
+    let started = false;
+    bb.upper.forEach((v, i) => {
+      if (v == null) return;
+      const x = xAt(i), y = pyAt(v);
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    });
+    for (let i = n - 1; i >= 0; i--) {
+      const v = bb.lower[i];
+      if (v == null) continue;
+      ctx.lineTo(xAt(i), pyAt(v));
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(99,179,237,0.07)';
+    ctx.fill();
+
+    // BB lines
+    const drawSeries = (series, color, dash = []) => {
+      ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash(dash);
+      let s = false;
+      series.forEach((v, i) => {
+        if (v == null) return;
+        const x = xAt(i), y = pyAt(v);
+        if (!s) { ctx.moveTo(x, y); s = true; } else ctx.lineTo(x, y);
+      });
+      ctx.stroke(); ctx.setLineDash([]);
+    };
+    drawSeries(bb.upper, 'rgba(99,179,237,0.55)', [3, 3]);
+    drawSeries(bb.lower, 'rgba(99,179,237,0.55)', [3, 3]);
+  }
+
+  // ── SMA20 ────────────────────────────────────────────────────────────────
+  {
+    ctx.beginPath(); ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.2; let s = false;
+    sma20Series.forEach((v, i) => {
+      if (v == null) return;
+      const x = xAt(i), y = pyAt(v);
+      if (!s) { ctx.moveTo(x, y); s = true; } else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  // ── SMA50 ────────────────────────────────────────────────────────────────
+  if (sma50Series) {
+    ctx.beginPath(); ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = 1.2; let s = false;
+    sma50Series.forEach((v, i) => {
+      if (v == null) return;
+      const x = xAt(i), y = pyAt(v);
+      if (!s) { ctx.moveTo(x, y); s = true; } else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  // ── Pivot lines ──────────────────────────────────────────────────────────
+  if (pivots && showPivots) {
+    const pvtLines = [
+      { v: pivots.r2, color: '#f87171', label: 'R2' },
+      { v: pivots.r1, color: '#fca5a5', label: 'R1' },
+      { v: pivots.pivot, color: '#94a3b8', label: 'P' },
+      { v: pivots.s1, color: '#86efac', label: 'S1' },
+      { v: pivots.s2, color: '#4ade80', label: 'S2' },
+    ];
+    pvtLines.forEach(({ v, color, label }) => {
+      if (!v || v < priceMin * 0.95 || v > priceMax * 1.05) return;
+      const y = pyAt(v);
+      ctx.beginPath(); ctx.strokeStyle = color + '99'; ctx.lineWidth = 0.8;
+      ctx.setLineDash([4, 4]); ctx.moveTo(chartX0, y); ctx.lineTo(chartX1, y); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = color; ctx.font = '9px sans-serif'; ctx.textAlign = 'right';
+      ctx.fillText(`${label} $${v.toFixed(2)}`, chartX1 + PAD_R - 2, y + 3);
+    });
+    ctx.textAlign = 'left';
+  }
+
+  // ── Candles or line ──────────────────────────────────────────────────────
+  if (mode === 'line') {
+    ctx.beginPath(); ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 1.5;
+    closes.forEach((v, i) => {
+      const x = xAt(i), y = pyAt(v);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  } else {
+    chartData.forEach((d, i) => {
+      const x    = xAt(i);
+      const up   = d.close >= d.open;
+      const col  = up ? '#16a34a' : '#dc2626';
+      const bodyTop    = pyAt(Math.max(d.open, d.close));
+      const bodyBottom = pyAt(Math.min(d.open, d.close));
+      const bodyH = Math.max(bodyBottom - bodyTop, 1);
+
+      // Wick
+      ctx.strokeStyle = col; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, pyAt(d.high));
+      ctx.lineTo(x, bodyTop);
+      ctx.moveTo(x, bodyBottom);
+      ctx.lineTo(x, pyAt(d.low));
+      ctx.stroke();
+
+      // Body
+      ctx.fillStyle = up ? '#16a34a' : '#dc2626';
+      ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH);
+
+      // Outline for doji / tiny bodies
+      if (bodyH <= 1) {
+        ctx.strokeStyle = col; ctx.lineWidth = 0.5;
+        ctx.strokeRect(x - candleW / 2, bodyTop, candleW, bodyH || 1);
+      }
+    });
+  }
+
+  // ── Y-axis price labels (right side) ─────────────────────────────────────
+  ctx.fillStyle = 'rgba(148,163,184,0.8)';
+  ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+  for (let g = 0; g <= gridSteps; g++) {
+    const v = priceMin + (1 - g / gridSteps) * priceRange;
+    const y = priceY0 + (g / gridSteps) * PRICE_H;
+    ctx.fillText('$' + v.toFixed(v < 10 ? 3 : 2), chartX1 + 4, y + 3);
+  }
+
+  // ── X-axis date labels ───────────────────────────────────────────────────
+  ctx.fillStyle = 'rgba(148,163,184,0.7)';
+  ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+  const labelEvery = Math.max(1, Math.round(n / 6));
+  chartData.forEach((d, i) => {
+    if (i % labelEvery !== 0 && i !== n - 1) return;
+    const x = xAt(i);
+    const label = d.date ? d.date.slice(5) : '';  // MM-DD
+    ctx.fillText(label, x, H - PAD_B + 14);
+  });
+}
+
+// ============================================================
 // PRICE CHART
 // ============================================================
 function drawPriceChart(canvasId, chartData, sma20, sma50, bbUpper, bbLower) {

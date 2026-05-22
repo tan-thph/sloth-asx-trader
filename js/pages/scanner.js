@@ -6,6 +6,15 @@ let _scanPollTimer    = null;
 let _scannerSort      = { col: 'score', dir: 'desc' };
 let _scannerUniverse  = 'asx200';
 let _scannerSector    = null;   // null = all sectors; string = filter to one sector
+let _scannerTab       = 'opportunities';   // 'opportunities' | 'screener'
+
+// Technical Screener Sandbox state
+let _screenerData     = null;   // last fetched analyse result
+let _screenerTicker   = '';
+let _screenerLoading  = false;
+let _screenerError    = '';
+let _screenerChartMode = 'candle';
+let _screenerOverlays = { bb: true, sma50: true, pivots: false };
 
 async function renderScannerPage(gen) {
   const el = document.getElementById('main-content');
@@ -33,7 +42,20 @@ function _buildScannerHTML(s) {
   const pct      = s.total > 0 ? Math.round(s.progress / s.total * 100) : 0;
   const universeLabels = { asx20:'ASX 20', asx50:'ASX 50', asx100:'ASX 100', asx200:'ASX 200' };
 
-  return `
+  // Tab nav
+  const tabNav = `
+  <div style="display:flex;gap:2px;margin-bottom:14px;border-bottom:1px solid var(--border-light);padding-bottom:0">
+    ${[['opportunities','◈ Opportunities'],['screener','⊙ Technical Screener']].map(([id,label]) => `
+      <button onclick="scannerSetTab('${id}')" style="padding:7px 16px;font-size:13px;font-weight:600;border:none;
+        border-bottom:2px solid ${_scannerTab===id?'var(--accent-primary)':'transparent'};
+        background:transparent;cursor:pointer;
+        color:${_scannerTab===id?'var(--accent-primary)':'var(--text-muted)'};
+        transition:color 0.15s,border-color 0.15s">${label}</button>`).join('')}
+  </div>`;
+
+  if (_scannerTab === 'screener') return tabNav + _buildScreenerHTML();
+
+  return tabNav + `
   <!-- Config bar -->
   <div class="card" style="margin-bottom:14px;padding:12px 16px">
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
@@ -354,6 +376,281 @@ function _buildSectorAllTickers(allResults, sector) {
       No score threshold, diversification cap, or opportunity rules applied.
     </p>
   </div>`;
+}
+
+// ── Technical Screener Sandbox ────────────────────────────────────────────────
+
+function _buildScreenerHTML() {
+  const d = _screenerData;
+
+  // Search bar
+  const searchBar = `
+  <div class="card" style="margin-bottom:14px;padding:12px 16px">
+    <div style="font-size:13px;font-weight:600;margin-bottom:10px">Technical Screener Sandbox</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">
+      Type standard ASX ticker codes (e.g. CBA, BHP, WTC, RIO, TLS) to run technical indicator scans on 1-year historical prices from Yahoo Finance.
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div style="position:relative;flex:0 0 200px">
+        <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text-muted);font-size:13px">⌕</span>
+        <input id="screener-input" type="text" placeholder="CBA"
+          value="${_screenerTicker}"
+          style="width:100%;padding:7px 10px 7px 30px;font-size:13px;font-weight:600;text-transform:uppercase;
+                 border:1px solid var(--border-medium);border-radius:var(--radius-sm);
+                 background:var(--bg-secondary);color:var(--text-primary);box-sizing:border-box"
+          onkeydown="if(event.key==='Enter')runScreener()"
+          oninput="this.value=this.value.toUpperCase()">
+      </div>
+      <button class="btn btn-primary" onclick="runScreener()" ${_screenerLoading?'disabled':''} style="padding:7px 18px">
+        ${_screenerLoading ? '⟳ Fetching…' : 'Fetch Details'}
+      </button>
+      ${_screenerError ? `<span style="font-size:11px;color:#ef4444">${_screenerError}</span>` : ''}
+    </div>
+  </div>`;
+
+  if (!d) return searchBar;
+
+  const f = d.fundamentals || {};
+  const sr = d.support_resistance || {};
+  const cd = d.chart_data || [];
+
+  // OHLCV header bar
+  const lastBar = cd[cd.length - 1] || {};
+  const chgPct = d.return_1d != null ? d.return_1d : 0;
+  const chgCol = chgPct >= 0 ? '#16a34a' : '#dc2626';
+
+  const ohlcvHeader = `
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap">
+    <div>
+      <span style="font-size:16px;font-weight:700;color:var(--text-primary)">${d.ticker}.AX Technical Desk</span>
+      <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${lastBar.date || ''}</span>
+    </div>
+    <div style="display:flex;gap:12px;font-size:12px;color:var(--text-muted)">
+      <span>O: <strong style="color:var(--text-primary)">$${fmt(lastBar.open,2)}</strong></span>
+      <span>H: <strong style="color:#16a34a">$${fmt(lastBar.high,2)}</strong></span>
+      <span>L: <strong style="color:#dc2626">$${fmt(lastBar.low,2)}</strong></span>
+      <span>C: <strong style="color:${chgCol}">$${fmt(lastBar.close,2)}</strong></span>
+      <span>V: <strong style="color:var(--text-secondary)">${lastBar.volume ? Math.round(lastBar.volume/1000)+'k' : 'n/a'}</strong></span>
+    </div>
+  </div>`;
+
+  // Chart toggles
+  const overlayBtn = (key, label, active) =>
+    `<button onclick="screenerToggleOverlay('${key}')" style="padding:3px 10px;font-size:11px;font-weight:600;
+      border-radius:4px;border:1px solid ${active?'var(--accent-primary)':'var(--border-medium)'};
+      background:${active?'var(--accent-primary)':'transparent'};
+      color:${active?'#fff':'var(--text-muted)'};cursor:pointer">${label}</button>`;
+
+  const modeBtn = (m, label) =>
+    `<button onclick="screenerSetChartMode('${m}')" style="padding:3px 10px;font-size:11px;font-weight:600;
+      border-radius:4px;border:1px solid ${_screenerChartMode===m?'var(--accent-primary)':'var(--border-medium)'};
+      background:${_screenerChartMode===m?'var(--accent-primary)':'transparent'};
+      color:${_screenerChartMode===m?'#fff':'var(--text-muted)'};cursor:pointer">${label}</button>`;
+
+  const chartCard = `
+  <div class="card" style="margin-bottom:14px">
+    ${ohlcvHeader}
+    <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+      ${modeBtn('candle','Candle')}${modeBtn('line','Line')}
+      ${overlayBtn('bb',   'BB (20, 2)', _screenerOverlays.bb)}
+      ${overlayBtn('sma50','SMA50',      _screenerOverlays.sma50)}
+      ${overlayBtn('pivots','Pivots',    _screenerOverlays.pivots)}
+    </div>
+    <canvas id="screener-chart" style="width:100%;display:block"></canvas>
+  </div>`;
+
+  // ── Score card computation (mirrors indicators.py _score_ticker logic) ──
+  const cp      = d.current_price || 0;
+  const sma20   = d.sma_20 || cp;
+  const sma50v  = d.sma_50 || cp;
+  const rsi14   = d.rsi_14 || 50;
+  const volRatio = d.volume_ratio || 1;
+  const ret5d   = d.return_5d || 0;
+  const pctHigh = f.pct_from_52w_high || 0;
+
+  // Trend (0-30): price vs SMA20 + price vs SMA50 + SMA rising (proxy: price > SMA20)
+  const trendPts = (cp > sma20 ? 10 : 0) + (cp > sma50v ? 10 : 0) + (d.trend_direction === 'bullish' ? 10 : 0);
+  // Pullback (0-30): RSI zone + position from high
+  let rsiPts = 3;
+  if      (35 <= rsi14 && rsi14 <= 55) rsiPts = 15;
+  else if (30 <= rsi14 && rsi14 <  35) rsiPts = 12;
+  else if (55 <  rsi14 && rsi14 <= 65) rsiPts = 10;
+  else if (rsi14 < 30)                 rsiPts = 5;
+  let posPts = 4;
+  if      (pctHigh >= -20 && pctHigh <= -5)  posPts = 15;
+  else if (pctHigh >  -5  && pctHigh <= 0)   posPts = 9;
+  else if (pctHigh >= -30 && pctHigh <  -20) posPts = 10;
+  const pullbackPts = rsiPts + posPts;
+  // Volume (0-20)
+  let volPts = 5;
+  if      (volRatio > 1.5) volPts = 20;
+  else if (volRatio > 1.1) volPts = 15;
+  else if (volRatio > 0.8) volPts = 10;
+  // Momentum (0-20)
+  let momPts = 5;
+  if      (ret5d > 3)  momPts = 20;
+  else if (ret5d > 0)  momPts = 15;
+  else if (ret5d > -2) momPts = 10;
+
+  const totalScore = trendPts + pullbackPts + volPts + momPts;
+  const scoreColor = totalScore >= 70 ? '#16a34a' : totalScore >= 50 ? '#d97706' : '#94a3b8';
+
+  const scoreRow = (label, pts, maxPts) => {
+    const col = (pts / maxPts) >= 0.7 ? '#16a34a' : (pts / maxPts) >= 0.4 ? '#d97706' : '#94a3b8';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <span style="font-size:12px;color:var(--text-muted)">${label}</span>
+      <div style="display:flex;align-items:center;gap:6px">
+        <div style="width:80px;height:4px;background:var(--border-light);border-radius:2px;overflow:hidden">
+          <div style="width:${Math.round(pts/maxPts*100)}%;height:100%;background:${col};border-radius:2px"></div>
+        </div>
+        <span style="font-size:12px;font-weight:600;color:${col};min-width:42px;text-align:right">${pts} / ${maxPts}</span>
+      </div>
+    </div>`;
+  };
+
+  const scoreCard = `
+  <div class="card" style="flex:1;min-width:220px">
+    <div style="font-size:11px;font-weight:700;color:var(--accent-primary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">Confluence Score Card</div>
+    <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:14px">
+      <span style="font-size:28px;font-weight:800;color:${scoreColor}">${totalScore}</span>
+      <span style="font-size:14px;color:var(--text-muted)">/&nbsp;100</span>
+      <span style="margin-left:8px;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600;
+        background:${scoreColor}22;color:${scoreColor}">
+        ${totalScore >= 70 ? 'Strong' : totalScore >= 50 ? 'Moderate' : 'Weak'}
+      </span>
+    </div>
+    ${scoreRow('Trend setup',          trendPts,   30)}
+    ${scoreRow('Pullback zone',        pullbackPts,30)}
+    ${scoreRow('Volume accumulation',  volPts,     20)}
+    ${scoreRow('Short mom score',      momPts,     20)}
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light);display:flex;justify-content:space-between">
+      <span style="font-size:11px;color:var(--text-muted)">90d off high drawdown</span>
+      <span style="font-size:12px;font-weight:600;color:${pctHigh >= -10 ? '#d97706' : pctHigh >= -20 ? '#16a34a' : '#94a3b8'}">
+        ${pctHigh >= 0 ? '+' : ''}${fmt(pctHigh,1)}%
+      </span>
+    </div>
+  </div>`;
+
+  // ── Calculated Indicator Readings ──
+  const iRow = (label, val, color) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px">
+       <span style="font-size:12px;color:var(--text-muted)">${label}</span>
+       <span style="font-size:13px;font-weight:600;color:${color||'var(--text-primary)'};">${val}</span>
+     </div>`;
+
+  const adxLabel = d.adx ? (d.adx >= 40 ? 'strong' : d.adx >= 25 ? 'trending' : 'weak') : '';
+  const rsiColor = rsi14 < 35 ? '#16a34a' : rsi14 > 65 ? '#dc2626' : '#d97706';
+  const adxColor = d.adx >= 40 ? '#16a34a' : d.adx >= 25 ? '#d97706' : '#94a3b8';
+  const bbPctPct = d.bb_pct_b != null ? Math.round(d.bb_pct_b * 100) + '%' : 'n/a';
+
+  const indicatorsCard = `
+  <div class="card" style="flex:1;min-width:220px">
+    <div style="font-size:11px;font-weight:700;color:var(--accent-primary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">Calculated Indicator Readings</div>
+    ${iRow('RSI (14-day):', d.rsi_14 != null ? fmt(d.rsi_14,1) : 'n/a', rsiColor)}
+    ${iRow('ADX (14-day):', d.adx != null ? fmt(d.adx,1) + (adxLabel ? ` <span style="font-size:10px;color:${adxColor}">(${adxLabel})</span>` : '') : 'n/a', adxColor)}
+    ${iRow('BB %B envelope:', bbPctPct, '#94a3b8')}
+    ${iRow('ATR volatility (%):', d.atr_14 != null ? `$${fmt(d.atr_14,3)} (${fmt(d.atr_pct,1)}%)` : 'n/a', '#94a3b8')}
+    ${iRow('Volume Z-Score:', d.volume_z_score != null ? fmt(d.volume_z_score,2) : 'n/a',
+           d.volume_z_score > 1.5 ? '#16a34a' : d.volume_z_score > 0.5 ? '#d97706' : '#94a3b8')}
+    ${iRow('20d ADV liquidity:', d.adv_20 != null ? '$' + fmt(d.adv_20/1e6,1) + 'M AUD' : 'n/a', '#94a3b8')}
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light);display:flex;justify-content:space-between">
+      <span style="font-size:11px;color:var(--text-muted)">Composite signal</span>
+      <span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:8px;
+        background:${d.composite_signal==='BUY'?'#14532d':d.composite_signal==='SELL'?'#450a0a':'#1e293b'};
+        color:${d.composite_signal==='BUY'?'#86efac':d.composite_signal==='SELL'?'#fca5a5':'#94a3b8'}">
+        ${d.composite_signal || 'NEUTRAL'}
+      </span>
+    </div>
+  </div>`;
+
+  // ── Support / Resistance Pivots ──
+  const pivRow = (label, val, color) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px">
+       <span style="font-size:12px;color:var(--text-muted)">${label}</span>
+       <span style="font-size:13px;font-weight:600;color:${color}">$${val != null ? fmt(val,2) : 'n/a'}</span>
+     </div>`;
+
+  const pivotsCard = `
+  <div class="card" style="flex:1;min-width:200px">
+    <div style="font-size:11px;font-weight:700;color:var(--accent-primary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">Support / Resistance Pivots</div>
+    ${pivRow('Resistance R2:', sr.r2,    '#f87171')}
+    ${pivRow('Resistance R1:', sr.r1,    '#fca5a5')}
+    ${pivRow('Pivot line:',    sr.pivot, '#94a3b8')}
+    ${pivRow('Support S1:',    sr.s1,    '#4ade80')}
+    ${pivRow('Support S2:',    sr.s2,    '#16a34a')}
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light);display:flex;justify-content:space-between">
+      <span style="font-size:11px;color:var(--text-muted)">Analyst target</span>
+      <span style="font-size:12px;font-weight:600;color:var(--text-primary)">
+        ${f.analyst_target ? '$' + fmt(f.analyst_target, 2) : 'n/a'}
+        ${f.analyst_recommendation ? `<span style="font-size:10px;color:var(--text-muted);margin-left:4px">(${f.analyst_recommendation})</span>` : ''}
+      </span>
+    </div>
+  </div>`;
+
+  return searchBar + chartCard + `
+  <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">
+    ${scoreCard}${indicatorsCard}${pivotsCard}
+  </div>`;
+}
+
+// Controls
+function scannerSetTab(tab) {
+  _scannerTab = tab;
+  renderPage();
+}
+
+function screenerSetChartMode(mode) {
+  _screenerChartMode = mode;
+  renderPage();
+  setTimeout(() => _drawScreenerChart(), 60);
+}
+
+function screenerToggleOverlay(key) {
+  _screenerOverlays[key] = !_screenerOverlays[key];
+  renderPage();
+  setTimeout(() => _drawScreenerChart(), 60);
+}
+
+function _drawScreenerChart() {
+  if (!_screenerData?.chart_data?.length) return;
+  drawCandleChart('screener-chart', _screenerData.chart_data, {
+    mode:       _screenerChartMode,
+    showBB:     _screenerOverlays.bb,
+    showSMA50:  _screenerOverlays.sma50,
+    showPivots: _screenerOverlays.pivots,
+    pivots:     _screenerData.support_resistance,
+    height:     320,
+  });
+}
+
+async function runScreener() {
+  const input = document.getElementById('screener-input');
+  const ticker = (input?.value || _screenerTicker).trim().toUpperCase().replace('.AX','');
+  if (!ticker) { _screenerError = 'Enter a ticker'; renderPage(); return; }
+  if (!state.serverOk) { _screenerError = 'Backend not running'; renderPage(); return; }
+
+  _screenerTicker = ticker;
+  _screenerLoading = true;
+  _screenerError = '';
+  _screenerData = null;
+  renderPage();
+
+  try {
+    const r = await fetch(`${API}/api/analyse/${ticker}`);
+    if (!r.ok) { throw new Error(`${r.status} ${r.statusText}`); }
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    if (!d.chart_data?.length) throw new Error('No chart data returned');
+    _screenerData = d;
+    _screenerLoading = false;
+    _screenerError = '';
+    renderPage();
+    setTimeout(() => _drawScreenerChart(), 80);
+  } catch (e) {
+    _screenerLoading = false;
+    _screenerError = `⚠ ${e.message}`;
+    renderPage();
+  }
 }
 
 // ── Controls ──────────────────────────────────────────────────────────────────
