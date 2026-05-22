@@ -112,6 +112,28 @@ const _REC_BUSINESS_RULES = [
     },
     message: r => `rrRatio ${r.rrRatio} < 2.0 minimum for ${r.action}`,
   },
+  // Anti-churn: SELL/TRIM within 7 days of a BUY/TOP_UP requires a catastrophe flag in factorsUsed[]
+  {
+    id: 'anti-churn-flip',
+    check: r => {
+      if (r.action !== 'SELL' && r.action !== 'TRIM') return true;
+      const recHistory = (state.recHistory || []);
+      const sevenDaysAgo = Date.now() - 7 * 24 * 3600 * 1000;
+      const recentBuy = recHistory.find(h => {
+        if (h.ticker !== r.ticker) return false;
+        if (h.action !== 'BUY' && h.action !== 'TOP_UP') return false;
+        const ts = h.timestamp ? new Date(h.timestamp).getTime() : 0;
+        return ts > sevenDaysAgo;
+      });
+      if (!recentBuy) return true;  // no recent buy — flip is fine
+      // There WAS a recent buy — require catastrophe keyword in factorsUsed[]
+      const factors = (r.factorsUsed || []).join(' ').toLowerCase();
+      const hasCatastrophe = ['earnings miss', 'debt default', 'regulatory ban',
+        'enforcement action', 'accounting fraud', 'covenant breach'].some(kw => factors.includes(kw));
+      return hasCatastrophe;
+    },
+    message: r => `anti-churn: SELL/TRIM on ${r.ticker} within 7 days of BUY/TOP_UP — no catastrophe keyword found in factorsUsed[]. Omit this rec or add explicit catastrophe evidence.`,
+  },
 ];
 
 // validateRec — returns { valid, errors[], fixed }
