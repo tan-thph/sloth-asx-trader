@@ -434,15 +434,18 @@ function _buildScreenerHTML() {
     </div>
   </div>`;
 
-  // Chart toggles
+  // Chart toggles — buttons have IDs so screenerSetChartMode / screenerToggleOverlay
+  // can update them in-place without calling renderPage() (which would destroy the canvas).
   const overlayBtn = (key, label, active) =>
-    `<button onclick="screenerToggleOverlay('${key}')" style="padding:3px 10px;font-size:11px;font-weight:600;
+    `<button id="screener-ov-${key}" onclick="screenerToggleOverlay('${key}')"
+      style="padding:3px 10px;font-size:11px;font-weight:600;
       border-radius:4px;border:1px solid ${active?'var(--accent-primary)':'var(--border-medium)'};
       background:${active?'var(--accent-primary)':'transparent'};
       color:${active?'#fff':'var(--text-muted)'};cursor:pointer">${label}</button>`;
 
   const modeBtn = (m, label) =>
-    `<button onclick="screenerSetChartMode('${m}')" style="padding:3px 10px;font-size:11px;font-weight:600;
+    `<button id="screener-mode-${m}" onclick="screenerSetChartMode('${m}')"
+      style="padding:3px 10px;font-size:11px;font-weight:600;
       border-radius:4px;border:1px solid ${_screenerChartMode===m?'var(--accent-primary)':'var(--border-medium)'};
       background:${_screenerChartMode===m?'var(--accent-primary)':'transparent'};
       color:${_screenerChartMode===m?'#fff':'var(--text-muted)'};cursor:pointer">${label}</button>`;
@@ -601,14 +604,35 @@ function scannerSetTab(tab) {
 
 function screenerSetChartMode(mode) {
   _screenerChartMode = mode;
-  renderPage();
-  setTimeout(() => _drawScreenerChart(), 60);
+  _updateScreenerButtons();   // update active styles in-place — no DOM rebuild
+  _drawScreenerChart();       // redraw canvas immediately (offsetWidth is already valid)
 }
 
 function screenerToggleOverlay(key) {
   _screenerOverlays[key] = !_screenerOverlays[key];
-  renderPage();
-  setTimeout(() => _drawScreenerChart(), 60);
+  _updateScreenerButtons();
+  _drawScreenerChart();
+}
+
+// _updateScreenerButtons — updates button active/inactive styles without touching the DOM tree.
+// Called instead of renderPage() so the canvas element (and its size) is preserved.
+function _updateScreenerButtons() {
+  ['candle', 'line'].forEach(m => {
+    const btn = document.getElementById(`screener-mode-${m}`);
+    if (!btn) return;
+    const active = _screenerChartMode === m;
+    btn.style.borderColor = active ? 'var(--accent-primary)' : 'var(--border-medium)';
+    btn.style.background  = active ? 'var(--accent-primary)' : 'transparent';
+    btn.style.color       = active ? '#fff' : 'var(--text-muted)';
+  });
+  ['bb', 'sma50', 'pivots'].forEach(key => {
+    const btn = document.getElementById(`screener-ov-${key}`);
+    if (!btn) return;
+    const active = _screenerOverlays[key];
+    btn.style.borderColor = active ? 'var(--accent-primary)' : 'var(--border-medium)';
+    btn.style.background  = active ? 'var(--accent-primary)' : 'transparent';
+    btn.style.color       = active ? '#fff' : 'var(--text-muted)';
+  });
 }
 
 function _drawScreenerChart() {
