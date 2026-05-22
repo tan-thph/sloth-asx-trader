@@ -14,7 +14,8 @@ let _screenerTicker   = '';
 let _screenerLoading  = false;
 let _screenerError    = '';
 let _screenerChartMode = 'candle';
-let _screenerOverlays = { bb: true, sma50: true, pivots: false };
+let _screenerOverlays  = { bb: true, sma50: true, pivots: false };
+let _screenerHoverIdx  = -1;   // index of candle under cursor; -1 = none
 
 async function renderScannerPage(gen) {
   const el = document.getElementById('main-content');
@@ -604,8 +605,8 @@ function scannerSetTab(tab) {
 
 function screenerSetChartMode(mode) {
   _screenerChartMode = mode;
-  _updateScreenerButtons();   // update active styles in-place — no DOM rebuild
-  _drawScreenerChart();       // redraw canvas immediately (offsetWidth is already valid)
+  _updateScreenerButtons();
+  _drawScreenerChart();
 }
 
 function screenerToggleOverlay(key) {
@@ -614,29 +615,39 @@ function screenerToggleOverlay(key) {
   _drawScreenerChart();
 }
 
-// _updateScreenerButtons — updates button active/inactive styles without touching the DOM tree.
-// Called instead of renderPage() so the canvas element (and its size) is preserved.
+// _updateScreenerButtons — replaces the full style string (cssText) on each toggle button
+// so that active vs inactive state is always rendered correctly regardless of prior state.
+// Never calls renderPage(), so the canvas element is preserved in the DOM.
 function _updateScreenerButtons() {
+  const base    = 'padding:3px 10px;font-size:11px;font-weight:600;border-radius:4px;cursor:pointer;';
+  const active  = base + 'border:1px solid var(--accent-primary);background:var(--accent-primary);color:#fff';
+  const inactive = base + 'border:1px solid var(--border-medium);background:transparent;color:var(--text-muted)';
+
   ['candle', 'line'].forEach(m => {
     const btn = document.getElementById(`screener-mode-${m}`);
-    if (!btn) return;
-    const active = _screenerChartMode === m;
-    btn.style.borderColor = active ? 'var(--accent-primary)' : 'var(--border-medium)';
-    btn.style.background  = active ? 'var(--accent-primary)' : 'transparent';
-    btn.style.color       = active ? '#fff' : 'var(--text-muted)';
+    if (btn) btn.style.cssText = (_screenerChartMode === m) ? active : inactive;
   });
   ['bb', 'sma50', 'pivots'].forEach(key => {
     const btn = document.getElementById(`screener-ov-${key}`);
-    if (!btn) return;
-    const active = _screenerOverlays[key];
-    btn.style.borderColor = active ? 'var(--accent-primary)' : 'var(--border-medium)';
-    btn.style.background  = active ? 'var(--accent-primary)' : 'transparent';
-    btn.style.color       = active ? '#fff' : 'var(--text-muted)';
+    if (btn) btn.style.cssText = _screenerOverlays[key] ? active : inactive;
   });
 }
 
+// _drawScreenerChart — draws (or retries via rAF until the canvas is in the DOM).
+// Safe to call immediately after renderPage(): rAF retries until canvas.offsetWidth > 0.
 function _drawScreenerChart() {
   if (!_screenerData?.chart_data?.length) return;
+  const canvas = document.getElementById('screener-chart');
+  if (!canvas || canvas.offsetWidth === 0) {
+    requestAnimationFrame(_drawScreenerChart);   // retry next frame
+    return;
+  }
+  // Attach crosshair event listeners once per canvas element
+  if (!canvas._screenerListenersAttached) {
+    canvas._screenerListenersAttached = true;
+    canvas.addEventListener('mousemove',  _screenerMouseMove);
+    canvas.addEventListener('mouseleave', _screenerMouseLeave);
+  }
   drawCandleChart('screener-chart', _screenerData.chart_data, {
     mode:       _screenerChartMode,
     showBB:     _screenerOverlays.bb,
@@ -644,7 +655,33 @@ function _drawScreenerChart() {
     showPivots: _screenerOverlays.pivots,
     pivots:     _screenerData.support_resistance,
     height:     320,
+    hoverIdx:   _screenerHoverIdx,
   });
+}
+
+// Crosshair mouse handlers ──────────────────────────────────────────────────
+
+function _screenerMouseMove(e) {
+  if (!_screenerData?.chart_data?.length) return;
+  const rect   = e.currentTarget.getBoundingClientRect();
+  const mx     = e.clientX - rect.left;
+  const n      = _screenerData.chart_data.length;
+  const PAD_L  = 62;
+  const PAD_R  = _screenerOverlays.pivots ? 80 : 8;
+  const W      = rect.width;
+  const chartX0 = PAD_L;
+  const chartW  = W - PAD_L - PAD_R;
+
+  if (mx < chartX0 || mx > W - PAD_R) {
+    if (_screenerHoverIdx !== -1) { _screenerHoverIdx = -1; _drawScreenerChart(); }
+    return;
+  }
+  const idx = Math.max(0, Math.min(n - 1, Math.floor((mx - chartX0) / (chartW / n))));
+  if (idx !== _screenerHoverIdx) { _screenerHoverIdx = idx; _drawScreenerChart(); }
+}
+
+function _screenerMouseLeave() {
+  if (_screenerHoverIdx !== -1) { _screenerHoverIdx = -1; _drawScreenerChart(); }
 }
 
 async function runScreener() {
@@ -653,10 +690,11 @@ async function runScreener() {
   if (!ticker) { _screenerError = 'Enter a ticker'; renderPage(); return; }
   if (!state.serverOk) { _screenerError = 'Backend not running'; renderPage(); return; }
 
-  _screenerTicker = ticker;
+  _screenerTicker  = ticker;
   _screenerLoading = true;
-  _screenerError = '';
-  _screenerData = null;
+  _screenerError   = '';
+  _screenerData    = null;
+  _screenerHoverIdx = -1;   // clear stale crosshair from previous ticker
   renderPage();
 
   try {
@@ -669,7 +707,7 @@ async function runScreener() {
     _screenerLoading = false;
     _screenerError = '';
     renderPage();
-    setTimeout(() => _drawScreenerChart(), 80);
+    _drawScreenerChart();  // rAF retry loop handles timing — no setTimeout needed
   } catch (e) {
     _screenerLoading = false;
     _screenerError = `⚠ ${e.message}`;

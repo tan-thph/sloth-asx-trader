@@ -400,6 +400,7 @@ function drawCandleChart(canvasId, chartData, options = {}) {
     showPivots = false,
     pivots     = null,
     height     = 320,
+    hoverIdx   = -1,    // crosshair: index of hovered candle, -1 = none
   } = options;
 
   const dpr = window.devicePixelRatio || 1;
@@ -595,6 +596,83 @@ function drawCandleChart(canvasId, chartData, options = {}) {
     if (i % labelEvery !== 0 && i !== n - 1) return;
     ctx.fillText(d.date ? d.date.slice(5) : '', xAt(i), H - PAD_B + 14);
   });
+
+  // ── Crosshair + OHLCV tooltip ────────────────────────────────────────────
+  if (hoverIdx >= 0 && hoverIdx < n) {
+    const hd  = chartData[hoverIdx];
+    const hx  = xAt(hoverIdx);
+    const hyC = pyAt(hd.close);
+
+    // Inline formatters (no dependency on global fmt)
+    const _fmtP = v => v == null ? 'n/a' : (v >= 100 ? v.toFixed(2) : v.toFixed(3));
+    const _fmtV = v => {
+      if (v == null) return 'n/a';
+      return v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
+           : v >= 1e3 ? Math.round(v / 1e3) + 'k'
+           : String(v);
+    };
+
+    // Vertical + horizontal crosshair lines
+    ctx.save();
+    ctx.strokeStyle = 'rgba(148,163,184,0.45)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(hx, priceY0); ctx.lineTo(hx, priceY1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(chartX0, hyC); ctx.lineTo(chartX1, hyC); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // Price badge on left Y-axis
+    const priceLbl  = '$' + _fmtP(hd.close);
+    const upDay     = hd.close >= hd.open;
+    const badgeCol  = upDay ? 'rgba(22,163,74,0.92)' : 'rgba(220,38,38,0.92)';
+    ctx.save();
+    ctx.font = 'bold 10px sans-serif';
+    const badgeW = ctx.measureText(priceLbl).width + 10;
+    const badgeH = 16;
+    ctx.fillStyle = badgeCol;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(chartX0 - badgeW - 2, hyC - badgeH / 2, badgeW, badgeH, 3);
+    else               ctx.rect(chartX0 - badgeW - 2, hyC - badgeH / 2, badgeW, badgeH);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'right';
+    ctx.fillText(priceLbl, chartX0 - 5, hyC + 4);
+    ctx.restore();
+
+    // OHLCV tooltip box
+    const lines = [
+      { t: hd.date ? hd.date.slice(0, 10) : '',   c: 'rgba(148,163,184,0.9)' },
+      { t: `O  $${_fmtP(hd.open)}`,                c: '#cbd5e1' },
+      { t: `H  $${_fmtP(hd.high)}`,                c: '#4ade80' },
+      { t: `L  $${_fmtP(hd.low)}`,                 c: '#f87171' },
+      { t: `C  $${_fmtP(hd.close)}`,               c: upDay ? '#4ade80' : '#f87171' },
+      { t: `V  ${_fmtV(hd.volume)}`,               c: '#94a3b8' },
+    ];
+    const lineH = 15, bPad = 8, bW = 108, bH = lines.length * lineH + bPad * 2;
+    let bX = hx + 14;
+    if (hx > chartX0 + chartW * 0.58) bX = hx - bW - 14;
+    bX = Math.max(chartX0 + 2, Math.min(bX, chartX1 - bW - 2));
+    const bY = priceY0 + 4;
+
+    ctx.save();
+    ctx.fillStyle   = 'rgba(15,23,42,0.93)';
+    ctx.strokeStyle = 'rgba(99,179,237,0.3)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bX, bY, bW, bH, 5);
+    else               ctx.rect(bX, bY, bW, bH);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    lines.forEach(({ t, c }, i) => {
+      ctx.fillStyle = c;
+      ctx.fillText(t, bX + bPad, bY + bPad + i * lineH + 10);
+    });
+    ctx.restore();
+  }
 }
 
 // ============================================================
