@@ -3250,10 +3250,47 @@ def learning_stats():
                 "win_rate":    round(r['wins'] / r['closed'] * 100, 1) if r['closed'] else None,
             } for r in pv_rows]
 
-            # Recent events
+            # Avg hold days for closed trades
+            hold_row = conn.execute("""
+                SELECT AVG(holding_period_days) FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven')
+                  AND holding_period_days IS NOT NULL
+            """).fetchone()
+            avg_hold_days = round(hold_row[0], 1) if hold_row and hold_row[0] else None
+
+            # Exit reason distribution
+            exit_rows = conn.execute("""
+                SELECT exit_reason, COUNT(*) as cnt FROM ai_learning_events
+                WHERE exit_reason IS NOT NULL
+                GROUP BY exit_reason ORDER BY cnt DESC
+            """).fetchall()
+            exit_reason_dist = {r['exit_reason']: r['cnt'] for r in exit_rows}
+
+            # R:R stats — suggested rr and win rate when rr_ratio >= 2.0
+            rr_rows = conn.execute("""
+                SELECT AVG(rr_ratio) as avg_rr,
+                       SUM(CASE WHEN rr_ratio >= 2.0 AND outcome_status='win' THEN 1 ELSE 0 END) as hi_rr_wins,
+                       SUM(CASE WHEN rr_ratio >= 2.0 AND outcome_status IN ('win','loss','breakeven') THEN 1 ELSE 0 END) as hi_rr_total,
+                       COUNT(*) as rr_sample
+                FROM ai_learning_events
+                WHERE rr_ratio IS NOT NULL
+            """).fetchone()
+            rr_stats = {}
+            if rr_rows and rr_rows['rr_sample']:
+                hi_total = rr_rows['hi_rr_total'] or 0
+                rr_stats = {
+                    "avg_suggested_rr": round(rr_rows['avg_rr'], 2) if rr_rows['avg_rr'] else None,
+                    "hi_rr_win_rate": round(rr_rows['hi_rr_wins'] / hi_total * 100, 1) if hi_total else None,
+                    "hi_rr_sample": hi_total,
+                    "sample": rr_rows['rr_sample'],
+                }
+
+            # Recent events (richer — include stop/target/hold for RR analysis)
             recent = conn.execute("""
                 SELECT id, timestamp, ticker, recommendation, ai_confidence, ensemble_confidence,
-                       outcome_status, realized_pnl_pct, regime, prompt_version, was_executed
+                       outcome_status, realized_pnl_pct, realized_pnl_aud, regime, prompt_version,
+                       was_executed, suggested_stop, suggested_target, rr_ratio,
+                       holding_period_days, exit_reason, rationale_summary
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 20
             """).fetchall()
 
@@ -3263,15 +3300,18 @@ def learning_stats():
             ).fetchall()
 
         return jsonify({
-            "total":         total,
-            "closed":        closed,
-            "wins":          wins,
+            "total":            total,
+            "closed":           closed,
+            "wins":             wins,
             "overall_win_rate": round(wins / closed * 100, 1) if closed else None,
-            "conf_bands":    conf_bands,
-            "regime_stats":  regime_list,
-            "version_stats": version_list,
-            "recent_events": [dict(r) for r in recent],
-            "failed_tickers": [dict(r) for r in failed],
+            "conf_bands":       conf_bands,
+            "regime_stats":     regime_list,
+            "version_stats":    version_list,
+            "recent_events":    [dict(r) for r in recent],
+            "failed_tickers":   [dict(r) for r in failed],
+            "avg_hold_days":    avg_hold_days,
+            "exit_reason_dist": exit_reason_dist,
+            "rr_stats":         rr_stats,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

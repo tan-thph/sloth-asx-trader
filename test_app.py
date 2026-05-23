@@ -180,6 +180,26 @@ class TestLearningLoopRoutes(unittest.TestCase):
         for field in ("id", "ticker", "recommendation", "ai_confidence", "outcome_status"):
             self.assertIn(field, ev, f"recent_event missing field: {field}")
 
+    def test_stats_has_new_aggregate_fields(self):
+        """stats endpoint must return avg_hold_days, exit_reason_dist, rr_stats."""
+        resp = self.client.get("/api/learning/stats")
+        body = json.loads(resp.data)
+        for key in ("avg_hold_days", "exit_reason_dist", "rr_stats"):
+            self.assertIn(key, body, f"Missing new field: {key}")
+        self.assertIsInstance(body["exit_reason_dist"], dict)
+        self.assertIsInstance(body["rr_stats"], dict)
+
+    def test_stats_recent_events_has_richer_fields(self):
+        """recent_events must now include stop, target, rr_ratio, hold days, exit_reason."""
+        resp = self.client.get("/api/learning/stats")
+        body = json.loads(resp.data)
+        events = body.get("recent_events", [])
+        if events:
+            ev = events[0]
+            for field in ("suggested_stop", "suggested_target", "rr_ratio",
+                          "holding_period_days", "exit_reason", "rationale_summary"):
+                self.assertIn(field, ev, f"recent_event missing richer field: {field}")
+
     def test_stats_win_rate_is_percentage(self):
         """overall_win_rate must be 0-100 (not 0-1 fraction)."""
         resp = self.client.get("/api/learning/stats")
@@ -399,9 +419,27 @@ class TestJSFunctionPresence(unittest.TestCase):
         self.assertTrue(self._contains("js/pages/recommendations.js",
                                        "Manually imported position"))
 
-    # learning-loop.js
+    # learning-loop.js — new v2 functions
     def test_buildCalibrationPromptBlock_defined(self):
         self.assertTrue(self._contains("js/learning-loop.js", "function buildCalibrationPromptBlock"))
+
+    def test_refreshLearningCache_defined(self):
+        self.assertTrue(self._contains("js/learning-loop.js", "function refreshLearningCache"))
+
+    def test_computeAllTradesStats_defined(self):
+        self.assertTrue(self._contains("js/learning-loop.js", "function computeAllTradesStats"))
+
+    def test_computeRRRealization_defined(self):
+        self.assertTrue(self._contains("js/learning-loop.js", "function computeRRRealization"))
+
+    def test_detectStrategyDecay_has_volatility(self):
+        self.assertTrue(self._contains("js/learning-loop.js", "recentVolatility"))
+
+    def test_refreshLearningCache_wired_in_analysis(self):
+        self.assertTrue(self._contains("js/analysis.js", "refreshLearningCache"))
+
+    def test_learning_loop_uses_backend_cache(self):
+        self.assertTrue(self._contains("js/learning-loop.js", "state._learningCache"))
 
 
 class TestPythonSyntax(unittest.TestCase):

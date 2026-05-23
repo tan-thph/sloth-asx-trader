@@ -313,7 +313,10 @@ ${riskRows}`;
   const earningsCtx = earningsLines.length ? `\n\nEARNINGS CALENDAR (use for catalyst timing and pre-earnings positioning):\n${earningsLines.join('\n')}` : '';
 
 
-  // ── Calibration via learning-loop.js — richer stats with regime performance + decay detection
+  // ── Calibration via learning-loop.js — refresh backend cache then build block ─
+  // refreshLearningCache() is non-blocking on failure; populates state._learningCache
+  // so the sync buildCalibrationPromptBlock() can use backend data as primary source.
+  if (typeof refreshLearningCache === 'function') await refreshLearningCache();
   const calibrationNote = buildCalibrationPromptBlock(state.recHistory);
 
   // ── userMessage carries ALL dynamic/live context; systemPrompt stays fully static
