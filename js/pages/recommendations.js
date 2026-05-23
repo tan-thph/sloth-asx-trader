@@ -702,13 +702,18 @@ function markExecuted(id, execPrice, execFee, execQty) {
   if (isReducing) {
     const holding = getPortfolioHolding(rec.ticker);
     if (holding && holding.shares >= qty) {
+      // Derive open date from earliest live parcel so Performance hold-duration is accurate
+      const liveParcels = (state.cgtParcels || []).filter(p => p.ticker === rec.ticker && (p.shares || 0) > 0);
+      const openDate = liveParcels.length
+        ? liveParcels.reduce((earliest, p) => (p.date && p.date < earliest ? p.date : earliest), liveParcels[0].date || today)
+        : null;
       const prevDisposalLen = state.cgtDisposals.length;
       const { disposals } = applySellToPortfolio(rec.ticker, qty, tradePrice, fees, today);
       realizedPnl = disposalsToPnl(disposals);
       tradeEntry = {
-        id: state.tradeJournal.length + 1, date: today, ticker: rec.ticker, action: rec.action,
+        id: state.tradeJournal.length + 1, date: openDate || today, ticker: rec.ticker, action: rec.action,
         qty, entryPrice: holding.avgPrice, exitPrice: tradePrice, fees,
-        status: 'closed', pnl: realizedPnl,
+        status: 'closed', pnl: realizedPnl, closeDate: today,
         disposalIds: disposals.map((_, i) => prevDisposalLen + i),
         recId: rec.id, recExecuted: true, timestamp: time
       };

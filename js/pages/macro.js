@@ -30,28 +30,28 @@ function renderPolymarketSection() {
     <div class="flex-between" style="margin-bottom:10px">
       <div>
         <span class="card-title" style="margin:0">Prediction Markets</span>
-        <span class="text-xs text-muted" style="margin-left:8px">via Polymarket</span>
+        <span class="text-xs text-muted" style="margin-left:8px">via Manifold Markets</span>
         ${fetchedAgo != null ? `<span class="text-xs text-muted" style="margin-left:6px">(${fetchedAgo < 2 ? 'just now' : fetchedAgo + ' min ago'}${pm.cached ? ' · cached' : ''})</span>` : ''}
       </div>
       <div class="flex-row" style="gap:10px;align-items:center">
-        <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;cursor:pointer" title="When checked, Polymarket probabilities are included in the next AI Macro Brief prompt">
+        <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;cursor:pointer" title="When checked, prediction market probabilities are included in the next AI Macro Brief prompt">
           <input type="checkbox" id="pm-include" onchange="state.includePolymarket=this.checked;renderPage()" ${state.includePolymarket ? 'checked' : ''}>
           Include in AI Brief
         </label>
-        <button class="btn btn-sm" onclick="fetchPolymarket()">⟳ Polymarket</button>
+        <button class="btn btn-sm" onclick="fetchPolymarket()">⟳ Predictions</button>
       </div>
     </div>
 
     ${state.includePolymarket ? `
       <div style="background:var(--bg-tertiary,#1e293b);border:1px solid #d97706;border-radius:var(--radius-sm);padding:6px 10px;margin-bottom:10px;font-size:11px;color:#d97706">
-        ⚡ Polymarket data <strong>will be appended</strong> to the next AI Macro Brief prompt
+        ⚡ Prediction market data <strong>will be appended</strong> to the next AI Macro Brief prompt
       </div>` : ''}
 
     ${!hasPm ? `
       <div class="empty-state" style="padding:1.5rem">
         <div class="empty-icon" style="font-size:20px">📊</div>
-        <p>No Polymarket data loaded.</p>
-        <p class="sub">Click ⟳ Polymarket to fetch live prediction market probabilities.</p>
+        <p>No prediction market data loaded.</p>
+        <p class="sub">Click ⟳ Predictions to fetch live probabilities from Manifold Markets.</p>
       </div>
     ` : `
       <div class="table-wrap">
@@ -102,7 +102,7 @@ function renderPolymarketSection() {
         </table>
       </div>
       <p class="text-xs text-muted mt-1">
-        Polymarket is a crowd-sourced prediction market. Probabilities reflect real-money bets, not financial advice.
+        Manifold Markets is a crowd-sourced prediction market. Probabilities reflect crowd sentiment and play-money bets, not financial advice.
         ${pm.cached ? '· Serving cached data.' : ''}
       </p>
     `}
@@ -345,7 +345,7 @@ async function runMacroAnalysis(force=false) {
       .filter(m => m.question && m.yes_prob != null)
       .map(m => `${m.label}: ${Math.round(m.yes_prob * 100)}% (${m.question.slice(0, 60)})`);
     if (pmLines.length) {
-      pmCtx = ' | Prediction market probabilities (Polymarket): ' + pmLines.join('; ');
+      pmCtx = ' | Prediction market probabilities (Manifold Markets): ' + pmLines.join('; ');
     }
   }
 

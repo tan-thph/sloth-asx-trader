@@ -492,50 +492,113 @@ def rba_rate():
     return jsonify({"rate": 4.35, "source": "fallback", "date": today})
 
 
-# ── Polymarket Prediction Markets ─────────────────────────────────────────────
+# ── Prediction Markets (Manifold Markets) ─────────────────────────────────────
+#
+# Switched from Polymarket gamma API (broken keyword search, stale 2024 data)
+# to Manifold Markets (https://docs.manifold.markets/api) which has current
+# 2026 macro markets and reliable binary probability responses.
+#
+# Each query searches for the best open binary (cpmm-1) market and returns its
+# crowd-sourced probability and volume so the AI can factor them into macro view.
 
-# Curated keyword queries — one per macro theme relevant to ASX investors.
-# Each entry maps to the best active Polymarket market found by keyword search.
 _PM_QUERIES = [
     {
-        "id": "rba_cut", "label": "RBA Rate Cut", "positive_for_asx": True,
-        "keyword": "RBA rate cut",
-        # At least one term must appear (case-insensitive) in the market question
-        "required_terms": ["rba", "reserve bank of australia"],
+        "id": "rba_cut", "label": "RBA Rate Cut 2026", "positive_for_asx": True,
+        "term": "RBA rate cut 2026",
+        "required_terms": ["rba", "reserve bank", "cash rate"],
     },
     {
-        "id": "fed_cut", "label": "Fed Rate Cut", "positive_for_asx": True,
-        "keyword": "Federal Reserve rate cut",
-        "required_terms": ["fed", "federal reserve", "fomc", "interest rate cut"],
+        "id": "fed_cut", "label": "Fed Rate Cut 2026", "positive_for_asx": True,
+        "term": "Federal Reserve interest rate cut 2026",
+        "required_terms": ["federal reserve", "fed", "fomc", "interest rate"],
     },
     {
         "id": "us_recession", "label": "US Recession 2026", "positive_for_asx": False,
-        "keyword": "US recession 2026",
+        "term": "US recession 2026",
         "required_terms": ["recession", "gdp"],
     },
     {
-        "id": "iron_ore", "label": "Iron Ore > $100", "positive_for_asx": True,
-        "keyword": "iron ore price",
-        "required_terms": ["iron ore"],
+        "id": "aud_usd", "label": "AUD/USD strength 2026", "positive_for_asx": None,
+        "term": "AUD USD Australian dollar 2026",
+        "required_terms": ["aud", "australian dollar", "aud/usd", "aussie"],
     },
     {
-        "id": "aud_usd", "label": "AUD/USD", "positive_for_asx": None,
-        "keyword": "AUD USD Australian dollar",
-        "required_terms": ["aud", "australian dollar", "aud/usd"],
+        "id": "china_gdp", "label": "China GDP target 2026", "positive_for_asx": True,
+        "term": "China GDP growth 2026",
+        "required_terms": ["china", "chinese", "gdp"],
+    },
+    {
+        "id": "sp500", "label": "S&P 500 2026", "positive_for_asx": True,
+        "term": "S&P 500 all-time high 2026",
+        "required_terms": ["s&p", "sp500", "s&p 500", "stock market"],
     },
 ]
 
 _PM_CACHE: dict = {"data": None, "fetched_at": 0.0}  # invalidated on server restart
 _PM_CACHE_TTL = 1800  # 30 minutes
 
+_MANIFOLD_HDR = {"User-Agent": "SlothASXTrader/1.0", "Accept": "application/json"}
+
+
+def _fetch_manifold_market(query: dict, req_mod) -> dict:
+    """Fetch the best open binary market from Manifold Markets for one query."""
+    entry = {
+        "id": query["id"], "label": query["label"],
+        "positive_for_asx": query["positive_for_asx"],
+        "question": None, "yes_prob": None, "volume": None, "end_date": None,
+        "source": "manifold", "error": None,
+    }
+    try:
+        r = req_mod.get(
+            "https://api.manifold.markets/v0/search-markets",
+            params={"term": query["term"], "filter": "open", "limit": 10, "sort": "liquidity"},
+            headers=_MANIFOLD_HDR, timeout=8,
+        )
+        r.raise_for_status()
+        markets = r.json()
+        if not isinstance(markets, list):
+            markets = markets.get("markets", [])
+
+        required = [t.lower() for t in query.get("required_terms", [])]
+
+        for m in markets:
+            # Binary only — skip multi-choice (cpmm-multi-1) and numeric (pseudo-numeric)
+            if m.get("mechanism") != "cpmm-1":
+                continue
+            # Must be open
+            if m.get("isResolved") or m.get("closeTime", 0) < 1:
+                continue
+            # Relevance guard
+            q_lc = (m.get("question") or "").lower()
+            if required and not any(t in q_lc for t in required):
+                continue
+
+            prob = m.get("probability")
+            if prob is None:
+                continue
+
+            entry["question"] = m.get("question", "")
+            entry["yes_prob"] = round(float(prob), 4)
+            entry["volume"]   = round(float(m.get("volume") or 0), 2)
+            close_ts = m.get("closeTime")
+            if close_ts:
+                from datetime import timezone
+                entry["end_date"] = datetime.fromtimestamp(close_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            entry["url"] = m.get("url", "")
+            break
+    except Exception as exc:
+        entry["error"] = str(exc)
+    return entry
+
 
 @app.route("/api/polymarket")
 def polymarket_markets():
-    """Proxy Polymarket gamma API — returns curated macro prediction markets.
+    """Return macro prediction market probabilities from Manifold Markets.
 
-    Caches results for 30 minutes to avoid hammering the external API.
-    Each entry returns the best active market matching the keyword query with
-    its Yes probability, volume, end date, and the original question text.
+    The route name is kept as /api/polymarket for frontend compatibility.
+    Source switched from Polymarket gamma API (broken keyword search) to
+    Manifold Markets which has current 2026 economic questions.
+    Caches results 30 minutes.
     """
     import time as _time
 
@@ -547,84 +610,13 @@ def polymarket_markets():
 
     import requests as _req
 
-    _HDR = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-    }
-
-    markets_out = []
-    for q in _PM_QUERIES:
-        entry = {
-            "id":               q["id"],
-            "label":            q["label"],
-            "positive_for_asx": q["positive_for_asx"],
-            "question":         None,
-            "yes_prob":         None,
-            "volume":           None,
-            "end_date":         None,
-            "error":            None,
-        }
-        try:
-            url = (
-                "https://gamma-api.polymarket.com/markets"
-                f"?keyword={_req.utils.quote(q['keyword'])}&limit=10&active=true"
-            )
-            r = _req.get(url, headers=_HDR, timeout=10)
-            r.raise_for_status()
-            raw_list = r.json()
-            if not isinstance(raw_list, list):
-                raw_list = raw_list.get("markets", [])
-
-            required = [t.lower() for t in q.get("required_terms", [])]
-
-            # Pick first active, non-closed, topically relevant Yes/No market
-            for m in raw_list:
-                if m.get("closed") or not m.get("active", True):
-                    continue
-
-                # Relevance guard — question must contain at least one required term.
-                # Prevents off-topic results (e.g. "New Rihanna Album before GTA VI?")
-                # from slipping through when the keyword search returns poor matches.
-                question_lc = (m.get("question") or "").lower()
-                if required and not any(t in question_lc for t in required):
-                    continue
-
-                outcomes = m.get("outcomes", "[]")
-                prices   = m.get("outcomePrices", "[]")
-                if isinstance(outcomes, str):
-                    outcomes = json.loads(outcomes)
-                if isinstance(prices, str):
-                    prices = json.loads(prices)
-
-                # Only handle binary Yes/No markets
-                out_lower = [str(o).lower() for o in outcomes]
-                if "yes" not in out_lower:
-                    continue
-
-                yes_idx = out_lower.index("yes")
-                yes_prob = float(prices[yes_idx]) if yes_idx < len(prices) else None
-
-                vol_raw = m.get("volume") or m.get("volumeNum") or 0
-                try:
-                    volume = float(vol_raw)
-                except (TypeError, ValueError):
-                    volume = 0.0
-
-                entry["question"] = m.get("question", "")
-                entry["yes_prob"] = yes_prob
-                entry["volume"]   = volume
-                entry["end_date"] = (m.get("endDate") or "")[:10]  # YYYY-MM-DD
-                break
-
-        except Exception as exc:
-            entry["error"] = str(exc)
-
-        markets_out.append(entry)
+    markets_out = [_fetch_manifold_market(q, _req) for q in _PM_QUERIES]
 
     result = {
         "markets":    markets_out,
         "fetched_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "cached":     False,
+        "source":     "manifold",
     }
     _PM_CACHE["data"]       = result
     _PM_CACHE["fetched_at"] = now

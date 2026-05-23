@@ -97,8 +97,13 @@ function renderPerformance() {
     else            { curL++; curW=0; if(curL>lossStreak) lossStreak=curL; }
   });
   const holdDays = t => {
-    if (!t.date || !t.closeDate) return null;
-    return Math.round((new Date(t.closeDate) - new Date(t.date)) / 86400000);
+    // closeDate is set on SELL entries; date is open (buy) date for BUY, open date for SELL.
+    // Fallback: if status='closed' and only date exists, the entry pre-dates the closeDate field.
+    const open  = t.date;
+    const close = t.closeDate;
+    if (!open || !close) return null;
+    const diff = Math.round((new Date(close) - new Date(open)) / 86400000);
+    return diff >= 0 ? diff : null;
   };
   const winHolds  = closedTrades.filter(t=>t.pnl>0).map(holdDays).filter(d=>d!=null);
   const lossHolds = closedTrades.filter(t=>t.pnl<0).map(holdDays).filter(d=>d!=null);
@@ -287,9 +292,14 @@ function renderPerformance() {
           <div class="card-title" style="margin:0">Trade Journal Export</div>
           <div class="text-xs text-muted" style="margin-top:2px">ATO-compatible CSV — drop into your tax spreadsheet or accountant portal</div>
         </div>
-        <button class="btn btn-sm" onclick="exportTradeJournalCSV()" style="white-space:nowrap">
-          ↓ Export CSV
-        </button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+          <button class="btn btn-sm" onclick="syncClosedTradesToLearningLoop()" style="white-space:nowrap" title="Push closed trade outcomes from Performance tab into the Learning Loop database">
+            🧠 Sync to Learning Loop
+          </button>
+          <button class="btn btn-sm" onclick="exportTradeJournalCSV()" style="white-space:nowrap">
+            ↓ Export CSV
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -503,4 +513,90 @@ function exportTradeJournalCSV() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// ── Sync closed trade outcomes → Learning Loop backend ────────────────────────
+// For each recHistory entry with a _learningId and a reconciled win/loss outcome,
+// call POST /api/learning/outcome. Also handles existing recs without a _learningId
+// by re-logging them as new events with was_executed:true.
+async function syncClosedTradesToLearningLoop() {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  const history = state.recHistory || [];
+  // Reconcile outcomes from trade journal (same logic as renderPerformance)
+  const reconciled = history.map(r => {
+    if (!r.executed || r.outcome === 'skipped') return r;
+    const jMatch = state.tradeJournal.find(t =>
+      (t.recId === r.id || (t.ticker === r.ticker && t.date === r.date)) &&
+      t.status === 'closed' && t.pnl != null
+    );
+    if (jMatch) {
+      const outcome = jMatch.pnl > 0 ? 'win' : jMatch.pnl < 0 ? 'loss' : 'breakeven';
+      const entryPrice = jMatch.entryPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
+      const qty = jMatch.qty || r.qty || 1;
+      const pnlPct = entryPrice && qty ? (jMatch.pnl / (entryPrice * qty)) * 100 : null;
+      const holdDays = (jMatch.date && jMatch.closeDate)
+        ? Math.max(0, Math.round((new Date(jMatch.closeDate) - new Date(jMatch.date)) / 86400000))
+        : null;
+      return { ...r, outcome, actualProfit: jMatch.pnl, _pnlPct: pnlPct, _holdDays: holdDays };
+    }
+    return r;
+  });
+
+  const toUpdate = reconciled.filter(r =>
+    r._learningId && r.outcome && r.outcome !== 'open' && r.outcome !== 'skipped'
+  );
+  const toLog = reconciled.filter(r =>
+    !r._learningId && r.executed && r.outcome && r.outcome !== 'open'
+  );
+
+  let updated = 0, logged = 0;
+  const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
+
+  for (const r of toUpdate) {
+    try {
+      const resp = await fetch(`${API}/api/learning/outcome`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: r._learningId,
+          outcome_status:      r.outcome,
+          was_executed:        r.executed,
+          realized_pnl_aud:    r.actualProfit != null ? +r.actualProfit.toFixed(2) : null,
+          realized_pnl_pct:    r._pnlPct != null ? +r._pnlPct.toFixed(2) : null,
+          holding_period_days: r._holdDays ?? null,
+          exit_reason:         'manual',
+        }),
+      });
+      if ((await resp.json()).ok) updated++;
+    } catch (_) {}
+  }
+
+  for (const r of toLog) {
+    try {
+      const resp = await fetch(`${API}/api/learning/log`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type:          'recommendation',
+          ticker:              r.ticker,
+          prompt_version:      pv,
+          ai_confidence:       r.confidence ?? null,
+          ensemble_confidence: r.ensembleConfidence ?? null,
+          recommendation:      r.action,
+          suggested_stop:      r.stopLoss ?? null,
+          suggested_target:    r.target ?? null,
+          was_executed:        true,
+          outcome_status:      r.outcome,
+          realized_pnl_aud:    r.actualProfit != null ? +r.actualProfit.toFixed(2) : null,
+          realized_pnl_pct:    r._pnlPct != null ? +r._pnlPct.toFixed(2) : null,
+          holding_period_days: r._holdDays ?? null,
+          exit_reason:         'manual',
+        }),
+      });
+      const res = await resp.json();
+      if (res.id) { r._learningId = res.id; logged++; }
+    } catch (_) {}
+  }
+
+  scheduleSave();
+  toast(`Learning Loop sync: ${updated} outcomes updated, ${logged} historical trades logged`, 'success');
 }
