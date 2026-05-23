@@ -57,9 +57,11 @@ function renderPerformance() {
 
   // ── Risk-adjusted metrics ──────────────────────────────────────────────────
   // Sortino ratio: mean(pnl%) / downside_deviation (target return = 0)
+  // Journal entries store the buy price as entryPrice (not avgPrice/price)
   const pnlPcts = closedTrades.map(t => {
-    const cost = t.qty && t.avgPrice ? t.qty * t.avgPrice : null;
-    return cost && cost > 0 ? t.pnl / cost : 0;
+    const ep   = Number(t.entryPrice) || Number(t.avgPrice) || Number(t.price) || 0;
+    const cost = t.qty && ep > 0 ? Number(t.qty) * ep : null;
+    return cost && cost > 0 ? Number(t.pnl) / cost : 0;
   });
   const meanRet = pnlPcts.length ? pnlPcts.reduce((s,v)=>s+v,0)/pnlPcts.length : 0;
   const downside = pnlPcts.filter(v=>v<0);
@@ -435,9 +437,11 @@ function exportTradeJournalCSV() {
     return;
   }
 
-  // Columns: Date, Ticker, Action, Qty, Price, Brokerage, Cost Base, Proceeds, Gross P&L, CGT Discount Eligible
+  // Columns: Open Date, Close Date, Ticker, Action, Qty, Buy Price, Sell Price,
+  //          Brokerage, Cost Base, Proceeds, Gross P&L, CGT Discount Eligible
   const headers = [
-    'Date', 'Ticker', 'Action', 'Qty', 'Price', 'Brokerage',
+    'Open Date', 'Close Date', 'Ticker', 'Action', 'Qty',
+    'Buy Price', 'Sell Price', 'Brokerage (AUD)',
     'Cost Base (AUD)', 'Proceeds (AUD)', 'Gross P&L (AUD)', 'CGT Discount Eligible (>12m)'
   ];
 
@@ -449,28 +453,38 @@ function exportTradeJournalCSV() {
   };
 
   const rows = trades.map(t => {
-    const date      = t.date || '';
+    const isClose   = t.status === 'closed' && t.pnl != null;
+    // Open/close dates: SELL entries now store date=open, closeDate=close
+    const openDate  = t.date || '';
+    const closeDate = t.closeDate || (isClose ? t.date : '') || '';
     const ticker    = t.ticker || '';
-    const action    = t.action || (t.type || '');
+    const action    = t.action || t.type || '';
     const qty       = Number(t.qty) || 0;
-    const price     = Number(t.price) || Number(t.avgPrice) || 0;
+    // entryPrice = buy price (avg cost for sells), exitPrice = sell price
+    const buyPrice  = Number(t.entryPrice) || Number(t.avgPrice) || Number(t.price) || 0;
+    const sellPrice = isClose ? (Number(t.exitPrice) || 0) : 0;
     const brokerage = Number(t.fees) || 0;
-    const costBase  = qty * (Number(t.avgPrice) || price) + brokerage;
-    const proceeds  = t.pnl != null ? costBase + Number(t.pnl) : '';
-    const grossPnl  = t.pnl != null ? Number(t.pnl) : '';
+    // ATO cost base = qty × buy price + brokerage
+    const costBase  = qty * buyPrice + brokerage;
+    // Proceeds = costBase + P&L (or directly qty × sellPrice for transparency)
+    const proceeds  = isClose ? Number((costBase + Number(t.pnl)).toFixed(2)) : '';
+    const grossPnl  = isClose ? Number(t.pnl) : '';
 
-    // CGT discount: check if held > 12 months (need buyDate and sellDate)
+    // CGT discount: held > 12 months and net gain > 0
     let cgtEligible = '';
-    if (t.date && t.closeDate) {
-      const held = (new Date(t.closeDate) - new Date(t.date)) / 86400000;
-      cgtEligible = held > 365 && grossPnl > 0 ? 'Y' : 'N';
+    if (openDate && closeDate && openDate !== closeDate) {
+      const held = (new Date(closeDate) - new Date(openDate)) / 86400000;
+      cgtEligible = isClose ? (held > 365 && Number(grossPnl) > 0 ? 'Y' : 'N') : '';
     }
 
     return [
-      esc(date), esc(ticker), esc(action),
-      esc(qty), esc(price.toFixed(4)), esc(brokerage.toFixed(2)),
+      esc(openDate), esc(closeDate), esc(ticker), esc(action),
+      esc(qty),
+      buyPrice  ? esc(buyPrice.toFixed(4))  : '',
+      sellPrice ? esc(sellPrice.toFixed(4)) : '',
+      esc(brokerage.toFixed(2)),
       esc(costBase.toFixed(2)),
-      proceeds !== '' ? esc(Number(proceeds).toFixed(2)) : '',
+      proceeds !== '' ? esc(proceeds.toFixed(2)) : '',
       grossPnl !== '' ? esc(Number(grossPnl).toFixed(2)) : '',
       esc(cgtEligible)
     ].join(',');
@@ -478,16 +492,16 @@ function exportTradeJournalCSV() {
 
   // Tax Year Summary row
   const closed    = trades.filter(t => t.pnl != null);
-  const totalProc = closed.reduce((s,t) => {
-    const qty  = Number(t.qty)||0;
-    const avg  = Number(t.avgPrice)||Number(t.price)||0;
-    const fee  = Number(t.fees)||0;
-    return s + (qty * avg + fee + Number(t.pnl));
+  const totalProc = closed.reduce((s, t) => {
+    const qty = Number(t.qty) || 0;
+    const ep  = Number(t.entryPrice) || Number(t.avgPrice) || Number(t.price) || 0;
+    const fee = Number(t.fees) || 0;
+    return s + (qty * ep + fee + Number(t.pnl));
   }, 0);
-  const totalCostB = closed.reduce((s,t) => {
-    const qty = Number(t.qty)||0;
-    const avg = Number(t.avgPrice)||Number(t.price)||0;
-    return s + qty * avg + (Number(t.fees)||0);
+  const totalCostB = closed.reduce((s, t) => {
+    const qty = Number(t.qty) || 0;
+    const ep  = Number(t.entryPrice) || Number(t.avgPrice) || Number(t.price) || 0;
+    return s + qty * ep + (Number(t.fees) || 0);
   }, 0);
   const netGain = closed.reduce((s,t) => s + Number(t.pnl), 0);
   const fyLabel = (() => {
@@ -496,7 +510,7 @@ function exportTradeJournalCSV() {
     return `FY${fy} Summary`;
   })();
   rows.push([
-    esc(fyLabel), '', '', '', '', '',
+    esc(fyLabel), '', '', '', '', '', '', '',
     esc(totalCostB.toFixed(2)),
     esc(totalProc.toFixed(2)),
     esc(netGain.toFixed(2)),
@@ -532,7 +546,7 @@ async function syncClosedTradesToLearningLoop() {
     );
     if (jMatch) {
       const outcome = jMatch.pnl > 0 ? 'win' : jMatch.pnl < 0 ? 'loss' : 'breakeven';
-      const entryPrice = jMatch.entryPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
+      const entryPrice = jMatch.entryPrice || jMatch.avgPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
       const qty = jMatch.qty || r.qty || 1;
       const pnlPct = entryPrice && qty ? (jMatch.pnl / (entryPrice * qty)) * 100 : null;
       const holdDays = (jMatch.date && jMatch.closeDate)

@@ -759,21 +759,62 @@ function markExecuted(id, execPrice, execFee, execQty) {
   };
   state.recHistory.unshift(histEntry);
 
-  // Update learning loop: mark event as executed (fire-and-forget)
-  if (rec._learningId && state.serverOk) {
-    const outcomePayload = { id: rec._learningId, was_executed: true };
-    // For SELL/TRIM with a realized P&L, record outcome immediately
-    if (realizedPnl != null) {
-      const entryPrice = tradeEntry.entryPrice || tradePrice;
-      outcomePayload.outcome_status = realizedPnl > 0 ? 'win' : realizedPnl < 0 ? 'loss' : 'breakeven';
-      outcomePayload.realized_pnl_aud = +realizedPnl.toFixed(2);
-      outcomePayload.realized_pnl_pct = entryPrice > 0 ? +((realizedPnl / (entryPrice * qty)) * 100).toFixed(2) : null;
-      outcomePayload.exit_reason = 'manual';
+  // Update learning loop: mark event as executed, or log fresh if no prior event
+  if (state.serverOk) {
+    const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
+    const entryP = tradeEntry.entryPrice || tradePrice;
+    const pnlPct = realizedPnl != null && entryP > 0
+      ? +((realizedPnl / (entryP * qty)) * 100).toFixed(2) : null;
+    const outcome = realizedPnl != null
+      ? (realizedPnl > 0 ? 'win' : realizedPnl < 0 ? 'loss' : 'breakeven') : null;
+
+    if (rec._learningId) {
+      // Existing learning event → update execution status + outcome
+      const outcomePayload = { id: rec._learningId, was_executed: true };
+      if (outcome) {
+        outcomePayload.outcome_status    = outcome;
+        outcomePayload.realized_pnl_aud  = +realizedPnl.toFixed(2);
+        outcomePayload.realized_pnl_pct  = pnlPct;
+        outcomePayload.exit_reason       = 'manual';
+      }
+      fetch(`${API}/api/learning/outcome`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(outcomePayload),
+      }).catch(() => {});
+    } else if (isReducing && realizedPnl != null) {
+      // No prior learning event (manually-imported stock or pre-wiring trade).
+      // Log a new event now so sell performance is captured in the Learning Loop.
+      const rrRatio = entryP && rec.stopLoss && rec.target && entryP !== rec.stopLoss
+        ? +Math.abs((rec.target - entryP) / (entryP - rec.stopLoss)).toFixed(2) : null;
+      fetch(`${API}/api/learning/log`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type:          'recommendation',
+          ticker:              rec.ticker,
+          prompt_version:      pv,
+          ai_confidence:       rec.confidence ?? null,
+          ensemble_confidence: rec.ensembleConfidence ?? null,
+          recommendation:      rec.action,
+          rationale_summary:   rec.reasoning ? rec.reasoning.slice(0, 300) : null,
+          suggested_stop:      rec.stopLoss ?? null,
+          suggested_target:    rec.target ?? null,
+          rr_ratio:            rrRatio,
+          was_executed:        true,
+          outcome_status:      outcome,
+          realized_pnl_aud:    +realizedPnl.toFixed(2),
+          realized_pnl_pct:    pnlPct,
+          exit_reason:         'manual',
+          notes:               'Manually imported position — no prior BUY recommendation logged',
+        }),
+      }).then(r => r.json()).then(res => {
+        if (res.id) {
+          histEntry._learningId = res.id;
+          // Patch recHistory entry too so sync button won't duplicate it
+          const rh = state.recHistory.find(r => r.id === rec.id);
+          if (rh) rh._learningId = res.id;
+        }
+      }).catch(() => {});
     }
-    fetch(`${API}/api/learning/outcome`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(outcomePayload),
-    }).catch(() => {});
   }
 
   toast(`${rec.ticker} ${rec.action} ${qty} @ $${fmt(tradePrice)} (fee $${fmt(fees)}) — logged`, 'success');
