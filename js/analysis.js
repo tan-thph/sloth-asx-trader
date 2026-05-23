@@ -744,9 +744,53 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     toast(`Analysis done: ${cappedDedupedRecs.length} recommendation(s)`, 'success');
     // Fire desktop notification for high-conviction recs
     if (typeof alertHighConviction === 'function') alertHighConviction(cappedDedupedRecs);
+    // Log recommendations to the Learning Loop backend (fire-and-forget)
+    logRecsToLearningLoop(cappedDedupedRecs, _activeRegime);
     showPage('recommendations');
   } catch(e) {
     state.analysisRunning = false;
     toast('Analysis error: ' + e.message, 'error');
+  }
+}
+
+// ── Learning Loop: log recommendations to backend ────────────────────────────
+// Fire-and-forget: called after cappedDedupedRecs is finalised.
+// Stores _learningId on each rec so markExecuted / markSkipped can update it.
+async function logRecsToLearningLoop(recs, regime) {
+  if (!state.serverOk || !recs || !recs.length) return;
+  const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
+  for (const r of recs) {
+    try {
+      // Derive R:R ratio if stop + target available
+      const entry = Array.isArray(r.priceRange) ? r.priceRange[0] : null;
+      let rrRatio = null;
+      if (entry && r.stopLoss && r.target && entry !== r.stopLoss) {
+        rrRatio = Math.abs((r.target - entry) / (entry - r.stopLoss));
+      }
+      const payload = {
+        event_type:          'recommendation',
+        ticker:              r.ticker,
+        regime:              regime || null,
+        prompt_version:      pv,
+        agent_type:          'portfolio-scanner',
+        ai_confidence:       r.confidence ?? null,
+        ensemble_confidence: r.ensembleConfidence ?? null,
+        recommendation:      r.action,
+        rationale_summary:   r.reasoning ? r.reasoning.slice(0, 300) : null,
+        suggested_stop:      r.stopLoss ?? null,
+        suggested_target:    r.target ?? null,
+        rr_ratio:            rrRatio != null ? +rrRatio.toFixed(2) : null,
+        was_executed:        false,
+      };
+      const resp = await fetch(`${API}/api/learning/log`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+      });
+      if (resp.ok) {
+        const result = await resp.json();
+        if (result.id) r._learningId = result.id;  // stash for outcome updates
+      }
+    } catch (_) { /* non-critical — never break analysis */ }
   }
 }

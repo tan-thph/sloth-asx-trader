@@ -3153,21 +3153,23 @@ def learning_outcome():
         return jsonify({"error": "id required"}), 400
     try:
         with get_db() as conn:
-            conn.execute("""
-                UPDATE ai_learning_events
-                SET outcome_status=?, realized_pnl_pct=?, realized_pnl_aud=?,
-                    holding_period_days=?, exit_reason=?, error_type=?, notes=?
-                WHERE id=?
-            """, (
-                data.get("outcome_status"),
-                data.get("realized_pnl_pct"),
-                data.get("realized_pnl_aud"),
-                data.get("holding_period_days"),
-                data.get("exit_reason"),
-                data.get("error_type"),
-                data.get("notes"),
-                event_id,
-            ))
+            # Build update dynamically so callers can send partial patches
+            fields, vals = [], []
+            for col in ("outcome_status", "realized_pnl_pct", "realized_pnl_aud",
+                        "holding_period_days", "exit_reason", "error_type", "notes"):
+                if col in data:
+                    fields.append(f"{col}=?")
+                    vals.append(data[col])
+            if "was_executed" in data:
+                fields.append("was_executed=?")
+                vals.append(1 if data["was_executed"] else 0)
+            if not fields:
+                return jsonify({"ok": True, "note": "nothing to update"})
+            vals.append(event_id)
+            conn.execute(
+                f"UPDATE ai_learning_events SET {', '.join(fields)} WHERE id=?",
+                vals,
+            )
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

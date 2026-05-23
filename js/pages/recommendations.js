@@ -738,7 +738,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
   state.tradeJournal.unshift(tradeEntry);
 
   // Save to recHistory — include all execution details so backtest can use them
-  state.recHistory.unshift({
+  const histEntry = {
     id: rec.id, date: today, ticker: rec.ticker, action: rec.action,
     confidence: rec.confidence, priceRange: rec.priceRange, target: rec.target,
     stopLoss: rec.stopLoss, expectedProfit: rec.expectedProfit, netProfit: rec.netProfit,
@@ -750,7 +750,26 @@ function markExecuted(id, execPrice, execFee, execQty) {
     actualProfit: realizedPnl,    // realized P&L for SELL/TRIM; null for BUY/TOP_UP (open)
     feedback: rec.feedback || null,
     journalId: tradeEntry.id,     // link back to Trade Journal entry
-  });
+    _learningId: rec._learningId || null,  // link to ai_learning_events row
+  };
+  state.recHistory.unshift(histEntry);
+
+  // Update learning loop: mark event as executed (fire-and-forget)
+  if (rec._learningId && state.serverOk) {
+    const outcomePayload = { id: rec._learningId, was_executed: true };
+    // For SELL/TRIM with a realized P&L, record outcome immediately
+    if (realizedPnl != null) {
+      const entryPrice = tradeEntry.entryPrice || tradePrice;
+      outcomePayload.outcome_status = realizedPnl > 0 ? 'win' : realizedPnl < 0 ? 'loss' : 'breakeven';
+      outcomePayload.realized_pnl_aud = +realizedPnl.toFixed(2);
+      outcomePayload.realized_pnl_pct = entryPrice > 0 ? +((realizedPnl / (entryPrice * qty)) * 100).toFixed(2) : null;
+      outcomePayload.exit_reason = 'manual';
+    }
+    fetch(`${API}/api/learning/outcome`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(outcomePayload),
+    }).catch(() => {});
+  }
 
   toast(`${rec.ticker} ${rec.action} ${qty} @ $${fmt(tradePrice)} (fee $${fmt(fees)}) — logged`, 'success');
   scheduleSave();
@@ -759,7 +778,20 @@ function markExecuted(id, execPrice, execFee, execQty) {
 function markSkipped(id) {
   const rec=state.recommendations.find(r=>r.id===id); if(!rec) return;
   rec.status='skipped';
-  state.recHistory.unshift({id:rec.id,date:todayStr(),ticker:rec.ticker,action:rec.action,confidence:rec.confidence,priceRange:rec.priceRange,target:rec.target,stopLoss:rec.stopLoss,expectedProfit:rec.expectedProfit,netProfit:rec.netProfit,executed:false,executedAt:null,outcome:'skipped',actualProfit:null,feedback:rec.feedback||null});
+  state.recHistory.unshift({
+    id: rec.id, date: todayStr(), ticker: rec.ticker, action: rec.action,
+    confidence: rec.confidence, priceRange: rec.priceRange, target: rec.target,
+    stopLoss: rec.stopLoss, expectedProfit: rec.expectedProfit, netProfit: rec.netProfit,
+    executed: false, executedAt: null, outcome: 'skipped', actualProfit: null,
+    feedback: rec.feedback || null, _learningId: rec._learningId || null,
+  });
+  // Update learning loop: mark event as skipped (fire-and-forget)
+  if (rec._learningId && state.serverOk) {
+    fetch(`${API}/api/learning/outcome`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: rec._learningId, outcome_status: 'skipped', was_executed: false }),
+    }).catch(() => {});
+  }
   toast(`${rec.ticker} skipped`,'info'); scheduleSave(); renderPage();
 }
 function clearRecHistory() {
