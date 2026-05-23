@@ -634,12 +634,46 @@ def polymarket_markets():
 # ── ASX Dividend Scraper ──────────────────────────────────────────────────────
 
 _ASX_DIV_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-AU,en;q=0.9",
     "Referer": "https://www.asx.com.au/markets/trade-our-cash-market/dividend-search",
 }
 _DIV_CACHE_TTL_HOURS = 12
+
+# Hardcoded franking % for the most common ASX tickers.
+# Used as fallback when the ASX scrape is unavailable.
+# Banks/financials: 100%; REITs/infrastructure: 0%; miners: varies.
+_FRANKING_MAP: dict[str, float] = {
+    # Banks
+    "CBA": 100.0, "NAB": 100.0, "WBC": 100.0, "ANZ": 100.0, "MQG": 45.0,
+    "BOQ": 100.0, "BEN": 100.0, "SUN": 100.0, "IAG": 100.0, "QBE": 0.0,
+    # Big miners
+    "BHP": 100.0, "RIO": 0.0, "FMG": 100.0, "MIN": 100.0, "S32": 0.0,
+    "WDS": 0.0, "STO": 0.0, "WHC": 100.0, "NHC": 100.0,
+    # Industrials / consumer
+    "WES": 100.0, "WOW": 100.0, "COL": 100.0, "JBH": 100.0, "HVN": 100.0,
+    "NCK": 100.0, "SUL": 100.0, "LOV": 100.0, "DMP": 100.0,
+    # Healthcare
+    "CSL": 15.0, "RHC": 100.0, "SHL": 100.0, "ANN": 0.0, "COH": 100.0,
+    # REITs / Infrastructure (0% franked — pass-through trusts)
+    "GMG": 0.0, "SCG": 0.0, "GPT": 0.0, "VCX": 0.0, "CHC": 0.0,
+    "DXS": 0.0, "CQR": 0.0, "HMC": 0.0, "MGR": 0.0, "BWP": 0.0,
+    "NSR": 0.0, "CLW": 0.0, "GDF": 0.0, "URW": 0.0,
+    # Infrastructure / Utilities
+    "TCL": 0.0, "APA": 0.0, "SKI": 0.0, "ALX": 0.0,
+    "AGL": 100.0, "ORG": 100.0, "ALD": 100.0,
+    # Tech
+    "WTC": 0.0, "XRO": 0.0, "CPU": 30.0, "NXT": 0.0, "TYR": 0.0,
+    # Telcos
+    "TLS": 100.0, "TPG": 0.0, "SPK": 0.0,
+    # ETFs (0% — pass-through)
+    "VAS": 0.0, "VHY": 0.0, "VLC": 0.0, "VGS": 0.0, "VDHG": 0.0,
+    "NDQ": 0.0, "IVV": 0.0, "STW": 0.0, "IOZ": 0.0, "A200": 0.0,
+    # Other
+    "ALL": 100.0, "REH": 0.0, "RWC": 0.0, "BXB": 0.0, "AMC": 0.0,
+    "ALQ": 100.0, "GWA": 100.0, "IPH": 100.0, "IEL": 100.0, "EML": 0.0,
+}
 
 
 def _get_cached_dividends(ticker: str) -> dict | None:
@@ -685,7 +719,7 @@ def scrape_asx_dividends(ticker: str) -> list[dict]:
         "https://www.asx.com.au/asx/v2/markets/dividends.do",
         params={"by": "asxCodes", "asxCodes": code, "view": "all"},
         headers=_ASX_DIV_HEADERS,
-        timeout=15,
+        timeout=4,   # fail fast — ASX endpoint is unreliable; yfinance is the primary source
     )
     resp.raise_for_status()
 
@@ -876,60 +910,84 @@ def _yf_info_safe(ticker: str) -> dict:
         return {}
 
 
+def _fetch_dividends_for_ticker(code: str) -> dict:
+    """
+    Fetch dividend data for one ASX ticker.
+
+    Strategy (primary → enrichment → fallback):
+    1. yfinance  — primary source: history, amounts, dates, yield metadata.
+                   Fast and reliable.
+    2. ASX scrape — optional enrichment: franking %, exact payable date,
+                   dividend type. Short timeout (4 s) so a dead endpoint
+                   doesn't stall the whole batch.
+    3. _FRANKING_MAP — hardcoded franking fallback when scrape unavailable.
+
+    Returns a dict suitable for _build_dividend_response / caching.
+    Never raises — returns {"error": ..., "ticker": code} on complete failure.
+    """
+    yf_info = _yf_info_safe(code)
+
+    # ── Build history from yfinance ───────────────────────────────────────────
+    history: list[dict] = []
+    try:
+        stk  = yf.Ticker(asx(code))
+        divs = stk.dividends
+        if not divs.empty:
+            cutoff = datetime.now() - timedelta(days=3 * 365)
+            for dt_raw, amt in divs.items():
+                # Strip tz — yfinance returns tz-aware index (Australia/Sydney)
+                dt = dt_raw.to_pydatetime().replace(tzinfo=None)
+                if dt < cutoff:
+                    continue
+                history.append({
+                    "ex_date":       dt.strftime("%Y-%m-%d"),
+                    "amount":        round(float(amt), 4),
+                    "franking_pct":  _FRANKING_MAP.get(code, 0.0),
+                    "dividend_type": "Ordinary",
+                    "payable_date":  None,
+                    "record_date":   None,
+                    "currency":      "AUD",
+                    "comments":      "",
+                })
+            history.sort(key=lambda x: x["ex_date"], reverse=True)
+    except Exception:
+        pass  # will return empty history; still builds a valid response
+
+    # ── Try ASX scrape as optional enrichment (franking, payable date) ────────
+    try:
+        asx_history = scrape_asx_dividends(code)
+        if asx_history:
+            # ASX data is more authoritative — use it wholesale
+            result = _build_dividend_response(code, asx_history, yf_info)
+            result["source"] = "asx+yfinance"
+            return result
+    except Exception:
+        pass  # scrape failed or timed out — continue with yfinance-only data
+
+    # ── Build response from yfinance data (with franking from _FRANKING_MAP) ──
+    if not history and not yf_info:
+        return {"error": "no dividend data available", "ticker": code}
+
+    result = _build_dividend_response(code, history, yf_info)
+    result["source"] = "yfinance"
+    return result
+
+
 @app.route("/api/dividends/<ticker>")
 def dividend_info(ticker):
     """
     Returns dividend schedule, history and forward yield for an ASX ticker.
-    Primary source: ASX dividend-search API (real ex-dates + franking %).
-    Secondary: yfinance for yield / payout ratio metadata.
+    Primary: yfinance (fast, reliable). Enriched by ASX scrape when available.
     Results cached for 12 h in dividend_cache table.
     """
     code = ticker.upper().replace(".AX", "")
-
     cached = _get_cached_dividends(code)
     if cached:
         return jsonify(cached)
 
-    # ── 1. Try ASX scrape ────────────────────────────────────────────────────
-    asx_history: list[dict] = []
-    asx_ok = False
-    try:
-        asx_history = scrape_asx_dividends(code)
-        asx_ok = bool(asx_history)
-    except Exception as ex:
-        pass  # fall through to yfinance-only path
-
-    # ── 2. yfinance metadata (yield, payout ratio, 5yr avg) ─────────────────
-    yf_info = _yf_info_safe(code)
-
-    # ── 3. Build response ────────────────────────────────────────────────────
-    if asx_ok:
-        result = _build_dividend_response(code, asx_history, yf_info)
-    else:
-        # Pure yfinance fallback (original behaviour)
-        try:
-            stk  = yf.Ticker(asx(code))
-            divs = stk.dividends
-            history = []
-            if not divs.empty:
-                cutoff = datetime.now() - timedelta(days=3 * 365)
-                # yfinance may return a tz-aware DatetimeIndex (e.g. Australia/Sydney).
-                # Strip timezone from each timestamp before comparing to naive cutoff.
-                for dt_raw, amt in divs.items():
-                    dt = dt_raw.to_pydatetime().replace(tzinfo=None)
-                    if dt < cutoff:
-                        continue
-                    history.append({"ex_date": dt.strftime("%Y-%m-%d"),
-                                    "amount": round(float(amt), 4),
-                                    "franking_pct": 0.0,
-                                    "dividend_type": "Ordinary"})
-                history.sort(key=lambda x: x["ex_date"], reverse=True)
-            result = _build_dividend_response(code, history, yf_info)
-            result["source"] = "yfinance"
-        except Exception as e:
-            return jsonify({"error": str(e), "ticker": code}), 500
-
-    _set_cached_dividends(code, result, result.get("source", "asx"))
+    result = _fetch_dividends_for_ticker(code)
+    if "error" not in result:
+        _set_cached_dividends(code, result, result.get("source", "yfinance"))
     return jsonify(result)
 
 
@@ -938,7 +996,7 @@ def dividend_batch():
     """
     Fetch dividend info for multiple tickers in parallel.
     Body: {"tickers": [...], "force": false}
-    Each ticker: ASX scrape → cache → yfinance fallback.
+    Primary: yfinance. Enriched by ASX scrape when available.
     """
     body    = request.get_json() or {}
     tickers = body.get("tickers", [])
@@ -950,42 +1008,9 @@ def dividend_batch():
             cached = _get_cached_dividends(code)
             if cached:
                 return code, cached
-
-        asx_history: list[dict] = []
-        asx_ok = False
-        try:
-            asx_history = scrape_asx_dividends(code)
-            asx_ok = bool(asx_history)
-        except Exception:
-            pass
-
-        yf_info = _yf_info_safe(code)
-
-        if asx_ok:
-            result = _build_dividend_response(code, asx_history, yf_info)
-        else:
-            try:
-                stk  = yf.Ticker(asx(code))
-                divs = stk.dividends
-                history = []
-                if not divs.empty:
-                    cutoff = datetime.now() - timedelta(days=3 * 365)
-                    # yfinance may return a tz-aware index; strip tz before comparison
-                    for dt_raw, amt in divs.items():
-                        dt = dt_raw.to_pydatetime().replace(tzinfo=None)
-                        if dt < cutoff:
-                            continue
-                        history.append({"ex_date": dt.strftime("%Y-%m-%d"),
-                                        "amount": round(float(amt), 4),
-                                        "franking_pct": 0.0,
-                                        "dividend_type": "Ordinary"})
-                    history.sort(key=lambda x: x["ex_date"], reverse=True)
-                result = _build_dividend_response(code, history, yf_info)
-                result["source"] = "yfinance"
-            except Exception as ex:
-                return code, {"error": str(ex), "ticker": code}
-
-        _set_cached_dividends(code, result, result.get("source", "asx"))
+        result = _fetch_dividends_for_ticker(code)
+        if "error" not in result:
+            _set_cached_dividends(code, result, result.get("source", "yfinance"))
         return code, result
 
     results: dict[str, dict] = {}
