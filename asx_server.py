@@ -913,7 +913,12 @@ def dividend_info(ticker):
             history = []
             if not divs.empty:
                 cutoff = datetime.now() - timedelta(days=3 * 365)
-                for dt, amt in divs[divs.index >= cutoff].items():
+                # yfinance may return a tz-aware DatetimeIndex (e.g. Australia/Sydney).
+                # Strip timezone from each timestamp before comparing to naive cutoff.
+                for dt_raw, amt in divs.items():
+                    dt = dt_raw.to_pydatetime().replace(tzinfo=None)
+                    if dt < cutoff:
+                        continue
                     history.append({"ex_date": dt.strftime("%Y-%m-%d"),
                                     "amount": round(float(amt), 4),
                                     "franking_pct": 0.0,
@@ -965,7 +970,11 @@ def dividend_batch():
                 history = []
                 if not divs.empty:
                     cutoff = datetime.now() - timedelta(days=3 * 365)
-                    for dt, amt in divs[divs.index >= cutoff].items():
+                    # yfinance may return a tz-aware index; strip tz before comparison
+                    for dt_raw, amt in divs.items():
+                        dt = dt_raw.to_pydatetime().replace(tzinfo=None)
+                        if dt < cutoff:
+                            continue
                         history.append({"ex_date": dt.strftime("%Y-%m-%d"),
                                         "amount": round(float(amt), 4),
                                         "franking_pct": 0.0,
