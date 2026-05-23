@@ -193,16 +193,19 @@ function _renderLearningContent(d) {
 
   // ── Recent events ──────────────────────────────────────────────────────────
   const outcomeChip = o => {
-    const map = { win:'#16a34a', loss:'#dc2626', breakeven:'#9ca3af', open:'#3b82f6', invalidated:'#d97706' };
+    const map = { win:'#16a34a', loss:'#dc2626', breakeven:'#9ca3af', open:'#3b82f6', invalidated:'#d97706', skipped:'#6b7280' };
     const col = map[o] || '#9ca3af';
     return `<span style="background:${col}20;color:${col};border-radius:3px;padding:1px 6px;font-size:10px;font-weight:600">${o || 'open'}</span>`;
   };
   const recentCard = `
     <div class="card section-gap">
-      <div class="card-title">Recent Events</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div class="card-title" style="margin:0">Recent Events</div>
+        <span class="text-xs text-muted">Click ✕ to remove events that shouldn't influence calibration</span>
+      </div>
       ${events.length ? `
         <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:600px">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:640px">
             <thead>
               <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
                 <th style="text-align:left;padding:4px 8px">Date</th>
@@ -212,16 +215,18 @@ function _renderLearningContent(d) {
                 <th style="text-align:left;padding:4px 8px">Regime</th>
                 <th style="text-align:left;padding:4px 8px">Outcome</th>
                 <th style="text-align:right;padding:4px 8px">P&amp;L %</th>
+                <th style="text-align:center;padding:4px 8px;width:32px"></th>
               </tr>
             </thead>
             <tbody>
               ${events.slice(0, 20).map(ev => {
+                // realized_pnl_pct is stored as a percentage value (e.g. 5.2 = 5.2%)
                 const pnlPct = ev.realized_pnl_pct;
                 const pnlStr = pnlPct != null
-                  ? (pnlPct >= 0 ? '+' : '') + (pnlPct * 100).toFixed(1) + '%'
+                  ? (pnlPct >= 0 ? '+' : '') + Number(pnlPct).toFixed(1) + '%'
                   : '—';
                 const pnlColor = pnlPct > 0 ? '#16a34a' : pnlPct < 0 ? '#dc2626' : 'var(--text-secondary)';
-                return `<tr style="border-bottom:1px solid var(--border)">
+                return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border)">
                   <td style="padding:4px 8px;color:var(--text-muted)">${(ev.timestamp||'').slice(0,10)}</td>
                   <td style="padding:4px 8px;font-weight:600">${ev.ticker||'—'}</td>
                   <td style="padding:4px 8px">${ev.recommendation||'—'}</td>
@@ -229,6 +234,15 @@ function _renderLearningContent(d) {
                   <td style="padding:4px 8px;color:var(--text-muted)">${ev.regime||'—'}</td>
                   <td style="padding:4px 8px">${outcomeChip(ev.outcome_status)}</td>
                   <td style="padding:4px 8px;text-align:right;color:${pnlColor}">${pnlStr}</td>
+                  <td style="padding:4px 8px;text-align:center">
+                    <button
+                      onclick="deleteLearningEvent(${ev.id})"
+                      title="Remove this event from the Learning Loop"
+                      style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:13px;padding:2px 4px;border-radius:3px;line-height:1"
+                      onmouseover="this.style.color='#dc2626';this.style.background='#dc262620'"
+                      onmouseout="this.style.color='var(--text-muted)';this.style.background='none'"
+                    >✕</button>
+                  </td>
                 </tr>`;
               }).join('')}
             </tbody>
@@ -262,4 +276,27 @@ function _renderLearningContent(d) {
   return summaryCards + calibCard +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     recentCard + failedCard;
+}
+
+// ── Delete a single learning event (optimise calibration dataset) ─────────────
+async function deleteLearningEvent(id) {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  try {
+    const resp = await fetch(`${API}/api/learning/event/${id}`, { method: 'DELETE' });
+    const result = await resp.json();
+    if (result.ok) {
+      // Instant DOM removal — no full page reload needed
+      const row = document.getElementById(`ll-row-${id}`);
+      if (row) {
+        row.style.transition = 'opacity 0.2s';
+        row.style.opacity = '0';
+        setTimeout(() => row.remove(), 200);
+      }
+      toast('Learning event removed', 'success');
+    } else {
+      toast('Could not remove event: ' + (result.error || 'unknown error'), 'error');
+    }
+  } catch (e) {
+    toast('Error removing event: ' + e.message, 'error');
+  }
 }

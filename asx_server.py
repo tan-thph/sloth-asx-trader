@@ -3167,6 +3167,21 @@ def learning_outcome():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/learning/event/<int:event_id>", methods=["DELETE"])
+def learning_delete_event(event_id):
+    """Hard-delete a single learning event by id."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "DELETE FROM ai_learning_events WHERE id=?", (event_id,)
+            ).rowcount
+        if rows == 0:
+            return jsonify({"ok": False, "error": "Event not found"}), 404
+        return jsonify({"ok": True, "deleted": event_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/learning/stats")
 def learning_stats():
     """Return learning loop stats: win rates by confidence band, regime, prompt version."""
