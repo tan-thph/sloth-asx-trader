@@ -71,21 +71,57 @@ ASX_SECTOR_MAP = {
     # Industrials
     'MQG': 'Diversified', 'SKI': 'Diversified', 'BEN': 'Diversified',
     'AZJ': 'Diversified', 'MPL': 'Industrial',
+
+    # Additional ASX200 tickers
+    'ALL': 'Gaming', 'SGP': 'REITs', 'CPU': 'Technology', 'NXT': 'Technology',
+    'LLC': 'REITs', 'MIN': 'Mining', 'IGO': 'Mining', 'LYC': 'Materials',
+    'NST': 'Mining', 'EVN': 'Mining', 'SFR': 'Mining', 'AWC': 'Materials',
+    'BSL': 'Materials', 'JHX': 'Materials', 'BLD': 'Materials', 'CSR': 'Materials',
+    'RWC': 'Materials', 'ILU': 'Mining', 'PLS': 'Mining', 'WHC': 'Energy',
+    'NHC': 'Energy', 'YAL': 'Energy', 'CMM': 'Mining', 'RRL': 'Mining',
+    'PRU': 'Mining', 'SAR': 'Mining', 'WDS': 'Energy', 'STO': 'Energy',
+    'BPT': 'Energy', 'KAR': 'Energy', 'IPL': 'Materials', 'ORI': 'Materials',
+    'PME': 'Healthcare', 'MSB': 'Healthcare', 'HCA': 'Healthcare', 'EHE': 'Healthcare',
+    'HLS': 'Healthcare', 'IDX': 'Healthcare', 'PNV': 'Healthcare', 'NAN': 'Healthcare',
+    'MYR': 'Retail', 'HVN': 'Retail', 'SUL': 'Retail', 'BRG': 'Retail',
+    'PMV': 'Retail', 'CKF': 'Retail', 'ARB': 'Retail', 'TPW': 'Technology',
+    'FLT': 'Travel', 'WEB': 'Travel', 'CTD': 'Travel', 'QAN': 'Transport',
+    'VCX': 'REITs', 'DXS': 'REITs', 'CHC': 'REITs', 'ARF': 'REITs',
+    'CIP': 'REITs', 'NSR': 'REITs', 'BWP': 'REITs', 'ABP': 'REITs',
+    'AZJ': 'Infrastructure', 'MND': 'Industrials', 'ALQ': 'Industrials',
+    'GWA': 'Industrials', 'NWH': 'Industrials', 'SSM': 'Industrials',
+    'SEK': 'Technology', 'REA': 'Technology', 'CAR': 'Technology', 'IEL': 'Technology',
+    'DTL': 'Technology', 'TNE': 'Technology', 'MP1': 'Technology',
+    'TWE': 'Consumer Staples', 'A2M': 'Consumer Staples', 'CCL': 'Consumer Staples',
+    'GNC': 'Consumer Staples', 'MQG': 'Financials', 'AMP': 'Financials',
+    'CGF': 'Financials', 'HUB': 'Financials', 'PPT': 'Financials',
+    'PTM': 'Financials', 'IFL': 'Financials', 'EQT': 'Financials',
+    'AUB': 'Financials', 'GQG': 'Financials', 'TPG': 'Telcos', 'REH': 'Industrials',
+    'AGL': 'Utilities', 'APA': 'Utilities', 'SKI': 'Utilities',
+    'XRO': 'Technology', 'APX': 'Technology', 'NEA': 'Technology',
+    'S32': 'Mining', 'OZL': 'Mining', 'MGX': 'Mining', 'SBM': 'Mining',
+    'WES': 'Retail', 'COL': 'Retail', 'WOW': 'Consumer Staples',
 }
+
+_SECTOR_CACHE: dict[str, str] = {}   # in-memory cache, populated on first lookup
 
 
 def get_sector_for_ticker(ticker: str) -> str:
     t = ticker.upper().strip().replace('.AX', '')
+    if t in _SECTOR_CACHE:
+        return _SECTOR_CACHE[t]
     if t in ASX_SECTOR_MAP:
+        _SECTOR_CACHE[t] = ASX_SECTOR_MAP[t]
         return ASX_SECTOR_MAP[t]
     try:
-        stk = yf.Ticker(asx(ticker))
-        info = stk.info
+        info = yf.Ticker(asx(ticker)).info or {}
         sector = info.get("sector", "").strip()
-        if sector and sector != "Unknown":
+        if sector and sector not in ("Unknown", ""):
+            _SECTOR_CACHE[t] = sector
             return sector
     except Exception:
         pass
+    _SECTOR_CACHE[t] = "Other"
     return "Other"
 
 
@@ -234,7 +270,12 @@ def _simple_rsi(closes: np.ndarray, period: int = 14) -> float:
     return float(100 - 100 / (1 + avg_g / avg_l)) if avg_l > 0 else 100.0
 
 
-def _score_ticker(closes: np.ndarray, volumes: np.ndarray) -> dict | None:
+def _score_ticker(
+    closes: np.ndarray,
+    volumes: np.ndarray,
+    index_closes: np.ndarray | None = None,
+) -> dict | None:
+    """Score a ticker 0-100. Components: Trend(30) + Pullback(30) + Volume(20) + Momentum(10) + RS(10)."""
     n = len(closes)
     if n < 45:
         return None
@@ -278,23 +319,36 @@ def _score_ticker(closes: np.ndarray, volumes: np.ndarray) -> dict | None:
     elif vol5_ratio > 0.8: vol_score = 10
     else:                  vol_score = 5
 
-    # ── Short-term momentum (0-20): price turning up ─────────────────────────
+    # ── Short-term momentum (0-10) ───────────────────────────────────────────
     ret_5d  = float((cp / closes[-6]  - 1) * 100) if n > 6  else 0.0
     ret_20d = float((cp / closes[-21] - 1) * 100) if n > 21 else 0.0
 
-    if   ret_5d > 3:  mom_score = 20
-    elif ret_5d > 0:  mom_score = 15
-    elif ret_5d > -2: mom_score = 10
-    else:             mom_score = 5
+    if   ret_5d > 3:  mom_score = 10
+    elif ret_5d > 0:  mom_score = 8
+    elif ret_5d > -2: mom_score = 5
+    else:             mom_score = 2
 
-    total = trend + pullback + vol_score + mom_score
+    # ── Relative Strength vs ^AXJO (0-10) ────────────────────────────────────
+    rs_score   = 5   # neutral default when index unavailable
+    rs_5d_alpha = None
+    if index_closes is not None and len(index_closes) >= 6:
+        idx_ret_5d  = float((index_closes[-1] / index_closes[-6] - 1) * 100)
+        rs_5d_alpha = round(ret_5d - idx_ret_5d, 2)
+        if   rs_5d_alpha > 4:  rs_score = 10
+        elif rs_5d_alpha > 2:  rs_score = 8
+        elif rs_5d_alpha > 0:  rs_score = 6
+        elif rs_5d_alpha > -2: rs_score = 4
+        else:                  rs_score = 1
 
-    return {
+    total = trend + pullback + vol_score + mom_score + rs_score
+
+    result = {
         "score":          round(min(total, 100), 1),
         "trend_score":    trend,
         "pullback_score": pullback,
         "vol_score":      vol_score,
         "mom_score":      mom_score,
+        "rs_score":       rs_score,
         "rsi":            round(rsi, 1),
         "ret_5d":         round(ret_5d, 2),
         "ret_20d":        round(ret_20d, 2),
@@ -304,17 +358,23 @@ def _score_ticker(closes: np.ndarray, volumes: np.ndarray) -> dict | None:
         "sma20":          round(sma20, 3),
         "sma50":          round(sma50, 3),
     }
+    if rs_5d_alpha is not None:
+        result["rs_5d_alpha"] = rs_5d_alpha
+    return result
 
 
 # ── Main ticker analysis ───────────────────────────────────────────────────────
 
 def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     t = asx(ticker)
-    stk = yf.Ticker(t)
+    try:
+        stk = yf.Ticker(t)
+        hist = stk.history(period=period, auto_adjust=True)
+    except Exception as e:
+        return {"error": f"yfinance failed for {ticker}: {e}", "ticker": ticker.upper()}
 
-    hist = stk.history(period=period, auto_adjust=True)
     if hist.empty or len(hist) < 30:
-        return {"error": f"Insufficient data for {ticker}"}
+        return {"error": f"Insufficient data for {ticker}", "ticker": ticker.upper()}
 
     close  = hist["Close"]
     high   = hist["High"]

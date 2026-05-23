@@ -147,9 +147,82 @@ def init_db():
                 fetched_at TEXT DEFAULT (datetime('now','localtime')),
                 expires_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS ticker_metadata (
+                ticker      TEXT PRIMARY KEY,
+                sector      TEXT,
+                industry    TEXT,
+                short_name  TEXT,
+                fetched_at  TEXT DEFAULT (datetime('now','localtime')),
+                expires_at  TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS failed_tickers (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT DEFAULT (datetime('now','localtime')),
+                ticker      TEXT,
+                error       TEXT,
+                context     TEXT DEFAULT 'scan'
+            );
+
+            CREATE TABLE IF NOT EXISTS ai_learning_events (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                event_type           TEXT NOT NULL DEFAULT 'recommendation',
+                ticker               TEXT,
+                regime               TEXT,
+                prompt_version       TEXT,
+                agent_type           TEXT,
+                ai_confidence        REAL,
+                ensemble_confidence  REAL,
+                recommendation       TEXT,
+                rationale_summary    TEXT,
+                suggested_stop       REAL,
+                suggested_target     REAL,
+                rr_ratio             REAL,
+                outcome_status       TEXT,
+                realized_pnl_pct     REAL,
+                realized_pnl_aud     REAL,
+                holding_period_days  INTEGER,
+                exit_reason          TEXT,
+                was_executed         INTEGER DEFAULT 0,
+                follow_through_days  INTEGER,
+                market_context       TEXT,
+                error_type           TEXT,
+                notes                TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS prompt_versions (
+                version              TEXT PRIMARY KEY,
+                created_at           TEXT,
+                description          TEXT,
+                total_calls          INTEGER DEFAULT 0,
+                win_rate             REAL DEFAULT 0,
+                high_conf_win_rate   REAL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_learning_ticker    ON ai_learning_events(ticker);
+            CREATE INDEX IF NOT EXISTS idx_learning_ts        ON ai_learning_events(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_learning_regime    ON ai_learning_events(regime);
+            CREATE INDEX IF NOT EXISTS idx_learning_pv        ON ai_learning_events(prompt_version);
+            CREATE INDEX IF NOT EXISTS idx_learning_conf      ON ai_learning_events(ai_confidence);
+            CREATE INDEX IF NOT EXISTS idx_failed_ts          ON failed_tickers(timestamp DESC);
         """)
 
 init_db()
+
+
+def _log_failed_ticker(ticker: str, error: str, context: str = 'scan') -> None:
+    """Persist a failed yfinance fetch to failed_tickers table (best-effort)."""
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO failed_tickers (ticker, error, context) VALUES (?, ?, ?)",
+                (ticker, str(error)[:500], context)
+            )
+    except Exception:
+        pass
+
 
 # ── Register blueprints ────────────────────────────────────────────────────────
 if _AE_OK:
@@ -1287,8 +1360,9 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
         })
 
     try:
+        dl_tickers = asx_tickers + ["^AXJO"]
         raw = yf.download(
-            asx_tickers, period="90d", auto_adjust=True,
+            dl_tickers, period="90d", auto_adjust=True,
             progress=False, group_by="column",
         )
         if raw.empty:
@@ -1299,6 +1373,15 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
         # Extract Close and Volume DataFrames (MultiIndex columns)
         closes_df = raw["Close"]  if "Close"  in raw.columns.get_level_values(0) else None
         volume_df = raw["Volume"] if "Volume" in raw.columns.get_level_values(0) else None
+
+        # Extract ^AXJO closes for relative-strength scoring
+        axjo_closes = None
+        try:
+            if closes_df is not None and "^AXJO" in closes_df.columns:
+                axjo_closes = closes_df["^AXJO"].dropna().values
+        except Exception:
+            pass
+
         if closes_df is None:
             with _scan_lock:
                 _scan_state.update({"running": False, "error": "Unexpected data format", "stage": "error"})
@@ -1336,7 +1419,7 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
             if adv_aud < min_adv_aud:
                 continue
 
-            scored = _score_ticker(closes, volumes)
+            scored = _score_ticker(closes, volumes, index_closes=axjo_closes)
             if scored is None:
                 continue
 
@@ -2978,6 +3061,210 @@ def get_ai_response():
 
 
 
+
+
+# ── Learning Loop ──────────────────────────────────────────────────────────────
+
+@app.route("/api/learning/log", methods=["POST"])
+def learning_log():
+    """Log an AI recommendation event for the learning loop."""
+    data = request.get_json() or {}
+    try:
+        with get_db() as conn:
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                    (event_type, ticker, regime, prompt_version, agent_type,
+                     ai_confidence, ensemble_confidence, recommendation, rationale_summary,
+                     suggested_stop, suggested_target, rr_ratio, was_executed, market_context, notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                data.get("event_type", "recommendation"),
+                data.get("ticker"),
+                data.get("regime"),
+                data.get("prompt_version"),
+                data.get("agent_type"),
+                data.get("ai_confidence"),
+                data.get("ensemble_confidence"),
+                data.get("recommendation"),
+                data.get("rationale_summary"),
+                data.get("suggested_stop"),
+                data.get("suggested_target"),
+                data.get("rr_ratio"),
+                1 if data.get("was_executed") else 0,
+                json.dumps(data.get("market_context")) if data.get("market_context") else None,
+                data.get("notes"),
+            ))
+            row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        pv = data.get("prompt_version")
+        if pv:
+            with get_db() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO prompt_versions (version, created_at, description) VALUES (?, datetime('now','localtime'), 'Auto-registered')",
+                    (pv,)
+                )
+                conn.execute("UPDATE prompt_versions SET total_calls = total_calls + 1 WHERE version=?", (pv,))
+
+        return jsonify({"ok": True, "id": row_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/learning/outcome", methods=["POST"])
+def learning_outcome():
+    """Update the outcome of a previously logged event."""
+    data = request.get_json() or {}
+    event_id = data.get("id")
+    if not event_id:
+        return jsonify({"error": "id required"}), 400
+    try:
+        with get_db() as conn:
+            conn.execute("""
+                UPDATE ai_learning_events
+                SET outcome_status=?, realized_pnl_pct=?, realized_pnl_aud=?,
+                    holding_period_days=?, exit_reason=?, error_type=?, notes=?
+                WHERE id=?
+            """, (
+                data.get("outcome_status"),
+                data.get("realized_pnl_pct"),
+                data.get("realized_pnl_aud"),
+                data.get("holding_period_days"),
+                data.get("exit_reason"),
+                data.get("error_type"),
+                data.get("notes"),
+                event_id,
+            ))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/learning/stats")
+def learning_stats():
+    """Return learning loop stats: win rates by confidence band, regime, prompt version."""
+    try:
+        with get_db() as conn:
+            total  = conn.execute("SELECT COUNT(*) FROM ai_learning_events").fetchone()[0]
+            closed = conn.execute(
+                "SELECT COUNT(*) FROM ai_learning_events WHERE outcome_status IN ('win','loss','breakeven')"
+            ).fetchone()[0]
+            wins   = conn.execute(
+                "SELECT COUNT(*) FROM ai_learning_events WHERE outcome_status='win'"
+            ).fetchone()[0]
+
+            # Confidence bands
+            conf_bands = []
+            for lo, hi in [(0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]:
+                rows = conn.execute("""
+                    SELECT outcome_status, COUNT(*) as cnt FROM ai_learning_events
+                    WHERE ai_confidence >= ? AND ai_confidence < ?
+                      AND outcome_status IN ('win','loss','breakeven')
+                    GROUP BY outcome_status
+                """, (lo, hi)).fetchall()
+                band_wins  = sum(r['cnt'] for r in rows if r['outcome_status'] == 'win')
+                band_total = sum(r['cnt'] for r in rows)
+                conf_bands.append({
+                    "band":     f"{int(lo*100)}-{int(hi*100)}%",
+                    "wins":     band_wins,
+                    "total":    band_total,
+                    "win_rate": round(band_wins / band_total * 100, 1) if band_total else None,
+                })
+
+            # Regime stats
+            regime_rows = conn.execute("""
+                SELECT regime, outcome_status, COUNT(*) as cnt FROM ai_learning_events
+                WHERE regime IS NOT NULL AND outcome_status IN ('win','loss','breakeven')
+                GROUP BY regime, outcome_status
+            """).fetchall()
+            regime_agg: dict = {}
+            for r in regime_rows:
+                reg = r['regime']
+                if reg not in regime_agg:
+                    regime_agg[reg] = {'wins': 0, 'total': 0}
+                regime_agg[reg]['total'] += r['cnt']
+                if r['outcome_status'] == 'win':
+                    regime_agg[reg]['wins'] += r['cnt']
+            regime_list = [
+                {"regime": k, "wins": v['wins'], "total": v['total'],
+                 "win_rate": round(v['wins'] / v['total'] * 100, 1) if v['total'] else None}
+                for k, v in sorted(regime_agg.items())
+            ]
+
+            # Prompt version stats
+            pv_rows = conn.execute("""
+                SELECT pv.version, pv.total_calls,
+                       COALESCE(SUM(CASE WHEN e.outcome_status='win' THEN 1 ELSE 0 END), 0) as wins,
+                       COALESCE(SUM(CASE WHEN e.outcome_status IN ('win','loss','breakeven') THEN 1 ELSE 0 END), 0) as closed
+                FROM prompt_versions pv
+                LEFT JOIN ai_learning_events e ON e.prompt_version = pv.version
+                GROUP BY pv.version ORDER BY pv.created_at DESC
+            """).fetchall()
+            version_list = [{
+                "version":     r['version'],
+                "total_calls": r['total_calls'],
+                "wins":        r['wins'],
+                "closed":      r['closed'],
+                "win_rate":    round(r['wins'] / r['closed'] * 100, 1) if r['closed'] else None,
+            } for r in pv_rows]
+
+            # Recent events
+            recent = conn.execute("""
+                SELECT id, timestamp, ticker, recommendation, ai_confidence, ensemble_confidence,
+                       outcome_status, realized_pnl_pct, regime, prompt_version, was_executed
+                FROM ai_learning_events ORDER BY timestamp DESC LIMIT 20
+            """).fetchall()
+
+            # Failed tickers
+            failed = conn.execute(
+                "SELECT ticker, error, context, timestamp FROM failed_tickers ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+
+        return jsonify({
+            "total":         total,
+            "closed":        closed,
+            "wins":          wins,
+            "overall_win_rate": round(wins / closed * 100, 1) if closed else None,
+            "conf_bands":    conf_bands,
+            "regime_stats":  regime_list,
+            "version_stats": version_list,
+            "recent_events": [dict(r) for r in recent],
+            "failed_tickers": [dict(r) for r in failed],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/learning/calibration")
+def learning_calibration():
+    """Compact calibration block for injection into AI prompts (last 30 days)."""
+    try:
+        cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT ai_confidence, outcome_status FROM ai_learning_events
+                WHERE timestamp > ? AND outcome_status IN ('win','loss','breakeven')
+                ORDER BY timestamp DESC LIMIT 100
+            """, (cutoff,)).fetchall()
+
+        if not rows:
+            return jsonify({"available": False, "block": None})
+
+        wins  = sum(1 for r in rows if r['outcome_status'] == 'win')
+        total = len(rows)
+        wr    = round(wins / total * 100, 1)
+
+        hc    = [r for r in rows if (r['ai_confidence'] or 0) >= 0.75]
+        hc_wr = round(sum(1 for r in hc if r['outcome_status'] == 'win') / len(hc) * 100, 1) if hc else None
+
+        block = (
+            f"=== RECENT AI CALIBRATION (last 30 days, {total} closed recs) ===\n"
+            f"Overall win rate: {wr}% | High-confidence (≥0.75) win rate: {hc_wr or 'n/a'}%\n"
+            f"If high-conf win rate < 55%, confidence is systematically over-estimated — "
+            f"apply −0.05 to all confidence values in this response."
+        )
+        return jsonify({"available": True, "block": block, "total": total, "win_rate": wr})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

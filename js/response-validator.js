@@ -191,8 +191,17 @@ function validateResponse(parsed, minConfidence) {
 
     const r = fixed || rec;
 
-    if ((r.confidence ?? 0) < minConf && r.action !== 'HOLD') {
-      rejected.push({ rec: r, errors: [`confidence ${r.confidence?.toFixed(2)} < minConf ${minConf}`] });
+    // Ensemble confidence: blend AI confidence with indicator composite score
+    // liveSignals[ticker].score is 0-100 from _score_ticker; normalise to 0-1
+    const sig = state.liveSignals?.[r.ticker] ?? state.liveSignals?.[r.ticker + '.AX'];
+    const indScore = sig?.score ?? null;
+    r.ensembleConfidence = indScore != null
+      ? Math.round((0.5 * r.confidence + 0.5 * (indScore / 100)) * 100) / 100
+      : r.confidence;
+
+    // Use ensembleConfidence for the minConfidence threshold gate
+    if ((r.ensembleConfidence ?? 0) < minConf && r.action !== 'HOLD') {
+      rejected.push({ rec: r, errors: [`ensembleConfidence ${r.ensembleConfidence?.toFixed(2)} < minConf ${minConf}`] });
       continue;
     }
 

@@ -55,6 +55,56 @@ function renderPerformance() {
   const divYieldOnCost = totalCostVal > 0 ? (annualDivIncome / totalCostVal) * 100 : 0;
   const totalReturnWithDivPct = totalReturnPct + divYieldOnCost;
 
+  // ── Risk-adjusted metrics ──────────────────────────────────────────────────
+  // Sortino ratio: mean(pnl%) / downside_deviation (target return = 0)
+  const pnlPcts = closedTrades.map(t => {
+    const cost = t.qty && t.avgPrice ? t.qty * t.avgPrice : null;
+    return cost && cost > 0 ? t.pnl / cost : 0;
+  });
+  const meanRet = pnlPcts.length ? pnlPcts.reduce((s,v)=>s+v,0)/pnlPcts.length : 0;
+  const downside = pnlPcts.filter(v=>v<0);
+  const downsideDev = downside.length
+    ? Math.sqrt(downside.reduce((s,v)=>s+v*v,0)/downside.length)
+    : 0;
+  const sortinoRatio = downsideDev > 0 ? meanRet / downsideDev : null;
+
+  // Calmar ratio: annualised return / max drawdown (from cumulative P&L curve)
+  let calmarRatio = null;
+  if (closedTrades.length >= 2) {
+    const sorted = [...closedTrades].sort((a,b) => (a.date||'').localeCompare(b.date||''));
+    let cumPnl = 0, peak = 0, maxDD = 0;
+    sorted.forEach(t => {
+      cumPnl += Number(t.pnl)||0;
+      if (cumPnl > peak) peak = cumPnl;
+      const dd = peak > 0 ? (peak - cumPnl) / peak * 100 : 0;
+      if (dd > maxDD) maxDD = dd;
+    });
+    const firstDate = sorted[0]?.date;
+    const lastDate  = sorted[sorted.length-1]?.date;
+    const daySpan   = firstDate && lastDate
+      ? (new Date(lastDate) - new Date(firstDate)) / 86400000 : 0;
+    const annFactor = daySpan > 30 ? 365 / daySpan : 1;
+    const annReturn = realised * annFactor;
+    const cost0     = totalCostVal || 1;
+    calmarRatio = maxDD > 0 ? (annReturn / cost0 * 100) / maxDD : null;
+  }
+
+  // Streaks and avg hold days
+  const sortedTrades = [...closedTrades].sort((a,b) => (a.date||'').localeCompare(b.date||''));
+  let winStreak=0, lossStreak=0, curW=0, curL=0;
+  sortedTrades.forEach(t => {
+    if (t.pnl > 0) { curW++; curL=0; if(curW>winStreak) winStreak=curW; }
+    else            { curL++; curW=0; if(curL>lossStreak) lossStreak=curL; }
+  });
+  const holdDays = t => {
+    if (!t.date || !t.closeDate) return null;
+    return Math.round((new Date(t.closeDate) - new Date(t.date)) / 86400000);
+  };
+  const winHolds  = closedTrades.filter(t=>t.pnl>0).map(holdDays).filter(d=>d!=null);
+  const lossHolds = closedTrades.filter(t=>t.pnl<0).map(holdDays).filter(d=>d!=null);
+  const avgHoldWin  = winHolds.length  ? winHolds.reduce((s,v)=>s+v,0)/winHolds.length   : null;
+  const avgHoldLoss = lossHolds.length ? lossHolds.reduce((s,v)=>s+v,0)/lossHolds.length : null;
+
   const confBuckets=[0.5,0.6,0.7,0.8,0.9].map(c=>{
     const b=state.recHistory.filter(r=>r.confidence>=c&&r.confidence<c+0.1&&r.outcome!=='open'&&r.outcome!=='skipped');
     const w=b.filter(r=>r.outcome==='win').length;
@@ -183,6 +233,65 @@ function renderPerformance() {
         <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"><div class="text-xs">Net after costs</div><div style="font-size:18px;font-weight:600;color:${realised-totalFees>=0?'#16a34a':'#dc2626'}">${sign(realised-totalFees)}$${fmt(Math.abs(realised-totalFees))}</div></div>
       </div>
     </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Risk-Adjusted Ratios</div>
+        <div class="grid-2" style="gap:8px;margin-bottom:10px">
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
+            <div class="text-xs">Sortino Ratio</div>
+            <div style="font-size:18px;font-weight:600;color:${sortinoRatio==null?'var(--text-secondary)':sortinoRatio>=1?'#16a34a':sortinoRatio>=0?'#d97706':'#dc2626'}">
+              ${sortinoRatio==null?'—':fmt(sortinoRatio,2)}
+            </div>
+            <div class="text-xs text-muted">Downside deviation only · ≥ 1.0 = good</div>
+          </div>
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
+            <div class="text-xs">Calmar Ratio</div>
+            <div style="font-size:18px;font-weight:600;color:${calmarRatio==null?'var(--text-secondary)':calmarRatio>=1?'#16a34a':calmarRatio>=0?'#d97706':'#dc2626'}">
+              ${calmarRatio==null?'—':fmt(calmarRatio,2)}
+            </div>
+            <div class="text-xs text-muted">Ann. return / max drawdown · ≥ 1.0 = good</div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Trade Streaks &amp; Hold Duration</div>
+        <div class="grid-2" style="gap:8px">
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
+            <div class="text-xs">Longest Win Streak</div>
+            <div style="font-size:18px;font-weight:600;color:#16a34a">${winStreak} trade${winStreak!==1?'s':''}</div>
+            <div class="text-xs text-muted">Consecutive wins</div>
+          </div>
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
+            <div class="text-xs">Longest Loss Streak</div>
+            <div style="font-size:18px;font-weight:600;color:${lossStreak>=3?'#dc2626':lossStreak>=2?'#d97706':'var(--text-primary)'}">${lossStreak} trade${lossStreak!==1?'s':''}</div>
+            <div class="text-xs text-muted">Consecutive losses</div>
+          </div>
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
+            <div class="text-xs">Avg Hold — Winners</div>
+            <div style="font-size:18px;font-weight:600">${avgHoldWin!=null?Math.round(avgHoldWin)+'d':'—'}</div>
+            <div class="text-xs text-muted">${winHolds.length} closed wins with dates</div>
+          </div>
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
+            <div class="text-xs">Avg Hold — Losers</div>
+            <div style="font-size:18px;font-weight:600">${avgHoldLoss!=null?Math.round(avgHoldLoss)+'d':'—'}</div>
+            <div class="text-xs text-muted">${lossHolds.length} closed losses with dates</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="flex-between" style="align-items:center">
+        <div>
+          <div class="card-title" style="margin:0">Trade Journal Export</div>
+          <div class="text-xs text-muted" style="margin-top:2px">ATO-compatible CSV — drop into your tax spreadsheet or accountant portal</div>
+        </div>
+        <button class="btn btn-sm" onclick="exportTradeJournalCSV()" style="white-space:nowrap">
+          ↓ Export CSV
+        </button>
+      </div>
+    </div>
   `;
 }
 
@@ -306,4 +415,92 @@ function _drawEquityCurveChart(d) {
   ctx.font = 'bold 10px system-ui,sans-serif';
   ctx.textAlign = 'right';
   ctx.fillText('$' + lastV.toLocaleString(), W - PAD_R, yOf(lastV) - 4);
+}
+
+// ── ATO-compatible Trade Journal CSV Export ───────────────────────────────────
+function exportTradeJournalCSV() {
+  const trades = state.tradeJournal || [];
+  if (!trades.length) {
+    alert('No trade journal entries to export.');
+    return;
+  }
+
+  // Columns: Date, Ticker, Action, Qty, Price, Brokerage, Cost Base, Proceeds, Gross P&L, CGT Discount Eligible
+  const headers = [
+    'Date', 'Ticker', 'Action', 'Qty', 'Price', 'Brokerage',
+    'Cost Base (AUD)', 'Proceeds (AUD)', 'Gross P&L (AUD)', 'CGT Discount Eligible (>12m)'
+  ];
+
+  const esc = v => {
+    const s = v == null ? '' : String(v);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? '"' + s.replace(/"/g, '""') + '"'
+      : s;
+  };
+
+  const rows = trades.map(t => {
+    const date      = t.date || '';
+    const ticker    = t.ticker || '';
+    const action    = t.action || (t.type || '');
+    const qty       = Number(t.qty) || 0;
+    const price     = Number(t.price) || Number(t.avgPrice) || 0;
+    const brokerage = Number(t.fees) || 0;
+    const costBase  = qty * (Number(t.avgPrice) || price) + brokerage;
+    const proceeds  = t.pnl != null ? costBase + Number(t.pnl) : '';
+    const grossPnl  = t.pnl != null ? Number(t.pnl) : '';
+
+    // CGT discount: check if held > 12 months (need buyDate and sellDate)
+    let cgtEligible = '';
+    if (t.date && t.closeDate) {
+      const held = (new Date(t.closeDate) - new Date(t.date)) / 86400000;
+      cgtEligible = held > 365 && grossPnl > 0 ? 'Y' : 'N';
+    }
+
+    return [
+      esc(date), esc(ticker), esc(action),
+      esc(qty), esc(price.toFixed(4)), esc(brokerage.toFixed(2)),
+      esc(costBase.toFixed(2)),
+      proceeds !== '' ? esc(Number(proceeds).toFixed(2)) : '',
+      grossPnl !== '' ? esc(Number(grossPnl).toFixed(2)) : '',
+      esc(cgtEligible)
+    ].join(',');
+  });
+
+  // Tax Year Summary row
+  const closed    = trades.filter(t => t.pnl != null);
+  const totalProc = closed.reduce((s,t) => {
+    const qty  = Number(t.qty)||0;
+    const avg  = Number(t.avgPrice)||Number(t.price)||0;
+    const fee  = Number(t.fees)||0;
+    return s + (qty * avg + fee + Number(t.pnl));
+  }, 0);
+  const totalCostB = closed.reduce((s,t) => {
+    const qty = Number(t.qty)||0;
+    const avg = Number(t.avgPrice)||Number(t.price)||0;
+    return s + qty * avg + (Number(t.fees)||0);
+  }, 0);
+  const netGain = closed.reduce((s,t) => s + Number(t.pnl), 0);
+  const fyLabel = (() => {
+    const now = new Date();
+    const fy  = now.getMonth() >= 6 ? now.getFullYear()+1 : now.getFullYear();
+    return `FY${fy} Summary`;
+  })();
+  rows.push([
+    esc(fyLabel), '', '', '', '', '',
+    esc(totalCostB.toFixed(2)),
+    esc(totalProc.toFixed(2)),
+    esc(netGain.toFixed(2)),
+    ''
+  ].join(','));
+
+  const csv  = [headers.join(','), ...rows].join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `sloth-trade-journal-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }

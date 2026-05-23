@@ -363,7 +363,8 @@ TASK:
 3. For every holding and watchlist ticker, run the Section 3 multi-factor framework. Exclude any ticker with < 3 independent non-technical factors from recs[].
 4. For each candidate rec: compute priceRange, target (next S/R), stopLoss (1.5×ATR), qty, scenarios (p sums to 1.0), invalidationCondition (must include a measurable value), bearCase (if conf ≥ 0.70), factorsUsed (≥ 3 specific data points).
 5. Apply Section 7 pre-flight checks. Fix all failures before writing JSON.
-6. Return JSON only — no preamble, no markdown.`;
+6. Return JSON only — no preamble, no markdown.
+PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown'}`;
 
   // ── Wait for macro to finish, then classify regime ──────────────────────────
   await macroPromise;
@@ -741,6 +742,8 @@ TASK:
     state.analysisRunning = false;
     scheduleSave();
     toast(`Analysis done: ${cappedDedupedRecs.length} recommendation(s)`, 'success');
+    // Fire desktop notification for high-conviction recs
+    if (typeof alertHighConviction === 'function') alertHighConviction(cappedDedupedRecs);
     showPage('recommendations');
   } catch(e) {
     state.analysisRunning = false;

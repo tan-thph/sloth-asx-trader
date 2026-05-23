@@ -786,10 +786,12 @@ function _startScanPoller(gen) {
         _scanPollTimer = null;
         if (state._renderGen === gen && state.page === 'scanner') {
           renderPage();
-          if (s.stage === 'complete')
+          if (s.stage === 'complete') {
             toast(`Scan complete — ${s.results?.length || 0} opportunities found from ${s.filtered_count} candidates`, 'success');
-          else if (s.error)
+            if (typeof alertScanComplete === 'function') alertScanComplete(s.results || []);
+          } else if (s.error) {
             toast(`Scan failed: ${s.error}`, 'error');
+          }
         }
       } else if (state.page === 'scanner' && state._renderGen === gen) {
         // Light update: just refresh the progress number

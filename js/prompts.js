@@ -13,6 +13,10 @@
 //   state.settings; returns a fresh string on each call.
 // ============================================================
 
+// Learning Loop: every AI call logs this version so calibration stats can be
+// correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
+const PROMPT_VERSION = '2026-05-v4';
+
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
 
@@ -28,6 +32,8 @@ const ANALYSIS_SYSTEM_PROMPT =
   Disciplined, data-driven, direct — no generic commentary, no hedging, no padding.
   Max single position: 15% | ASX200 long-run expected return: ~7–8% p.a.
   Account settings (brokerage, max trades/day, min trade size) are in the user message.
+
+  === HARD RULES (non-negotiable) ===
 
   SECTION 1 — HARD RULES (never violate)
 
@@ -269,7 +275,41 @@ const ANALYSIS_SYSTEM_PROMPT =
     TOP_UP: Add to EXISTING holding — underweight, strong multi-factor thesis. qty = incremental shares only.
     SELL:   Close full position — multi-factor deterioration confirmed.
     TRIM:   Reduce EXISTING holding — overweight (>15%), near fair value, or factor thesis weakening.
-            qty = shares to sell (not total held).`;
+            qty = shares to sell (not total held).
+
+  === JSON OUTPUT SCHEMA EXAMPLE (conform exactly) ===
+  {
+    "recs": [
+      {
+        "ticker": "BHP",
+        "action": "BUY",
+        "sector": "Materials",
+        "isWatchlist": false,
+        "priceRange": [44.20, 44.80],
+        "target": 49.50,
+        "stopLoss": 42.10,
+        "qty": 50,
+        "tranches": 1,
+        "orderType": "LIMIT",
+        "limitPrice": 44.50,
+        "confidence": 0.74,
+        "scenarios": { "bull": {"p": 0.30, "ret": 0.12}, "base": {"p": 0.50, "ret": 0.07}, "bear": {"p": 0.20, "ret": -0.04} },
+        "expectedTimeToTarget": 45,
+        "factorsUsed": ["EPS revision: +3.1% over 30d", "Macro: AUD/USD weak — benefits unhedged exporter", "Valuation: fwdPE 10.2 vs sector 13.5x"],
+        "reasoning": "Iron ore supply discipline + weak AUD drive EPS upgrade cycle. Technicals confirm.",
+        "risks": "Iron ore price collapse below $95/t would break thesis.",
+        "catalysts": "RBA cut Jun25; FY result Aug25 with guidance update.",
+        "signals": ["RSI 14: 44 rising", "OBV: uptrend", "50DMA > 200DMA"],
+        "invalidationCondition": "Close below $42.10 stop or iron ore < $95/t for 5 sessions",
+        "bearCase": "China demand shock sends iron ore to $80/t; BHP rerates to 8x fwdPE.",
+        "weightGuidance": "Accumulate (+1-2%)",
+        "expectedProfit": 367.50,
+        "netProfit": 329.30
+      }
+    ],
+    "summary": "BHP: BUY — iron ore upgrade cycle, weak AUD tailwind. Macro: risk-on; RBA easing bias intact. Cash: deploy 50% to BHP; retain remainder.",
+    "dataGaps": []
+  }`;
 
 
 // ── Day / swing trade scan ────────────────────────────────────────────────────

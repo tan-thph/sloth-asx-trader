@@ -24,6 +24,7 @@ async function refreshPrices(opts = {}) {
   state.lastPriceRefresh = Date.now();
   if(!silent) toast(`Updated ${updated} prices from yfinance`,'success');
   checkPriceAlerts();
+  if (typeof checkRecStopTargetAlerts === 'function') checkRecStopTargetAlerts();
   recordPortfolioSnapshot();
   scheduleSave();
   // Skip re-render on silent auto-refresh for async pages (news/announcements) —
