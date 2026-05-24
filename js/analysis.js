@@ -313,11 +313,7 @@ ${riskRows}`;
   const earningsCtx = earningsLines.length ? `\n\nEARNINGS CALENDAR (use for catalyst timing and pre-earnings positioning):\n${earningsLines.join('\n')}` : '';
 
 
-  // ── Calibration via learning-loop.js — refresh backend cache then build block ─
-  // refreshLearningCache() is non-blocking on failure; populates state._learningCache
-  // so the sync buildCalibrationPromptBlock() can use backend data as primary source.
-  if (typeof refreshLearningCache === 'function') await refreshLearningCache();
-  const calibrationNote = buildCalibrationPromptBlock(state.recHistory);
+  // calibrationNote assembled after regime detection below (needs _activeRegime + sectors)
 
   // ── userMessage carries ALL dynamic/live context; systemPrompt stays fully static
   //    for stable prompt-cache hits across the entire trading day.
@@ -358,7 +354,7 @@ LIVE PORTFOLIO STATE:
 Holdings: ${portfolioJson}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
 RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
-${recCtx}${pendingFeedbackCtx}${calibrationNote}${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${indicatorCtx}${rulesCtx}
+${recCtx}${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${indicatorCtx}${rulesCtx}
 
 TASK:
 1. Apply any CALIBRATION adjustments above to confidence scores before output.
@@ -373,6 +369,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   await macroPromise;
   const _regimeResult = await fetchAndClassifyRegime();
   const _activeRegime = _regimeResult.regime;
+  if (_activeRegime && _activeRegime !== 'unknown') state._lastRegime = _activeRegime;
 
   // Regime gate: panic → no new positions, skip AI call
   if (_activeRegime === 'panic') {
@@ -388,17 +385,25 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 
   toast('Running AI trade analysis...','info');
 
+  // ── Smart calibration — fetched after regime is known, filtered to context ──
+  // Derive sectors from current portfolio so backend can filter to relevant ones.
+  const _portfolioSectors = [...new Set(mergedPortfolio().map(h => h.sector).filter(Boolean))];
+  const _calibrationNote = typeof fetchCalibrationBlock === 'function'
+    ? await fetchCalibrationBlock(_activeRegime, _portfolioSectors)
+    : '';
+
   // ── Assemble dynamic system prompt (core cached + regime/date modules) ──────
   const _systemArray = typeof buildSystemArray === 'function'
     ? buildSystemArray({ regime: _activeRegime, portfolio: mergedPortfolio() })
     : [{ type: 'text', text: ANALYSIS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
 
-  // Append regime context to user message
+  // Inject calibration and regime into the final user message
   const regimeCtx = _activeRegime && _activeRegime !== 'unknown'
     ? `\nACTIVE_REGIME: ${_activeRegime} (confidence: ${(_regimeResult.confidence * 100).toFixed(0)}%)`
     : '';
 
-  const fullUserMessage = userMessage + regimeCtx;
+  const fullUserMessage = userMessage
+    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote) + regimeCtx;
 
   try {
     const { text, usage: _usage } = await callClaude('portfolio', fullUserMessage, {
@@ -770,6 +775,8 @@ async function logRecsToLearningLoop(recs, regime) {
       if (entry && r.stopLoss && r.target && entry !== r.stopLoss) {
         rrRatio = Math.abs((r.target - entry) / (entry - r.stopLoss));
       }
+      const holding = (typeof mergedPortfolio === 'function' ? mergedPortfolio() : [])
+        .find(h => h.ticker === r.ticker);
       const payload = {
         event_type:          'recommendation',
         ticker:              r.ticker,
@@ -779,10 +786,11 @@ async function logRecsToLearningLoop(recs, regime) {
         ai_confidence:       r.confidence ?? null,
         ensemble_confidence: r.ensembleConfidence ?? null,
         recommendation:      r.action,
-        rationale_summary:   r.reasoning ? r.reasoning.slice(0, 300) : null,
+        rationale_summary:   r.reasoning ? r.reasoning.slice(0, 400) : null,
         suggested_stop:      r.stopLoss ?? null,
         suggested_target:    r.target ?? null,
         rr_ratio:            rrRatio != null ? +rrRatio.toFixed(2) : null,
+        sector:              r.sector || holding?.sector || null,
         was_executed:        false,
       };
       const resp = await fetch(`${API}/api/learning/log`, {

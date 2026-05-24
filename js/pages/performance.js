@@ -552,7 +552,12 @@ async function syncClosedTradesToLearningLoop() {
       const holdDays = (jMatch.date && jMatch.closeDate)
         ? Math.max(0, Math.round((new Date(jMatch.closeDate) - new Date(jMatch.date)) / 86400000))
         : null;
-      return { ...r, outcome, actualProfit: jMatch.pnl, _pnlPct: pnlPct, _holdDays: holdDays };
+      const holding = typeof getPortfolioHolding === 'function' ? getPortfolioHolding(r.ticker) : null;
+      const sector = r.sector || holding?.sector || null;
+      return {
+        ...r, outcome, actualProfit: jMatch.pnl, _pnlPct: pnlPct, _holdDays: holdDays,
+        _entryPrice: entryPrice, _exitPrice: jMatch.exitPrice ?? null, _sector: sector,
+      };
     }
     return r;
   });
@@ -578,6 +583,9 @@ async function syncClosedTradesToLearningLoop() {
           realized_pnl_aud:    r.actualProfit != null ? +r.actualProfit.toFixed(2) : null,
           realized_pnl_pct:    r._pnlPct != null ? +r._pnlPct.toFixed(2) : null,
           holding_period_days: r._holdDays ?? null,
+          actual_entry_price:  r._entryPrice ?? null,
+          actual_exit_price:   r._exitPrice  ?? null,
+          sector:              r._sector     ?? null,
           exit_reason:         'manual',
         }),
       });
@@ -596,6 +604,7 @@ async function syncClosedTradesToLearningLoop() {
           ai_confidence:       r.confidence ?? null,
           ensemble_confidence: r.ensembleConfidence ?? null,
           recommendation:      r.action,
+          rationale_summary:   r.reasoning ? r.reasoning.slice(0, 400) : null,
           suggested_stop:      r.stopLoss ?? null,
           suggested_target:    r.target ?? null,
           was_executed:        true,
@@ -603,6 +612,9 @@ async function syncClosedTradesToLearningLoop() {
           realized_pnl_aud:    r.actualProfit != null ? +r.actualProfit.toFixed(2) : null,
           realized_pnl_pct:    r._pnlPct != null ? +r._pnlPct.toFixed(2) : null,
           holding_period_days: r._holdDays ?? null,
+          actual_entry_price:  r._entryPrice ?? null,
+          actual_exit_price:   r._exitPrice  ?? null,
+          sector:              r._sector     ?? null,
           exit_reason:         'manual',
         }),
       });

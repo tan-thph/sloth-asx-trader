@@ -747,15 +747,14 @@ function markExecuted(id, execPrice, execFee, execQty) {
     id: rec.id, date: today, ticker: rec.ticker, action: rec.action,
     confidence: rec.confidence, priceRange: rec.priceRange, target: rec.target,
     stopLoss: rec.stopLoss, expectedProfit: rec.expectedProfit, netProfit: rec.netProfit,
-    qty,                          // confirmed execution qty
-    executedPrice: tradePrice,    // confirmed execution price
-    executedFee:   fees,          // confirmed brokerage
+    qty, executedPrice: tradePrice, executedFee: fees,
     executed: true, executedAt: time,
     outcome: 'open',
-    actualProfit: realizedPnl,    // realized P&L for SELL/TRIM; null for BUY/TOP_UP (open)
+    actualProfit: realizedPnl,
+    reasoning: rec.reasoning || null,
     feedback: rec.feedback || null,
-    journalId: tradeEntry.id,     // link back to Trade Journal entry
-    _learningId: rec._learningId || null,  // link to ai_learning_events row
+    journalId: tradeEntry.id,
+    _learningId: rec._learningId || null,
   };
   state.recHistory.unshift(histEntry);
 
@@ -763,27 +762,39 @@ function markExecuted(id, execPrice, execFee, execQty) {
   if (state.serverOk) {
     const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
     const entryP = tradeEntry.entryPrice || tradePrice;
+    const exitP  = tradeEntry.exitPrice  ?? null;
     const pnlPct = realizedPnl != null && entryP > 0
       ? +((realizedPnl / (entryP * qty)) * 100).toFixed(2) : null;
     const outcome = realizedPnl != null
       ? (realizedPnl > 0 ? 'win' : realizedPnl < 0 ? 'loss' : 'breakeven') : null;
+    const holdDays = (tradeEntry.date && today)
+      ? Math.max(0, Math.round((new Date(today) - new Date(tradeEntry.date)) / 86400000))
+      : null;
+    const currentRegime = typeof state._lastRegime === 'string' ? state._lastRegime : null;
+    const sector = rec.sector || (typeof getPortfolioHolding === 'function'
+      ? getPortfolioHolding(rec.ticker)?.sector : null) || null;
 
     if (rec._learningId) {
-      // Existing learning event → update execution status + outcome
-      const outcomePayload = { id: rec._learningId, was_executed: true };
+      // Existing learning event → update with full outcome context
+      const outcomePayload = {
+        id: rec._learningId, was_executed: true,
+        actual_entry_price: entryP ?? null,
+        actual_exit_price:  exitP  ?? null,
+        sector,
+      };
       if (outcome) {
-        outcomePayload.outcome_status    = outcome;
-        outcomePayload.realized_pnl_aud  = +realizedPnl.toFixed(2);
-        outcomePayload.realized_pnl_pct  = pnlPct;
-        outcomePayload.exit_reason       = 'manual';
+        outcomePayload.outcome_status      = outcome;
+        outcomePayload.realized_pnl_aud    = +realizedPnl.toFixed(2);
+        outcomePayload.realized_pnl_pct    = pnlPct;
+        outcomePayload.holding_period_days = holdDays;
+        outcomePayload.exit_reason         = 'manual';
       }
       fetch(`${API}/api/learning/outcome`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(outcomePayload),
       }).catch(() => {});
     } else if (isReducing && realizedPnl != null) {
-      // No prior learning event (manually-imported stock or pre-wiring trade).
-      // Log a new event now so sell performance is captured in the Learning Loop.
+      // No prior learning event (manually-imported position).
       const rrRatio = entryP && rec.stopLoss && rec.target && entryP !== rec.stopLoss
         ? +Math.abs((rec.target - entryP) / (entryP - rec.stopLoss)).toFixed(2) : null;
       fetch(`${API}/api/learning/log`, {
@@ -791,11 +802,12 @@ function markExecuted(id, execPrice, execFee, execQty) {
         body: JSON.stringify({
           event_type:          'recommendation',
           ticker:              rec.ticker,
+          regime:              currentRegime,
           prompt_version:      pv,
           ai_confidence:       rec.confidence ?? null,
           ensemble_confidence: rec.ensembleConfidence ?? null,
           recommendation:      rec.action,
-          rationale_summary:   rec.reasoning ? rec.reasoning.slice(0, 300) : null,
+          rationale_summary:   rec.reasoning ? rec.reasoning.slice(0, 400) : null,
           suggested_stop:      rec.stopLoss ?? null,
           suggested_target:    rec.target ?? null,
           rr_ratio:            rrRatio,
@@ -803,13 +815,16 @@ function markExecuted(id, execPrice, execFee, execQty) {
           outcome_status:      outcome,
           realized_pnl_aud:    +realizedPnl.toFixed(2),
           realized_pnl_pct:    pnlPct,
+          holding_period_days: holdDays,
           exit_reason:         'manual',
-          notes:               'Manually imported position — no prior BUY recommendation logged',
+          actual_entry_price:  entryP ?? null,
+          actual_exit_price:   exitP  ?? null,
+          sector,
+          notes:               'Manually imported position — no prior BUY event logged',
         }),
       }).then(r => r.json()).then(res => {
         if (res.id) {
           histEntry._learningId = res.id;
-          // Patch recHistory entry too so sync button won't duplicate it
           const rh = state.recHistory.find(r => r.id === rec.id);
           if (rh) rh._learningId = res.id;
         }

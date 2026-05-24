@@ -118,6 +118,7 @@ def init_db():
                 reasoning           TEXT,
                 risks               TEXT,
                 signals             TEXT,
+                learning_id         INTEGER,
                 created_at          TEXT DEFAULT (datetime('now','localtime'))
             );
 
@@ -186,6 +187,9 @@ def init_db():
                 holding_period_days  INTEGER,
                 exit_reason          TEXT,
                 was_executed         INTEGER DEFAULT 0,
+                actual_entry_price   REAL,
+                actual_exit_price    REAL,
+                sector               TEXT,
                 follow_through_days  INTEGER,
                 market_context       TEXT,
                 error_type           TEXT,
@@ -210,6 +214,17 @@ def init_db():
         """)
 
 init_db()
+
+# Migrations for existing databases
+with get_db() as _mig:
+    _rh_cols = {r[1] for r in _mig.execute("PRAGMA table_info(rec_history)").fetchall()}
+    if "learning_id" not in _rh_cols:
+        _mig.execute("ALTER TABLE rec_history ADD COLUMN learning_id INTEGER")
+
+    _le_cols = {r[1] for r in _mig.execute("PRAGMA table_info(ai_learning_events)").fetchall()}
+    for _col, _defn in [("actual_entry_price", "REAL"), ("actual_exit_price", "REAL"), ("sector", "TEXT")]:
+        if _col not in _le_cols:
+            _mig.execute(f"ALTER TABLE ai_learning_events ADD COLUMN {_col} {_defn}")
 
 
 def _log_failed_ticker(ticker: str, error: str, context: str = 'scan') -> None:
@@ -1596,8 +1611,8 @@ def db_save():
                     INSERT OR REPLACE INTO rec_history
                         (id, date, ticker, action, confidence, price_range_low, price_range_high,
                          target, stop_loss, expected_profit, net_profit, executed, executed_at,
-                         outcome, actual_profit, reasoning, risks, signals)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         outcome, actual_profit, reasoning, risks, signals, learning_id)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     r["id"], r["date"], r["ticker"], r["action"],
                     r.get("confidence"), pr[0] if pr else None, pr[1] if pr else None,
@@ -1605,7 +1620,8 @@ def db_save():
                     1 if r.get("executed") else 0, r.get("executedAt"),
                     r.get("outcome"), r.get("actualProfit"),
                     r.get("reasoning"), r.get("risks"),
-                    json.dumps(r.get("signals", []))
+                    json.dumps(r.get("signals", [])),
+                    r.get("learningId") or r.get("_learningId"),
                 ))
 
         # --- settings ---
@@ -1693,6 +1709,7 @@ def db_load():
                 "reasoning": row["reasoning"],
                 "risks": row["risks"],
                 "signals": json.loads(row["signals"]) if row["signals"] else [],
+                "_learningId": row["learning_id"],
             })
 
         # settings
@@ -3101,8 +3118,10 @@ def learning_log():
                 INSERT INTO ai_learning_events
                     (event_type, ticker, regime, prompt_version, agent_type,
                      ai_confidence, ensemble_confidence, recommendation, rationale_summary,
-                     suggested_stop, suggested_target, rr_ratio, was_executed, market_context, notes)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     suggested_stop, suggested_target, rr_ratio, was_executed, market_context, notes,
+                     outcome_status, realized_pnl_aud, realized_pnl_pct, holding_period_days, exit_reason,
+                     actual_entry_price, actual_exit_price, sector)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -3119,6 +3138,14 @@ def learning_log():
                 1 if data.get("was_executed") else 0,
                 json.dumps(data.get("market_context")) if data.get("market_context") else None,
                 data.get("notes"),
+                data.get("outcome_status"),
+                data.get("realized_pnl_aud"),
+                data.get("realized_pnl_pct"),
+                data.get("holding_period_days"),
+                data.get("exit_reason"),
+                data.get("actual_entry_price"),
+                data.get("actual_exit_price"),
+                data.get("sector"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -3148,7 +3175,8 @@ def learning_outcome():
             # Build update dynamically so callers can send partial patches
             fields, vals = [], []
             for col in ("outcome_status", "realized_pnl_pct", "realized_pnl_aud",
-                        "holding_period_days", "exit_reason", "error_type", "notes"):
+                        "holding_period_days", "exit_reason", "error_type", "notes",
+                        "actual_entry_price", "actual_exit_price", "sector"):
                 if col in data:
                     fields.append(f"{col}=?")
                     vals.append(data[col])
@@ -3319,33 +3347,81 @@ def learning_stats():
 
 @app.route("/api/learning/calibration")
 def learning_calibration():
-    """Compact calibration block for injection into AI prompts (last 30 days)."""
+    """Smart compact calibration block for AI prompt injection.
+    Context-aware: filters by regime + sectors. Only emits statistically
+    meaningful findings. Target output: ~30-60 tokens."""
+    regime  = request.args.get("regime", "")
+    sectors = [s.strip() for s in request.args.get("sectors", "").split(",") if s.strip()]
+    days    = min(int(request.args.get("days", 60)), 90)
+    cutoff  = (datetime.now() - timedelta(days=days)).isoformat()
+    cutoff_30 = (datetime.now() - timedelta(days=30)).isoformat()
+
     try:
-        cutoff = (datetime.now() - timedelta(days=30)).isoformat()
         with get_db() as conn:
             rows = conn.execute("""
-                SELECT ai_confidence, outcome_status FROM ai_learning_events
-                WHERE timestamp > ? AND outcome_status IN ('win','loss','breakeven')
-                ORDER BY timestamp DESC LIMIT 100
+                SELECT ai_confidence, outcome_status, regime, sector,
+                       realized_pnl_pct, rr_ratio, timestamp
+                FROM ai_learning_events
+                WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
+                ORDER BY timestamp DESC LIMIT 200
             """, (cutoff,)).fetchall()
 
-        if not rows:
+        if len(rows) < 5:
             return jsonify({"available": False, "block": None})
 
-        wins  = sum(1 for r in rows if r['outcome_status'] == 'win')
-        total = len(rows)
-        wr    = round(wins / total * 100, 1)
+        n = len(rows)
+        parts = []
 
-        hc    = [r for r in rows if (r['ai_confidence'] or 0) >= 0.75]
-        hc_wr = round(sum(1 for r in hc if r['outcome_status'] == 'win') / len(hc) * 100, 1) if hc else None
+        # 1. Confidence bands — only bands with n≥3 AND |delta|>5pp
+        for label, lo, hi, mid in [("60-70", 0.60, 0.70, 0.65), ("70-80", 0.70, 0.80, 0.75)]:
+            subset = [r for r in rows if lo <= (r["ai_confidence"] or 0) < hi]
+            if len(subset) < 3:
+                continue
+            wr = sum(1 for r in subset if r["outcome_status"] == "win") / len(subset)
+            delta = wr - mid
+            if abs(delta) > 0.05:
+                adj = "tighten" if delta < 0 else "raise"
+                parts.append(f"conf {label}%:{wr*100:.0f}%({delta*100:+.0f}pp→{adj},n={len(subset)})")
 
-        block = (
-            f"=== RECENT AI CALIBRATION (last 30 days, {total} closed recs) ===\n"
-            f"Overall win rate: {wr}% | High-confidence (≥0.75) win rate: {hc_wr or 'n/a'}%\n"
-            f"If high-conf win rate < 55%, confidence is systematically over-estimated — "
-            f"apply −0.05 to all confidence values in this response."
-        )
-        return jsonify({"available": True, "block": block, "total": total, "win_rate": wr})
+        # 2. Current regime win rate — only if n≥3
+        if regime:
+            reg = [r for r in rows if r["regime"] == regime]
+            if len(reg) >= 3:
+                wr = sum(1 for r in reg if r["outcome_status"] == "win") / len(reg)
+                warn = " ⚠AVOID" if wr < 0.40 else (" ⚠CAUTION" if wr < 0.50 else "")
+                parts.append(f"{regime}:{wr*100:.0f}%W(n={len(reg)}){warn}")
+
+        # 3. Relevant sectors — only sectors in current analysis with n≥3 AND notable rate
+        for sector in sectors:
+            s_rows = [r for r in rows if r["sector"] == sector]
+            if len(s_rows) < 3:
+                continue
+            wr = sum(1 for r in s_rows if r["outcome_status"] == "win") / len(s_rows)
+            if wr < 0.45:
+                parts.append(f"{sector}:{wr*100:.0f}%(n={len(s_rows)}) ⚠underperform")
+            elif wr > 0.72:
+                parts.append(f"{sector}:{wr*100:.0f}%(n={len(s_rows)}) ✓strong")
+
+        # 4. Strategy decay — recent 30d vs window, only if clearly decaying (delta<-15pp, n≥5)
+        recent = [r for r in rows if r["timestamp"] >= cutoff_30]
+        if len(recent) >= 5 and n >= 10:
+            all_wr = sum(1 for r in rows if r["outcome_status"] == "win") / n
+            rec_wr = sum(1 for r in recent if r["outcome_status"] == "win") / len(recent)
+            if (rec_wr - all_wr) < -0.15:
+                parts.append(f"⚠decay:{rec_wr*100:.0f}%recent/{all_wr*100:.0f}%all→tighten")
+
+        # 5. R:R accuracy — only if n≥5 high-R:R trades with clear underperformance
+        hi_rr = [r for r in rows if (r["rr_ratio"] or 0) >= 2.0]
+        if len(hi_rr) >= 5:
+            hi_wr = sum(1 for r in hi_rr if r["outcome_status"] == "win") / len(hi_rr)
+            if hi_wr < 0.50:
+                parts.append(f"RR≥2.0:{hi_wr*100:.0f}%W(n={len(hi_rr)})⚠stops/targets off")
+
+        if not parts:
+            return jsonify({"available": False, "block": None})
+
+        block = f"CALIBRATION({n}cls,{days}d): " + "; ".join(parts) + "."
+        return jsonify({"available": True, "block": block, "sample": n})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

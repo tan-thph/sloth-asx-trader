@@ -29,9 +29,8 @@
 
 /**
  * Fetch backend learning stats and store in state._learningCache.
- * Called at the top of runAnalysis() so buildCalibrationPromptBlock()
- * has fresh data before the AI call is made.
- * Fire-and-forget safe — never throws, silently falls back to recHistory.
+ * Used by the Learning Loop page (renderLearningPage). Not needed for
+ * prompt injection — use fetchCalibrationBlock() for that instead.
  */
 async function refreshLearningCache() {
   if (typeof state === 'undefined' || !state.serverOk) return;
@@ -313,113 +312,29 @@ function computeRRRealization(recHistory) {
   };
 }
 
-// ── buildCalibrationPromptBlock ───────────────────────────────────────────────
+// ── fetchCalibrationBlock ─────────────────────────────────────────────────────
 
 /**
- * Builds a multi-section calibration string ready to inject into the AI
- * user message. Combines: confidence calibration, regime performance, strategy
- * decay + volatility, R:R realization, hold duration, and exit reason analysis.
- * Returns '' when insufficient data so nothing is injected.
+ * Fetches a compact, context-aware calibration string from the backend and
+ * returns it ready for injection into the AI user message.
+ *
+ * The backend filters to: recent window (60d), current regime, relevant
+ * sectors. It only emits findings where n≥3 AND the signal is statistically
+ * meaningful (|delta|>5pp for bands, clear decay, R:R underperformance).
+ * Target output: ~30-60 tokens. Returns '' when insufficient data.
+ *
+ * @param {string} regime   - Current market regime (e.g. 'riskOn')
+ * @param {string[]} sectors - Sectors present in the current analysis
  */
-function buildCalibrationPromptBlock(recHistory) {
-  const cache = (typeof state !== 'undefined') ? state._learningCache : null;
-
-  // ── Calibration bands ─────────────────────────────────────────────────────
-  const stats = computeCalibrationStats(recHistory);
-  if (!stats.sufficient) return '';
-
-  const bandLines = Object.entries(stats.bands)
-    .filter(([, b]) => b.total >= 3)
-    .map(([band, b]) => {
-      if (b.hitRate == null) return null;
-      const hr  = (b.hitRate * 100).toFixed(0);
-      const adj = b.adjustment !== 0
-        ? ` → apply ${b.adjustment > 0 ? '+' : ''}${(b.adjustment * 100).toFixed(0)}% to confidence`
-        : ' → no adjustment needed';
-      const pnl = b.avgPnl != null ? `, avg P&L $${b.avgPnl}` : '';
-      const cal = b.calibrationDelta != null
-        ? ` (delta ${b.calibrationDelta > 0 ? '+' : ''}${b.calibrationDelta})`
-        : '';
-      return `  ${band}: ${b.hits}/${b.total} = ${hr}% hit rate${pnl}${cal}${adj}`;
-    })
-    .filter(Boolean);
-
-  if (!bandLines.length) return '';
-
-  const src = stats.source === 'backend' ? `DB, ${stats.sampleSize} closed` : `local, ${stats.sampleSize}`;
-
-  // ── Regime performance ────────────────────────────────────────────────────
-  const regimes = computeRegimePerformance(recHistory);
-  const regimeLines = Object.entries(regimes)
-    .filter(([, r]) => r.total >= 3)
-    .map(([rg, r]) => {
-      const wr = r.winRate != null ? (r.winRate * 100).toFixed(0) + '%' : 'n/a';
-      const pnl = r.avgPnl != null ? `, avg P&L $${r.avgPnl}` : '';
-      const warn = r.winRate != null && r.winRate < 0.50 ? ' ⚠ POOR — avoid new entries' : '';
-      return `  ${rg}: ${r.total} trades, ${wr} win${pnl}${warn}`;
-    });
-  const regimeBlock = regimeLines.length
-    ? `\nREGIME PERFORMANCE:\n${regimeLines.join('\n')}` : '';
-
-  // ── Decay + volatility ────────────────────────────────────────────────────
-  const decay = detectStrategyDecay(recHistory);
-  let decayBlock = '';
-  if (!decay.insufficient) {
-    if (decay.decaying || decay.volatile) {
-      decayBlock = `\nSTRATEGY HEALTH: ${decay.note}. Recent ${(decay.recentWinRate * 100).toFixed(0)}% vs all-time ${(decay.allTimeWinRate * 100).toFixed(0)}% win rate (n=${decay.recentSample})${decay.recentVolatility != null ? `, return volatility CoV=${decay.recentVolatility}` : ''}.`;
-    }
-  }
-
-  // ── R:R realization ───────────────────────────────────────────────────────
-  const rr = computeRRRealization(recHistory);
-  let rrBlock = '';
-  if (rr.avgSuggestedRR != null) {
-    rrBlock = `\nR:R ACCURACY: avg suggested R:R ${rr.avgSuggestedRR}`;
-    if (rr.hiRRSample >= 3 && rr.hiRRWinRate != null) {
-      rrBlock += `, high-R:R trades (≥2.0) win rate ${rr.hiRRWinRate}% (n=${rr.hiRRSample}).`;
-      if (!rr.meetsRRThreshold) rrBlock += ' ⚠ Below 55% — stops may be too wide or targets too ambitious.';
-    } else {
-      rrBlock += '.';
-    }
-  }
-
-  // ── Avg hold duration ─────────────────────────────────────────────────────
-  let holdBlock = '';
-  const avgHold = cache?.avg_hold_days;
-  if (avgHold != null) {
-    holdBlock = `\nAVG HOLD: ${avgHold} days (closed trades).`;
-  }
-
-  // ── Exit reason distribution ──────────────────────────────────────────────
-  let exitBlock = '';
-  const exitDist = cache?.exit_reason_dist;
-  if (exitDist && Object.keys(exitDist).length) {
-    const sorted = Object.entries(exitDist).sort(([, a], [, b]) => b - a);
-    exitBlock = `\nEXIT REASONS: ${sorted.map(([r, n]) => `${r}×${n}`).join(', ')}.`;
-  }
-
-  // ── AI vs manual comparison ───────────────────────────────────────────────
-  let aiVsManualBlock = '';
-  const tradeStats = computeAllTradesStats();
-  if (tradeStats && tradeStats.aiTotal >= 3 && tradeStats.manualTotal >= 3) {
-    const aiPct     = (tradeStats.aiWinRate * 100).toFixed(0);
-    const manualPct = (tradeStats.manualWinRate * 100).toFixed(0);
-    const delta = tradeStats.aiWinRate - tradeStats.manualWinRate;
-    const note  = Math.abs(delta) < 0.05 ? '' :
-                  delta > 0 ? ' ✓ AI recommendations outperforming manual trades' :
-                              ' ⚠ Manual trades outperforming AI — review AI criteria';
-    aiVsManualBlock = `\nAI vs MANUAL: AI ${aiPct}% win (n=${tradeStats.aiTotal}) | Manual ${manualPct}% win (n=${tradeStats.manualTotal}).${note}`;
-  }
-
-  // ── Assemble final block ──────────────────────────────────────────────────
-  return [
-    `\n\nCALIBRATION (${src} — apply adjustments before setting confidence):`,
-    bandLines.join('\n'),
-    regimeBlock,
-    decayBlock,
-    rrBlock,
-    holdBlock,
-    exitBlock,
-    aiVsManualBlock,
-  ].filter(Boolean).join('');
+async function fetchCalibrationBlock(regime, sectors) {
+  if (typeof state === 'undefined' || !state.serverOk) return '';
+  try {
+    const params = new URLSearchParams();
+    if (regime) params.set('regime', regime);
+    if (sectors && sectors.length) params.set('sectors', sectors.join(','));
+    const resp = await fetch(`${API}/api/learning/calibration?${params}`);
+    if (!resp.ok) return '';
+    const data = await resp.json();
+    return (data.available && data.block) ? '\n\n' + data.block : '';
+  } catch (_) { return ''; }
 }
