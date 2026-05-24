@@ -96,6 +96,7 @@ def init_db():
                 status      TEXT DEFAULT 'open',
                 rec_id      TEXT,
                 rec_executed INTEGER DEFAULT 0,
+                close_date  TEXT,
                 created_at  TEXT DEFAULT (datetime('now','localtime'))
             );
 
@@ -225,6 +226,10 @@ with get_db() as _mig:
     for _col, _defn in [("actual_entry_price", "REAL"), ("actual_exit_price", "REAL"), ("sector", "TEXT")]:
         if _col not in _le_cols:
             _mig.execute(f"ALTER TABLE ai_learning_events ADD COLUMN {_col} {_defn}")
+
+    _tj_cols = {r[1] for r in _mig.execute("PRAGMA table_info(trade_journal)").fetchall()}
+    if "close_date" not in _tj_cols:
+        _mig.execute("ALTER TABLE trade_journal ADD COLUMN close_date TEXT")
 
 
 def _log_failed_ticker(ticker: str, error: str, context: str = 'scan') -> None:
@@ -1593,13 +1598,14 @@ def db_save():
             for t in data["tradeJournal"]:
                 conn.execute("""
                     INSERT INTO trade_journal
-                        (date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status, rec_id, rec_executed)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        (date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status, rec_id, rec_executed, close_date)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     t.get("date"), t.get("timestamp"), t["ticker"], t["action"],
                     t["qty"], t["entryPrice"], t.get("exitPrice"),
                     t.get("fees", 10), t.get("pnl"), t.get("status","open"),
-                    t.get("recId"), 1 if t.get("recExecuted") else 0
+                    t.get("recId"), 1 if t.get("recExecuted") else 0,
+                    t.get("closeDate"),
                 ))
 
         # --- rec history ---
@@ -1686,6 +1692,7 @@ def db_load():
                 "status": row["status"],
                 "recId": row["rec_id"],
                 "recExecuted": bool(row["rec_executed"]),
+                "closeDate": row["close_date"],
             })
 
         # rec history

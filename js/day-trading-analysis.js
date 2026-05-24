@@ -7,24 +7,21 @@
 
 async function runDayTradeAnalysis() {
   if (state.dayTrading.analysisRunning) { toast('Day trade analysis already running', 'info'); return; }
-  const key = getApiKey();
-  if (!key) { toast('Add Anthropic API key in Settings', 'error'); showPage('settings'); return; }
 
   state.dayTrading.analysisRunning = true;
   renderPage();
-  toast('Running day trade analysis…', 'info');
+  toast('Running day trade scan…', 'info');
 
   // ── Refresh prices first ─────────────────────────────────────────────────────
   if (state.serverOk && state.portfolio.length) {
     try { await refreshPrices({ silent: true }); } catch {}
   }
 
-  // ── Fetch fresh signals for portfolio + DT extra tickers ────────────────────
+  // ── Fetch 1y signals for portfolio + DT extra tickers (SMA200 needs 200 days) ─
   const portfolioTickers = mergedPortfolio().map(h => h.ticker);
   const dtExtra = (state.dayTrading.extraTickers || []).filter(t => !portfolioTickers.includes(t));
   const allTickers = [...portfolioTickers, ...dtExtra];
 
-  // Use 1y period for day trading — needed to compute SMA200 (requires 200 days of data)
   if (state.serverOk && allTickers.length) {
     try {
       const r = await fetch(`${API}/api/analyse/batch`, {
@@ -43,216 +40,119 @@ async function runDayTradeAnalysis() {
     } catch {}
   }
 
-  // ── News signals ─────────────────────────────────────────────────────────────
-  let newsOutlook = '';
-  try {
-    const tickers = allTickers.join(',');
-    const r = await fetch(`${API}/api/news/brief?tickers=${tickers}&days=2`);
-    if (r.ok) {
-      const d = await r.json();
-      const items = d.items || [];
-      if (items.length) {
-        const direct = items.filter(n => n.portfolio_direct);
-        const broad  = items.filter(n => !n.portfolio_direct);
-        const lines  = [];
-        if (direct.length) lines.push('Holdings directly covered:', ...direct.map(n => `  • ${n.signal || n.title?.slice(0,70)}`));
-        if (broad.length)  lines.push('Market-wide:', ...broad.map(n => `  • ${n.signal || n.title?.slice(0,70)}`));
-        if (lines.length) newsOutlook = `\n\nNEWS SIGNALS (last 2d):\n${lines.join('\n')}`;
-      }
-    }
-  } catch {}
-
-  // ── Announcements ────────────────────────────────────────────────────────────
-  let annCtx = '';
-  if (state.serverOk && allTickers.length) {
-    try {
-      const d = await fetch(`${API}/api/announcements/brief?tickers=${allTickers.join(',')}&days=2&max=8`)
-        .then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] }));
-      const items = d.items || [];
-      if (items.length) {
-        const ps    = items.filter(a => a.price_sensitive);
-        const other = items.filter(a => !a.price_sensitive);
-        const lines = [];
-        if (ps.length)    lines.push('⚡ Price-sensitive:', ...ps.map(a => `  • ${a.signal}`));
-        if (other.length) lines.push('Routine:', ...other.map(a => `  • ${a.signal}`));
-        annCtx = `\n\nASX ANNOUNCEMENTS (last 2d):\n${lines.join('\n')}`;
-      }
-    } catch {}
-  }
-
-  // ── Earnings calendar (catalyst filter) ──────────────────────────────────────
-  const earningsLines = allTickers
-    .filter(t => state.earningsCalendar[t]?.nextEarningsDate)
-    .map(t => {
-      const e = state.earningsCalendar[t];
-      const daysAway = Math.round((new Date(e.nextEarningsDate) - new Date()) / 86400000);
-      const flag = Math.abs(daysAway) <= 7 ? ' ⚡WITHIN 7 DAYS' : '';
-      return `  ${t}: nextEarnings=${e.nextEarningsDate} (${daysAway}d)${flag}`;
-    });
-  const earningsCtx = earningsLines.length
-    ? `\n\nEARNINGS CALENDAR (catalyst risk check):\n${earningsLines.join('\n')}`
-    : '';
-
-  // ── Build indicator context ──────────────────────────────────────────────────
-  let indicatorCtx = '';
-  const loaded = allTickers.filter(t => state.liveSignals[t] && !state.liveSignals[t].error);
-  if (loaded.length) {
-    indicatorCtx = '\n\nLIVE TECHNICAL DATA:\n' + loaded.map(t => {
-      const s = state.liveSignals[t];
-      const sr = s.support_resistance || {};
-      // Compute approximate Fibonacci 50-61.8% zone from high/low embedded in chart data
-      // (We pass raw price context so the AI can verify the Fib zone itself)
-      return `\n[${t}]
-  Price=$${s.current_price} | Trend=${s.trend_direction} | ADX=${s.adx?.toFixed(1)} (${s.trend_strength})
-  RSI14=${s.rsi_14?.toFixed(1)} (prev=${s.rsi_14 != null ? (s.rsi_14 - 0.5).toFixed(1) : 'n/a'})
-  BB: Upper=$${s.bb_upper?.toFixed(3)}, Mid=$${s.bb_mid?.toFixed(3)}, Lower=$${s.bb_lower?.toFixed(3)}, %B=${s.bb_pct_b != null ? (s.bb_pct_b * 100).toFixed(0) + '%' : 'n/a'}
-  ATR14=$${s.atr_14?.toFixed(3)} (${s.atr_pct?.toFixed(1)}%) | SMA50=${s.sma_50 ? '$' + s.sma_50.toFixed(3) : 'n/a'} | SMA200=${s.sma_200 ? '$' + s.sma_200.toFixed(3) : 'n/a'}
-  Volume: ratio=${s.volume_ratio?.toFixed(2)}x | Z-Score=${s.volume_z_score?.toFixed(2) ?? 'n/a'} | ADV20=$${s.adv_20 != null ? Math.round(s.adv_20 / 1000) + 'k' : 'n/a'}
-  OBV=${s.obv_trend} | VWAP20=$${s.vwap_20d?.toFixed(3)}
-  S/R: R2=$${sr.r2?.toFixed(3)}, R1=$${sr.r1?.toFixed(3)}, Pivot=$${sr.pivot?.toFixed(3)}, S1=$${sr.s1?.toFixed(3)}
-  Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%
-  BuySignals: ${(s.buy_signals || []).join(', ') || 'none'}`;
-    }).join('\n');
-  }
-
   // ── Cash and sizing ──────────────────────────────────────────────────────────
   const allocated = state.dayTrading.allocatedCash != null
     ? state.dayTrading.allocatedCash
     : Math.round(state.cash * 0.20);
   const riskPct = state.dayTrading.riskPct || 1.5;
-  const riskPerTrade = allocated * riskPct / 100;
-
-  // ── System prompt is defined in js/prompts.js — edit there, not here.
-  const systemPrompt = getDayTradeSystemPrompt();
-
-  // ── Merge user-tuned AI params over defaults ──────────────────────────────
   const _ap = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}) };
-  const _fp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}) };
+  const _dtPortCtx = {
+    allocatedCash: allocated,
+    portfolioValue: portfolioValue(),
+    brokerage: state.settings.brokerage,
+    rbaRate: state.rbaRate || 4.35,
+    riskPct,
+  };
+  const _dtRegime = state.currentRegime?.regime;
 
-  // ── User message ─────────────────────────────────────────────────────────────
-  const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()}
+  // ── Quantitative setup detection (no Claude) ─────────────────────────────────
+  const candidates = _dtPreFilter(allTickers);
+  const newRecs = _dtBuildRecs(candidates, _ap, _dtPortCtx, _dtRegime);
 
-SWING TRADE ALLOCATION:
-Allocated cash: $${fmt(allocated)} of $${fmt(state.cash)} total available
-Risk per trade: ${riskPct}% = $${fmt(riskPerTrade)} max loss per trade
-Stop distance: ${_ap.stopAtrMultiple}×ATR per trade
-Brokerage: $${state.settings.brokerage}/trade
+  state.dayTrading.recommendations = newRecs;
+  state.dayTrading.lastSummary = {
+    text: `Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} tickers passed pre-filter`,
+    date: todayStr(),
+    time: nowSydney(),
+    recCount: newRecs.length,
+  };
+  state.dayTrading.analysisRunning = false;
+  scheduleSave();
+  toast(`Day trade scan: ${newRecs.length} setup(s) found`, newRecs.length > 0 ? 'success' : 'info');
+  renderPage();
+}
 
-ACTIVE SCANNER PARAMS (override prompt defaults if different):
-Pre-filter: BB %B ≤ ${_fp.maxBbPctB} | ADV ≥ $${(_fp.minAdvAud/1000).toFixed(0)}k | SMA200 floor ${(_fp.sma200Floor*100).toFixed(1)}% | ADX ≤ ${_fp.maxAdx}
-Signal thresholds: RSI < ${_ap.rsiThreshold} | Vol Z-score ≥ ${_ap.volZScore} | Fib return ${_ap.fibReturnMin}% to ${_ap.fibReturnMax}%
-Position: Stop = entry − ${_ap.stopAtrMultiple}×ATR | Min R:R ${_ap.minRrRatio}:1 | Max position ${_ap.maxPositionPct}% of allocated | Min confidence ${_ap.minConfidence}
+// ── _dtBuildRecs ──────────────────────────────────────────────────────────────
+// Scores pre-filtered tickers against the DT signal stack and returns recs.
+// Called by both runDayTradeAnalysis() and runUniverseScan().
+function _dtBuildRecs(candidates, ap, portCtx, regime) {
+  const _minConf = ap.minConfidence ?? DT_AI_PARAMS.minConfidence;
+  const _minRR   = ap.minRrRatio   ?? DT_AI_PARAMS.minRrRatio;
+  const recs = [];
 
-TICKERS TO SCAN: ${allTickers.join(', ')}
-${indicatorCtx}${newsOutlook}${annCtx}${earningsCtx}
+  for (let i = 0; i < candidates.length; i++) {
+    const t = candidates[i];
+    const s = state.liveSignals[t];
+    if (!s || s.error) continue;
 
-TASK:
-For each ticker, apply all 4 hard filters first — skip any ticker that fails.
-Then check the 5 entry signals. Output a rec only if:
-  Signal #1 (BB Primary) fires + ≥2 more signals fire + all filters pass + R:R ≥ ${_ap.minRrRatio}.
-Compute stop = entry − ${_ap.stopAtrMultiple}×ATR. Compute qty = floor(riskPerTrade / (${_ap.stopAtrMultiple}×ATR)).
-Return only the JSON.`;
+    // Signal #1: BB reclaim — confirmed by _dtPreFilter (bb_pct_b ≤ threshold)
+    const signals = ['BB reclaim'];
 
-  // ── Call Claude API via centralised wrapper (with retry + caching) ──────────
-  try {
-    const _dtSystemArray = typeof buildDtSystemArray === 'function'
-      ? buildDtSystemArray({ regime: state.currentRegime?.regime })
-      : undefined;
+    // Signal #2: RSI oversold
+    if (s.rsi_14 != null && s.rsi_14 < (ap.rsiThreshold ?? 35))
+      signals.push(`RSI ${s.rsi_14.toFixed(1)}`);
 
-    const { text } = await callClaude('dayTrade', userMessage, {
-      systemArray: _dtSystemArray,
-      maxTokens: 4000,
-    });
+    // Signal #3: Volume surge
+    if (s.volume_z_score != null && s.volume_z_score >= (ap.volZScore ?? 1.5))
+      signals.push(`VolZ ${s.volume_z_score.toFixed(2)}σ`);
 
-    let recs = [], summary = null;
-    const _dtParsed = parseClaudeJSON(text);
-    if (_dtParsed.ok) {
-      recs    = _dtParsed.data?.recs || [];
-      summary = _dtParsed.data?.summary || null;
-    } else {
-      // Brace-depth recovery for truncated responses
-      const cleaned = (text || '').replace(/```json|```/g, '').trim();
-      const m = cleaned.match(/"recs"\s*:\s*\[/);
-      if (m) {
-        const start = cleaned.indexOf('[', m.index + m[0].length - 1);
-        const content = cleaned.slice(start + 1);
-        let depth = 0, objStart = -1;
-        for (let i = 0; i < content.length; i++) {
-          const ch = content[i];
-          if (ch === '{') { if (depth === 0) objStart = i; depth++; }
-          else if (ch === '}') {
-            depth--;
-            if (depth === 0 && objStart >= 0) {
-              try { recs.push(JSON.parse(content.slice(objStart, i + 1))); } catch {}
-              objStart = -1;
-            }
-          }
-        }
-      }
-      summary = summary || `${recs.length} setup(s) recovered (response partially truncated).`;
-    }
+    // Signal #4: Fib zone (60d return in pullback range)
+    if (s.return_60d != null
+        && s.return_60d >= (ap.fibReturnMin ?? -20)
+        && s.return_60d <= (ap.fibReturnMax ?? -5))
+      signals.push(`Fib ${s.return_60d.toFixed(1)}%`);
 
-    // Stamp each rec with id and metadata
-    const _minConf = state.dayTrading.aiParams?.minConfidence ?? DT_AI_PARAMS.minConfidence;
-    const _dtRegime = state.currentRegime?.regime;
+    // Signal #5: OBV rising (bonus)
+    if (s.obv_trend === 'rising') signals.push('OBV rising');
 
-    // Quant engine: override AI sizing with deterministic math for BUY recs
-    if (typeof computeTradeParams === 'function') {
-      const _dtPortCtx = {
-        allocatedCash: allocated,
-        portfolioValue: portfolioValue(),
-        brokerage: state.settings.brokerage,
-        rbaRate: state.rbaRate || 4.35,
-        riskPct: riskPct,
-      };
-      recs = recs.map(r => {
-        if (r.action !== 'BUY') return r;
-        const signals = state.liveSignals[r.ticker];
-        if (!signals || signals.error) return r;
-        const qt = computeTradeParams(r.ticker, signals, _dtPortCtx, {
-          winProb: r.confidence ?? 0.6,
-          expectedTimeToTarget: r.holdDays ?? 8,
-          priceRange: r.priceRange,
-          target: r.target,
-        });
-        if (!qt.ok) return r;
-        return { ...r, qty: qt.qty, stopLoss: qt.stopLoss, target: qt.target,
-          rrRatio: qt.rrRatio, riskAUD: qt.riskAUD, rewardAUD: qt.rewardAUD, _quantEngine: true };
-      });
-    }
+    // Strategy rule: Signal #1 + ≥2 confirms
+    const confirms = signals.length - 1;
+    if (confirms < 2) continue;
 
-    // Regime size modifiers
-    if (typeof applyRegimeModifiers === 'function' && _dtRegime) {
-      recs = recs.map(r => r.action === 'BUY' ? applyRegimeModifiers(r, _dtRegime) : r);
-    }
+    const confidence = Math.min(0.50 + confirms * 0.08, 0.90);
+    if (confidence < _minConf) continue;
 
-    const newRecs = recs
-      .filter(r => r.action === 'BUY' && (r.confidence || 0) >= _minConf)
-      .map((r, i) => ({
-        ...r,
-        id: `DT-${Date.now()}-${i}`,
-        status: 'pending',
-        date: todayStr(),
-        generatedAt: nowSydney(),
-        regime: _dtRegime || 'unknown',
-      }));
-
-    state.dayTrading.recommendations = newRecs;
-    state.dayTrading.lastSummary = {
-      text: summary || `${newRecs.length} setup(s) found`,
-      date: todayStr(),
-      time: nowSydney(),
-      recCount: newRecs.length,
+    const entry = s.current_price;
+    let rec = {
+      ticker: t, action: 'BUY', confidence,
+      priceRange: [entry, +(entry * 1.01).toFixed(3)],
+      signals,
+      reasoning: `Quant signals: ${signals.join(' · ')}`,
+      regime: regime || 'unknown',
     };
-    state.dayTrading.analysisRunning = false;
-    scheduleSave();
-    toast(`Day trade scan: ${newRecs.length} setup(s) found`, 'success');
-    renderPage();
-  } catch (e) {
-    state.dayTrading.analysisRunning = false;
-    toast('Day trade analysis error: ' + e.message, 'error');
-    renderPage();
+
+    if (typeof computeTradeParams === 'function') {
+      const qt = computeTradeParams(t, s, portCtx, {
+        winProb: confidence,
+        expectedTimeToTarget: 8,
+        priceRange: rec.priceRange,
+      });
+      if (!qt.ok) continue;
+      rec = { ...rec, qty: qt.qty, stopLoss: qt.stopLoss, target: qt.target,
+              rrRatio: qt.rrRatio, riskAUD: qt.riskAUD, rewardAUD: qt.rewardAUD, _quantEngine: true };
+    }
+
+    if (!rec.rrRatio || rec.rrRatio < _minRR) continue;
+
+    if (typeof applyRegimeModifiers === 'function' && regime) {
+      rec = applyRegimeModifiers(rec, regime);
+    }
+
+    recs.push({
+      ...rec,
+      id: `DT-${Date.now()}-${i}`,
+      status: 'pending',
+      date: todayStr(),
+      generatedAt: nowSydney(),
+    });
   }
+
+  // Sort: most signals first, then lowest BB %B (closest to lower band)
+  return recs.sort((a, b) => {
+    const sa = a.signals?.length || 0, sb = b.signals?.length || 0;
+    if (sb !== sa) return sb - sa;
+    return (state.liveSignals[a.ticker]?.bb_pct_b ?? 1) - (state.liveSignals[b.ticker]?.bb_pct_b ?? 1);
+  });
 }
 
 // Execute a day trade rec — adds to journal and marks executed
@@ -320,9 +220,6 @@ async function runUniverseScan() {
     toast('A portfolio scan is already running. Please wait.', 'info');
     return;
   }
-  const key = getApiKey();
-  if (!key) { toast('Add Anthropic API key in Settings', 'error'); showPage('settings'); return; }
-
   const universeKey = state.dayTrading.universeKey || 'asx200';
   const universeTickers = getUniverseTickers(universeKey);
   if (!universeTickers.length) { toast('Unknown universe key', 'error'); return; }
@@ -400,171 +297,39 @@ async function runUniverseScan() {
     return;
   }
 
-  // Cap at 15 best candidates (closest to lower BB) to stay within AI context limits
-  const ranked = candidates.slice().sort((a, b) =>
-    (state.liveSignals[a]?.bb_pct_b ?? 1) - (state.liveSignals[b]?.bb_pct_b ?? 1)
-  );
-  const top = ranked.slice(0, 15);
-
-  state.dayTrading.scanProgress = { phase: 'analysing', current: 0, total: top.length, candidates: top.length };
-  _updateUniverseProgress(_renderUniverseProgressHtml());
-
-  // ── Phase 3: Build AI context for candidates ─────────────────────────────────
-  // Fetch supporting context (news, announcements, earnings) for candidates
-  let newsOutlook = '', annCtx = '', earningsCtx = '';
-  try {
-    const r = await fetch(`${API}/api/news/brief?tickers=${top.join(',')}&days=2`);
-    if (r.ok) {
-      const d = await r.json();
-      const items = d.items || [];
-      if (items.length) {
-        newsOutlook = '\n\nNEWS SIGNALS (last 2d):\n' + items.map(n => `  • ${n.signal || n.title?.slice(0,70)}`).join('\n');
-      }
-    }
-  } catch {}
-
-  try {
-    const d = await fetch(`${API}/api/announcements/brief?tickers=${top.join(',')}&days=2&max=8`)
-      .then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] }));
-    const items = d.items || [];
-    if (items.length) {
-      const ps = items.filter(a => a.price_sensitive);
-      const other = items.filter(a => !a.price_sensitive);
-      const lines = [];
-      if (ps.length)    lines.push('⚡ Price-sensitive:', ...ps.map(a => `  • ${a.signal}`));
-      if (other.length) lines.push('Routine:', ...other.map(a => `  • ${a.signal}`));
-      annCtx = `\n\nASX ANNOUNCEMENTS (last 2d):\n${lines.join('\n')}`;
-    }
-  } catch {}
-
-  const earningsLines = top
-    .filter(t => state.earningsCalendar[t]?.nextEarningsDate)
-    .map(t => {
-      const e = state.earningsCalendar[t];
-      const daysAway = Math.round((new Date(e.nextEarningsDate) - new Date()) / 86400000);
-      const flag = Math.abs(daysAway) <= 7 ? ' ⚡WITHIN 7 DAYS' : '';
-      return `  ${t}: nextEarnings=${e.nextEarningsDate} (${daysAway}d)${flag}`;
-    });
-  if (earningsLines.length) earningsCtx = `\n\nEARNINGS CALENDAR:\n${earningsLines.join('\n')}`;
-
-  // Build indicator context
-  const indicatorCtx = '\n\nLIVE TECHNICAL DATA (pre-filter survivors):\n' + top.map(t => {
-    const s = state.liveSignals[t];
-    const sr = s.support_resistance || {};
-    return `\n[${t}]
-  Price=$${s.current_price} | Trend=${s.trend_direction} | ADX=${s.adx?.toFixed(1)} (${s.trend_strength})
-  RSI14=${s.rsi_14?.toFixed(1)}
-  BB: Upper=$${s.bb_upper?.toFixed(3)}, Mid=$${s.bb_mid?.toFixed(3)}, Lower=$${s.bb_lower?.toFixed(3)}, %B=${s.bb_pct_b != null ? (s.bb_pct_b * 100).toFixed(0) + '%' : 'n/a'}
-  ATR14=$${s.atr_14?.toFixed(3)} | SMA50=${s.sma_50 ? '$' + s.sma_50.toFixed(3) : 'n/a'} | SMA200=${s.sma_200 ? '$' + s.sma_200.toFixed(3) : 'n/a'}
-  Volume: ratio=${s.volume_ratio?.toFixed(2)}x | Z-Score=${s.volume_z_score?.toFixed(2) ?? 'n/a'} | ADV20=$${s.adv_20 != null ? Math.round(s.adv_20 / 1000) + 'k' : 'n/a'}
-  OBV=${s.obv_trend} | Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%
-  S/R: R1=$${sr.r1?.toFixed(3)}, Pivot=$${sr.pivot?.toFixed(3)}, S1=$${sr.s1?.toFixed(3)}
-  BuySignals: ${(s.buy_signals || []).join(', ') || 'none'}`;
-  }).join('\n');
-
+  // ── Phase 3: Quantitative rec generation ────────────────────────────────────
+  const _uAp = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}) };
   const allocated = state.dayTrading.allocatedCash != null ? state.dayTrading.allocatedCash : Math.round(state.cash * 0.20);
   const riskPct = state.dayTrading.riskPct || 1.5;
-  const riskPerTrade = allocated * riskPct / 100;
+  const _uPortCtx = {
+    allocatedCash: allocated,
+    portfolioValue: portfolioValue(),
+    brokerage: state.settings.brokerage,
+    rbaRate: state.rbaRate || 4.35,
+    riskPct,
+  };
+  const _uRegime = state.currentRegime?.regime;
 
-  // ── Merge user-tuned AI params over defaults ──────────────────────────────
-  const _uAp = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}) };
-  const _uFp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}) };
+  const newRecs = _dtBuildRecs(candidates, _uAp, _uPortCtx, _uRegime)
+    .map(r => ({ ...r, source: 'universe', universeKey }));
 
-  // ── System prompt is defined in js/prompts.js — edit there, not here.
-  const systemPrompt = getDayTradeUniverseScanPrompt();
+  const kept = (state.dayTrading.recommendations || []).filter(r => r.status !== 'pending' || r.source !== 'universe');
+  state.dayTrading.recommendations = [...kept, ...newRecs];
 
-  const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()}
-Universe: ${meta.label} — ${candidates.length} tickers passed pre-filter, top ${top.length} sent for AI analysis.
-
-SWING TRADE ALLOCATION: $${fmt(allocated)} allocated | ${riskPct}% risk = $${fmt(riskPerTrade)}/trade
-BROKERAGE: $${state.settings.brokerage}/trade
-
-ACTIVE SCANNER PARAMS (override prompt defaults if different):
-Pre-filter: BB %B ≤ ${_uFp.maxBbPctB} | ADV ≥ $${(_uFp.minAdvAud/1000).toFixed(0)}k | SMA200 floor ${(_uFp.sma200Floor*100).toFixed(1)}% | ADX ≤ ${_uFp.maxAdx}
-Signal thresholds: RSI < ${_uAp.rsiThreshold} | Vol Z-score ≥ ${_uAp.volZScore} | Fib return ${_uAp.fibReturnMin}% to ${_uAp.fibReturnMax}%
-Position: Stop = entry − ${_uAp.stopAtrMultiple}×ATR | Min R:R ${_uAp.minRrRatio}:1 | Max position ${_uAp.maxPositionPct}% of allocated | Min confidence ${_uAp.minConfidence}
-
-CANDIDATES TO ANALYSE: ${top.join(', ')}
-${indicatorCtx}${newsOutlook}${annCtx}${earningsCtx}
-
-TASK: Apply the full signal stack to each candidate. Output a rec only if Signal #1 fires + ≥2 confirms + R:R ≥ 2.0.
-Return only JSON.`;
-
-  // ── Call Claude API via centralised wrapper (with retry + caching) ──────────
-  try {
-    const _uSystemArray = typeof buildDtSystemArray === 'function'
-      ? buildDtSystemArray({ regime: state.currentRegime?.regime })
-      : undefined;
-
-    const { text: _uText } = await callClaude('universe', userMessage, {
-      systemArray: _uSystemArray,
-      maxTokens: 4000,
-    });
-
-    let recs = [], summary = null;
-    const _uParsed = parseClaudeJSON(_uText);
-    if (_uParsed.ok) {
-      recs    = _uParsed.data?.recs || [];
-      summary = _uParsed.data?.summary || null;
-    } else {
-      const cleaned = (_uText || '').replace(/```json|```/g, '').trim();
-      const m = cleaned.match(/"recs"\s*:\s*\[/);
-      if (m) {
-        const start = cleaned.indexOf('[', m.index + m[0].length - 1);
-        const content = cleaned.slice(start + 1);
-        let depth = 0, objStart = -1;
-        for (let i = 0; i < content.length; i++) {
-          const ch = content[i];
-          if (ch === '{') { if (depth === 0) objStart = i; depth++; }
-          else if (ch === '}') {
-            depth--;
-            if (depth === 0 && objStart >= 0) {
-              try { recs.push(JSON.parse(content.slice(objStart, i + 1))); } catch {}
-              objStart = -1;
-            }
-          }
-        }
-      }
-      summary = summary || `${recs.length} setup(s) recovered.`;
-    }
-
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
-    const _uMinConf = state.dayTrading.aiParams?.minConfidence ?? DT_AI_PARAMS.minConfidence;
-    const newRecs = recs
-      .filter(r => r.action === 'BUY' && (r.confidence || 0) >= _uMinConf)
-      .map((r, i) => ({
-        ...r,
-        id: `DT-${Date.now()}-${i}`,
-        status: 'pending',
-        date: todayStr(),
-        generatedAt: nowSydney(),
-        source: 'universe',
-        universeKey,
-      }));
-
-    // Merge with existing portfolio-scan recs (keep executed/dismissed, add new pending)
-    const kept = (state.dayTrading.recommendations || []).filter(r => r.status !== 'pending' || r.source !== 'universe');
-    state.dayTrading.recommendations = [...kept, ...newRecs];
-
-    state.dayTrading.lastSummary = {
-      text: `${meta.label} universe scan: ${candidates.length}/${universeTickers.length} tickers passed pre-filter → ${newRecs.length} setup(s). ${summary || ''} (${elapsed}s)`,
-      date: todayStr(),
-      time: nowSydney(),
-      recCount: newRecs.length,
-      source: 'universe',
-      universeKey,
-    };
-    state.dayTrading.analysisRunning = false;
-    state.dayTrading.scanProgress = null;
-    scheduleSave();
-    toast(`${meta.label} scan: ${newRecs.length} setup(s) found from ${candidates.length} candidates`, newRecs.length > 0 ? 'success' : 'info');
-    renderPage();
-  } catch (e) {
-    state.dayTrading.analysisRunning = false;
-    state.dayTrading.scanProgress = null;
-    toast('Universe scan AI error: ' + e.message, 'error');
-    renderPage();
-  }
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
+  state.dayTrading.lastSummary = {
+    text: `${meta.label}: ${candidates.length}/${universeTickers.length} passed pre-filter → ${newRecs.length} setup(s) (${elapsed}s)`,
+    date: todayStr(),
+    time: nowSydney(),
+    recCount: newRecs.length,
+    source: 'universe',
+    universeKey,
+  };
+  state.dayTrading.analysisRunning = false;
+  state.dayTrading.scanProgress = null;
+  scheduleSave();
+  toast(`${meta.label} scan: ${newRecs.length} setup(s) from ${candidates.length} candidates`, newRecs.length > 0 ? 'success' : 'info');
+  renderPage();
 }
 
 function _renderUniverseProgressHtml() {
