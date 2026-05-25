@@ -3531,17 +3531,21 @@ def learning_calibration():
 _OLLAMA_BASE = "http://localhost:11434"
 
 
-def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 2) -> dict:
+def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1) -> dict:
     """
     Send a prompt to a local Ollama model via /api/generate.
     Returns {"ok": True, "text": "..."} or {"ok": False, "error": "..."}.
-    Uses streaming=False. Retries up to `retries` times with exponential backoff
-    on transient errors (connection reset, 503, timeout on first try only).
+
+    Retry policy:
+      - HTTP 503 (model still loading): retry up to `retries` times with backoff.
+      - Timeout: NO retry — fail immediately. A timed-out prompt won't succeed
+        faster on a second attempt; the caller should increase `timeout` or
+        switch to a smaller model.
+      - ConnectionError: NO retry — Ollama is not running.
     """
-    last_error = "unknown"
     for attempt in range(retries + 1):
         if attempt > 0:
-            time.sleep(min(2 ** attempt, 8))  # 2s, 4s, 8s cap
+            time.sleep(min(2 ** attempt, 8))   # 2 s, 4 s … for 503 retries only
         try:
             resp = requests.post(
                 f"{_OLLAMA_BASE}/api/generate",
@@ -3551,22 +3555,19 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 2) -
             if resp.ok:
                 data = resp.json()
                 return {"ok": True, "text": data.get("response", "").strip()}
-            # 503 = Ollama loading model — retry
+            # 503 = Ollama still loading the model weights — worth retrying
             if resp.status_code == 503 and attempt < retries:
-                last_error = f"Ollama HTTP 503 (model loading)"
                 continue
             return {"ok": False, "error": f"Ollama HTTP {resp.status_code}"}
         except requests.exceptions.ConnectionError:
-            # Don't retry connection refused — Ollama is simply not running
-            return {"ok": False, "error": "Ollama not running — start it with ollama serve"}
+            return {"ok": False, "error": "Ollama not running — run: ollama serve"}
         except requests.exceptions.Timeout:
-            last_error = f"Ollama timeout after {timeout}s"
-            if attempt < retries:
-                continue  # retry on timeout
-            return {"ok": False, "error": last_error}
+            # Fail immediately — retrying won't help a slow model/prompt
+            return {"ok": False,
+                    "error": f"Ollama timeout after {timeout}s — try a smaller model or increase timeout"}
         except Exception as ex:
             return {"ok": False, "error": str(ex)}
-    return {"ok": False, "error": last_error}
+    return {"ok": False, "error": "Ollama did not respond after retries"}
 
 
 @app.route("/api/debate/status")
@@ -3723,7 +3724,8 @@ def debate_postmortem():
     data    = request.get_json() or {}
     ev_id   = data.get("id")
     model   = data.get("model") or "qwen3:9b"
-    tout    = min(int(data.get("timeout", 30)), 60)
+    # Default 60 s, max 120 s. No retries — if it times out once it will again.
+    tout    = min(int(data.get("timeout", 60)), 120)
 
     if not ev_id:
         return jsonify({"ok": False, "error": "id required"}), 400
@@ -3744,31 +3746,25 @@ def debate_postmortem():
     if status not in ("win", "loss", "breakeven"):
         return jsonify({"ok": False, "error": f"event is '{status}', not closed"}), 400
 
-    # Build a compact trade summary for the model
+    # Compact trade summary — fewer tokens → faster generation
     summary = (
-        f"Ticker: {row['ticker']} | Outcome: {status}"
-        + (f" | PnL: {row['realized_pnl_pct']:.1f}%" if row["realized_pnl_pct"] is not None else "")
-        + (f" | HoldDays: {row['holding_period_days']}" if row["holding_period_days"] is not None else "")
-        + (f" | AI_conf: {row['ai_confidence']:.0%}" if row["ai_confidence"] is not None else "")
-        + (f" | ExitReason: {row['exit_reason']}" if row["exit_reason"] else "")
-        + (f" | Regime: {row['regime']}" if row["regime"] else "")
+        f"{row['ticker']} {status.upper()}"
+        + (f" PnL={row['realized_pnl_pct']:.1f}%"    if row["realized_pnl_pct"]      is not None else "")
+        + (f" hold={row['holding_period_days']}d"      if row["holding_period_days"]   is not None else "")
+        + (f" conf={row['ai_confidence']:.0%}"         if row["ai_confidence"]         is not None else "")
+        + (f" exit={row['exit_reason']}"               if row["exit_reason"]           else "")
+        + (f" regime={row['regime']}"                  if row["regime"]                else "")
     )
 
+    # Ultra-compact prompt — shorter input = faster output on small models
     prompt = (
-        "Classify this closed trade into exactly ONE of these error types:\n"
-        "  overconfident   — stated confidence was too high vs actual outcome\n"
-        "  missed_catalyst — an earnings/news event was not accounted for\n"
-        "  regime_mismatch — wrong strategy for the prevailing market regime\n"
-        "  poor_entry      — entry timing or price was off\n"
-        "  stop_too_tight  — stopped out by normal volatility\n"
-        "  none            — no clear error (winning trade or random outcome)\n\n"
-        f"Trade summary: {summary}\n\n"
-        "Reply with ONLY a JSON object on one line, e.g.:\n"
-        '{"error_type":"overconfident","reason":"Confidence was 80% but RSI already extended"}\n'
-        "No extra text."
+        f"Trade: {summary}\n"
+        "Pick ONE tag: overconfident | missed_catalyst | regime_mismatch | poor_entry | stop_too_tight | none\n"
+        'Reply JSON only: {"error_type":"TAG","reason":"one sentence"}'
     )
 
-    result = _call_ollama(model, prompt, timeout=tout)
+    # retries=0 — a timeout means the model is too slow for this prompt; don't compound it
+    result = _call_ollama(model, prompt, timeout=tout, retries=0)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 

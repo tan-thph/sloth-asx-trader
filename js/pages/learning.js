@@ -580,7 +580,7 @@ async function runTestDebate() {
     const result = await fetchDebate(ticker, state.liveSignals[ticker] || {}, {
       skipCache: true,
       model,
-      timeout: 60,
+      timeout: 90,   // per-side; both run in parallel so wall-clock ≈ 90 s max
     });
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
@@ -671,13 +671,14 @@ async function triggerDebatePostmortem(eventId) {
     const model = typeof preferredDebateModel === 'function'
       ? preferredDebateModel(status.models) : 'qwen3:9b';
 
-    toast(`🤖 Asking ${model} for post-mortem on event #${eventId}…`, 'info');
+    toast(`🤖 Asking ${model} for post-mortem on event #${eventId}… (up to 60 s)`, 'info');
     const t0 = Date.now();
 
     const r = await fetch(`${API}/api/debate/postmortem`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ id: eventId, model }),
+      body:    JSON.stringify({ id: eventId, model, timeout: 60 }),
+      signal:  AbortSignal.timeout(130_000),   // 130 s browser cap (server max 120 s)
     });
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     const result = await r.json();
@@ -692,7 +693,9 @@ async function triggerDebatePostmortem(eventId) {
         if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
       }
     } else {
-      toast(`Post-mortem failed (${elapsed}s): ${result.error || 'unknown'}`, 'error');
+      const isTimeout = (result.error || '').includes('timeout');
+      const hint = isTimeout ? ' Try a smaller model (qwen3:0.6b).' : '';
+      toast(`Post-mortem failed (${elapsed}s): ${result.error || 'unknown'}${hint}`, 'error');
       if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
     }
   } catch (e) {
