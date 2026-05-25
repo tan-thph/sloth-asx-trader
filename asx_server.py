@@ -3878,22 +3878,29 @@ def debate_postmortem():
     rationale = (row["rationale_summary"] or "").strip()[:250]
     exit_reason = row["exit_reason"] or ""
 
-    # Build exit-aware guidance hint to steer the model when rationale is thin
+    # Exit-reason context — factual only, no tag suggestions.
+    # Suggesting tags causes the model to pattern-match on exit_reason instead of reasoning.
     if exit_reason == "stop_hit":
-        exit_hint = "The stop was hit — consider stop_too_tight (normal volatility) or overconfident (stop placed poorly)."
+        exit_hint = "The pre-set stop loss price was triggered."
     elif exit_reason == "time_exit":
-        exit_hint = "Trade was closed on time — consider thesis_broken (thesis didn't play out) or poor_entry (wrong timing)."
+        exit_hint = "The position was closed after the expected holding period without reaching stop or target."
     elif exit_reason == "manual":
-        exit_hint = "Trade was closed manually — consider thesis_broken or missed_catalyst."
+        exit_hint = "The position was closed manually before reaching stop or target."
+    elif exit_reason == "protective_stop":
+        exit_hint = "The position was deliberately closed early to protect capital."
     else:
         exit_hint = ""
 
     prompt = (
         f"ASX closed trade (LOSS or BREAKEVEN): {summary}\n"
         + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "No original rationale stored.\n")
-        + (f"Hint: {exit_hint}\n" if exit_hint else "")
+        + (f"Exit context: {exit_hint}\n" if exit_hint else "")
         + "\n"
-        "Select 1-2 error tags from this list (comma-separate if multiple apply):\n"
+        "Classify the PRIMARY reason this trade failed. Use the P&L, holding period, "
+        "confidence level, R:R ratio, and entry/stop/target prices to reason — do NOT "
+        "base the tag solely on the exit method.\n"
+        "\n"
+        "Select 1-2 error tags:\n"
         "  overconfident   - AI confidence was too high given the actual risk\n"
         "  missed_catalyst - key event (earnings/news/macro) was not accounted for\n"
         "  regime_mismatch - wrong strategy for the market regime at the time\n"
@@ -3902,11 +3909,9 @@ def debate_postmortem():
         "  poor_rr         - reward:risk ratio was too low from the start to justify the trade\n"
         "  external_shock  - outcome driven by unpredictable external event (policy change, black swan)\n"
         "  thesis_broken   - thesis was invalidated by new information that emerged after entry\n"
-        "  none            - ONLY use this if you have a specific reason the loss was unforeseeable\n"
+        "  none            - ONLY if the loss was genuinely unforeseeable with the available data\n"
         "\n"
-        "You MUST pick at least one tag. Use the exit reason, R:R ratio, holding period, and confidence "
-        "as signals even if rationale is missing.\n"
-        'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence"}\n'
+        'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence citing specific numbers"}\n'
         "No markdown, no explanation outside JSON. /no_think"
     )
 
