@@ -274,7 +274,7 @@ function _renderLearningContent(d) {
       ['poor_entry',      'PE', 'Poor entry — timing or price was suboptimal'],
       ['stop_too_tight',  'ST', 'Stop too tight — normal volatility triggered stop before the move played out'],
     ];
-    const escapedCurrent = JSON.stringify(currentTagStr || '');
+    const escapedCurrent = JSON.stringify(currentTagStr || '').replace(/"/g, '&quot;');
     return `<div style="display:flex;gap:2px;flex-wrap:wrap">` +
       tags.map(([key, short, tip]) => {
         const active  = activeTags.has(key);

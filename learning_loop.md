@@ -18,7 +18,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `recommendation` | TEXT | BUY / SELL / TRIM / TOP_UP |
 | `ai_confidence` | REAL | Claude's stated confidence (0–1) |
 | `ensemble_confidence` | REAL | Quant engine confidence (0–1) |
-| `outcome_status` | TEXT | win / loss / open / skipped |
+| `outcome_status` | TEXT | win / loss / open / skipped / breakeven |
 | `realized_pnl_pct` | REAL | Exit P&L as % of cost basis |
 | `realized_pnl_aud` | REAL | Exit P&L in AUD |
 | `regime` | TEXT | Market regime at time of rec |
@@ -33,6 +33,11 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `actual_entry_price` | REAL | Actual fill price |
 | `actual_exit_price` | REAL | Actual exit price |
 | `sector` | TEXT | GICS sector of the ticker |
+| `error_type` | TEXT | Comma-separated failure tags (see below) — loss/breakeven only |
+| `error_type_source` | TEXT | `'manual'` (UI) or `'auto'` (Ollama postmortem) |
+| `skill_score` | REAL | 0–10 outcome quality score from local model |
+| `debate_summary` | TEXT | ≤200-char `"B:… / R:…"` from local model at analysis time |
+| `prompt_hash` | TEXT | 12-char djb2 fingerprint of `promptVersion\|regime\|date` |
 
 ### `rec_history` table
 Stores every Claude recommendation. The `learning_id` column links each rec to its `ai_learning_events` row, persisted across restarts.
@@ -118,21 +123,45 @@ const fullUserMessage = userMessage.replace('__CALIBRATION_PLACEHOLDER__', calib
 | Endpoint | Method | Description |
 |---|---|---|
 | `POST /api/learning/log` | Write | Create a new `ai_learning_events` row |
-| `PATCH /api/learning/outcome/{id}` | Write | Update outcome fields on an existing event |
+| `POST /api/learning/outcome` | Write | Update outcome/error_type on an existing event |
+| `DELETE /api/learning/event/<id>` | Write | Hard-delete a single learning event |
 | `GET /api/learning/stats` | Read | Full aggregate stats for the Learning Loop page |
 | `GET /api/learning/calibration` | Read | Smart, context-aware calibration block for Claude injection |
+| `GET /api/debate/status` | Read | Check if Ollama is running; returns `{available, models[], url}` (60s TTL in JS) |
+| `POST /api/debate` | Write | Bull/bear debate for one ticker — sequential calls, 4h result cache |
+| `POST /api/debate/postmortem` | Write | Auto-tag a closed event's `error_type` via local model; rejects wins (HTTP 400) |
 
 ---
 
 ## Learning Loop Display Page
 
-The Learning Loop tab in the app renders:
-- **Calibration accuracy** — per-confidence-band hit rates vs expected (e.g., 80–90% confidence band should hit ~85% of the time)
-- **Regime performance** — win rate and avg P&L broken down by market regime
-- **Strategy decay** — recent vs all-time win rate with volatility flag
-- **R:R realization** — whether high-R:R setups are actually winning at the expected rate
-- **Recent events** — last 20 events with outcome, P&L%, regime, hold days, exit reason
-- **AI vs Manual** — side-by-side comparison of AI-recommended vs manually-entered trade performance
+The Learning Loop tab renders:
+- **Summary cards** — total events, overall win rate, high-confidence (≥70%) win rate, active prompt version
+- **Calibration accuracy** — per-confidence-band hit rates vs expected; ⚠ badge if n < 5; yellow warning banner if closed < 10
+- **Regime performance** — win rate broken down by market regime
+- **Prompt version history** — calls and win rate per version string
+- **Failure patterns** — exit reason distribution + error type tag counts (split on commas for multi-tags)
+- **Recent events** — last 30 events with outcome chip, P&L%, error tag buttons, 🤖 post-mortem button, ✕ delete
+- **Debate Summaries** — last 5 events that have a stored `debate_summary`, showing bull/bear snippets and trade outcome
+- **Debate Engine card** — async-rendered; Offline state shows install instructions; Online state shows model `<select>`, depth `<select>`, and a live **Test Debate** button
+
+### Error tag rules
+- Tags are only shown on **loss** and **breakeven** events (`TAG_STATUSES`). Wins never get error tags — errors on wins conflate luck with failure.
+- Tags are comma-separated in the DB (`"overconfident,regime_mismatch"`). Each button toggles independently.
+- **Auto-tagged** (from Ollama postmortem): dashed border. **Manual**: solid border.
+- The 🤖 button is only shown for loss/breakeven events with **no tag yet**. Once any tag exists (auto or manual), it disappears — the user uses the toggle buttons instead.
+- Clearing all tags resets `error_type_source` to NULL.
+
+### Failure pattern aggregation
+The backend splits comma-separated `error_type` strings before counting:
+```python
+for r in fail_type_rows:
+    for tag in (r["error_type"] or "").split(","):
+        tag = tag.strip()
+        if tag:
+            type_counts[tag] = type_counts.get(tag, 0) + 1
+```
+This means a `"overconfident,regime_mismatch"` event increments both counters by 1.
 
 ---
 
@@ -149,7 +178,9 @@ Without the link, the only way to match an outcome to a recommendation is by tic
 
 ---
 
-## Internal Debate — Design Spec
+## Internal Debate — Implementation
+
+> **Status:** Phases 1–4 fully implemented and shipped. Phases 5–7 remain as future work.
 
 ### What it is
 
@@ -400,14 +431,91 @@ Debate goes **after** calibration and **before** the task instruction, so Claude
 
 ### Implementation Sequence
 
-| Phase | What | Files |
-|---|---|---|
-| 1 | `_call_ollama()` helper + `/api/debate/status` health check + graceful fallback everywhere | `asx_server.py` |
-| 2 | `/api/debate` endpoint (bull/bear type) | `asx_server.py` |
-| 3 | `fetchBullBearDebate()` in JS + inject into Claude user message | `js/analysis.js` |
-| 4 | `/api/debate/postmortem` endpoint + auto-tag on trade close | `asx_server.py`, `js/pages/recommendations.js` |
-| 5 | `skill_score` column + attribution call on close + weighted calibration | `asx_server.py` |
-| 6 | Calibration quality debate card on Learning Loop page | `js/pages/learning.js` |
-| 7 | Entry staleness check on Execute dialog | `js/pages/recommendations.js` |
+| Phase | What | Files | Status |
+|---|---|---|---|
+| 1 | `_call_ollama()` helper + `/api/debate/status` health check + graceful fallback everywhere | `asx_server.py` | ✅ Done |
+| 2 | `/api/debate` endpoint (bull/bear — sequential) + `debate-client.js` | `asx_server.py`, `js/debate-client.js` | ✅ Done |
+| 3 | Debate preamble injected into Claude user message + richer toasts + 4h cache + aggression setting | `js/analysis.js`, `js/config.js` | ✅ Done |
+| 4 | `/api/debate/postmortem` + multi-tag + win exclusion + Debate Engine card on Learning Loop | `asx_server.py`, `js/pages/learning.js` | ✅ Done |
+| 5 | `skill_score` attribution call on close + skill-weighted calibration | `asx_server.py` | 🔲 Future |
+| 6 | Calibration quality debate card (local model interprets calibration stats) | `js/pages/learning.js` | 🔲 Future |
+| 7 | Entry staleness check on Execute dialog | `js/pages/recommendations.js` | 🔲 Future |
 
-Phase 1–3 deliver the highest-value change (debate in Claude's context) with the least risk. Phases 4–7 can be added incrementally without breaking anything already built.
+---
+
+### Actual Implementation Details (Phases 1–4)
+
+#### `debate-client.js` — frontend debate layer
+New standalone file loaded after `claude-client.js`. All functions degrade gracefully (return `null`) when Ollama is offline.
+
+Key functions:
+- `debateStatus()` — 60s TTL cache of `/api/debate/status`
+- `fetchDebate(ticker, signals, opts)` — single-ticker debate with 4h signal-hash cache; `opts.skipCache=true` bypasses cache (used by Test Debate button)
+- `fetchDebateBatch(tickers, concurrency, opts)` — respects `state.debate.aggression` (none/light/full → 0/3/8 tickers, always concurrency=1)
+- `preferredDebateModel(pulledModels)` — respects `state.debate.model` user choice, falls back to priority list: `qwen3:9b → qwen3:4b → gemma3:2b → llama3.2:3b`
+- `buildDebatePreamble(debates)` — formats all debates as a text block for Claude's user message
+- `buildDebateSummary(debate)` — `"B:<80chars> / R:<80chars>"` (≤200 chars) for DB storage
+- `triggerPostmortem(eventId, model)` — fire-and-forget call to `/api/debate/postmortem`
+
+#### Signal hash for 4h cache
+```javascript
+function _signalHash(signals = {}) {
+  const pick = (v, dp = 2) => v == null ? 'x' : Number(v).toFixed(dp);
+  return [
+    pick(signals.current_price),
+    pick(signals.rsi_14, 1),
+    pick(signals.bb_pct_b),
+    pick(signals.volume_z_score, 1),
+    pick(signals.return_60d, 1),
+    signals.obv_trend || 'x',
+    pick(signals.adx_14, 1),
+  ].join('|');
+}
+```
+Rounded values prevent sub-cent price drift from busting cache while still detecting genuine signal changes.
+
+#### Ollama stability rules (learned the hard way)
+- **Sequential, not concurrent**: bull and bear calls are sequential in `asx_server.py`. Concurrent `ThreadPoolExecutor(2)` doubled peak VRAM and caused crashes.
+- **`keep_alive: "10m"`**: prevents Ollama from unloading the model between consecutive calls.
+- **`num_predict: 200`**: caps output length to prevent runaway generation.
+- **`temperature: 0.3`**: deterministic enough for structured output; varied enough to not be repetitive.
+- **Batch concurrency=1** for all aggression levels: `fetchDebateBatch` processes one ticker at a time even in Full mode. Concurrent Python threads just stack Ollama's internal queue with no wall-clock benefit.
+- **No retry on timeout**: `_call_ollama` retries 503 (model loading) with backoff, but returns immediately on `Timeout`. Retrying timeouts was tripling wait time (3 × 30s = 90s).
+
+#### Postmortem prompt (actual)
+```python
+prompt = (
+    f"ASX closed trade (LOSS or BREAKEVEN): {summary}\n"
+    + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "")
+    + "\n"
+    "Select 1-2 error tags from this list (comma-separate if multiple apply):\n"
+    "  overconfident | missed_catalyst | regime_mismatch | poor_entry | stop_too_tight | none\n"
+    'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence"}\n'
+)
+```
+Includes `rationale_summary[:250]` from the DB so the model has context on *what* the AI was thinking at entry, not just the outcome numbers. Wins are rejected server-side (HTTP 400) before the model is even called.
+
+#### Timeout settings
+| Call | Default | JS cap | Retry |
+|------|---------|--------|-------|
+| Bull/bear debate | 45s per side | 100s total | 503 only |
+| Postmortem | 60s | 130s | None (`retries=0`) |
+| Test Debate button | 90s per side | — | None |
+
+---
+
+### Known Bug Fixed (May 2026)
+
+**Tag buttons silently failed on click** — root cause was HTML attribute injection. `JSON.stringify("overconfident")` produces `"overconfident"` (with surrounding double quotes). When embedded in `onclick="toggleLearningTag(123, "overconfident", 'key')"`, the first inner `"` terminates the attribute, truncating the JS call before it could execute.
+
+**Fix:** `.replace(/"/g, '&quot;')` after `JSON.stringify`. The browser decodes `&quot;` → `"` before evaluating JS, so the call is syntactically valid in both HTML and JS contexts.
+
+```javascript
+// Before (broken):
+const escapedCurrent = JSON.stringify(currentTagStr || '');
+
+// After (fixed):
+const escapedCurrent = JSON.stringify(currentTagStr || '').replace(/"/g, '&quot;');
+```
+
+This affected all tag operations: first-time manual tagging, toggling additional tags, removing tags, and removing auto-tags. All now work correctly.
