@@ -767,7 +767,10 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 async function logRecsToLearningLoop(recs, regime) {
   if (!state.serverOk || !recs || !recs.length) return;
   const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
+  // Capture market context once per analysis run
+  const _mktCtx = { rba_rate: typeof state.rbaRate === 'number' ? state.rbaRate : null };
   for (const r of recs) {
+    if (r._learningId) continue;  // already logged — idempotency guard
     try {
       // Derive R:R ratio if stop + target available
       const entry = Array.isArray(r.priceRange) ? r.priceRange[0] : null;
@@ -792,6 +795,7 @@ async function logRecsToLearningLoop(recs, regime) {
         rr_ratio:            rrRatio != null ? +rrRatio.toFixed(2) : null,
         sector:              r.sector || holding?.sector || null,
         was_executed:        false,
+        market_context:      _mktCtx,
       };
       const resp = await fetch(`${API}/api/learning/log`, {
         method:  'POST',

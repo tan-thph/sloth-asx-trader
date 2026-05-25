@@ -223,7 +223,15 @@ with get_db() as _mig:
         _mig.execute("ALTER TABLE rec_history ADD COLUMN learning_id INTEGER")
 
     _le_cols = {r[1] for r in _mig.execute("PRAGMA table_info(ai_learning_events)").fetchall()}
-    for _col, _defn in [("actual_entry_price", "REAL"), ("actual_exit_price", "REAL"), ("sector", "TEXT")]:
+    for _col, _defn in [
+        ("actual_entry_price",  "REAL"),
+        ("actual_exit_price",   "REAL"),
+        ("sector",              "TEXT"),
+        ("follow_through_days", "INTEGER"),
+        ("market_context",      "TEXT"),
+        ("error_type",          "TEXT"),
+        ("notes",               "TEXT"),
+    ]:
         if _col not in _le_cols:
             _mig.execute(f"ALTER TABLE ai_learning_events ADD COLUMN {_col} {_defn}")
 
@@ -3222,6 +3230,15 @@ def learning_stats():
     """Return learning loop stats: win rates by confidence band, regime, prompt version."""
     try:
         with get_db() as conn:
+            # ── Auto-expire: open events older than 120 days have no useful outcome signal ──
+            conn.execute("""
+                UPDATE ai_learning_events
+                SET outcome_status = 'expired',
+                    notes = COALESCE(notes || ' | ', '') || 'Auto-expired: no outcome after 120 days'
+                WHERE outcome_status = 'open'
+                  AND datetime(timestamp) < datetime('now', '-120 days')
+            """)
+
             total  = conn.execute("SELECT COUNT(*) FROM ai_learning_events").fetchone()[0]
             closed = conn.execute(
                 "SELECT COUNT(*) FROM ai_learning_events WHERE outcome_status IN ('win','loss','breakeven')"
@@ -3320,14 +3337,30 @@ def learning_stats():
                     "sample": rr_rows['rr_sample'],
                 }
 
-            # Recent events (richer — include stop/target/hold for RR analysis)
+            # Recent events (richer — include error_type for tagging UI)
             recent = conn.execute("""
                 SELECT id, timestamp, ticker, recommendation, ai_confidence, ensemble_confidence,
                        outcome_status, realized_pnl_pct, realized_pnl_aud, regime, prompt_version,
                        was_executed, suggested_stop, suggested_target, rr_ratio,
-                       holding_period_days, exit_reason, rationale_summary
-                FROM ai_learning_events ORDER BY timestamp DESC LIMIT 20
+                       holding_period_days, exit_reason, rationale_summary, error_type
+                FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
+
+            # Failure patterns — exit_reason and error_type breakdown for closed trades
+            fail_exit = conn.execute("""
+                SELECT exit_reason, COUNT(*) as cnt FROM ai_learning_events
+                WHERE exit_reason IS NOT NULL AND outcome_status IN ('win','loss','breakeven')
+                GROUP BY exit_reason ORDER BY cnt DESC
+            """).fetchall()
+            fail_type = conn.execute("""
+                SELECT error_type, COUNT(*) as cnt FROM ai_learning_events
+                WHERE error_type IS NOT NULL
+                GROUP BY error_type ORDER BY cnt DESC
+            """).fetchall()
+            failure_patterns = {
+                "by_exit_reason": {r["exit_reason"]: r["cnt"] for r in fail_exit},
+                "by_error_type":  {r["error_type"]:  r["cnt"] for r in fail_type},
+            }
 
             # Failed tickers
             failed = conn.execute(
@@ -3347,6 +3380,7 @@ def learning_stats():
             "avg_hold_days":    avg_hold_days,
             "exit_reason_dist": exit_reason_dist,
             "rr_stats":         rr_stats,
+            "failure_patterns": failure_patterns,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3380,15 +3414,17 @@ def learning_calibration():
         parts = []
 
         # 1. Confidence bands — only bands with n≥3 AND |delta|>5pp
-        for label, lo, hi, mid in [("60-70", 0.60, 0.70, 0.65), ("70-80", 0.70, 0.80, 0.75)]:
+        # adj is proportional to delta (80%), capped at ±0.15; tells Claude exactly how much to shift
+        for label, lo, hi, mid in [("60-70", 0.60, 0.70, 0.65), ("70-80", 0.70, 0.80, 0.75),
+                                    ("80-90", 0.80, 0.90, 0.85)]:
             subset = [r for r in rows if lo <= (r["ai_confidence"] or 0) < hi]
             if len(subset) < 3:
                 continue
             wr = sum(1 for r in subset if r["outcome_status"] == "win") / len(subset)
             delta = wr - mid
             if abs(delta) > 0.05:
-                adj = "tighten" if delta < 0 else "raise"
-                parts.append(f"conf {label}%:{wr*100:.0f}%({delta*100:+.0f}pp→{adj},n={len(subset)})")
+                adj_val = round(max(-0.15, min(0.10, delta * 0.8)), 2)
+                parts.append(f"conf {label}%:{wr*100:.0f}%WR(Δ{delta*100:+.0f}pp,adj{adj_val:+.2f},n={len(subset)})")
 
         # 2. Current regime win rate — only if n≥3
         if regime:
@@ -3410,19 +3446,19 @@ def learning_calibration():
                 parts.append(f"{sector}:{wr*100:.0f}%(n={len(s_rows)}) ✓strong")
 
         # 4. Strategy decay — recent 30d vs window, only if clearly decaying (delta<-15pp, n≥5)
-        recent = [r for r in rows if r["timestamp"] >= cutoff_30]
-        if len(recent) >= 5 and n >= 10:
+        recent_rows = [r for r in rows if r["timestamp"] >= cutoff_30]
+        if len(recent_rows) >= 5 and n >= 10:
             all_wr = sum(1 for r in rows if r["outcome_status"] == "win") / n
-            rec_wr = sum(1 for r in recent if r["outcome_status"] == "win") / len(recent)
+            rec_wr = sum(1 for r in recent_rows if r["outcome_status"] == "win") / len(recent_rows)
             if (rec_wr - all_wr) < -0.15:
-                parts.append(f"⚠decay:{rec_wr*100:.0f}%recent/{all_wr*100:.0f}%all→tighten")
+                parts.append(f"⚠decay:{rec_wr*100:.0f}%recent/{all_wr*100:.0f}%all(Δ{(rec_wr-all_wr)*100:+.0f}pp)→reduce posn 30%")
 
         # 5. R:R accuracy — only if n≥5 high-R:R trades with clear underperformance
         hi_rr = [r for r in rows if (r["rr_ratio"] or 0) >= 2.0]
         if len(hi_rr) >= 5:
             hi_wr = sum(1 for r in hi_rr if r["outcome_status"] == "win") / len(hi_rr)
             if hi_wr < 0.50:
-                parts.append(f"RR≥2.0:{hi_wr*100:.0f}%W(n={len(hi_rr)})⚠stops/targets off")
+                parts.append(f"RR≥2.0:{hi_wr*100:.0f}%WR(n={len(hi_rr)})⚠stops/targets off→widen stops")
 
         if not parts:
             return jsonify({"available": False, "block": None})

@@ -54,34 +54,32 @@ async function renderLearningPage(gen) {
 
 function _renderLearningContent(d) {
   // Backend fields (flat, win_rate already 0-100)
-  const total        = d.total           ?? 0;
-  const closed       = d.closed          ?? 0;
-  const wins         = d.wins            ?? 0;
-  const overallWR    = d.overall_win_rate;               // null or 0-100
-  const confBands    = d.conf_bands      || [];
-  const regimes      = d.regime_stats    || [];
-  const versions     = d.version_stats   || [];
-  const events       = d.recent_events   || [];
-  const failed       = d.failed_tickers  || [];
+  const total        = d.total            ?? 0;
+  const closed       = d.closed           ?? 0;
+  const wins         = d.wins             ?? 0;
+  const overallWR    = d.overall_win_rate;                // null or 0-100
+  const confBands    = d.conf_bands       || [];
+  const regimes      = d.regime_stats     || [];
+  const versions     = d.version_stats    || [];
+  const events       = d.recent_events    || [];
+  const failed       = d.failed_tickers   || [];
+  const failPats     = d.failure_patterns || {};
 
   // Helpers
   const fmt = (v, dp = 1) => v == null ? '—' : Number(v).toFixed(dp);
-  // win_rate from backend is 0-100; display as "x%"
   const pct = (v) => v == null ? '—' : Number(v).toFixed(0) + '%';
-  // Colour thresholds are also 0-100
   const rateColor = r => r == null ? 'var(--text-secondary)' : r >= 60 ? '#16a34a' : r >= 45 ? '#d97706' : '#dc2626';
+  const sampleBadge = n => n < 5
+    ? `<span title="Limited data — treat with caution" style="margin-left:4px;font-size:10px;color:#d97706;background:#fef3c7;border-radius:3px;padding:1px 5px">n=${n} ⚠</span>`
+    : `<span style="margin-left:4px;font-size:10px;color:var(--text-muted)">(n=${n})</span>`;
 
-  // Derive a few summary stats from conf_bands for high-conf win rate
-  const hcBands = confBands.filter(b => {
-    const lo = parseFloat(b.band); // e.g. "70-80%" → 70
-    return !isNaN(lo) && lo >= 70;
-  });
+  // Derive summary stats from conf_bands for high-conf win rate
+  const hcBands = confBands.filter(b => !isNaN(parseFloat(b.band)) && parseFloat(b.band) >= 70);
   const hcTotal = hcBands.reduce((s, b) => s + (b.total || 0), 0);
   const hcWins  = hcBands.reduce((s, b) => s + (b.wins  || 0), 0);
   const hcWR    = hcTotal > 0 ? (hcWins / hcTotal * 100) : null;
 
-  // Current active prompt version
-  const latestVer = versions.length ? versions[0].version : null;
+  const latestVer   = versions.length ? versions[0].version : null;
   const latestCalls = versions.length ? versions[0].total_calls : 0;
 
   // ── Summary cards ─────────────────────────────────────────────────────────
@@ -100,7 +98,7 @@ function _renderLearningContent(d) {
       <div class="metric-card">
         <div class="metric-label">High-Conf Win Rate</div>
         <div class="metric-value ${hcWR != null && hcWR >= 60 ? 'up' : 'down'}">${pct(hcWR)}</div>
-        <div class="metric-sub">Confidence ≥ 70% · ${hcTotal} trades</div>
+        <div class="metric-sub">Confidence ≥ 70% · ${hcTotal} trades${hcTotal < 5 ? ' · limited data' : ''}</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Active Prompt Version</div>
@@ -113,7 +111,10 @@ function _renderLearningContent(d) {
   const calibCard = `
     <div class="card section-gap">
       <div class="card-title">Confidence Calibration</div>
-      <p class="text-xs text-muted mb-1">Predicted confidence vs actual win rate by band. Ideal: each band's win rate ≈ its confidence level.</p>
+      <p class="text-xs text-muted mb-1">
+        Predicted confidence vs actual win rate per band. ⚠ = fewer than 5 samples — treat cautiously.
+        Calibration notes are injected into Claude when n≥3 and |delta|>5pp.
+      </p>
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead>
           <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
@@ -121,22 +122,31 @@ function _renderLearningContent(d) {
             <th style="text-align:right;padding:4px 8px">Trades</th>
             <th style="text-align:right;padding:4px 8px">Wins</th>
             <th style="text-align:right;padding:4px 8px">Win Rate</th>
-            <th style="text-align:left;padding:4px 8px;width:120px">Bar</th>
+            <th style="text-align:left;padding:4px 8px;width:120px">vs Expected</th>
           </tr>
         </thead>
         <tbody>
-          ${confBands.length ? confBands.map(b => `
-            <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:5px 8px">${b.band}</td>
+          ${confBands.length ? confBands.map(b => {
+            const midpoint = parseFloat(b.band) + 5;  // e.g. "70-80%" → 75
+            const delta = b.win_rate != null ? b.win_rate - midpoint : null;
+            const deltaStr = delta != null ? `${delta >= 0 ? '+' : ''}${delta.toFixed(0)}pp` : '';
+            const dimStyle = b.total < 5 ? 'opacity:0.65' : '';
+            return `
+            <tr style="border-bottom:1px solid var(--border);${dimStyle}">
+              <td style="padding:5px 8px">${b.band}${sampleBadge(b.total)}</td>
               <td style="padding:5px 8px;text-align:right">${b.total}</td>
               <td style="padding:5px 8px;text-align:right">${b.wins}</td>
               <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(b.win_rate)}">${pct(b.win_rate)}</td>
               <td style="padding:5px 8px">
-                <div style="background:var(--bg-secondary);border-radius:3px;height:8px;width:100px">
-                  <div style="background:${rateColor(b.win_rate)};border-radius:3px;height:8px;width:${b.win_rate != null ? Math.min(100, Math.round(b.win_rate)) : 0}px"></div>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <div style="background:var(--bg-secondary);border-radius:3px;height:8px;width:80px;flex-shrink:0">
+                    <div style="background:${rateColor(b.win_rate)};border-radius:3px;height:8px;width:${b.win_rate != null ? Math.min(80, Math.round(b.win_rate * 0.8)) : 0}px"></div>
+                  </div>
+                  ${delta != null ? `<span style="font-size:10px;color:${delta < -5 ? '#dc2626' : delta > 5 ? '#16a34a' : 'var(--text-muted)'}">${deltaStr}</span>` : ''}
                 </div>
               </td>
-            </tr>`).join('') : '<tr><td colspan="5" style="padding:8px;color:var(--text-muted)">No closed events yet.</td></tr>'}
+            </tr>`;
+          }).join('') : '<tr><td colspan="5" style="padding:8px;color:var(--text-muted)">No closed events yet.</td></tr>'}
         </tbody>
       </table>
     </div>`;
@@ -156,8 +166,8 @@ function _renderLearningContent(d) {
         </thead>
         <tbody>
           ${regimes.length ? regimes.map(r => `
-            <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:5px 8px">${r.regime || 'unknown'}</td>
+            <tr style="border-bottom:1px solid var(--border);${r.total < 5 ? 'opacity:0.65' : ''}">
+              <td style="padding:5px 8px">${r.regime || 'unknown'}${sampleBadge(r.total)}</td>
               <td style="padding:5px 8px;text-align:right">${r.total}</td>
               <td style="padding:5px 8px;text-align:right">${r.wins}</td>
               <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(r.win_rate)}">${pct(r.win_rate)}</td>
@@ -182,65 +192,132 @@ function _renderLearningContent(d) {
         <tbody>
           ${versions.length ? versions.map(v => `
             <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:5px 8px;font-family:monospace">${v.version}</td>
+              <td style="padding:5px 8px;font-family:monospace;font-size:11px">${v.version}</td>
               <td style="padding:5px 8px;text-align:right">${v.total_calls}</td>
               <td style="padding:5px 8px;text-align:right">${v.closed}</td>
-              <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(v.win_rate)}">${pct(v.win_rate)}</td>
+              <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(v.win_rate)}">${v.closed < 3 ? '<span title="Limited data" style="color:#d97706">—</span>' : pct(v.win_rate)}</td>
             </tr>`).join('') : '<tr><td colspan="4" style="padding:8px;color:var(--text-muted)">No prompt version data yet.</td></tr>'}
         </tbody>
       </table>
     </div>`;
 
+  // ── Failure patterns ───────────────────────────────────────────────────────
+  const errorTypeLabels = {
+    overconfident:   { label: 'Overconfident',    color: '#dc2626' },
+    missed_catalyst: { label: 'Missed catalyst',  color: '#d97706' },
+    regime_mismatch: { label: 'Regime mismatch',  color: '#7c3aed' },
+    poor_entry:      { label: 'Poor entry',       color: '#ea580c' },
+    stop_too_tight:  { label: 'Stop too tight',   color: '#0891b2' },
+  };
+  const exitReasons   = Object.entries(failPats.by_exit_reason  || {});
+  const errorTypes    = Object.entries(failPats.by_error_type   || {});
+  const failureCard = (exitReasons.length || errorTypes.length) ? `
+    <div class="card section-gap">
+      <div class="card-title">Failure Patterns</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:6px;font-weight:600">Exit reason distribution</div>
+          ${exitReasons.length ? exitReasons.map(([reason, cnt]) => `
+            <div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px;border-bottom:1px solid var(--border)">
+              <span>${reason.replace(/_/g,' ')}</span>
+              <span style="font-weight:600;color:var(--text-secondary)">${cnt}</span>
+            </div>`).join('') : '<span class="text-xs text-muted">None yet</span>'}
+        </div>
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:6px;font-weight:600">Error type tags (manual)</div>
+          ${errorTypes.length ? errorTypes.map(([type, cnt]) => {
+            const meta = errorTypeLabels[type] || { label: type, color: '#6b7280' };
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:12px;border-bottom:1px solid var(--border)">
+              <span style="color:${meta.color}">${meta.label}</span>
+              <span style="font-weight:600;color:var(--text-secondary)">${cnt}</span>
+            </div>`;
+          }).join('') : '<span class="text-xs text-muted">No tags yet — tag recent events below</span>'}
+        </div>
+      </div>
+    </div>` : '';
+
   // ── Recent events ──────────────────────────────────────────────────────────
   const outcomeChip = o => {
-    const map = { win:'#16a34a', loss:'#dc2626', breakeven:'#9ca3af', open:'#3b82f6', invalidated:'#d97706', skipped:'#6b7280' };
+    const map = { win:'#16a34a', loss:'#dc2626', breakeven:'#9ca3af', open:'#3b82f6', expired:'#6b7280', invalidated:'#d97706', skipped:'#6b7280' };
     const col = map[o] || '#9ca3af';
     return `<span style="background:${col}20;color:${col};border-radius:3px;padding:1px 6px;font-size:10px;font-weight:600">${o || 'open'}</span>`;
   };
+  const errorChip = type => {
+    if (!type) return '';
+    const meta = errorTypeLabels[type] || { label: type, color: '#6b7280' };
+    return `<span title="Error type tag" style="background:${meta.color}18;color:${meta.color};border-radius:3px;padding:1px 5px;font-size:10px;margin-left:3px">${meta.label}</span>`;
+  };
+  // Error type tag button group for a given event id
+  const tagButtons = (evId, currentTag) => {
+    const tags = [
+      ['overconfident',   'OC'],
+      ['missed_catalyst', 'MC'],
+      ['regime_mismatch', 'RM'],
+      ['poor_entry',      'PE'],
+      ['stop_too_tight',  'ST'],
+    ];
+    return `<div style="display:flex;gap:2px;flex-wrap:wrap">` +
+      tags.map(([key, short]) => {
+        const active = currentTag === key;
+        const meta   = errorTypeLabels[key] || { color: '#6b7280' };
+        return `<button
+          onclick="tagLearningEvent(${evId},'${key}')"
+          title="${key.replace(/_/g,' ')}"
+          style="font-size:9px;padding:1px 4px;border-radius:2px;border:1px solid ${meta.color}40;
+                 background:${active ? meta.color : 'transparent'};color:${active ? '#fff' : meta.color};
+                 cursor:pointer;line-height:1.4"
+        >${short}</button>`;
+      }).join('') +
+      (currentTag ? `<button onclick="tagLearningEvent(${evId},null)" title="Clear tag"
+        style="font-size:9px;padding:1px 4px;border-radius:2px;border:1px solid var(--border);
+               background:transparent;color:var(--text-muted);cursor:pointer;line-height:1.4">✕</button>` : '') +
+    `</div>`;
+  };
+
   const recentCard = `
     <div class="card section-gap">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div class="card-title" style="margin:0">Recent Events</div>
-        <span class="text-xs text-muted">Click ✕ to remove events that shouldn't influence calibration</span>
+        <div class="card-title" style="margin:0">Recent Events (${events.length})</div>
+        <span class="text-xs text-muted">Tag error types · click ✕ to remove outliers</span>
       </div>
       ${events.length ? `
         <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:640px">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:700px">
             <thead>
               <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
-                <th style="text-align:left;padding:4px 8px">Date</th>
-                <th style="text-align:left;padding:4px 8px">Ticker</th>
-                <th style="text-align:left;padding:4px 8px">Action</th>
-                <th style="text-align:right;padding:4px 8px">Confidence</th>
-                <th style="text-align:left;padding:4px 8px">Regime</th>
-                <th style="text-align:left;padding:4px 8px">Outcome</th>
-                <th style="text-align:right;padding:4px 8px">P&amp;L %</th>
-                <th style="text-align:center;padding:4px 8px;width:32px"></th>
+                <th style="text-align:left;padding:4px 6px">Date</th>
+                <th style="text-align:left;padding:4px 6px">Ticker</th>
+                <th style="text-align:left;padding:4px 6px">Action</th>
+                <th style="text-align:right;padding:4px 6px">Conf</th>
+                <th style="text-align:left;padding:4px 6px">Regime</th>
+                <th style="text-align:left;padding:4px 6px">Outcome</th>
+                <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
+                <th style="text-align:left;padding:4px 6px">Error tag</th>
+                <th style="padding:4px 6px;width:28px"></th>
               </tr>
             </thead>
             <tbody>
-              ${events.slice(0, 20).map(ev => {
-                // realized_pnl_pct is stored as a percentage value (e.g. 5.2 = 5.2%)
-                const pnlPct = ev.realized_pnl_pct;
-                const pnlStr = pnlPct != null
-                  ? (pnlPct >= 0 ? '+' : '') + Number(pnlPct).toFixed(1) + '%'
-                  : '—';
+              ${events.map(ev => {
+                const pnlPct  = ev.realized_pnl_pct;
+                const pnlStr  = pnlPct != null ? (pnlPct >= 0 ? '+' : '') + Number(pnlPct).toFixed(1) + '%' : '—';
                 const pnlColor = pnlPct > 0 ? '#16a34a' : pnlPct < 0 ? '#dc2626' : 'var(--text-secondary)';
-                return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border)">
-                  <td style="padding:4px 8px;color:var(--text-muted)">${(ev.timestamp||'').slice(0,10)}</td>
-                  <td style="padding:4px 8px;font-weight:600">${ev.ticker||'—'}</td>
-                  <td style="padding:4px 8px">${ev.recommendation||'—'}</td>
-                  <td style="padding:4px 8px;text-align:right">${ev.ai_confidence != null ? (ev.ai_confidence*100).toFixed(0)+'%' : '—'}</td>
-                  <td style="padding:4px 8px;color:var(--text-muted)">${ev.regime||'—'}</td>
-                  <td style="padding:4px 8px">${outcomeChip(ev.outcome_status)}</td>
-                  <td style="padding:4px 8px;text-align:right;color:${pnlColor}">${pnlStr}</td>
-                  <td style="padding:4px 8px;text-align:center">
+                const isOpen  = !ev.outcome_status || ev.outcome_status === 'open';
+                return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen?'opacity:0.7':''}">
+                  <td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
+                  <td style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
+                  <td style="padding:3px 6px">${ev.recommendation||'—'}</td>
+                  <td style="padding:3px 6px;text-align:right">${ev.ai_confidence != null ? (ev.ai_confidence*100).toFixed(0)+'%' : '—'}</td>
+                  <td style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
+                  <td style="padding:3px 6px">${outcomeChip(ev.outcome_status)}</td>
+                  <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
+                  <td style="padding:3px 6px" id="ll-tag-${ev.id}">${tagButtons(ev.id, ev.error_type)}</td>
+                  <td style="padding:3px 6px;text-align:center">
                     <button
                       onclick="deleteLearningEvent(${ev.id})"
-                      title="Remove this event from the Learning Loop"
-                      style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:13px;padding:2px 4px;border-radius:3px;line-height:1"
-                      onmouseover="this.style.color='#dc2626';this.style.background='#dc262620'"
-                      onmouseout="this.style.color='var(--text-muted)';this.style.background='none'"
+                      title="Remove event"
+                      style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:12px;padding:2px;border-radius:3px;line-height:1"
+                      onmouseover="this.style.color='#dc2626'"
+                      onmouseout="this.style.color='var(--text-muted)'"
                     >✕</button>
                   </td>
                 </tr>`;
@@ -275,7 +352,7 @@ function _renderLearningContent(d) {
 
   return summaryCards + calibCard +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
-    recentCard + failedCard;
+    failureCard + recentCard + failedCard;
 }
 
 // ── Delete a single learning event (optimise calibration dataset) ─────────────
@@ -285,7 +362,6 @@ async function deleteLearningEvent(id) {
     const resp = await fetch(`${API}/api/learning/event/${id}`, { method: 'DELETE' });
     const result = await resp.json();
     if (result.ok) {
-      // Instant DOM removal — no full page reload needed
       const row = document.getElementById(`ll-row-${id}`);
       if (row) {
         row.style.transition = 'opacity 0.2s';
@@ -298,5 +374,28 @@ async function deleteLearningEvent(id) {
     }
   } catch (e) {
     toast('Error removing event: ' + e.message, 'error');
+  }
+}
+
+// ── Tag a learning event with an error type (manual annotation) ───────────────
+// errorType: 'overconfident' | 'missed_catalyst' | 'regime_mismatch' |
+//            'poor_entry' | 'stop_too_tight' | null (clear)
+async function tagLearningEvent(id, errorType) {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  try {
+    const resp = await fetch(`${API}/api/learning/outcome`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ id, error_type: errorType }),
+    });
+    const result = await resp.json();
+    if (result.ok) {
+      // Reload just the tag cell with updated buttons (no full page reload)
+      showPage('learning');  // cheapest full refresh — table is small
+    } else {
+      toast('Tag error: ' + (result.error || 'unknown'), 'error');
+    }
+  } catch (e) {
+    toast('Tag error: ' + e.message, 'error');
   }
 }
