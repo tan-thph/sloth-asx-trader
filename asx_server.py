@@ -3423,21 +3423,50 @@ def learning_stats():
 def learning_calibration():
     """Smart compact calibration block for AI prompt injection.
     Context-aware: filters by regime + sectors. Only emits statistically
-    meaningful findings. Target output: ~30-60 tokens."""
+    meaningful findings. Target output: ~30-60 tokens.
+
+    Signal quality improvements vs naive equal-weight averaging:
+    - Exponential time-decay (half-life 45d): recent trades dominate, old ones fade
+    - external_shock tags + protective_stop exits excluded from confidence-band
+      calibration — market accidents don't reflect model quality
+    - Regime freshness gate: warns Claude when current-regime sample is thin
+    - Date range + regime label included so Claude knows how fresh the data is
+    """
     regime  = request.args.get("regime", "")
     sectors = [s.strip() for s in request.args.get("sectors", "").split(",") if s.strip()]
-    days    = min(int(request.args.get("days", 60)), 90)
+    days    = min(int(request.args.get("days", 90)), 180)   # default 90d (was 60d)
     cutoff  = (datetime.now() - timedelta(days=days)).isoformat()
     cutoff_30 = (datetime.now() - timedelta(days=30)).isoformat()
+
+    def _decay(ts, half_life=45):
+        """Exponential decay weight: 1.0 today → 0.5 at 45 d → 0.25 at 90 d → ~0.1 at 150 d."""
+        try:
+            d = (datetime.now() - datetime.fromisoformat(ts)).days
+            return math.exp(-math.log(2) * d / half_life)
+        except Exception:
+            return 1.0
+
+    def _wwr(subset):
+        """Decay-weighted win rate for a list of DB rows."""
+        w_wins  = sum(_decay(r["timestamp"]) for r in subset if r["outcome_status"] == "win")
+        w_total = sum(_decay(r["timestamp"]) for r in subset)
+        return w_wins / w_total if w_total > 0 else 0.0
+
+    def _is_shock(r):
+        """True for market-accident outcomes that should not penalise confidence calibration."""
+        et = r["error_type"] or ""
+        er = r["exit_reason"] or ""
+        return "external_shock" in et.split(",") or er == "protective_stop"
 
     try:
         with get_db() as conn:
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector,
-                       realized_pnl_pct, rr_ratio, timestamp
+                       realized_pnl_pct, rr_ratio, timestamp,
+                       error_type, exit_reason
                 FROM ai_learning_events
                 WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
-                ORDER BY timestamp DESC LIMIT 200
+                ORDER BY timestamp DESC LIMIT 300
             """, (cutoff,)).fetchall()
 
         if len(rows) < 5:
@@ -3446,89 +3475,102 @@ def learning_calibration():
         n = len(rows)
         parts = []
 
-        # 1. Confidence bands — only bands with n≥3 AND |delta|>5pp
-        # adj is proportional to delta (80%), capped at ±0.15; tells Claude exactly how much to shift
+        # Rows clean for confidence-band calibration (market accidents filtered out)
+        calib_rows  = [r for r in rows if not _is_shock(r)]
+        n_excluded  = n - len(calib_rows)
+
+        # 1. Confidence bands — decay-weighted; n≥3 AND |delta|>5pp
         for label, lo, hi, mid in [("60-70", 0.60, 0.70, 0.65), ("70-80", 0.70, 0.80, 0.75),
                                     ("80-90", 0.80, 0.90, 0.85)]:
-            subset = [r for r in rows if lo <= (r["ai_confidence"] or 0) < hi]
+            subset = [r for r in calib_rows if lo <= (r["ai_confidence"] or 0) < hi]
             if len(subset) < 3:
                 continue
-            wr = sum(1 for r in subset if r["outcome_status"] == "win") / len(subset)
+            wr    = _wwr(subset)
             delta = wr - mid
             if abs(delta) > 0.05:
                 adj_val = round(max(-0.15, min(0.10, delta * 0.8)), 2)
                 parts.append(f"conf {label}%:{wr*100:.0f}%WR(Δ{delta*100:+.0f}pp,adj{adj_val:+.2f},n={len(subset)})")
 
-        # 2. Current regime win rate — only if n≥3
+        # 2. Current regime — freshness gate; warn Claude when sample is thin
         if regime:
             reg = [r for r in rows if r["regime"] == regime]
-            if len(reg) >= 3:
-                wr = sum(1 for r in reg if r["outcome_status"] == "win") / len(reg)
+            if len(reg) < 3:
+                # Warn rather than silently omit — thin data is itself useful context
+                parts.append(f"⚠only {len(reg)} trade{'s' if len(reg)!=1 else ''} in {regime} regime—calibration limited")
+            else:
+                wr   = _wwr(reg)
                 warn = " ⚠AVOID" if wr < 0.40 else (" ⚠CAUTION" if wr < 0.50 else "")
                 parts.append(f"{regime}:{wr*100:.0f}%W(n={len(reg)}){warn}")
 
-        # 3. Relevant sectors — only sectors in current analysis with n≥3 AND notable rate
+        # 3. Relevant sectors — decay-weighted; n≥3 AND notable rate
         for sector in sectors:
             s_rows = [r for r in rows if r["sector"] == sector]
             if len(s_rows) < 3:
                 continue
-            wr = sum(1 for r in s_rows if r["outcome_status"] == "win") / len(s_rows)
+            wr = _wwr(s_rows)
             if wr < 0.45:
                 parts.append(f"{sector}:{wr*100:.0f}%(n={len(s_rows)}) ⚠underperform")
             elif wr > 0.72:
                 parts.append(f"{sector}:{wr*100:.0f}%(n={len(s_rows)}) ✓strong")
 
-        # 4. Strategy decay — recent 30d vs window, only if clearly decaying (delta<-15pp, n≥5)
+        # 4. Strategy decay — recent 30d vs full window; only if clearly decaying (Δ<-15pp, n≥5)
         recent_rows = [r for r in rows if r["timestamp"] >= cutoff_30]
         if len(recent_rows) >= 5 and n >= 10:
-            all_wr = sum(1 for r in rows if r["outcome_status"] == "win") / n
-            rec_wr = sum(1 for r in recent_rows if r["outcome_status"] == "win") / len(recent_rows)
+            all_wr = _wwr(rows)
+            rec_wr = _wwr(recent_rows)
             if (rec_wr - all_wr) < -0.15:
                 parts.append(f"⚠decay:{rec_wr*100:.0f}%recent/{all_wr*100:.0f}%all(Δ{(rec_wr-all_wr)*100:+.0f}pp)→reduce posn 30%")
 
-        # 5. R:R accuracy — only if n≥5 high-R:R trades with clear underperformance
+        # 5. R:R accuracy — n≥5 high-R:R with clear underperformance
         hi_rr = [r for r in rows if (r["rr_ratio"] or 0) >= 2.0]
         if len(hi_rr) >= 5:
-            hi_wr = sum(1 for r in hi_rr if r["outcome_status"] == "win") / len(hi_rr)
+            hi_wr = _wwr(hi_rr)
             if hi_wr < 0.50:
                 parts.append(f"RR≥2.0:{hi_wr*100:.0f}%WR(n={len(hi_rr)})⚠stops/targets off→widen stops")
 
-        # 6. Error-type synergy — if one error dominates recent losses (≥40%), call it out
-        loss_rows = [r for r in rows if r["outcome_status"] == "loss"]
-        if len(loss_rows) >= 4:
+        # 6. Error-type synergy — dominant learnable error in non-shock losses (≥40%)
+        # external_shock excluded: it's unpredictable noise, not a learnable pattern
+        learnable_losses = [r for r in rows if r["outcome_status"] == "loss" and not _is_shock(r)]
+        if len(learnable_losses) >= 4:
             type_counts: dict = {}
-            for r in loss_rows:
+            for r in learnable_losses:
                 et = r["error_type"] if "error_type" in r.keys() else None
                 if et:
-                    # comma-separated multi-tag support
                     for tag in et.split(","):
                         tag = tag.strip()
-                        if tag:
+                        if tag and tag != "external_shock":
                             type_counts[tag] = type_counts.get(tag, 0) + 1
             if type_counts:
                 top_et, top_cnt = max(type_counts.items(), key=lambda x: x[1])
-                top_pct = top_cnt / len(loss_rows)
+                top_pct = top_cnt / len(learnable_losses)
                 if top_pct >= 0.40:
                     short = {"overconfident": "OC", "missed_catalyst": "MC",
                              "regime_mismatch": "RM", "poor_entry": "PE",
                              "stop_too_tight": "ST", "poor_rr": "PR",
-                             "external_shock": "ES", "thesis_broken": "TB"}.get(top_et, top_et)
+                             "thesis_broken": "TB"}.get(top_et, top_et)
                     parts.append(
-                        f"top_err:{short}({top_cnt}/{len(loss_rows)}losses)→"
+                        f"top_err:{short}({top_cnt}/{len(learnable_losses)}losses)→"
                         + ("reduce conf" if top_et == "overconfident" else
                            "check news" if top_et == "missed_catalyst" else
                            "check regime fit" if top_et == "regime_mismatch" else
                            "refine entry timing" if top_et == "poor_entry" else
                            "widen stops" if top_et == "stop_too_tight" else
                            "require min R:R 2.5" if top_et == "poor_rr" else
-                           "add catalyst screen" if top_et == "external_shock" else
                            "add re-validation step")
                     )
 
         if not parts:
             return jsonify({"available": False, "block": None})
 
-        block = f"CALIBRATION({n}cls,{days}d): " + "; ".join(parts) + "."
+        # Block prefix: date range + regime so Claude knows data freshness and context
+        date_from  = cutoff[:7]                          # YYYY-MM
+        date_to    = datetime.now().strftime("%Y-%m")
+        regime_tag = f",{regime}" if regime else ""
+        excl_note  = f",{n_excluded}excl" if n_excluded > 0 else ""
+        block = (
+            f"CALIBRATION({n}cls,{date_from}→{date_to}{regime_tag}{excl_note}): "
+            + "; ".join(parts) + "."
+        )
         return jsonify({"available": True, "block": block, "sample": n})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

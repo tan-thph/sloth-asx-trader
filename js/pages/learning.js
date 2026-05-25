@@ -337,6 +337,18 @@ function _renderLearningContent(d) {
                 const pnlColor = pnlPct > 0 ? '#16a34a' : pnlPct < 0 ? '#dc2626' : 'var(--text-secondary)';
                 const isOpen   = !ev.outcome_status || ev.outcome_status === 'open';
                 const isClosed = new Set(['win','loss','breakeven']).has(ev.outcome_status);
+                // 🛡 Protective stop — show badge if already marked, offer button for stop_hit losses
+                const isProtective = ev.exit_reason === 'protective_stop';
+                const protectiveEl = isProtective
+                  ? `<span title="Protective stop — excluded from confidence calibration (market accident, not model error)"
+                       style="font-size:10px;color:#15803d;margin-left:3px;cursor:default">🛡</span>`
+                  : (ev.exit_reason === 'stop_hit' && TAG_STATUSES.has(ev.outcome_status))
+                    ? `<button onclick="markProtectiveStop(${ev.id})"
+                         title="Mark as protective stop — this loss was deliberate capital protection during a market shock, not a model error. Excluded from calibration."
+                         style="background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;color:var(--text-muted);line-height:1"
+                         onmouseover="this.style.color='#15803d'" onmouseout="this.style.color='var(--text-muted)'"
+                       >🛡?</button>`
+                    : '';
                 // 🤖 post-mortem button only for losses/breakevens without a tag yet
                 const showPm = TAG_STATUSES.has(ev.outcome_status) && !ev.error_type;
                 // 🔬 skill score — show badge if scored, button if closed and unscored
@@ -362,7 +374,7 @@ function _renderLearningContent(d) {
                   <td style="padding:3px 6px">${ev.recommendation||'—'}</td>
                   <td style="padding:3px 6px;text-align:right">${ev.ai_confidence != null ? (ev.ai_confidence*100).toFixed(0)+'%' : '—'}</td>
                   <td style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
-                  <td style="padding:3px 6px">${outcomeChip(ev.outcome_status)}</td>
+                  <td style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
                   <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
                   <td style="padding:3px 6px;text-align:center">${skillBadge}</td>
@@ -786,6 +798,28 @@ async function toggleLearningTag(id, currentTagStr, key) {
   }
   const newTagStr = [...activeTags].sort().join(',') || null;
   await tagLearningEvent(id, newTagStr);
+}
+
+// ── Mark a stop_hit loss as a protective stop (excluded from calibration) ────
+// Called from the 🛡? button on stop_hit loss/breakeven rows.
+async function markProtectiveStop(id) {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  try {
+    const resp = await fetch(`${API}/api/learning/outcome`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ id, exit_reason: 'protective_stop' }),
+    });
+    const result = await resp.json();
+    if (result.ok) {
+      toast('🛡 Marked as protective stop — excluded from confidence calibration', 'success');
+      showPage('learning');
+    } else {
+      toast('Error: ' + (result.error || 'unknown'), 'error');
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
 }
 
 // ── Tag a learning event with an error type (manual annotation) ───────────────
