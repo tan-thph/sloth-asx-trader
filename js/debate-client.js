@@ -245,6 +245,74 @@ function buildDebateSummary(debate) {
 }
 
 /**
+ * Check if a pending recommendation is still valid given current signals.
+ * Returns null if Ollama is offline, rec is < 2 days old, or request fails.
+ *
+ * @param {string} ticker
+ * @param {object} signals     From state.liveSignals[ticker]
+ * @param {string} action      BUY / SELL / TOP_UP / TRIM
+ * @param {number} confidence  0–1 float
+ * @param {number} daysAgo     Integer — days since rec was generated
+ * @param {object} [opts]      { model, timeout }
+ * @returns {Promise<{ok:boolean, verdict:'VALID'|'WEAKENED'|'INVALIDATED',
+ *                    reason:string, model:string}|null>}
+ */
+async function fetchStaleness(ticker, signals, action, confidence, daysAgo, opts = {}) {
+  if (!state.serverOk) return null;
+  if (daysAgo < 2) return null;          // fresh recs don't need a check
+
+  const status = await debateStatus();
+  if (!status.available) return null;
+
+  const model = opts.model || preferredDebateModel(status.models);
+  try {
+    const r = await fetch(`${API}/api/debate/staleness`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        ticker, signals, action, confidence,
+        days_ago: daysAgo,
+        model,
+        timeout: opts.timeout || 40,
+      }),
+      signal: AbortSignal.timeout(70_000),
+    });
+    if (r.ok) return await r.json();
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Score a closed trade's outcome quality (skill vs luck) and persist to DB.
+ *
+ * @param {number} eventId   ai_learning_events.id
+ * @param {object} [opts]    { model, timeout }
+ * @returns {Promise<{ok:boolean, skill_score:number, reason:string, model:string}|null>}
+ */
+async function fetchSkillScore(eventId, opts = {}) {
+  if (!state.serverOk) return null;
+
+  const status = await debateStatus();
+  if (!status.available) return null;
+
+  const model = opts.model || preferredDebateModel(status.models);
+  try {
+    const r = await fetch(`${API}/api/debate/skill`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ id: eventId, model, timeout: opts.timeout || 45 }),
+      signal:  AbortSignal.timeout(80_000),
+    });
+    if (r.ok) return await r.json();
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Trigger a post-mortem auto-tag for a closed learning event (fire-and-forget).
  * @param {number} eventId
  * @param {string} [model]

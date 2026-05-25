@@ -1,8 +1,18 @@
 # Learning Loop — Architecture & Data Flow
 
+**Last Updated:** May 2026  
+**Status:** Advanced Implementation (Phases 1–4 Complete)
+
+The Learning Loop closes the feedback cycle between Claude’s recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyzes performance, and feeds compact, statistically meaningful insights back into future Claude calls.
+
+---
+
 ## Purpose
 
-The Learning Loop closes the feedback cycle between Claude's recommendations and their real-world outcomes. Historical win rates, calibration deltas, and regime performance are fed back into each new Claude call as a compact calibration block, allowing the model to improve its recommendations over time without manual tuning.
+- Provide objective measurement of Claude’s (and the overall system’s) edge.
+- Detect prompt decay, regime mismatches, and recurring failure patterns.
+- Deliver high-signal calibration feedback without breaking prompt caching.
+- Support continuous improvement through structured post-mortem analysis and debate.
 
 ---
 
@@ -11,511 +21,229 @@ The Learning Loop closes the feedback cycle between Claude's recommendations and
 All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 
 ### `ai_learning_events` table (primary)
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PK | Auto-incremented event ID |
-| `ticker` | TEXT | ASX ticker |
-| `recommendation` | TEXT | BUY / SELL / TRIM / TOP_UP |
-| `ai_confidence` | REAL | Claude's stated confidence (0–1) |
-| `ensemble_confidence` | REAL | Quant engine confidence (0–1) |
-| `outcome_status` | TEXT | win / loss / open / skipped / breakeven |
-| `realized_pnl_pct` | REAL | Exit P&L as % of cost basis |
-| `realized_pnl_aud` | REAL | Exit P&L in AUD |
-| `regime` | TEXT | Market regime at time of rec |
-| `prompt_version` | TEXT | System prompt version |
-| `was_executed` | INTEGER | 0/1 — did the user trade it? |
-| `suggested_stop` | REAL | Claude's stop-loss price |
-| `suggested_target` | REAL | Claude's target price |
-| `rr_ratio` | REAL | Reward:risk ratio |
-| `holding_period_days` | INTEGER | Days held (open → close) |
-| `exit_reason` | TEXT | stop_hit / target_hit / manual / … |
-| `rationale_summary` | TEXT | First 400 chars of Claude's reasoning |
-| `actual_entry_price` | REAL | Actual fill price |
-| `actual_exit_price` | REAL | Actual exit price |
-| `sector` | TEXT | GICS sector of the ticker |
-| `error_type` | TEXT | Comma-separated failure tags (see below) — loss/breakeven only |
-| `error_type_source` | TEXT | `'manual'` (UI) or `'auto'` (Ollama postmortem) |
-| `skill_score` | REAL | 0–10 outcome quality score from local model |
-| `debate_summary` | TEXT | ≤200-char `"B:… / R:…"` from local model at analysis time |
-| `prompt_hash` | TEXT | 12-char djb2 fingerprint of `promptVersion\|regime\|date` |
 
-### `rec_history` table
-Stores every Claude recommendation. The `learning_id` column links each rec to its `ai_learning_events` row, persisted across restarts.
+| Column                | Type    | Description |
+|-----------------------|---------|-----------|
+| `id`                  | INTEGER PK | Auto-incremented event ID |
+| `ticker`              | TEXT    | ASX ticker |
+| `recommendation`      | TEXT    | BUY / SELL / TRIM / TOP_UP / HOLD |
+| `ai_confidence`       | REAL    | Claude's stated confidence (0–1) |
+| `ensemble_confidence` | REAL    | Quant engine confidence (0–1) |
+| `outcome_status`      | TEXT    | win / loss / breakeven / open / skipped |
+| `realized_pnl_pct`    | REAL    | Exit P&L as % of cost basis |
+| `realized_pnl_aud`    | REAL    | Exit P&L in AUD |
+| `regime`              | TEXT    | Market regime at time of rec |
+| `prompt_version`      | TEXT    | System prompt version |
+| `was_executed`        | INTEGER | 0/1 |
+| `suggested_stop`      | REAL    | Claude's stop-loss price |
+| `suggested_target`    | REAL    | Claude's target price |
+| `rr_ratio`            | REAL    | Reward:risk ratio |
+| `holding_period_days` | INTEGER | Days held |
+| `exit_reason`         | TEXT    | stop_hit / target_hit / manual / time_exit / catalyst |
+| `rationale_summary`   | TEXT    | First 400 chars of Claude’s reasoning |
+| `actual_entry_price`  | REAL    | Actual fill price |
+| `actual_exit_price`   | REAL    | Actual exit price |
+| `sector`              | TEXT    | GICS sector |
+| `error_type`          | TEXT    | Comma-separated tags (losses/breakevens only) |
+| `error_type_source`   | TEXT    | `'manual'` or `'auto'` (Ollama) |
+| `skill_score`         | REAL    | 0–10 (analysis quality vs luck) — Phase 5 |
+| `debate_summary`      | TEXT    | ≤200-char bull/bear summary |
+| `prompt_hash`         | TEXT    | 12-char fingerprint |
 
-### `trade_journal` table
-Stores all trades (AI-executed and manual). The `close_date` column records when a SELL/TRIM was executed, enabling hold-duration analytics.
+### Supporting Tables
+- `rec_history` — Stores every Claude recommendation + `learning_id` link.
+- `trade_journal` — All trades (AI + manual) with `close_date`.
 
 ---
 
 ## Event Lifecycle
 
-### 1. Recommendation generated
-`logRecsToLearningLoop()` in `analysis.js` fires after Claude returns results. For each rec it calls `POST /api/learning/log` with:
-- `ticker`, `recommendation`, `ai_confidence`, `ensemble_confidence`
-- `regime` (from `state._lastRegime`)
-- `sector`, `rationale_summary` (400-char excerpt)
-- `suggested_stop`, `suggested_target`, `rr_ratio`
-- `prompt_version`
+1. **Recommendation Generated** (`analysis.js` → `logRecsToLearningLoop()`)
+   - Calls `POST /api/learning/log`
+   - Creates partial record and returns `id`
+   - Stores `rec._learningId`
 
-The backend inserts a row in `ai_learning_events` and returns the new `id`, which is stored as `rec._learningId` in JS state and persisted to `rec_history.learning_id` in the database.
+2. **Trade Executed** (`recommendations.js` → `markExecuted()`)
+   - Updates existing event via `POST /api/learning/outcome`
 
-### 2. Trade executed
-`markExecuted()` in `recommendations.js` fires when the user clicks Execute on a pending rec.
+3. **Trade Closed** (`performance.js` → `syncClosedTradesToLearningLoop()`)
+   - Reconciliation between journal and learning events
 
-- **Branch A** (prior event exists — `rec._learningId` is set): calls `PATCH /api/learning/outcome/{id}` to update `outcome_status`, `realized_pnl_*`, `actual_entry_price`, `actual_exit_price`, `holding_period_days`, `exit_reason`, `sector`.
-- **Branch B** (no prior event — manually-entered stock): calls `POST /api/learning/log` with all outcome fields pre-filled (creates a complete event in one shot).
-
-### 3. Trade closed via journal sync
-`syncClosedTradesToLearningLoop()` in `performance.js` reconciles the trade journal against `rec_history` on each Performance page load. Any closed trade with a linked rec that hasn't updated its learning event gets an outcome PATCH call.
-
-### 4. Manual trade imports
-When a SELL/TRIM is added manually in the journal for a ticker that had a prior AI recommendation, the reconciliation in step 3 picks it up on the next Performance page load.
+4. **Manual Trades**
+   - Supported via Branch B (full record creation) or reconciliation
 
 ---
 
 ## Calibration Injection
 
-### Old approach (removed)
-`buildCalibrationPromptBlock()` generated a verbose multi-section text block (~150 tokens) from local `recHistory` and injected it into every Claude call regardless of whether there was enough data.
+**Strategy**: Dynamic, context-aware, low-token.
 
-### New approach
-`fetchCalibrationBlock(regime, sectors)` in `learning-loop.js` calls `GET /api/learning/calibration?regime=X&sectors=Y,Z` after regime detection in `analysis.js`. The backend:
-
-1. Filters to the last 60 days (max 90)
-2. Applies the current regime as a filter
-3. Only emits findings where **n ≥ 3 AND the signal is statistically meaningful**:
-   - Confidence bands: |hit rate − midpoint| > 5pp
-   - Regime: current regime only, n ≥ 3
-   - Sectors: n ≥ 3 AND notable performance
-   - Strategy decay: recent win rate dropped > 15pp, n ≥ 5
-   - R:R underperformance: high-R:R win rate < 55%, n ≥ 5
-4. Returns `{ available: false }` when no meaningful signal
-5. Target output: ~30–60 tokens
-
-The calibration note goes into the **user message** (not the system prompt), so it doesn't break Anthropic's prompt cache on the system prompt.
-
-The template pattern used:
-```
-userMessage = "... __CALIBRATION_PLACEHOLDER__ ..."
-// After regime detected:
-const calibrationNote = await fetchCalibrationBlock(regime, sectors);
-const fullUserMessage = userMessage.replace('__CALIBRATION_PLACEHOLDER__', calibrationNote);
-```
+- `fetchCalibrationBlock(regime, sectors)` calls `GET /api/learning/calibration`
+- Backend filters last 60–90 days and only returns **statistically meaningful** findings (n ≥ 3 + notable delta).
+- Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` (preserves system prompt cache).
+- Target size: 30–60 tokens.
 
 ---
 
 ## Analytics Functions (`learning-loop.js`)
 
-| Function | Source | Description |
-|---|---|---|
-| `refreshLearningCache()` | Backend `/api/learning/stats` | Populates `state._learningCache` for the Learning Loop display page |
-| `computeCalibrationStats(recHistory)` | Cache → local fallback | Per-confidence-band hit rates vs expected |
-| `computeRegimePerformance(recHistory)` | Cache → local fallback | Win rate and avg P&L per regime |
-| `detectStrategyDecay(recHistory, days)` | Local only | Recent vs all-time win rate + return volatility |
-| `computeAllTradesStats(journalHistory)` | Local tradeJournal | AI-recommended vs manual trade win rates |
-| `computeRRRealization(recHistory)` | Cache → local fallback | Suggested R:R vs actual win rate on high-R:R trades |
-| `fetchCalibrationBlock(regime, sectors)` | Backend `/api/learning/calibration` | Smart, compressed calibration string for Claude injection |
+- `refreshLearningCache()`
+- `computeCalibrationStats()`
+- `computeRegimePerformance()`
+- `detectStrategyDecay()`
+- `computeAllTradesStats()` (AI vs Manual)
+- `computeRRRealization()`
+- `fetchCalibrationBlock()`
 
 ---
 
-## Backend Endpoints
+## Backend Endpoints (`asx_server.py`)
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `POST /api/learning/log` | Write | Create a new `ai_learning_events` row |
-| `POST /api/learning/outcome` | Write | Update outcome/error_type on an existing event |
-| `DELETE /api/learning/event/<id>` | Write | Hard-delete a single learning event |
-| `GET /api/learning/stats` | Read | Full aggregate stats for the Learning Loop page |
-| `GET /api/learning/calibration` | Read | Smart, context-aware calibration block for Claude injection |
-| `GET /api/debate/status` | Read | Check if Ollama is running; returns `{available, models[], url}` (60s TTL in JS) |
-| `POST /api/debate` | Write | Bull/bear debate for one ticker — sequential calls, 4h result cache |
-| `POST /api/debate/postmortem` | Write | Auto-tag a closed event's `error_type` via local model; rejects wins (HTTP 400) |
+| Endpoint                        | Method | Description |
+|--------------------------------|--------|-----------|
+| `POST /api/learning/log`       | Write  | Create new event |
+| `POST /api/learning/outcome`   | Write  | Update outcome + tags |
+| `DELETE /api/learning/event/<id>` | Write | Hard delete |
+| `GET /api/learning/stats`      | Read   | Aggregates for UI |
+| `GET /api/learning/calibration`| Read   | Smart calibration block |
+| `GET /api/debate/status`       | Read   | Ollama health |
+| `POST /api/debate`             | Write  | Bull/Bear debate |
+| `POST /api/debate/postmortem`  | Write  | Auto error tagging (loss/breakeven only) |
+| `POST /api/debate/staleness`   | Write  | Staleness check for pending recs ≥ 2 days old |
+| `POST /api/debate/skill`       | Write  | Score closed trade outcome quality (0–10) |
 
 ---
 
 ## Learning Loop Display Page
 
-The Learning Loop tab renders:
-- **Summary cards** — total events, overall win rate, high-confidence (≥70%) win rate, active prompt version
-- **Calibration accuracy** — per-confidence-band hit rates vs expected; ⚠ badge if n < 5; yellow warning banner if closed < 10
-- **Regime performance** — win rate broken down by market regime
-- **Prompt version history** — calls and win rate per version string
-- **Failure patterns** — exit reason distribution + error type tag counts (split on commas for multi-tags)
-- **Recent events** — last 30 events with outcome chip, P&L%, error tag buttons, 🤖 post-mortem button, ✕ delete
-- **Debate Summaries** — last 5 events that have a stored `debate_summary`, showing bull/bear snippets and trade outcome
-- **Debate Engine card** — async-rendered; Offline state shows install instructions; Online state shows model `<select>`, depth `<select>`, and a live **Test Debate** button
+**Key Sections:**
+- Summary cards (overall win rate, high-confidence win rate, etc.)
+- Calibration accuracy (per band with sample size warnings)
+- Regime performance
+- Prompt version history
+- Failure patterns (error tags + exit reasons)
+- Recent Events table (with tags, P&L, delete)
+- Debate Summaries
+- Debate Engine status card
 
-### Error tag rules
-- Tags are only shown on **loss** and **breakeven** events (`TAG_STATUSES`). Wins never get error tags — errors on wins conflate luck with failure.
-- Tags are comma-separated in the DB (`"overconfident,regime_mismatch"`). Each button toggles independently.
-- **Auto-tagged** (from Ollama postmortem): dashed border. **Manual**: solid border.
-- The 🤖 button is only shown for loss/breakeven events with **no tag yet**. Once any tag exists (auto or manual), it disappears — the user uses the toggle buttons instead.
-- Clearing all tags resets `error_type_source` to NULL.
+**Error Tag Rules:**
+- Tags only on **loss** and **breakeven** (`TAG_STATUSES`)
+- Wins have no automated error evaluation — `skill_score` (Phase 5) will add outcome-quality scoring for all closed events including wins
+- Multi-tag support (comma-separated)
+- Auto-tagged entries have dashed border
 
-### Failure pattern aggregation
-The backend splits comma-separated `error_type` strings before counting:
-```python
-for r in fail_type_rows:
-    for tag in (r["error_type"] or "").split(","):
-        tag = tag.strip()
-        if tag:
-            type_counts[tag] = type_counts.get(tag, 0) + 1
-```
-This means a `"overconfident,regime_mismatch"` event increments both counters by 1.
+---
+
+## Trade Evaluation Checklist
+
+> **Status: Planned UI** — this checklist documents the intended review framework. The Ollama post-mortem already evaluates items 4 and 5. A full structured form UI is a future phase.
+
+This checklist defines what a complete trade review covers:
+
+### 1. Trade Context
+- Ticker, Action, Regime, Confidence, R:R, Holding Period, Outcome
+
+### 2. Signal & Thesis Quality (at Entry)
+- Technical confluence strength
+- Catalyst / fundamental support
+- Regime alignment
+- Position sizing appropriateness
+
+### 3. Outcome Quality
+- **Skill Score** (0–10): Analysis quality vs luck
+- Did price follow the expected thesis?
+- Stop/Target behavior
+
+### 4. Tags
+
+**Error Tags (Loss/Breakeven only):**
+
+Implemented (in UI buttons + server validation):
+- `overconfident` — stated AI confidence was too high for actual risk
+- `missed_catalyst` — key earnings/news/macro event not accounted for
+- `regime_mismatch` — wrong strategy for the prevailing market regime
+- `poor_entry` — timing or price was suboptimal
+- `stop_too_tight` — normal volatility triggered stop before move played out
+
+Planned additions (next iteration):
+- `poor_rr` — reward:risk ratio was insufficient from the start
+- `external_shock` — outcome driven by unpredictable external event (policy, black swan)
+- `thesis_broken` — thesis was invalidated by new information after entry
+
+**Success Tags (Wins only — recommended future):**
+- `strong_confluence`
+- `catalyst_capture`
+- `regime_aligned`
+- `excellent_execution`
+- `high_conviction_payoff`
+
+### 5. Root Cause & Lessons
+- Primary reason for outcome
+- Actionable lesson for future prompts
+
+---
+
+## Internal Debate System (Ollama)
+
+**Status:** Phases 1–4 implemented.
+
+**Core Value**: Local models provide structured bull/bear arguments and post-mortem tagging before Claude makes final decisions.
+
+**Use Cases Implemented:**
+- Bull/Bear pre-analysis (injected into Claude user message)
+- Post-mortem auto-tagging (`/api/debate/postmortem`)
+- Debate Engine UI card
+
+**Implemented Phases (1–5, 7):**
+- Bull/Bear pre-analysis (injected into Claude user message)
+- Post-mortem auto-tagging (`/api/debate/postmortem`)
+- 8 error tags: 5 original + `poor_rr`, `external_shock`, `thesis_broken`
+- Skill score (`/api/debate/skill`) — 🔬 button on all closed events in Learning Loop
+- Entry staleness check (`/api/debate/staleness`) — banner on pending recs ≥ 2 days old
+- Debate Engine UI card (model selector, aggression, Test Debate button)
+
+**Future Phases:**
+- Calibration quality debate (Phase 6) — local model interprets calibration band deltas
+- Skill-weighted calibration (Phase 8) — `/api/learning/calibration` weighs events by `skill_score`
+
+**Design Highlights:**
+- Graceful fallback when Ollama unavailable
+- 4-hour debate cache based on signal hash
+- Sequential calls + keep_alive for stability
+- Configurable aggression level
 
 ---
 
 ## Key Design Decisions
 
-**Why user message, not system prompt, for calibration?**
-Anthropic caches system prompts. Injecting dynamic per-call data (calibration) into the system prompt would invalidate the cache on every call. Placing it in the user message keeps the cache hit rate high.
-
-**Why 30–60 token target for calibration?**
-The full calibration stats (all bands, all regimes, decay, R:R) could easily be 200+ tokens. At 30–60 tokens we spend ~$0.003/call on calibration overhead vs $0.02+ for the verbose version. The backend only emits what's statistically meaningful, so noisy low-confidence signals don't inflate the context.
-
-**Why link `rec_history` to `ai_learning_events` via `learning_id`?**
-Without the link, the only way to match an outcome to a recommendation is by ticker + action + approximate date, which is ambiguous when the same ticker gets multiple recs close together. The integer foreign key makes the match exact and allows the backend to update the right event even months later.
+- **User message** for calibration & debate (preserves prompt cache)
+- **Statistical filtering** in calibration (only meaningful signals)
+- **Error tags restricted to losses/breakevens** (clear semantics)
+- **Local models** for debate and tagging (cost, privacy, speed)
+- **learning_id foreign key** for unambiguous linking
 
 ---
 
-## Internal Debate — Implementation
+## Implementation Notes
 
-> **Status:** Phases 1–4 fully implemented and shipped. Phases 5–7 remain as future work.
-
-### What it is
-
-Internal debate is a technique where multiple model passes argue for and against a position before a final decision is made. The disagreement surface-mines assumptions, risks and edge cases that a single-pass model skips over. In a trading assistant the debate is structurally natural: every trade has a bull case and a bear case, and the final recommendation quality improves when Claude has already seen both stated explicitly.
-
-Local models (Qwen3:9B, Gemma3:4B via Ollama) handle the debate cheaply and privately — no API cost, no data leaving the machine. They don't need Claude-level capability; they only need to generate plausible, specific counterarguments. Claude arbitrates.
-
-### Architecture
-
-```
-┌───────────────────────────────────────────────────────────┐
-│  Local machine                                            │
-│                                                           │
-│  Ollama  ←──────────────────────────────────────────┐    │
-│   Qwen3:9B  or  Gemma3:4B                           │    │
-│                                                     │    │
-│  asx_server.py                                      │    │
-│   ├─ _call_ollama()          shared HTTP client ────┘    │
-│   ├─ POST /api/debate        bull/bear on a ticker        │
-│   ├─ POST /api/debate/postmortem  auto-tagger            │
-│   └─ GET  /api/debate/status      Ollama health check    │
-│                                                           │
-│  Browser (JS)                                            │
-│   ├─ analysis.js — fetchBullBearDebate()                 │
-│   │   inject debate block into Claude user message       │
-│   ├─ recommendations.js — triggerPostMortem()            │
-│   │   auto-tag error_type on trade close                 │
-│   └─ pages/learning.js — show attribution in events     │
-└───────────────────────────────────────────────────────────┘
-               ↓  Claude API (Anthropic)
-       Final recommendation with debate context
-```
-
-If Ollama is not running: `/api/debate` returns `{"available": false}` immediately and every caller falls back gracefully — analysis runs unchanged, manual tags remain available. Zero disruption to the existing flow.
+- **Signal Hash** for debate caching prevents unnecessary calls on minor price changes.
+- **Postmortem Prompt** includes original rationale for better context.
+- **Tag Button Fix** (May 2026): `JSON.stringify()` produces double-quoted strings; embedding in `onclick="..."` broke attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
+- **Staleness banner** renders immediately with a "checking…" spinner; Ollama call fills in VALID/WEAKENED/INVALIDATED asynchronously without re-rendering the page.
+- **Skill score** is 🔬-button triggered (not automatic) — avoids Ollama load on every page render. Badge turns green ≥7, amber ≥4, red <4.
+- **Sequential staleness checks** — `initRecStalenessChecks()` processes old recs one at a time to avoid stacking concurrent Ollama calls.
+- **3 new error tags** (`poor_rr`, `external_shock`, `thesis_broken`) added to server `VALID_TYPES`, postmortem prompt, calibration synergy map, and UI buttons.
 
 ---
 
-### Use Case 1 — Bull/Bear Pre-Analysis
+**This Learning Loop turns Sloth ASX Trader from an AI-assisted tool into a true self-improving trading intelligence system.**
 
-**Where in the pipeline:** After signal fetch, before assembling the Claude user message.
-
-**What happens:**
-For each top-N candidates (post `_dtPreFilter` or post regime detection in the main scanner), fire two local model calls in parallel:
-
-- **Bull pass** (system: *"You are a bullish ASX swing trader. Be specific to the numbers."*): "Given these signals, write 2-3 specific reasons to BUY `{ticker}` in under 80 words."
-- **Bear pass** (system: *"You are a bearish ASX risk analyst. Be specific to the numbers."*): "Given these signals, write 2-3 specific risks AGAINST buying `{ticker}` in under 80 words."
-
-Both receive the same compact signal summary:
-```
-WBC: Price=$29.10, BB%B=0.08, RSI=31.2, ADX=18.4, VolZ=2.1, OBV=rising, 5D=−2.1%
-```
-
-**Output injected into Claude's user message** (after the calibration note, before the main portfolio data):
-```
-INTERNAL DEBATE (pre-analysis, local model):
-[WBC] BULL: RSI turning from 31 with volume surge — classic mean-reversion setup; support at $28.40 held. OBV rising confirms accumulation. BEAR: Ex-dividend in 8 days will distort signal; NIM compression still unresolved; property exposure elevated in riskOff.
-[CSL] BULL: … BEAR: …
-```
-
-**Why Claude benefits:** Claude now receives two structured opposing views before forming its own. If the bear case is strong and specific, Claude is more likely to lower confidence, tighten the stop suggestion, or skip the rec entirely — without needing to be explicitly prompted to consider risks.
-
-**Token budget:** ~150 tokens per ticker. For 3 tickers: ~450 tokens added to Claude's context.
-
-**Time budget:** 2 calls × ~3 seconds each, run in parallel per ticker → ~3-6 seconds total added to analysis time. Acceptable; run concurrently with news/announcement fetches.
-
-**Scoping:** Only debate top-N candidates (3–5), not every portfolio ticker. Universe scan: debate the top 5 after pre-filter, skip the rest.
+It combines persistent memory, structured feedback, hybrid local+cloud reasoning, and disciplined risk/learning processes.
 
 ---
 
-### Use Case 2 — Post-Mortem Auto-Tagger
-
-**Where in the pipeline:** Immediately after a trade closes (`markExecuted()` or `syncClosedTradesToLearningLoop()`).
-
-**What happens:**
-Send closed trade data to the local model and ask it to classify the primary failure reason. Run twice at different temperatures to check agreement:
-
-```
-Prompt:
-"This ASX trade closed as {loss/win} with P&L {pnl_pct:.1f}%.
-Rec: {action} {ticker} at confidence {confidence:.0%} during {regime} regime.
-Entry signals: BB%B={bb_pct_b:.2f}, RSI={rsi:.1f}, VolZ={vol_z:.1f}.
-Exit: {exit_reason}.
-
-Classify the PRIMARY failure reason from exactly one:
-  overconfident    — stated confidence too high given signals and regime
-  missed_catalyst  — earnings, news or corporate event not accounted for
-  regime_mismatch  — strategy was wrong for prevailing market conditions
-  poor_entry       — timing or price entry was off
-  stop_too_tight   — stopped out by normal volatility before the move
-  luck             — good analysis but random adverse movement
-  none             — outcome was expected given the signals
-
-Reply with ONLY the single classification word."
-```
-
-Run 1: temperature 0.2 (deterministic)
-Run 2: temperature 0.5 (slightly varied)
-
-**Decision logic:**
-| Result | Action |
-|--------|--------|
-| Both agree on a valid tag | Auto-write `error_type` to `ai_learning_events`; show filled button in UI |
-| Only one is valid | Store as a *suggestion*; show a faded `?` badge next to tag buttons |
-| Neither is valid / both differ | Leave blank; user tags manually |
-
-**Why this helps:** Manual tagging requires the user to remember context weeks or months after the trade. The local model has the numbers at close time and can classify immediately with decent accuracy on structured inputs.
-
----
-
-### Use Case 3 — Outcome Attribution (Skill vs Luck)
-
-**Where:** Same timing as post-mortem auto-tagger — runs in parallel on trade close.
-
-**What happens:**
-Ask the local model to rate 0–10 whether the outcome reflects **analysis quality** vs **random market movement**:
-
-```
-Prompt:
-"ASX trade: {action} {ticker}, confidence {confidence:.0%}, regime {regime}.
-BB%B at entry: {bb_pct_b:.2f}, RSI: {rsi:.1f}, ADX: {adx:.1f}.
-Outcome: {outcome_status}, P&L: {pnl_pct:.1f}%, exit: {exit_reason}, held {hold_days}d.
-
-On a scale 0–10, how much does the outcome reflect the QUALITY of the analysis
-(vs random market luck)? 0=pure luck, 10=fully explained by the signals.
-Reply with ONLY a number 0–10."
-```
-
-**Storage:** Store the score as `skill_score` in `ai_learning_events` (new column).
-
-**Use in calibration weighting:**
-```python
-# In /api/learning/calibration
-# Down-weight events where skill_score < 4 (likely luck)
-weight = max(0.3, skill_score / 10) if skill_score is not None else 1.0
-weighted_wins += weight * (1 if outcome == 'win' else 0)
-weighted_total += weight
-```
-
-**Why this matters:** Currently all wins are equal in calibration. A win because CSL bounced on a global biotech rally (luck) is treated the same as a win because the BB reclaim + RSI + volume confluence played out exactly as predicted (skill). Skill-weighted calibration gives better signal.
-
----
-
-### Use Case 4 — Calibration Quality Debate
-
-**Where:** On-demand from the Learning Loop display page, or on each stats load when closed ≥ 10.
-
-**What happens:**
-Send the calibration stats to the local model and ask two interpretive questions:
-
-```
-Prompt 1 (signal vs noise):
-"Calibration data: {band summaries with n, win_rate, delta}.
-Is the observed underperformance in the 70-80% band (n=8, WR=61%, expected=75%) a
-systematic signal or likely small-sample noise? Consider: sample size, consistency
-across bands, regime conditions. Answer in 2 sentences."
-
-Prompt 2 (decay interpretation):
-"Recent 30d win rate: {rec_wr:.0%} vs all-time: {all_wr:.0%} (Δ{delta:+.0%}, n={n}).
-Could this be explained by a regime shift (e.g. transition to riskOff) rather than
-strategy decay? Give one sentence for each interpretation."
-```
-
-**Output:** Display the model's interpretations as a "Debate note" card beneath the calibration table on the Learning Loop page. Label it `⚡ Local model interpretation (Qwen3:9B)` so the user knows the source.
-
-**Why this helps:** Raw numbers like "65% WR vs 75% expected" leave the user to interpret significance alone. The model adds: "With only 8 observations, this delta sits within the expected sampling variance — don't adjust yet" vs "This pattern is consistent across 3 consecutive months and 2 regime types — the overconfidence is likely real."
-
----
-
-### Use Case 5 — Entry Staleness Check
-
-**Where:** On-demand — fires when the user clicks **Execute** on a pending recommendation.
-
-**What happens:**
-The rec was generated at some point in the past (potentially days ago). Conditions change. Before the user commits capital:
-
-1. Fetch fresh signals for the ticker (may already be in `state.liveSignals`)
-2. Fire a single local model call: "This BUY rec was generated {days_ago}d ago at confidence {confidence:.0%}. Current signals: {fresh_summary}. Is the setup still valid, deteriorated, or invalidated? Reply: VALID / WEAKENED / INVALIDATED — then one sentence why."
-3. If WEAKENED or INVALIDATED: show a warning banner on the Execute dialog
-4. If VALID: show a small green checkmark
-
-**Trigger condition:** Only run if rec is ≥ 2 days old. For same-day recs, skip (too new to be stale).
-
-**Why this helps:** A BB-reclaim setup seen on Monday is meaningless if the stock has ripped 4% by Thursday and BB%B is now 0.65. The user is about to execute a stale signal. This check adds a cheap, fast sanity layer before capital is deployed.
-
----
-
-### Prompt Design Rules for Small Models
-
-Small models drift easily. Keep prompts tight:
-
-| Rule | Rationale |
-|---|---|
-| One task per call | Combining bull+bear in one prompt produces compromised, hedged output |
-| Hard output constraint | Set `num_predict: 150-200` in Ollama options; prevents rambling |
-| Explicit format instruction | "Reply with ONLY the word" / "Format: BULL: … BEAR: …" |
-| Compact signal summary | Fit all relevant signals in one line; models ignore long data dumps |
-| Low temperature for classification (0.2–0.3) | Needed for reliable structured output |
-| Higher temperature for debate (0.6–0.8) | Encourages diverse, non-obvious arguments |
-| 1-shot example for classification | One example in the prompt doubles accuracy on small models |
-
----
-
-### Model Selection
-
-| Model | Command | VRAM | Speed | Best for |
-|---|---|---|---|---|
-| **Qwen3:9B** (recommended) | `ollama pull qwen3:9b` | ~6 GB | ~3–5 s/call | Post-mortem tagging, attribution, calibration debate — needs structured output |
-| **Gemma3:4B** | `ollama pull gemma3:4b` | ~3 GB | ~1–2 s/call | Bull/bear debate, staleness check — needs fluent argument, not precise classification |
-| **Qwen3:0.6B** (fallback) | `ollama pull qwen3:0.6b` | ~0.5 GB | <1 s/call | CPU-only machines; basic debate only |
-
-Both sides of the bull/bear debate can use the **same model** with different system prompts and different random seeds — the perspective shift comes entirely from framing.
-
-The Ollama model used is configurable via a `debate_model` key in `blob_store` (Settings page), defaulting to `"qwen3:9b"`.
-
----
-
-### Where Debate Output Sits in Claude's Context
-
-```
-[System prompt — cached]
-[User message — dynamic]
-  ├─ Date + time
-  ├─ Portfolio summary
-  ├─ Live signals (indicators per ticker)
-  ├─ __CALIBRATION_PLACEHOLDER__   ← 30-60 tokens from /api/learning/calibration
-  ├─ INTERNAL DEBATE BLOCK         ← 150-500 tokens from /api/debate (new)
-  └─ Task instruction
-```
-
-Debate goes **after** calibration and **before** the task instruction, so Claude processes:
-1. How its past confidence has performed (calibration)
-2. What the bull and bear cases are for each candidate (debate)
-3. What the actual task is (analyse and recommend)
-
----
-
-### What NOT to Use Local Debate For
-
-| Tempting idea | Why to skip |
-|---|---|
-| Debate every ticker in universe scan (200+) | Too slow — 200 × 6s = 20 minutes. Only debate post-filter survivors (top 5). |
-| Local model makes final trading decision | It can't. Small models hallucinate price levels and don't know ASX micro-structure. Claude arbitrates. |
-| Macro / RBA / interest rate debate | Local models have unreliable economic reasoning. Use news/announcement engine for macro context. |
-| Risk quantification (stop levels, position size) | Keep that in the deterministic quant engine. Non-negotiable. |
-| Replacing manual error tags | Assist, not replace. Low-confidence auto-tags still need human confirmation. |
-
----
-
-### Implementation Sequence
-
-| Phase | What | Files | Status |
-|---|---|---|---|
-| 1 | `_call_ollama()` helper + `/api/debate/status` health check + graceful fallback everywhere | `asx_server.py` | ✅ Done |
-| 2 | `/api/debate` endpoint (bull/bear — sequential) + `debate-client.js` | `asx_server.py`, `js/debate-client.js` | ✅ Done |
-| 3 | Debate preamble injected into Claude user message + richer toasts + 4h cache + aggression setting | `js/analysis.js`, `js/config.js` | ✅ Done |
-| 4 | `/api/debate/postmortem` + multi-tag + win exclusion + Debate Engine card on Learning Loop | `asx_server.py`, `js/pages/learning.js` | ✅ Done |
-| 5 | `skill_score` attribution call on close + skill-weighted calibration | `asx_server.py` | 🔲 Future |
-| 6 | Calibration quality debate card (local model interprets calibration stats) | `js/pages/learning.js` | 🔲 Future |
-| 7 | Entry staleness check on Execute dialog | `js/pages/recommendations.js` | 🔲 Future |
-
----
-
-### Actual Implementation Details (Phases 1–4)
-
-#### `debate-client.js` — frontend debate layer
-New standalone file loaded after `claude-client.js`. All functions degrade gracefully (return `null`) when Ollama is offline.
-
-Key functions:
-- `debateStatus()` — 60s TTL cache of `/api/debate/status`
-- `fetchDebate(ticker, signals, opts)` — single-ticker debate with 4h signal-hash cache; `opts.skipCache=true` bypasses cache (used by Test Debate button)
-- `fetchDebateBatch(tickers, concurrency, opts)` — respects `state.debate.aggression` (none/light/full → 0/3/8 tickers, always concurrency=1)
-- `preferredDebateModel(pulledModels)` — respects `state.debate.model` user choice, falls back to priority list: `qwen3:9b → qwen3:4b → gemma3:2b → llama3.2:3b`
-- `buildDebatePreamble(debates)` — formats all debates as a text block for Claude's user message
-- `buildDebateSummary(debate)` — `"B:<80chars> / R:<80chars>"` (≤200 chars) for DB storage
-- `triggerPostmortem(eventId, model)` — fire-and-forget call to `/api/debate/postmortem`
-
-#### Signal hash for 4h cache
-```javascript
-function _signalHash(signals = {}) {
-  const pick = (v, dp = 2) => v == null ? 'x' : Number(v).toFixed(dp);
-  return [
-    pick(signals.current_price),
-    pick(signals.rsi_14, 1),
-    pick(signals.bb_pct_b),
-    pick(signals.volume_z_score, 1),
-    pick(signals.return_60d, 1),
-    signals.obv_trend || 'x',
-    pick(signals.adx_14, 1),
-  ].join('|');
-}
-```
-Rounded values prevent sub-cent price drift from busting cache while still detecting genuine signal changes.
-
-#### Ollama stability rules (learned the hard way)
-- **Sequential, not concurrent**: bull and bear calls are sequential in `asx_server.py`. Concurrent `ThreadPoolExecutor(2)` doubled peak VRAM and caused crashes.
-- **`keep_alive: "10m"`**: prevents Ollama from unloading the model between consecutive calls.
-- **`num_predict: 200`**: caps output length to prevent runaway generation.
-- **`temperature: 0.3`**: deterministic enough for structured output; varied enough to not be repetitive.
-- **Batch concurrency=1** for all aggression levels: `fetchDebateBatch` processes one ticker at a time even in Full mode. Concurrent Python threads just stack Ollama's internal queue with no wall-clock benefit.
-- **No retry on timeout**: `_call_ollama` retries 503 (model loading) with backoff, but returns immediately on `Timeout`. Retrying timeouts was tripling wait time (3 × 30s = 90s).
-
-#### Postmortem prompt (actual)
-```python
-prompt = (
-    f"ASX closed trade (LOSS or BREAKEVEN): {summary}\n"
-    + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "")
-    + "\n"
-    "Select 1-2 error tags from this list (comma-separate if multiple apply):\n"
-    "  overconfident | missed_catalyst | regime_mismatch | poor_entry | stop_too_tight | none\n"
-    'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence"}\n'
-)
-```
-Includes `rationale_summary[:250]` from the DB so the model has context on *what* the AI was thinking at entry, not just the outcome numbers. Wins are rejected server-side (HTTP 400) before the model is even called.
-
-#### Timeout settings
-| Call | Default | JS cap | Retry |
-|------|---------|--------|-------|
-| Bull/bear debate | 45s per side | 100s total | 503 only |
-| Postmortem | 60s | 130s | None (`retries=0`) |
-| Test Debate button | 90s per side | — | None |
-
----
-
-### Known Bug Fixed (May 2026)
-
-**Tag buttons silently failed on click** — root cause was HTML attribute injection. `JSON.stringify("overconfident")` produces `"overconfident"` (with surrounding double quotes). When embedded in `onclick="toggleLearningTag(123, "overconfident", 'key')"`, the first inner `"` terminates the attribute, truncating the JS call before it could execute.
-
-**Fix:** `.replace(/"/g, '&quot;')` after `JSON.stringify`. The browser decodes `&quot;` → `"` before evaluating JS, so the call is syntactically valid in both HTML and JS contexts.
-
-```javascript
-// Before (broken):
-const escapedCurrent = JSON.stringify(currentTagStr || '');
-
-// After (fixed):
-const escapedCurrent = JSON.stringify(currentTagStr || '').replace(/"/g, '&quot;');
-```
-
-This affected all tag operations: first-time manual tagging, toggling additional tags, removing tags, and removing auto-tags. All now work correctly.
+**Next Milestones (Recommended)**
+1. Complete Phase 5 (`skill_score` + weighted calibration)
+2. Add success tags for wins
+3. Implement Entry Staleness Check
+4. Add full Trade Checklist UI form

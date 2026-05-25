@@ -31,7 +31,10 @@ function renderPage() {
     case 'dashboard':       el.innerHTML = renderDashboard(); break;
     case 'portfolio':       el.innerHTML = renderPortfolio(); break;
     case 'macro':           el.innerHTML = renderMacro(); break;
-    case 'recommendations': el.innerHTML = renderRecommendations(); break;
+    case 'recommendations':
+      el.innerHTML = renderRecommendations();
+      if (typeof initRecStalenessChecks === 'function') initRecStalenessChecks().catch(() => {});
+      break;
     case 'day-trading':     renderDayTradingPage(gen); break;
     case 'signals':         renderSignalsPage(gen); break;
     case 'journal':         el.innerHTML = renderJournal(); break;

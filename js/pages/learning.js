@@ -223,6 +223,9 @@ function _renderLearningContent(d) {
     regime_mismatch: { label: 'Regime mismatch',  color: '#7c3aed' },
     poor_entry:      { label: 'Poor entry',       color: '#ea580c' },
     stop_too_tight:  { label: 'Stop too tight',   color: '#0891b2' },
+    poor_rr:         { label: 'Poor R:R',         color: '#6b7280' },
+    external_shock:  { label: 'External shock',   color: '#be185d' },
+    thesis_broken:   { label: 'Thesis broken',    color: '#92400e' },
   };
   const exitReasons   = Object.entries(failPats.by_exit_reason  || {});
   const errorTypes    = Object.entries(failPats.by_error_type   || {});
@@ -273,6 +276,9 @@ function _renderLearningContent(d) {
       ['regime_mismatch', 'RM', 'Regime mismatch — wrong strategy for the prevailing market regime'],
       ['poor_entry',      'PE', 'Poor entry — timing or price was suboptimal'],
       ['stop_too_tight',  'ST', 'Stop too tight — normal volatility triggered stop before the move played out'],
+      ['poor_rr',         'PR', 'Poor R:R — reward:risk ratio was too low from the start'],
+      ['external_shock',  'ES', 'External shock — outcome driven by unpredictable event (policy, black swan)'],
+      ['thesis_broken',   'TB', 'Thesis broken — invalidated by new information that emerged after entry'],
     ];
     const escapedCurrent = JSON.stringify(currentTagStr || '').replace(/"/g, '&quot;');
     return `<div style="display:flex;gap:2px;flex-wrap:wrap">` +
@@ -319,7 +325,8 @@ function _renderLearningContent(d) {
                 <th style="text-align:left;padding:4px 6px">Regime</th>
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
-                <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
+                <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
+                <th style="text-align:center;padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. 🔬 = trigger Ollama scoring">🔬</th>
                 <th style="padding:4px 6px;width:28px"></th>
               </tr>
             </thead>
@@ -329,9 +336,26 @@ function _renderLearningContent(d) {
                 const pnlStr  = pnlPct != null ? (pnlPct >= 0 ? '+' : '') + Number(pnlPct).toFixed(1) + '%' : '—';
                 const pnlColor = pnlPct > 0 ? '#16a34a' : pnlPct < 0 ? '#dc2626' : 'var(--text-secondary)';
                 const isOpen   = !ev.outcome_status || ev.outcome_status === 'open';
+                const isClosed = new Set(['win','loss','breakeven']).has(ev.outcome_status);
                 // 🤖 post-mortem button only for losses/breakevens without a tag yet
-                // (wins excluded — error tags don't apply to profitable trades)
                 const showPm = TAG_STATUSES.has(ev.outcome_status) && !ev.error_type;
+                // 🔬 skill score — show badge if scored, button if closed and unscored
+                const skillBadge = ev.skill_score != null
+                  ? `<span id="skill-${ev.id}"
+                       title="Skill score: ${ev.skill_score}/10 — how much outcome reflects analysis quality vs luck"
+                       style="font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600;
+                              background:${ev.skill_score>=7?'#dcfce7':ev.skill_score>=4?'#fef3c7':'#fee2e2'};
+                              color:${ev.skill_score>=7?'#15803d':ev.skill_score>=4?'#92400e':'#991b1b'}"
+                     >${ev.skill_score.toFixed(1)}</span>`
+                  : isClosed
+                    ? `<button id="skill-btn-${ev.id}"
+                         onclick="triggerSkillScore(${ev.id})"
+                         title="Score outcome quality (skill vs luck) with local model"
+                         style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1;color:var(--text-muted)"
+                         onmouseover="this.style.background='var(--bg-secondary)'"
+                         onmouseout="this.style.background='none'"
+                       >🔬</button>`
+                    : '';
                 return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
                   <td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
                   <td style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
@@ -341,6 +365,7 @@ function _renderLearningContent(d) {
                   <td style="padding:3px 6px">${outcomeChip(ev.outcome_status)}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
                   <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
+                  <td style="padding:3px 6px;text-align:center">${skillBadge}</td>
                   <td style="padding:3px 6px;text-align:center;white-space:nowrap">
                     ${showPm ? `<button id="pm-btn-${ev.id}"
                       onclick="triggerDebatePostmortem(${ev.id})"
@@ -703,6 +728,48 @@ async function triggerDebatePostmortem(eventId) {
   } catch (e) {
     toast('Post-mortem error: ' + e.message, 'error');
     if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
+  }
+}
+
+// ── Score a closed event's outcome quality (skill vs luck) via local model ────
+async function triggerSkillScore(eventId) {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  const btn = document.getElementById(`skill-btn-${eventId}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; btn.title = 'Scoring…'; }
+
+  try {
+    const status = await debateStatus();
+    if (!status.available) {
+      toast('Ollama is not running — start it first', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Score outcome quality with local model'; }
+      return;
+    }
+    const model = typeof preferredDebateModel === 'function'
+      ? preferredDebateModel(status.models) : 'qwen3:9b';
+
+    toast(`🔬 Asking ${model} to score event #${eventId}…`, 'info');
+    const result = await fetchSkillScore(eventId, { model });
+
+    if (result?.ok) {
+      const score = result.skill_score;
+      // Replace button with score badge inline (no full page re-render needed)
+      const cell = btn?.parentElement;
+      if (cell) {
+        const bg    = score >= 7 ? '#dcfce7' : score >= 4 ? '#fef3c7' : '#fee2e2';
+        const color = score >= 7 ? '#15803d' : score >= 4 ? '#92400e' : '#991b1b';
+        cell.innerHTML = `<span id="skill-${eventId}"
+          title="Skill score: ${score}/10 — ${(result.reason||'').slice(0,80)}"
+          style="font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600;background:${bg};color:${color}"
+        >${score.toFixed(1)}</span>`;
+      }
+      toast(`🔬 Skill score: ${score}/10 — ${(result.reason||'').slice(0,60)}`, 'success');
+    } else {
+      toast(`Skill score failed: ${result?.error || 'no response'}`, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Score outcome quality with local model'; }
+    }
+  } catch (e) {
+    toast('Skill score error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Score outcome quality with local model'; }
   }
 }
 

@@ -17,7 +17,10 @@ function switchRecTab(tab) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   const activeTab = document.getElementById('tab-'+tab);
   if(activeTab) activeTab.classList.add('active');
-  if(tab==='pending') document.getElementById('rec-content').innerHTML=renderPendingRecs(state.recommendations.filter(r=>r.status==='pending'));
+  if(tab==='pending') {
+    document.getElementById('rec-content').innerHTML=renderPendingRecs(state.recommendations.filter(r=>r.status==='pending'));
+    if (typeof initRecStalenessChecks === 'function') initRecStalenessChecks().catch(() => {});
+  }
   else if(tab==='run') document.getElementById('rec-content').innerHTML=renderRunAnalysisPanel();
   else if(tab==='history') document.getElementById('rec-content').innerHTML=renderRecHistory();
   else document.getElementById('rec-content').innerHTML=renderRecRulesPanel();
@@ -429,6 +432,15 @@ function renderPendingRecs(recs) {
         </div>
       </div>
 
+      <!-- Staleness check banner (only shown for recs ≥ 2 days old) -->
+      ${_recAgeInDays(r) >= 2 ? `<div id="staleness-${r.id}" style="margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;
+                    background:#f8fafc;border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--text-muted)">
+          <span>⏳</span>
+          <span>Rec is ${_recAgeInDays(r)} day(s) old — checking if setup is still valid…</span>
+        </div>
+      </div>` : ''}
+
       <!-- Position Sizing Calculator (BUY / TOP_UP only) -->
       ${!isReducing ? renderPositionSizer(r) : ''}
 
@@ -442,6 +454,80 @@ function renderPendingRecs(recs) {
   `;
   }).join('');
 }
+// ── Entry Staleness Check ─────────────────────────────────────────────────────
+// Parses DD-MM-YYYY rec.date into whole days elapsed (0 if unparseable).
+function _recAgeInDays(rec) {
+  const s = rec.date || '';
+  const p = s.split('-');
+  if (p.length === 3 && p[2].length === 4) {
+    const d = new Date(+p[2], +p[1] - 1, +p[0]);
+    const now = new Date(); now.setHours(0,0,0,0); d.setHours(0,0,0,0);
+    return Math.max(0, Math.floor((now - d) / 86400000));
+  }
+  return 0;
+}
+
+/**
+ * After the recommendations page renders, kick off background staleness checks
+ * for any pending recs that are ≥ 2 days old.  Each check updates its banner div
+ * without triggering a full re-render.
+ */
+async function initRecStalenessChecks() {
+  if (typeof debateStatus !== 'function') return;
+  const pending = state.recommendations.filter(r => r.status === 'pending' && _recAgeInDays(r) >= 2);
+  if (!pending.length) return;
+
+  // Check Ollama once; skip all if offline
+  const status = await debateStatus();
+  if (!status?.available) {
+    // Still update the banners to show "Ollama offline — verify manually"
+    pending.forEach(r => {
+      const el = document.getElementById(`staleness-${r.id}`);
+      if (el) el.innerHTML = _stalenessBanner(r.id, null, _recAgeInDays(r));
+    });
+    return;
+  }
+
+  const model = typeof preferredDebateModel === 'function'
+    ? preferredDebateModel(status.models) : 'qwen3:9b';
+
+  // Run sequentially — one Ollama call at a time avoids memory pressure
+  for (const r of pending) {
+    const el = document.getElementById(`staleness-${r.id}`);
+    if (!el) continue;
+    const signals = state.liveSignals?.[r.ticker] || {};
+    const age = _recAgeInDays(r);
+    try {
+      const result = await fetchStaleness(r.ticker, signals, r.action, r.confidence, age, { model });
+      el.innerHTML = _stalenessBanner(r.id, result, age);
+    } catch {
+      el.innerHTML = _stalenessBanner(r.id, null, age);
+    }
+  }
+}
+
+/** Build the staleness banner HTML for a given result. */
+function _stalenessBanner(recId, result, daysAgo) {
+  if (!result?.ok) {
+    return `<div style="padding:6px 10px;background:#f8fafc;border:1px solid var(--border);
+                         border-radius:6px;font-size:11px;color:var(--text-muted)">
+      ⚠ Rec is ${daysAgo} day(s) old — Ollama offline, verify setup manually before executing.
+    </div>`;
+  }
+  const cfg = {
+    VALID:       { bg: '#f0fdf4', border: '#bbf7d0', color: '#15803d', icon: '✓' },
+    WEAKENED:    { bg: '#fffbeb', border: '#fde68a', color: '#92400e', icon: '⚠' },
+    INVALIDATED: { bg: '#fef2f2', border: '#fecaca', color: '#991b1b', icon: '✗' },
+  }[result.verdict] || { bg: '#f8fafc', border: 'var(--border)', color: 'var(--text-muted)', icon: '?' };
+  const label = { VALID: 'Setup still valid', WEAKENED: 'Setup weakened', INVALIDATED: 'Setup invalidated' }[result.verdict] || result.verdict;
+  return `<div style="padding:6px 10px;background:${cfg.bg};border:1px solid ${cfg.border};
+                       border-radius:6px;font-size:11px;display:flex;gap:6px;align-items:flex-start">
+    <span style="font-weight:700;color:${cfg.color};flex-shrink:0">${cfg.icon} ${label}</span>
+    <span style="color:${cfg.color}">${result.reason || ''}</span>
+    <span style="margin-left:auto;white-space:nowrap;color:var(--text-muted)">${daysAgo}d old · ${result.model||''}</span>
+  </div>`;
+}
+
 // ── REC HISTORY FILTER STATE ──────────────────────────────────
 if (!state.recHistoryFilter) state.recHistoryFilter = {
   ticker: '', action: 'all', status: 'all', outcome: 'all',

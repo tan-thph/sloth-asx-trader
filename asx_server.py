@@ -3358,7 +3358,7 @@ def learning_stats():
                        outcome_status, realized_pnl_pct, realized_pnl_aud, regime, prompt_version,
                        was_executed, suggested_stop, suggested_target, rr_ratio,
                        holding_period_days, exit_reason, rationale_summary,
-                       error_type, error_type_source, debate_summary
+                       error_type, error_type_source, debate_summary, skill_score
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
 
@@ -3511,14 +3511,18 @@ def learning_calibration():
                 if top_pct >= 0.40:
                     short = {"overconfident": "OC", "missed_catalyst": "MC",
                              "regime_mismatch": "RM", "poor_entry": "PE",
-                             "stop_too_tight": "ST"}.get(top_et, top_et)
+                             "stop_too_tight": "ST", "poor_rr": "PR",
+                             "external_shock": "ES", "thesis_broken": "TB"}.get(top_et, top_et)
                     parts.append(
                         f"top_err:{short}({top_cnt}/{len(loss_rows)}losses)→"
                         + ("reduce conf" if top_et == "overconfident" else
                            "check news" if top_et == "missed_catalyst" else
                            "check regime fit" if top_et == "regime_mismatch" else
                            "refine entry timing" if top_et == "poor_entry" else
-                           "widen stops")
+                           "widen stops" if top_et == "stop_too_tight" else
+                           "require min R:R 2.5" if top_et == "poor_rr" else
+                           "add catalyst screen" if top_et == "external_shock" else
+                           "add re-validation step")
                     )
 
         if not parts:
@@ -3786,6 +3790,9 @@ def debate_postmortem():
         "  regime_mismatch - wrong strategy for the market regime at the time\n"
         "  poor_entry      - entry timing or price was suboptimal\n"
         "  stop_too_tight  - stop was hit by normal volatility before the move played out\n"
+        "  poor_rr         - reward:risk ratio was too low from the start to justify the trade\n"
+        "  external_shock  - outcome driven by unpredictable external event (policy change, black swan)\n"
+        "  thesis_broken   - thesis was invalidated by new information that emerged after entry\n"
         "  none            - loss was reasonable/random, no clear systematic error\n"
         "\n"
         'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence"}\n'
@@ -3814,7 +3821,8 @@ def debate_postmortem():
         reason = m2.group(1) if m2 else raw[:120]
 
     VALID_TYPES = {"overconfident", "missed_catalyst", "regime_mismatch",
-                   "poor_entry", "stop_too_tight", "none"}
+                   "poor_entry", "stop_too_tight",
+                   "poor_rr", "external_shock", "thesis_broken", "none"}
     if error_type not in VALID_TYPES:
         error_type = ""  # reject hallucinated categories
 
@@ -3841,6 +3849,177 @@ def debate_postmortem():
         "error_type": error_type or "none",
         "reason":     reason,
         "model":      model,
+    })
+
+
+@app.route("/api/debate/staleness", methods=["POST"])
+def debate_staleness():
+    """
+    Check if a pending recommendation is still valid given current signals.
+    Only called for recs that are ≥ 2 days old.
+
+    Request: { ticker, signals, action, confidence, days_ago, model, timeout }
+    Response: { ok, verdict:"VALID"|"WEAKENED"|"INVALIDATED", reason, model }
+    """
+    data    = request.get_json() or {}
+    ticker  = data.get("ticker", "?")
+    signals = data.get("signals", {})
+    action  = data.get("action", "BUY")
+    conf    = data.get("confidence")          # 0-1 float or None
+    days    = int(data.get("days_ago", 0))
+    model   = data.get("model", "qwen3:9b")
+    tout    = min(int(data.get("timeout", 40)), 90)
+
+    def _sig(key, dp=2):
+        v = signals.get(key)
+        return f"{v:.{dp}f}" if v is not None else "?"
+
+    summary = (
+        f"{ticker}: Price=${_sig('current_price')}, "
+        f"BB%B={_sig('bb_pct_b')}, RSI={_sig('rsi_14',1)}, "
+        f"ADX={_sig('adx_14',1)}, VolZ={_sig('volume_z_score',1)}, "
+        f"OBV={signals.get('obv_trend','?')}, "
+        f"5D={_sig('return_5d',1)}%"
+    )
+    conf_str = f"{conf:.0%}" if conf is not None else "?"
+
+    prompt = (
+        f"Pending ASX recommendation: {action} {ticker}, "
+        f"AI confidence {conf_str}, generated {days} day(s) ago.\n"
+        f"Current signals: {summary}\n\n"
+        "Is this setup still valid today?\n"
+        "  VALID       - signals still support the original thesis\n"
+        "  WEAKENED    - setup has partially deteriorated, proceed with caution\n"
+        "  INVALIDATED - original thesis is no longer supported by current signals\n"
+        "\n"
+        'Reply with JSON only: {"verdict":"VALID|WEAKENED|INVALIDATED","reason":"one sentence"}\n'
+        "No markdown, no explanation outside JSON."
+    )
+
+    result = _call_ollama(model, prompt, timeout=tout, retries=0)
+    if not result["ok"]:
+        return jsonify({"ok": False, "error": result["error"]})
+
+    raw = result["text"].strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$",       "", raw)
+    try:
+        parsed  = json.loads(raw)
+        verdict = parsed.get("verdict", "").upper()
+        reason  = parsed.get("reason", "")
+    except Exception:
+        m       = re.search(r'"verdict"\s*:\s*"([^"]+)"', raw, re.IGNORECASE)
+        verdict = m.group(1).upper() if m else ""
+        m2      = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
+        reason  = m2.group(1) if m2 else raw[:100]
+
+    VALID_VERDICTS = {"VALID", "WEAKENED", "INVALIDATED"}
+    if verdict not in VALID_VERDICTS:
+        verdict = "WEAKENED"   # conservative default for unexpected output
+
+    app.logger.info(f"[Staleness] {action} {ticker} ({days}d old) → {verdict} via {model}")
+    return jsonify({"ok": True, "verdict": verdict, "reason": reason, "model": model})
+
+
+@app.route("/api/debate/skill", methods=["POST"])
+def debate_skill():
+    """
+    Score a closed trade's outcome quality (skill vs luck) using local model.
+    Stores result in skill_score column (0-10).
+
+    Request: { id, model, timeout }
+    Response: { ok, id, skill_score, reason, model }
+    """
+    data  = request.get_json() or {}
+    ev_id = data.get("id")
+    if not ev_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+
+    model = data.get("model", "qwen3:9b")
+    tout  = min(int(data.get("timeout", 45)), 90)
+
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT ticker, recommendation, ai_confidence, ensemble_confidence,
+                      outcome_status, realized_pnl_pct, exit_reason, regime,
+                      holding_period_days, rationale_summary
+               FROM ai_learning_events WHERE id=?""",
+            (ev_id,)
+        ).fetchone()
+
+    if not row:
+        return jsonify({"ok": False, "error": "Event not found"}), 404
+
+    outcome = row["outcome_status"]
+    CLOSED  = {"win", "loss", "breakeven"}
+    if outcome not in CLOSED:
+        return jsonify({"ok": False, "error": f"Event is '{outcome}' — skill score only for closed trades"}), 400
+
+    # Build compact trade summary
+    conf_str = f"{row['ai_confidence']:.0%}" if row["ai_confidence"] is not None else "?"
+    pnl_str  = f"{row['realized_pnl_pct']:+.1f}%" if row["realized_pnl_pct"] is not None else "?"
+    summary  = (
+        f"{row['recommendation']} {row['ticker']}, confidence {conf_str}, "
+        f"regime {row['regime'] or '?'}, held {row['holding_period_days'] or '?'}d, "
+        f"exit {row['exit_reason'] or '?'}, outcome: {outcome}, P&L: {pnl_str}"
+    )
+    rationale = (row["rationale_summary"] or "").strip()[:200]
+
+    prompt = (
+        f"ASX closed trade: {summary}\n"
+        + (f"Original AI reasoning: {rationale}\n" if rationale else "")
+        + "\n"
+        "Rate 0–10: how much does this outcome reflect the QUALITY of the analysis "
+        "(vs random market luck)?\n"
+        "  0 = pure luck / random market movement\n"
+        "  5 = mixed — analysis was reasonable but luck played a role\n"
+        " 10 = outcome fully explained by the signals and thesis\n"
+        "\n"
+        'Reply with JSON only: {"skill_score":7,"reason":"one sentence"}\n'
+        "No markdown."
+    )
+
+    result = _call_ollama(model, prompt, timeout=tout, retries=0)
+    if not result["ok"]:
+        return jsonify({"ok": False, "error": result["error"]})
+
+    raw = result["text"].strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$",       "", raw)
+    try:
+        parsed     = json.loads(raw)
+        skill_raw  = parsed.get("skill_score")
+        reason     = parsed.get("reason", "")
+    except Exception:
+        m         = re.search(r'"skill_score"\s*:\s*([0-9.]+)', raw)
+        skill_raw = float(m.group(1)) if m else None
+        m2        = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
+        reason    = m2.group(1) if m2 else ""
+
+    try:
+        skill_score = max(0.0, min(10.0, float(skill_raw)))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Could not parse skill_score from model output"})
+
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE ai_learning_events SET skill_score=? WHERE id=?",
+                (round(skill_score, 1), ev_id)
+            )
+        app.logger.info(
+            f"[Skill] event#{ev_id} ({row['ticker']}) → {skill_score:.1f}/10 via {model}"
+            + (f" | {reason[:60]}" if reason else "")
+        )
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+    return jsonify({
+        "ok":          True,
+        "id":          ev_id,
+        "skill_score": round(skill_score, 1),
+        "reason":      reason,
+        "model":       model,
     })
 
 
