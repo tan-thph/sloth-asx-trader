@@ -3943,12 +3943,21 @@ def debate_postmortem():
     VALID_TYPES = {"overconfident", "missed_catalyst", "regime_mismatch",
                    "poor_entry", "stop_too_tight",
                    "poor_rr", "external_shock", "thesis_broken", "none"}
-    if error_type not in VALID_TYPES:
-        app.logger.info(
-            f"[PostMortem] event#{ev_id} ({row['ticker']}) → INVALID tag '{error_type}' via {model}"
-            f" — rejected. Raw: {raw[:120]}"
-        )
-        error_type = ""  # reject hallucinated categories
+
+    # Validate each tag individually — the model may return "tag1,tag2" per the prompt
+    # instructions. Checking the whole string against VALID_TYPES rejects every multi-tag
+    # response as invalid, even when every individual tag is correct.
+    if error_type:
+        tags = [t.strip() for t in error_type.split(",") if t.strip()]
+        valid_tags   = [t for t in tags if t in VALID_TYPES]
+        invalid_tags = [t for t in tags if t not in VALID_TYPES]
+        if invalid_tags:
+            app.logger.info(
+                f"[PostMortem] event#{ev_id} ({row['ticker']}) — stripped invalid tags "
+                f"{invalid_tags} from '{error_type}' via {model}"
+            )
+        # Keep valid tags; if none remain, treat as empty
+        error_type = ",".join(valid_tags) if valid_tags else ""
 
     # Persist if we got something useful — mark source as 'auto'
     if error_type and error_type != "none":
