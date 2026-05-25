@@ -242,47 +242,38 @@ function _renderLearningContent(d) {
     const col = map[o] || '#9ca3af';
     return `<span style="background:${col}20;color:${col};border-radius:3px;padding:1px 6px;font-size:10px;font-weight:600">${o || 'open'}</span>`;
   };
-  const errorChip = type => {
-    if (!type) return '';
-    const meta = errorTypeLabels[type] || { label: type, color: '#6b7280' };
-    return `<span title="Error type tag" style="background:${meta.color}18;color:${meta.color};border-radius:3px;padding:1px 5px;font-size:10px;margin-left:3px">${meta.label}</span>`;
-  };
-  // Error type tag button group for a given event id
-  const tagButtons = (evId, currentTag) => {
-    const tags = [
-      ['overconfident',   'OC'],
-      ['missed_catalyst', 'MC'],
-      ['regime_mismatch', 'RM'],
-      ['poor_entry',      'PE'],
-      ['stop_too_tight',  'ST'],
+  // Tag dropdown — only shown on closed events; empty cell for open/expired
+  const CLOSED_STATUSES = new Set(['win', 'loss', 'breakeven']);
+  const tagCell = (evId, currentTag, status) => {
+    if (!CLOSED_STATUSES.has(status)) return '';  // open/expired — no tag UI
+    const opts = [
+      ['', '— tag —'],
+      ['overconfident',   'Overconfident'],
+      ['missed_catalyst', 'Missed catalyst'],
+      ['regime_mismatch', 'Regime mismatch'],
+      ['poor_entry',      'Poor entry'],
+      ['stop_too_tight',  'Stop too tight'],
     ];
-    return `<div style="display:flex;gap:2px;flex-wrap:wrap">` +
-      tags.map(([key, short]) => {
-        const active = currentTag === key;
-        const meta   = errorTypeLabels[key] || { color: '#6b7280' };
-        return `<button
-          onclick="tagLearningEvent(${evId},'${key}')"
-          title="${key.replace(/_/g,' ')}"
-          style="font-size:9px;padding:1px 4px;border-radius:2px;border:1px solid ${meta.color}40;
-                 background:${active ? meta.color : 'transparent'};color:${active ? '#fff' : meta.color};
-                 cursor:pointer;line-height:1.4"
-        >${short}</button>`;
-      }).join('') +
-      (currentTag ? `<button onclick="tagLearningEvent(${evId},null)" title="Clear tag"
-        style="font-size:9px;padding:1px 4px;border-radius:2px;border:1px solid var(--border);
-               background:transparent;color:var(--text-muted);cursor:pointer;line-height:1.4">✕</button>` : '') +
-    `</div>`;
+    const meta = currentTag ? (errorTypeLabels[currentTag] || { color: '#6b7280' }) : null;
+    const borderColor = meta ? meta.color : 'var(--border)';
+    return `<select
+      data-ll-tag="${evId}"
+      onchange="tagLearningEvent(${evId}, this.value || null)"
+      style="font-size:10px;padding:2px 4px;border-radius:3px;border:1px solid ${borderColor};
+             background:var(--bg-secondary);color:${meta ? meta.color : 'var(--text-muted)'};
+             cursor:pointer;max-width:115px;font-weight:${meta ? '600' : '400'}"
+    >${opts.map(([v, l]) => `<option value="${v}"${currentTag === v ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
   };
 
   const recentCard = `
     <div class="card section-gap">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div class="card-title" style="margin:0">Recent Events (${events.length})</div>
-        <span class="text-xs text-muted">Tag error types · click ✕ to remove outliers</span>
+        <span class="text-xs text-muted">Tag failures on closed trades · ✕ removes outliers from calibration</span>
       </div>
       ${events.length ? `
         <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:700px">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:620px">
             <thead>
               <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
                 <th style="text-align:left;padding:4px 6px">Date</th>
@@ -292,7 +283,7 @@ function _renderLearningContent(d) {
                 <th style="text-align:left;padding:4px 6px">Regime</th>
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
-                <th style="text-align:left;padding:4px 6px">Error tag</th>
+                <th style="text-align:left;padding:4px 6px">Tag</th>
                 <th style="padding:4px 6px;width:28px"></th>
               </tr>
             </thead>
@@ -301,8 +292,8 @@ function _renderLearningContent(d) {
                 const pnlPct  = ev.realized_pnl_pct;
                 const pnlStr  = pnlPct != null ? (pnlPct >= 0 ? '+' : '') + Number(pnlPct).toFixed(1) + '%' : '—';
                 const pnlColor = pnlPct > 0 ? '#16a34a' : pnlPct < 0 ? '#dc2626' : 'var(--text-secondary)';
-                const isOpen  = !ev.outcome_status || ev.outcome_status === 'open';
-                return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen?'opacity:0.7':''}">
+                const isOpen   = !ev.outcome_status || ev.outcome_status === 'open';
+                return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
                   <td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
                   <td style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
                   <td style="padding:3px 6px">${ev.recommendation||'—'}</td>
@@ -310,7 +301,7 @@ function _renderLearningContent(d) {
                   <td style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
                   <td style="padding:3px 6px">${outcomeChip(ev.outcome_status)}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
-                  <td style="padding:3px 6px" id="ll-tag-${ev.id}">${tagButtons(ev.id, ev.error_type)}</td>
+                  <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status)}</td>
                   <td style="padding:3px 6px;text-align:center">
                     <button
                       onclick="deleteLearningEvent(${ev.id})"
@@ -390,8 +381,20 @@ async function tagLearningEvent(id, errorType) {
     });
     const result = await resp.json();
     if (result.ok) {
-      // Reload just the tag cell with updated buttons (no full page reload)
-      showPage('learning');  // cheapest full refresh — table is small
+      // Instant DOM update — change select border/text colour to match tag, no page reload
+      const sel = document.querySelector(`select[data-ll-tag="${id}"]`);
+      if (sel) {
+        const _errorTypeColors = {
+          overconfident: '#dc2626', missed_catalyst: '#d97706', regime_mismatch: '#7c3aed',
+          poor_entry: '#ea580c', stop_too_tight: '#0891b2',
+        };
+        const col = errorType ? (_errorTypeColors[errorType] || '#6b7280') : 'var(--border)';
+        sel.style.borderColor  = col;
+        sel.style.color        = errorType ? col : 'var(--text-muted)';
+        sel.style.fontWeight   = errorType ? '600' : '400';
+        sel.value              = errorType || '';
+      }
+      toast(errorType ? `Tagged: ${errorType.replace(/_/g,' ')}` : 'Tag cleared', 'success');
     } else {
       toast('Tag error: ' + (result.error || 'unknown'), 'error');
     }
