@@ -3529,8 +3529,11 @@ def learning_calibration():
                 parts.append(f"RR≥2.0:{hi_wr*100:.0f}%WR(n={len(hi_rr)})⚠stops/targets off→widen stops")
 
         # 6. Error-type synergy — dominant learnable error in non-shock losses (≥40%)
-        # external_shock excluded: it's unpredictable noise, not a learnable pattern
-        learnable_losses = [r for r in rows if r["outcome_status"] == "loss" and not _is_shock(r)]
+        # Only external_shock excluded — unpredictable noise, not a learnable pattern.
+        # protective_stop losses ARE included if tagged: a regime_mismatch or poor_entry
+        # that triggered a protective stop is still a learnable signal.
+        learnable_losses = [r for r in rows if r["outcome_status"] == "loss"
+                            and "external_shock" not in (r["error_type"] or "").split(",")]
         if len(learnable_losses) >= 4:
             type_counts: dict = {}
             for r in learnable_losses:

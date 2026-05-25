@@ -95,12 +95,20 @@ weight = exp(-ln(2) × days_since_close / 45)
 ```
 Old data fades gracefully — it still contributes when sample sizes are small, but cannot dominate when fresh data exists. The default window is 90 days (extended from 60d) with a 180-day hard cap.
 
-**2. Protective stop exclusion** ✅
-Two types of "good loss" are excluded from confidence-band calibration:
-- `exit_reason = 'protective_stop'` — user explicitly marks these in the Learning Loop UI (🛡? button appears on `stop_hit` losses)
-- `error_type` contains `external_shock` — auto-tagged by Ollama postmortem
+**2. Protective stop & external shock exclusion** ✅
+Exclusion rules differ by purpose:
 
-These trades still appear in the event list and affect regime/sector stats (they happened, after all), but they do **not** distort the model's confidence calibration. Their count is shown in the block prefix as `Nexcl` so Claude knows they were filtered.
+| Where excluded | `protective_stop` | `external_shock` |
+|---|---|---|
+| Confidence-band calibration | ❌ Yes | ❌ Yes |
+| Regime / sector / R:R stats | ✅ Included | ✅ Included |
+| Learnable error patterns (check 6) | ✅ Included (if tagged) | ❌ Yes |
+
+- **Confidence bands**: both excluded — neither reflects model quality (one is deliberate capital protection, the other a market accident).
+- **Regime/sector/strategy stats**: both included — they happened, Claude should see the full outcome picture. This prevents Claude from becoming overly conservative by seeing an artificially inflated win rate.
+- **Error-type synergy**: `external_shock` excluded (nothing learnable from a black swan). `protective_stop` losses **are** included if they carry error tags — e.g. a `regime_mismatch` tag on a protective stop is still a learnable signal that the trade was entered in the wrong conditions.
+
+The count of confidence-band exclusions is shown in the block prefix as `Nexcl` so Claude knows they were filtered.
 
 **3. Regime freshness gate** ✅
 If fewer than 3 trades exist in the current regime, the calibration block warns Claude rather than omitting data silently:
