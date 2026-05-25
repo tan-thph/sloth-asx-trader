@@ -231,6 +231,11 @@ with get_db() as _mig:
         ("market_context",      "TEXT"),
         ("error_type",          "TEXT"),
         ("notes",               "TEXT"),
+        # v3 additions
+        ("skill_score",         "REAL"),     # 0–10 quality score for outcome attribution
+        ("debate_summary",      "TEXT"),     # condensed bull/bear from local model
+        ("prompt_hash",         "TEXT"),     # sha1-like fingerprint of the exact prompt used
+        ("error_type_source",   "TEXT"),     # 'manual' | 'auto' — how error_type was set
     ]:
         if _col not in _le_cols:
             _mig.execute(f"ALTER TABLE ai_learning_events ADD COLUMN {_col} {_defn}")
@@ -3135,8 +3140,9 @@ def learning_log():
                      ai_confidence, ensemble_confidence, recommendation, rationale_summary,
                      suggested_stop, suggested_target, rr_ratio, was_executed, market_context, notes,
                      outcome_status, realized_pnl_aud, realized_pnl_pct, holding_period_days, exit_reason,
-                     actual_entry_price, actual_exit_price, sector)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     actual_entry_price, actual_exit_price, sector,
+                     skill_score, debate_summary, prompt_hash, error_type_source)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -3161,6 +3167,10 @@ def learning_log():
                 data.get("actual_entry_price"),
                 data.get("actual_exit_price"),
                 data.get("sector"),
+                data.get("skill_score"),
+                data.get("debate_summary"),
+                data.get("prompt_hash"),
+                data.get("error_type_source"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -3191,13 +3201,18 @@ def learning_outcome():
             fields, vals = [], []
             for col in ("outcome_status", "realized_pnl_pct", "realized_pnl_aud",
                         "holding_period_days", "exit_reason", "error_type", "notes",
-                        "actual_entry_price", "actual_exit_price", "sector"):
+                        "actual_entry_price", "actual_exit_price", "sector",
+                        "skill_score", "debate_summary", "prompt_hash"):
                 if col in data:
                     fields.append(f"{col}=?")
                     vals.append(data[col])
             if "was_executed" in data:
                 fields.append("was_executed=?")
                 vals.append(1 if data["was_executed"] else 0)
+            # When error_type is set by this endpoint (UI button), mark source as 'manual'
+            if "error_type" in data:
+                fields.append("error_type_source=?")
+                vals.append("manual" if data["error_type"] else None)
             if not fields:
                 return jsonify({"ok": True, "note": "nothing to update"})
             vals.append(event_id)
@@ -3337,14 +3352,24 @@ def learning_stats():
                     "sample": rr_rows['rr_sample'],
                 }
 
-            # Recent events (richer — include error_type for tagging UI)
+            # Recent events (richer — include error_type, source, debate_summary for UI)
             recent = conn.execute("""
                 SELECT id, timestamp, ticker, recommendation, ai_confidence, ensemble_confidence,
                        outcome_status, realized_pnl_pct, realized_pnl_aud, regime, prompt_version,
                        was_executed, suggested_stop, suggested_target, rr_ratio,
-                       holding_period_days, exit_reason, rationale_summary, error_type
+                       holding_period_days, exit_reason, rationale_summary,
+                       error_type, error_type_source, debate_summary
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
+
+            # Debate insights — events that have a stored debate_summary (for Insights card)
+            debate_rows = conn.execute("""
+                SELECT id, timestamp, ticker, outcome_status, realized_pnl_pct, debate_summary
+                FROM ai_learning_events
+                WHERE debate_summary IS NOT NULL AND debate_summary != ''
+                ORDER BY timestamp DESC LIMIT 5
+            """).fetchall()
+            debate_insights = [dict(r) for r in debate_rows]
 
             # Failure patterns — exit_reason and error_type breakdown for closed trades
             fail_exit = conn.execute("""
@@ -3368,19 +3393,21 @@ def learning_stats():
             ).fetchall()
 
         return jsonify({
-            "total":            total,
-            "closed":           closed,
-            "wins":             wins,
-            "overall_win_rate": round(wins / closed * 100, 1) if closed else None,
-            "conf_bands":       conf_bands,
-            "regime_stats":     regime_list,
-            "version_stats":    version_list,
-            "recent_events":    [dict(r) for r in recent],
-            "failed_tickers":   [dict(r) for r in failed],
-            "avg_hold_days":    avg_hold_days,
-            "exit_reason_dist": exit_reason_dist,
-            "rr_stats":         rr_stats,
-            "failure_patterns": failure_patterns,
+            "total":              total,
+            "closed":             closed,
+            "wins":               wins,
+            "overall_win_rate":   round(wins / closed * 100, 1) if closed else None,
+            "insufficient_data":  closed < 10,  # flag for UI to soften calibration display
+            "conf_bands":         conf_bands,
+            "regime_stats":       regime_list,
+            "version_stats":      version_list,
+            "recent_events":      [dict(r) for r in recent],
+            "failed_tickers":     [dict(r) for r in failed],
+            "avg_hold_days":      avg_hold_days,
+            "exit_reason_dist":   exit_reason_dist,
+            "rr_stats":           rr_stats,
+            "failure_patterns":   failure_patterns,
+            "debate_insights":    debate_insights,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3460,6 +3487,30 @@ def learning_calibration():
             if hi_wr < 0.50:
                 parts.append(f"RR≥2.0:{hi_wr*100:.0f}%WR(n={len(hi_rr)})⚠stops/targets off→widen stops")
 
+        # 6. Error-type synergy — if one error dominates recent losses (≥40%), call it out
+        loss_rows = [r for r in rows if r["outcome_status"] == "loss"]
+        if len(loss_rows) >= 4:
+            type_counts: dict = {}
+            for r in loss_rows:
+                et = r["error_type"] if "error_type" in r.keys() else None
+                if et:
+                    type_counts[et] = type_counts.get(et, 0) + 1
+            if type_counts:
+                top_et, top_cnt = max(type_counts.items(), key=lambda x: x[1])
+                top_pct = top_cnt / len(loss_rows)
+                if top_pct >= 0.40:
+                    short = {"overconfident": "OC", "missed_catalyst": "MC",
+                             "regime_mismatch": "RM", "poor_entry": "PE",
+                             "stop_too_tight": "ST"}.get(top_et, top_et)
+                    parts.append(
+                        f"top_err:{short}({top_cnt}/{len(loss_rows)}losses)→"
+                        + ("reduce conf" if top_et == "overconfident" else
+                           "check news" if top_et == "missed_catalyst" else
+                           "check regime fit" if top_et == "regime_mismatch" else
+                           "refine entry timing" if top_et == "poor_entry" else
+                           "widen stops")
+                    )
+
         if not parts:
             return jsonify({"available": False, "block": None})
 
@@ -3480,28 +3531,42 @@ def learning_calibration():
 _OLLAMA_BASE = "http://localhost:11434"
 
 
-def _call_ollama(model: str, prompt: str, timeout: int = 45) -> dict:
+def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 2) -> dict:
     """
     Send a prompt to a local Ollama model via /api/generate.
     Returns {"ok": True, "text": "..."} or {"ok": False, "error": "..."}.
-    Uses streaming=False so we get a single JSON response.
+    Uses streaming=False. Retries up to `retries` times with exponential backoff
+    on transient errors (connection reset, 503, timeout on first try only).
     """
-    try:
-        resp = requests.post(
-            f"{_OLLAMA_BASE}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
-            timeout=timeout,
-        )
-        if resp.ok:
-            data = resp.json()
-            return {"ok": True, "text": data.get("response", "").strip()}
-        return {"ok": False, "error": f"Ollama HTTP {resp.status_code}"}
-    except requests.exceptions.ConnectionError:
-        return {"ok": False, "error": "Ollama not running — start it with ollama serve"}
-    except requests.exceptions.Timeout:
-        return {"ok": False, "error": f"Ollama timeout after {timeout}s"}
-    except Exception as ex:
-        return {"ok": False, "error": str(ex)}
+    last_error = "unknown"
+    for attempt in range(retries + 1):
+        if attempt > 0:
+            time.sleep(min(2 ** attempt, 8))  # 2s, 4s, 8s cap
+        try:
+            resp = requests.post(
+                f"{_OLLAMA_BASE}/api/generate",
+                json={"model": model, "prompt": prompt, "stream": False},
+                timeout=timeout,
+            )
+            if resp.ok:
+                data = resp.json()
+                return {"ok": True, "text": data.get("response", "").strip()}
+            # 503 = Ollama loading model — retry
+            if resp.status_code == 503 and attempt < retries:
+                last_error = f"Ollama HTTP 503 (model loading)"
+                continue
+            return {"ok": False, "error": f"Ollama HTTP {resp.status_code}"}
+        except requests.exceptions.ConnectionError:
+            # Don't retry connection refused — Ollama is simply not running
+            return {"ok": False, "error": "Ollama not running — start it with ollama serve"}
+        except requests.exceptions.Timeout:
+            last_error = f"Ollama timeout after {timeout}s"
+            if attempt < retries:
+                continue  # retry on timeout
+            return {"ok": False, "error": last_error}
+        except Exception as ex:
+            return {"ok": False, "error": str(ex)}
+    return {"ok": False, "error": last_error}
 
 
 @app.route("/api/debate/status")
@@ -3726,12 +3791,12 @@ def debate_postmortem():
     if error_type not in VALID_TYPES:
         error_type = ""  # reject hallucinated categories
 
-    # Persist if we got something useful
+    # Persist if we got something useful — mark source as 'auto'
     if error_type and error_type != "none":
         try:
             with get_db() as conn:
                 conn.execute(
-                    "UPDATE ai_learning_events SET error_type=? WHERE id=?",
+                    "UPDATE ai_learning_events SET error_type=?, error_type_source='auto' WHERE id=?",
                     (error_type, ev_id)
                 )
         except Exception as ex:

@@ -143,6 +143,10 @@ const state = {
       gemini_model: 'gemini-3.5-flash',
     },
   },
+  debate: {
+    aggression: 'light',   // 'none' | 'light' | 'full'
+    model: '',             // '' = auto (preferred by pulled model priority); set by user
+  },
   dayTrading: {
     recommendations: [],   // active day-trade setups from AI
     analysisRunning: false,

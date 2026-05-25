@@ -393,23 +393,28 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     : '';
 
   // ── Internal Debate (optional — Ollama local model) ─────────────────────────
-  // Run bull/bear debates for portfolio tickers with fresh signals.
-  // Result goes in user message (not system prompt) to preserve prompt-cache hits.
+  // Respects state.debate.aggression: 'none' skips, 'light' = 3 tickers, 'full' = 8.
+  // Results go into user message (not system prompt) to preserve prompt-cache hits.
+  // debate_summary (≤200 chars) is stored in ai_learning_events for later review.
   let _debatePreamble = '';
-  if (typeof fetchDebateBatch === 'function' && state.serverOk) {
+  let _debateResults  = {};  // ticker → debate result; passed to logRecsToLearningLoop
+  if (typeof fetchDebateBatch === 'function' && state.serverOk
+      && (state.debate?.aggression || 'light') !== 'none') {
     try {
+      const { maxTickers } = typeof _aggressionParams === 'function'
+        ? _aggressionParams() : { maxTickers: 3 };
       const _debateTickers = mergedPortfolio()
         .map(h => h.ticker)
         .filter(t => state.liveSignals[t] && !state.liveSignals[t].error)
-        .slice(0, 8); // cap at 8 tickers to limit latency
+        .slice(0, maxTickers);
       if (_debateTickers.length) {
         const _dStatus = await debateStatus();
         if (_dStatus.available) {
           toast('Local model debate running…', 'info');
-          const _debates = await fetchDebateBatch(_debateTickers, 3);
-          _debatePreamble = buildDebatePreamble(_debates);
+          _debateResults  = await fetchDebateBatch(_debateTickers);
+          _debatePreamble = buildDebatePreamble(_debateResults);
           if (_debatePreamble) {
-            console.log(`[Debate] Injected for ${Object.keys(_debates).length} ticker(s)`);
+            console.log(`[Debate] Injected for ${Object.keys(_debateResults).length} ticker(s)`);
           }
         }
       }
@@ -779,7 +784,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // Fire desktop notification for high-conviction recs
     if (typeof alertHighConviction === 'function') alertHighConviction(cappedDedupedRecs);
     // Log recommendations to the Learning Loop backend (fire-and-forget)
-    logRecsToLearningLoop(cappedDedupedRecs, _activeRegime);
+    logRecsToLearningLoop(cappedDedupedRecs, _activeRegime, _debateResults);
     showPage('recommendations');
   } catch(e) {
     state.analysisRunning = false;
@@ -790,15 +795,26 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 // ── Learning Loop: log recommendations to backend ────────────────────────────
 // Fire-and-forget: called after cappedDedupedRecs is finalised.
 // Stores _learningId on each rec so markExecuted / markSkipped can update it.
-async function logRecsToLearningLoop(recs, regime) {
+// debates: optional map of ticker → debate result from fetchDebateBatch()
+async function logRecsToLearningLoop(recs, regime, debates = {}) {
   if (!state.serverOk || !recs || !recs.length) return;
   const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
+
+  // Lightweight prompt_hash — first 12 chars of a djb2-style hash over pv + regime + today
+  const _hashInput = `${pv}|${regime || ''}|${todayStr()}`;
+  let _hash = 5381;
+  for (let i = 0; i < _hashInput.length; i++) {
+    _hash = ((_hash << 5) + _hash) ^ _hashInput.charCodeAt(i);
+    _hash >>>= 0; // keep unsigned
+  }
+  const _promptHash = _hash.toString(16).padStart(8, '0').slice(0, 12);
+
   // Capture market context once per analysis run
   const _mktCtx = { rba_rate: typeof state.rbaRate === 'number' ? state.rbaRate : null };
+
   for (const r of recs) {
     if (r._learningId) continue;  // already logged — idempotency guard
     try {
-      // Derive R:R ratio if stop + target available
       const entry = Array.isArray(r.priceRange) ? r.priceRange[0] : null;
       let rrRatio = null;
       if (entry && r.stopLoss && r.target && entry !== r.stopLoss) {
@@ -806,11 +822,19 @@ async function logRecsToLearningLoop(recs, regime) {
       }
       const holding = (typeof mergedPortfolio === 'function' ? mergedPortfolio() : [])
         .find(h => h.ticker === r.ticker);
+
+      // debate_summary: condensed bull/bear for this ticker (if debate was run)
+      const _debate = debates[r.ticker];
+      const _debateSummary = (typeof buildDebateSummary === 'function' && _debate?.ok)
+        ? buildDebateSummary(_debate)
+        : null;
+
       const payload = {
         event_type:          'recommendation',
         ticker:              r.ticker,
         regime:              regime || null,
         prompt_version:      pv,
+        prompt_hash:         _promptHash,
         agent_type:          'portfolio-scanner',
         ai_confidence:       r.confidence ?? null,
         ensemble_confidence: r.ensembleConfidence ?? null,
@@ -822,6 +846,7 @@ async function logRecsToLearningLoop(recs, regime) {
         sector:              r.sector || holding?.sector || null,
         was_executed:        false,
         market_context:      _mktCtx,
+        debate_summary:      _debateSummary,
       };
       const resp = await fetch(`${API}/api/learning/log`, {
         method:  'POST',
@@ -830,7 +855,7 @@ async function logRecsToLearningLoop(recs, regime) {
       });
       if (resp.ok) {
         const result = await resp.json();
-        if (result.id) r._learningId = result.id;  // stash for outcome updates
+        if (result.id) r._learningId = result.id;
       }
     } catch (_) { /* non-critical — never break analysis */ }
   }

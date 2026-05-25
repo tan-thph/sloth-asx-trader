@@ -63,12 +63,14 @@ function _renderLearningContent(d) {
   const closed       = d.closed           ?? 0;
   const wins         = d.wins             ?? 0;
   const overallWR    = d.overall_win_rate;                // null or 0-100
-  const confBands    = d.conf_bands       || [];
-  const regimes      = d.regime_stats     || [];
-  const versions     = d.version_stats    || [];
-  const events       = d.recent_events    || [];
-  const failed       = d.failed_tickers   || [];
-  const failPats     = d.failure_patterns || {};
+  const confBands       = d.conf_bands        || [];
+  const regimes         = d.regime_stats      || [];
+  const versions        = d.version_stats     || [];
+  const events          = d.recent_events     || [];
+  const failed          = d.failed_tickers    || [];
+  const failPats        = d.failure_patterns  || {};
+  const debateInsights  = d.debate_insights   || [];
+  const insufficientData = d.insufficient_data ?? (closed < 10);
 
   // Helpers
   const fmt = (v, dp = 1) => v == null ? '—' : Number(v).toFixed(dp);
@@ -116,6 +118,14 @@ function _renderLearningContent(d) {
   const calibCard = `
     <div class="card section-gap">
       <div class="card-title">Confidence Calibration</div>
+      ${insufficientData ? `
+      <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start">
+        <span style="font-size:16px;line-height:1">⚠️</span>
+        <div>
+          <strong>Not enough data yet (${closed} closed trade${closed !== 1 ? 's' : ''})</strong> — calibration signals are unreliable below 10 closed trades.
+          Keep running analyses and marking trade outcomes; patterns will emerge naturally.
+        </div>
+      </div>` : ''}
       <p class="text-xs text-muted mb-1">
         Predicted confidence vs actual win rate per band. ⚠ = fewer than 5 samples — treat cautiously.
         Calibration notes are injected into Claude when n≥3 and |delta|>5pp.
@@ -271,8 +281,22 @@ function _renderLearningContent(d) {
       }).join('') +
     `</div>`;
   };
-  const tagCell = (evId, currentTag, status) => {
-    if (!CLOSED_STATUSES.has(status)) return '';  // open/expired — no tag UI
+  // tagCell: show shortcode buttons for closed trades; if auto-tagged, show badge + clear button
+  const tagCell = (evId, currentTag, status, tagSource) => {
+    if (!CLOSED_STATUSES.has(status)) return '';
+    if (currentTag && tagSource === 'auto') {
+      // Auto-tagged by local model — show badge with dashed border + clear option
+      const meta = errorTypeLabels[currentTag] || { label: currentTag, color: '#6b7280' };
+      return `<div style="display:flex;align-items:center;gap:4px">
+        <span title="Auto-tagged by local model — click to remove"
+          style="font-size:10px;padding:1px 6px;border-radius:3px;border:1.5px dashed ${meta.color};
+                 color:${meta.color};white-space:nowrap;cursor:default">
+          🤖 ${currentTag.replace(/_/g,' ')}
+        </span>
+        <button onclick="tagLearningEvent(${evId},'')" title="Clear auto-tag"
+          style="font-size:10px;background:none;border:none;cursor:pointer;color:var(--text-muted);padding:0 2px">×</button>
+      </div>`;
+    }
     return tagButtons(evId, currentTag);
   };
 
@@ -314,7 +338,7 @@ function _renderLearningContent(d) {
                   <td style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
                   <td style="padding:3px 6px">${outcomeChip(ev.outcome_status)}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
-                  <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status)}</td>
+                  <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
                   <td style="padding:3px 6px;text-align:center;white-space:nowrap">
                     ${showPm ? `<button id="pm-btn-${ev.id}"
                       onclick="triggerDebatePostmortem(${ev.id})"
@@ -361,6 +385,39 @@ function _renderLearningContent(d) {
       </table>
     </div>` : '';
 
+  // ── Debate Insights card (recent stored bull/bear summaries) ─────────────────
+  const debateInsightsCard = debateInsights.length ? `
+    <div class="card section-gap">
+      <div class="card-title">💬 Recent Debate Summaries</div>
+      <p class="text-xs text-muted" style="margin-bottom:8px">
+        Stored bull/bear context from local model debate at analysis time.
+        Useful for post-mortem: was the model's bear case correct?
+      </p>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        ${debateInsights.map(di => {
+          const pnlPct  = di.realized_pnl_pct;
+          const pnlStr  = pnlPct != null ? (pnlPct >= 0 ? '+' : '') + Number(pnlPct).toFixed(1) + '%' : 'open';
+          const pnlColor = pnlPct > 0 ? '#16a34a' : pnlPct < 0 ? '#dc2626' : 'var(--text-muted)';
+          const summary = di.debate_summary || '';
+          // Split on " / R:" to get bull/bear parts
+          const splitIdx = summary.indexOf(' / R:');
+          const bullPart = splitIdx > 0 ? summary.slice(2, splitIdx)         : summary; // strip "B:"
+          const bearPart = splitIdx > 0 ? summary.slice(splitIdx + 4)        : '';      // strip " / R:"
+          return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:12px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+              <span style="font-weight:600">${di.ticker}</span>
+              <div style="display:flex;gap:8px;align-items:center">
+                <span style="color:${pnlColor};font-weight:600">${pnlStr}</span>
+                <span style="font-size:10px;color:var(--text-muted)">${(di.timestamp||'').slice(0,10)}</span>
+              </div>
+            </div>
+            ${bullPart ? `<div style="color:#16a34a;margin-bottom:2px"><span style="font-size:10px;font-weight:700;margin-right:4px">BULL</span>${bullPart}</div>` : ''}
+            ${bearPart ? `<div style="color:#dc2626"><span style="font-size:10px;font-weight:700;margin-right:4px">BEAR</span>${bearPart}</div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
   // ── Internal Debate Engine status card ────────────────────────────────────────
   // Rendered async after the main content — see renderLearningDebateCard()
   const debateCardPlaceholder = `
@@ -368,7 +425,7 @@ function _renderLearningContent(d) {
 
   return summaryCards + calibCard +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
-    failureCard + recentCard + failedCard + debateCardPlaceholder;
+    failureCard + recentCard + failedCard + debateInsightsCard + debateCardPlaceholder;
 }
 
 // ── Delete a single learning event (optimise calibration dataset) ─────────────
@@ -420,37 +477,80 @@ async function renderLearningDebateCard() {
     return;
   }
 
-  // Ollama is running — show models and instructions
+  // Ollama is running — show models, selector, and aggression control
   const models = status.models || [];
   const recommended = ['qwen3:9b', 'qwen3:4b', 'gemma3:4b', 'qwen3:0.6b'];
   const pulledRec = models.filter(m => recommended.some(r => m.startsWith(r.split(':')[0])));
-  const preferred = typeof preferredDebateModel === 'function' ? preferredDebateModel(models) : models[0] || '—';
+  const currentModel = state.debate?.model || '';
+  const currentAgg   = state.debate?.aggression || 'light';
+
+  // Model <select> options — "Auto" + all pulled models
+  const modelOptions = ['', ...models].map(m => {
+    const label = m === '' ? `Auto (${typeof preferredDebateModel === 'function' ? preferredDebateModel(models) : models[0] || '?'})` : m;
+    return `<option value="${m}" ${currentModel === m ? 'selected' : ''}>${label}</option>`;
+  }).join('');
 
   el.style.display = 'block';
   el.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
       <div class="card-title" style="margin:0">🤖 Local Debate Engine</div>
-      <span style="font-size:11px;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;padding:2px 8px;border-radius:4px">● Online</span>
+      <span style="font-size:11px;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;padding:2px 8px;border-radius:4px">● Online · ${models.length} model${models.length !== 1 ? 's' : ''} pulled</span>
     </div>
-    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px;margin-bottom:10px">
-      <span class="text-muted">URL</span>
-      <span style="font-family:monospace">${status.url}</span>
-      <span class="text-muted">Active model</span>
-      <span style="font-weight:600">${preferred}</span>
-      <span class="text-muted">Pulled models</span>
-      <span>${models.length ? models.slice(0,6).join(', ') + (models.length > 6 ? ` +${models.length - 6} more` : '') : 'None'}</span>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Model</div>
+        <select onchange="setDebateModel(this.value)"
+          style="width:100%;font-size:12px;padding:4px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary)">
+          ${modelOptions}
+        </select>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Debate depth</div>
+        <select onchange="setDebateAggression(this.value)"
+          style="width:100%;font-size:12px;padding:4px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary)">
+          <option value="none"  ${currentAgg === 'none'  ? 'selected' : ''}>None — skip debate</option>
+          <option value="light" ${currentAgg === 'light' ? 'selected' : ''}>Light — top 3 tickers (fast)</option>
+          <option value="full"  ${currentAgg === 'full'  ? 'selected' : ''}>Full — up to 8 tickers</option>
+        </select>
+      </div>
     </div>
+
     ${pulledRec.length === 0 ? `
       <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px">
-        ⚠ No recommended debate model found. Pull one with:<br>
-        <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:9b</code> (best quality)
-        or <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:0.6b</code> (fastest)
+        ⚠ No recommended model found. Pull one:
+        <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:9b</code>
+        (best) · <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:0.6b</code> (fast)
       </div>` : ''}
-    <p class="text-xs text-muted" style="margin:0">
-      When Ollama is online and a model is pulled, portfolio analysis automatically runs a bull/bear
-      debate for each ticker before calling Claude. The debate output is appended to Claude's
-      user message and does <strong>not</strong> affect prompt-cache hits.
-    </p>`;
+
+    <div style="font-size:12px;color:var(--text-muted);line-height:1.5">
+      ${currentAgg === 'none'
+        ? '⏸ Debate is disabled — no local model calls during analysis.'
+        : `Bull/bear debate runs automatically before each portfolio analysis.
+           Results are appended to Claude's user message and stored as
+           <em>debate_summary</em> in the learning log for later review.
+           Does <strong>not</strong> affect prompt-cache hits.`}
+    </div>`;
+
+}
+
+function setDebateModel(model) {
+  if (!state.debate) state.debate = {};
+  state.debate.model = model;
+  scheduleSave();
+  // Invalidate debate status cache so preferred model re-resolves
+  if (typeof clearDebateStatusCache === 'function') clearDebateStatusCache();
+  toast(model ? `Debate model set to ${model}` : 'Debate model set to Auto', 'success');
+}
+
+function setDebateAggression(level) {
+  if (!state.debate) state.debate = {};
+  state.debate.aggression = level;
+  scheduleSave();
+  const labels = { none: 'disabled', light: 'Light (3 tickers)', full: 'Full (8 tickers)' };
+  toast(`Debate depth: ${labels[level] || level}`, 'success');
+  // Re-render card so the description updates
+  renderLearningDebateCard().catch(() => {});
 }
 
 async function startOllamaAndRefreshDebateCard() {
