@@ -315,6 +315,44 @@ async function fetchSkillScore(eventId, opts = {}) {
 }
 
 /**
+ * Run an adversarial two-model postmortem debate on a closed learning event.
+ *
+ * Phase 1 — both models classify independently.
+ * Phase 2 — agreement check (CONSENSUS / PARTIAL / DIVERGED).
+ * Phase 3 — on full divergence, Model A is shown Model B's position
+ *            and asked to maintain or concede.
+ *
+ * @param {number} eventId   ai_learning_events.id
+ * @param {string} modelA    Primary model (challenger in Phase 3)
+ * @param {string} modelB    Opposition model
+ * @param {object} [opts]    { timeout }
+ * @returns {Promise<{ok:boolean, error_type:string, error_type_source:string,
+ *                    verdict:string, reason:string, debate:object,
+ *                    model_a:string, model_b:string, elapsed_ms:number}|null>}
+ */
+async function fetchPostmortemDebate(eventId, modelA, modelB, opts = {}) {
+  if (!state.serverOk) return null;
+  try {
+    const r = await fetch(`${API}/api/debate/postmortem-debate`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        id:      eventId,
+        model_a: modelA,
+        model_b: modelB,
+        timeout: opts.timeout || 60,
+      }),
+      // 3× max server timeout: Phase 1 (A) + Phase 1 (B) + Phase 3 + margin
+      signal: AbortSignal.timeout(400_000),
+    });
+    if (r.ok) return await r.json();
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Trigger a post-mortem auto-tag for a closed learning event (fire-and-forget).
  * @param {number} eventId
  * @param {string} [model]

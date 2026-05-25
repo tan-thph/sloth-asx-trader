@@ -46,10 +46,11 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `actual_exit_price`   | REAL       | Actual exit price |
 | `sector`              | TEXT       | GICS sector |
 | `error_type`          | TEXT       | Comma-separated tags (loss/breakeven only) |
-| `error_type_source`   | TEXT       | `'manual'` or `'auto'` (Ollama postmortem) |
+| `error_type_source`   | TEXT       | `'manual'` / `'auto'` / `'debated-consensus'` / `'debated-merged'` / `'debated-singleton'` / `'debated'` |
 | `skill_score`         | REAL       | 0–10 analysis quality vs luck (Ollama scored) |
 | `debate_summary`      | TEXT       | ≤200-char bull/bear summary stored at analysis time |
 | `prompt_hash`         | TEXT       | 12-char djb2 fingerprint of prompt version + regime + date |
+| `postmortem_debate`   | TEXT       | JSON blob of full adversarial debate transcript (Phase 3) |
 
 > **Note on `loss_quality`:** This is a *computed property*, not a stored column. It is derived at calibration time from existing fields:
 > - `exit_reason = 'protective_stop'` → **good** loss (deliberate capital defence, excluded from confidence calibration)
@@ -164,11 +165,13 @@ Target size: 30–60 tokens.
 | `DELETE /api/learning/event/<id>`  | Write  | Hard delete |
 | `GET /api/learning/stats`          | Read   | Aggregates for Learning Loop UI |
 | `GET /api/learning/calibration`    | Read   | Decay-weighted, shock-excluded calibration block |
+| `GET /api/learning/debate-stats`   | Read   | Per-pairing adversarial-debate breakdown (consensus/partial/diverged + concede rate) |
 | `GET /api/debate/status`           | Read   | Ollama health check (60s TTL in JS) |
 | `POST /api/debate`                 | Write  | Bull/Bear debate (sequential, 4h signal-hash cache) |
-| `POST /api/debate/postmortem`      | Write  | Auto-tag error_type for loss/breakeven events |
-| `POST /api/debate/staleness`       | Write  | Freshness check for pending recs ≥ 2 days old |
-| `POST /api/debate/skill`           | Write  | Score closed trade outcome quality 0–10 |
+| `POST /api/debate/postmortem`         | Write  | Auto-tag error_type for loss/breakeven events (single model) |
+| `POST /api/debate/postmortem-debate`  | Write  | Adversarial two-model debate → CONSENSUS / PARTIAL / DIVERGED |
+| `POST /api/debate/staleness`          | Write  | Freshness check for pending recs ≥ 2 days old |
+| `POST /api/debate/skill`              | Write  | Score closed trade outcome quality 0–10 |
 
 ---
 
@@ -183,11 +186,14 @@ Target size: 30–60 tokens.
 - Recent Events table (30 most recent) — features:
   - `outcomeChip` + 🛡 badge if `protective_stop`, 🛡? button if `stop_hit` loss
   - Error tag buttons (8 tags, multi-select, auto=dashed/manual=solid border)
-  - 🤖 postmortem button (loss/breakeven, untagged only)
-  - 🔬 skill score button (all closed events); badge when scored (green/amber/red)
+  - 🤖 postmortem button (loss/breakeven, re-runnable — overwrites existing tag)
+  - ⚔️ adversarial debate button (loss/breakeven, user-initiated only)
+  - 📜 stored-debate viewer (only shown on rows where `postmortem_debate` is non-null — opens transcript modal with no model call)
+  - 🔬 skill score button (all closed events, re-runnable); badge when scored (green/amber/red)
   - ✕ delete button
 - Debate Summaries (last 5 with stored debate_summary)
-- Debate Engine card (model selector, aggression, Test Debate button)
+- **Debate Stats card** (per-pairing breakdown of all stored adversarial debates — total, consensus, partial, diverged, singleton, agreement %, A→B concede rate)
+- Debate Engine card (primary model, opposition model, aggression, Test Debate button)
 
 ### Error Tag Reference
 
@@ -212,10 +218,11 @@ Target size: 30–60 tokens.
 
 ### Implemented
 - Bull/Bear pre-analysis injected into Claude user message (4h signal-hash cache)
-- Post-mortem auto-tagging (`/api/debate/postmortem`) — losses/breakevens only
+- Single-model post-mortem auto-tagging (`/api/debate/postmortem`) — losses/breakevens only
+- **Adversarial two-model postmortem debate** (`/api/debate/postmortem-debate`) — user-initiated via ⚔️ button
 - Entry staleness check (`/api/debate/staleness`) — banner on recs ≥ 2 days old
 - Skill score (`/api/debate/skill`) — 🔬 button on all closed events
-- Debate Engine UI card (model selector, aggression=none/light/full, Test Debate)
+- Debate Engine UI card (primary model, **opposition model**, aggression=none/light/full, Test Debate)
 
 ### Future
 - Phase 6: Calibration quality debate — local model interprets calibration band deltas ("Is this underperformance signal or noise?")
@@ -279,6 +286,64 @@ Exit reason is translated to a factual description only — no tag suggestions:
 
 **Why no tag suggestions?** Early versions included hints like "consider stop_too_tight or overconfident" for `stop_hit`. This caused the model to pattern-match on exit reason rather than analyse the trade, producing identical templated reasons for all manual closes, all stop_hits, etc.
 
+---
+
+## Adversarial Two-Model Postmortem Debate
+
+**Endpoint:** `POST /api/debate/postmortem-debate`  
+**Trigger:** ⚔️ button per row — **never automatic**. Normal 🤖 runs single-model only.  
+**UI control:** Opposition model selector in Debate Engine card (`state.debate.oppositionModel`).
+
+### Three-Phase Protocol
+
+**Phase 1 — Independent classification**  
+Model A and Model B each receive the same base prompt (same `_pm_build_prompt()` output) and classify independently. Neither sees the other's response. Runs sequentially to avoid VRAM spikes (two concurrent calls on a 16 GB machine can OOM).
+
+**Phase 2 — Agreement check**
+
+| Outcome | Condition | `error_type_source` | Next |
+|---|---|---|---|
+| SINGLETON_A | A parsed, B failed | `debated-singleton` | Done (use A) |
+| SINGLETON_B | B parsed, A failed | `debated-singleton` | Done (use B) |
+| CONSENSUS | Both parsed, sets identical (or both "none") | `debated-consensus` | Done |
+| PARTIAL | Both parsed, non-empty intersection | `debated-merged` | Done (keep overlap) |
+| DIVERGED | Both parsed, no overlap | — | Phase 3 |
+
+If both models fail to produce parseable output, the endpoint returns an error rather than running Phase 3 on garbage.
+
+For PARTIAL, only the *agreed* tags are kept. This is conservative — an agreed subset is higher-confidence than either model's full output.
+
+The SINGLETON case prevents a wasteful Phase 3 debate when one model parses successfully and the other doesn't. Without this guard, the challenge round would ask the successful model to defend its real classification against an empty "none" reason from the failed model — meaningless and slow.
+
+**Phase 3 — Challenge round** *(only on full divergence)*  
+Model A is shown:
+- Its own Phase 1 tags + reason
+- Model B's Phase 1 tags + reason  
+- The original trade summary (for reference)
+
+Model A must respond: `{"maintain": bool, "final_tags": "TAG1,TAG2", "reason": "one sentence"}`
+
+- If **maintains**: Model A's (possibly refined) `final_tags` are used
+- If **concedes**: Model B's Phase 1 tags are used
+
+`error_type_source` is `debated` in either case.
+
+### Storage
+Results are stored in:
+- `error_type` — final resolved tags
+- `error_type_source` — one of: `debated-consensus`, `debated-merged`, `debated`
+- `postmortem_debate` — full JSON transcript of all phases for later inspection
+
+The transcript is available in future via the modal shown immediately after the debate completes.
+
+### Model Selection
+- **Primary model**: `state.debate.model` (or Auto via `preferredDebateModel()`)
+- **Opposition model**: `state.debate.oppositionModel` (or auto-picks a different pulled model)
+- If only one model is pulled, the ⚔️ button shows an error toast rather than starting a debate with itself
+
+### Why user-initiated only
+The divergence pattern between models is valuable but computationally expensive: up to 3 Ollama calls × model timeout. Running this automatically on every loss would block the UI for 3–5 minutes per event and keep Ollama occupied. The 🤖 button already provides fast single-model tagging; ⚔️ is for when you want a second opinion on a disputed or surprising classification.
+
 ### Classification instructions
 The model is explicitly told:
 - Classify the **primary reason** the trade failed
@@ -313,6 +378,9 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | `recommendation` first in postmortem summary | Model assumes BUY direction without it; SELL/TRIM entry analysis is inverted |
 | `think: false` API flag, not just text stripping | Text stripping requires a closing `</think>` tag; truncated output has none. API-level suppression prevents thinking tokens from consuming the token budget entirely |
 | `num_predict=350` for skill (vs 200 for others) | Skill reason strings run 30–50 tokens longer than postmortem/staleness JSON; 200 caused truncation |
+| Adversarial debate: user-initiated only | 3 sequential Ollama calls × up to 120s each; auto-running on every loss would block UI for minutes. 🤖 fast-path handles the common case; ⚔️ is for disputes |
+| PARTIAL verdict: keep intersection only | Higher confidence than either model's full output. A tag both agreed on is stronger signal than either individual response |
+| Phase 3 challenges Model A (not arbitrary) | Model A runs first and is the "incumbent"; Model B is the challenger. Incumbent defends first — this mirrors how human debates work and produces more decisive outcomes |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
 | Lessons Database deferred | Needs proper design: what is a "lesson"? How injected? Until defined, premature to implement. |
 
@@ -328,6 +396,14 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 - **Skill score badge colours:** green ≥7 · amber 4–6.9 · red <4.
 - **Ollama 404 error:** now surfaces `"Model not found — run: ollama pull <model>"` with Ollama's own error body, instead of the opaque `"Ollama HTTP 404"`.
 - **`qwen3.5:9b` is a valid Ollama model** (confirmed). It is a thinking/reasoning model — `think: false` and `/no_think` both apply. Works for all JSON endpoints after the thinking-model fixes.
+- **Shared postmortem helpers** (`_pm_build_summary`, `_pm_exit_hint`, `_pm_build_prompt`, `_pm_validate_tags`, `_pm_parse`): extracted before both postmortem endpoints so single-model and adversarial debate use identical trade summaries and prompts. This ensures Phase 1 of the adversarial debate is a fair comparison — both models see exactly what 🤖 would have seen.
+- **`_pm_validate_tags()`**: stand-alone validator (no JSON roundtrip). Splits comma-separated tags, validates each against `VALID_PM_TYPES`, and strips `none` when mixed with real tags (mutually exclusive).
+- **`error_type_source` values for adversarial debate**: `debated-consensus` (sets identical), `debated-merged` (overlap kept), `debated-singleton` (only one model parsed), `debated` (Phase 3 — one model maintained or conceded). These are distinct from `'auto'` (single 🤖 run) and `'manual'` (user button clicks).
+- **Debate transcript modal**: shown immediately after ⚔️ completes, before the page re-renders. The transcript persists in `postmortem_debate` column for later inspection. The modal shows Phase 1 tags+reason per model, Phase 3 maintain/concede decision, final tag, and timing.
+- **Per-phase logging**: each phase logs separate INFO lines with timing — `Phase 1A — qwen3.5:9b…` / `Phase 1A done (4231ms)`. Lets you tail `asx_server.log` to watch a debate progress without polling.
+- **Stored-debate viewer (📜)**: rows where `postmortem_debate IS NOT NULL` get a 📜 button next to ⚔️. Click opens the same modal used after a fresh run, with a `STORED` badge in the header. The data comes from an in-memory cache (`_learningEventsById`) populated by `_renderLearningContent` — no extra HTTP round-trip. ⚔️ still triggers a fresh debate that overwrites the stored transcript.
+- **Modal ESC-to-close**: keydown listener attached on modal mount, removed via MutationObserver when the modal element is detached (handles all three close paths: ✕ button, click-outside, ESC).
+- **Debate Stats card** (`GET /api/learning/debate-stats`): aggregates all stored `postmortem_debate` JSON blobs by `(model_a, model_b)` pair. Counts verdicts and computes `concede_rate = concedes_in_phase_3 / total_diverged`. High Agree% with low A→B = healthy pair; low Agree% with high A→B = primary model is weaker than opposition (consider swapping).
 
 ---
 

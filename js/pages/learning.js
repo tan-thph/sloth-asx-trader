@@ -22,6 +22,11 @@
 // win_rate is already a percentage (0–100), NOT a 0–1 fraction.
 // ============================================================
 
+// Module-level cache: events keyed by id from the last render of
+// _renderLearningContent(). Used by viewStoredDebate() to grab the
+// postmortem_debate JSON blob without re-fetching from the server.
+let _learningEventsById = {};
+
 async function renderLearningPage(gen) {
   const el = document.getElementById('main-content');
   if (state._renderGen !== gen) return;
@@ -55,6 +60,8 @@ async function renderLearningPage(gen) {
   if (typeof debateStatus === 'function') {
     renderLearningDebateCard().catch(() => {});
   }
+  // Async: load debate stats card (per-pairing agreement breakdown)
+  renderDebateStatsCard().catch(() => {});
 }
 
 function _renderLearningContent(d) {
@@ -71,6 +78,11 @@ function _renderLearningContent(d) {
   const failPats        = d.failure_patterns  || {};
   const debateInsights  = d.debate_insights   || [];
   const insufficientData = d.insufficient_data ?? (closed < 10);
+
+  // Cache events by id so viewStoredDebate() can look up postmortem_debate JSON
+  // without an extra HTTP round-trip.
+  _learningEventsById = {};
+  for (const ev of events) _learningEventsById[ev.id] = ev;
 
   // Helpers
   const fmt = (v, dp = 1) => v == null ? '—' : Number(v).toFixed(dp);
@@ -393,6 +405,20 @@ function _renderLearningContent(d) {
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
                     >🤖</button>` : ''}
+                    ${showPm ? `<button id="adv-btn-${ev.id}"
+                      onclick="triggerAdversarialPostmortem(${ev.id})"
+                      title="${ev.postmortem_debate ? 'Re-run adversarial debate (will overwrite stored transcript)' : 'Adversarial debate: two models classify independently, then argue to a conclusion'}"
+                      style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1"
+                      onmouseover="this.style.background='var(--bg-secondary)'"
+                      onmouseout="this.style.background='none'"
+                    >⚔️</button>` : ''}
+                    ${ev.postmortem_debate ? `<button
+                      onclick="viewStoredDebate(${ev.id})"
+                      title="View stored debate transcript (no model call)"
+                      style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1"
+                      onmouseover="this.style.background='var(--bg-secondary)'"
+                      onmouseout="this.style.background='none'"
+                    >📜</button>` : ''}
                     <button
                       onclick="deleteLearningEvent(${ev.id})"
                       title="Remove event"
@@ -469,9 +495,15 @@ function _renderLearningContent(d) {
   const debateCardPlaceholder = `
     <div id="ll-debate-card" class="card section-gap" style="display:none"></div>`;
 
+  // ── Debate Stats card (per-pairing agreement metrics) ──────────────────────────
+  // Rendered async — see renderDebateStatsCard()
+  const debateStatsPlaceholder = `
+    <div id="ll-debate-stats-card" class="card section-gap" style="display:none"></div>`;
+
   return summaryCards + calibCard +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
-    failureCard + recentCard + failedCard + debateInsightsCard + debateCardPlaceholder;
+    failureCard + recentCard + failedCard + debateInsightsCard +
+    debateStatsPlaceholder + debateCardPlaceholder;
 }
 
 // ── Delete a single learning event (optimise calibration dataset) ─────────────
@@ -527,13 +559,20 @@ async function renderLearningDebateCard() {
   const models = status.models || [];
   const recommended = ['qwen3.5:9b', 'qwen3:9b', 'qwen3:4b', 'gemma4', 'gemma3:4b', 'qwen3:0.6b'];
   const pulledRec = models.filter(m => recommended.some(r => m.startsWith(r.split(':')[0])));
-  const currentModel = state.debate?.model || '';
-  const currentAgg   = state.debate?.aggression || 'light';
+  const currentModel    = state.debate?.model || '';
+  const currentOppModel = state.debate?.oppositionModel || '';
+  const currentAgg      = state.debate?.aggression || 'light';
 
   // Model <select> options — "Auto" + all pulled models
   const modelOptions = ['', ...models].map(m => {
     const label = m === '' ? `Auto (${typeof preferredDebateModel === 'function' ? preferredDebateModel(models) : models[0] || '?'})` : m;
     return `<option value="${m}" ${currentModel === m ? 'selected' : ''}>${label}</option>`;
+  }).join('');
+
+  // Opposition model options — "Auto (pick different)" + all pulled models
+  const oppModelOptions = ['', ...models].map(m => {
+    const label = m === '' ? 'Auto (pick different model)' : m;
+    return `<option value="${m}" ${currentOppModel === m ? 'selected' : ''}>${label}</option>`;
   }).join('');
 
   el.style.display = 'block';
@@ -545,7 +584,7 @@ async function renderLearningDebateCard() {
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
       <div>
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Model</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Primary model</div>
         <select onchange="setDebateModel(this.value)"
           style="width:100%;font-size:12px;padding:4px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary)">
           ${modelOptions}
@@ -559,6 +598,21 @@ async function renderLearningDebateCard() {
           <option value="light" ${currentAgg === 'light' ? 'selected' : ''}>Light — top 3 tickers (fast)</option>
           <option value="full"  ${currentAgg === 'full'  ? 'selected' : ''}>Full — up to 8 tickers</option>
         </select>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Opposition model <span style="font-weight:400">(for ⚔️ debate)</span></div>
+        <select onchange="setOppositionModel(this.value)"
+          style="width:100%;font-size:12px;padding:4px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary)">
+          ${oppModelOptions}
+        </select>
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <p class="text-xs text-muted" style="margin:0;line-height:1.4">
+          ⚔️ on each loss row runs an adversarial 3-phase debate between primary and opposition models — only on demand.
+        </p>
       </div>
     </div>
 
@@ -677,6 +731,13 @@ function setDebateModel(model) {
   toast(model ? `Debate model set to ${model}` : 'Debate model set to Auto', 'success');
 }
 
+function setOppositionModel(model) {
+  if (!state.debate) state.debate = {};
+  state.debate.oppositionModel = model;
+  scheduleSave();
+  toast(model ? `Opposition model set to ${model}` : 'Opposition model set to Auto', 'success');
+}
+
 function setDebateAggression(level) {
   if (!state.debate) state.debate = {};
   state.debate.aggression = level;
@@ -792,6 +853,306 @@ async function triggerSkillScore(eventId) {
     toast('Skill score error: ' + e.message, 'error');
     if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Score outcome quality with local model'; }
   }
+}
+
+// ── Adversarial two-model postmortem debate ────────────────────────────────────
+// Triggered only by the ⚔️ button — never runs automatically.
+// Uses primary model (state.debate.model) vs opposition model (state.debate.oppositionModel).
+async function triggerAdversarialPostmortem(eventId) {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  const btn = document.getElementById(`adv-btn-${eventId}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; btn.title = 'Debate running…'; }
+
+  try {
+    const status = await debateStatus();
+    if (!status.available) {
+      toast('Ollama is not running — start it first', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
+      return;
+    }
+
+    const models  = status.models || [];
+    const modelA  = (typeof preferredDebateModel === 'function')
+      ? preferredDebateModel(models) : (models[0] || 'qwen3:9b');
+
+    // Opposition model — must differ from primary; fall back to second model in list
+    let modelB = state.debate?.oppositionModel || '';
+    if (!modelB || modelB === modelA) {
+      modelB = models.find(m => m !== modelA) || '';
+    }
+    if (!modelB) {
+      toast('⚔️ Debate needs at least 2 pulled models. Pull a second model (e.g. gemma3:4b).', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
+      return;
+    }
+
+    toast(`⚔️ ${modelA} vs ${modelB} — classifying event #${eventId}… (up to 3 min)`, 'info');
+    const t0 = Date.now();
+
+    const result = await fetchPostmortemDebate(eventId, modelA, modelB, { timeout: 90 });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+
+    if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
+
+    if (!result?.ok) {
+      toast(`⚔️ Debate failed (${elapsed}s): ${result?.error || 'no response'}`, 'error');
+      return;
+    }
+
+    showPostmortemDebateModal(result, eventId);
+
+    const tag = (result.error_type && result.error_type !== 'none') ? result.error_type : null;
+    if (tag) {
+      toast(`⚔️ ${result.verdict}: "${tag}" in ${elapsed}s`, 'success');
+      showPage('learning');
+    } else {
+      toast(`⚔️ ${result.verdict}: no clear error found (${elapsed}s)`, 'info');
+    }
+  } catch (e) {
+    toast('Debate error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
+  }
+}
+
+/**
+ * Show a lightweight modal with the full adversarial debate transcript.
+ * Creates (or reuses) a #pm-debate-modal overlay div.
+ */
+function showPostmortemDebateModal(result, eventId) {
+  // Remove any existing modal
+  const existing = document.getElementById('pm-debate-modal');
+  if (existing) existing.remove();
+
+  const d = result.debate || {};
+  const p1 = d.phase_1 || {};
+  const p3 = d.phase_3;
+
+  const verdictColor = {
+    'CONSENSUS':   '#16a34a',
+    'PARTIAL':     '#d97706',
+    'DIVERGED':    '#dc2626',
+    'SINGLETON_A': '#0ea5e9',
+    'SINGLETON_B': '#0ea5e9',
+  }[result.verdict] || '#6b7280';
+
+  const sourceLabel = {
+    'debated-consensus': 'Both models agreed',
+    'debated-merged':    'Tags merged from overlap',
+    'debated-singleton': result.verdict === 'SINGLETON_A'
+      ? `Only ${result.model_a} produced parseable output`
+      : `Only ${result.model_b} produced parseable output`,
+    'debated':           p3?.maintains
+      ? `${result.model_a} held its ground in challenge round`
+      : `${result.model_a} conceded to ${result.model_b}`,
+  }[result.error_type_source] || '';
+
+  const phase3Html = p3 ? `
+    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+      <div style="font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.5px;margin-bottom:6px">
+        PHASE 3 — CHALLENGE ROUND (${result.model_a})
+      </div>
+      <div style="font-size:12px;line-height:1.5;color:var(--text-primary)">
+        ${p3.maintains
+          ? `<span style="color:#16a34a;font-weight:600">Maintained</span> → final: <strong>${p3.final_tags || result.error_type}</strong>`
+          : `<span style="color:#dc2626;font-weight:600">Conceded</span> to ${result.model_b} → final: <strong>${p3.final_tags || result.error_type}</strong>`
+        }
+      </div>
+    </div>` : '';
+
+  const modal = document.createElement('div');
+  modal.id = 'pm-debate-modal';
+  modal.style.cssText = `
+    position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;
+    background:rgba(0,0,0,.5);padding:16px;`;
+  modal.innerHTML = `
+    <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:10px;
+                max-width:600px;width:100%;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+      <div style="display:flex;align-items:center;justify-content:space-between;
+                  padding:14px 18px;border-bottom:1px solid var(--border)">
+        <div>
+          <span style="font-size:14px;font-weight:700;color:var(--text-primary)">
+            ${result._stored ? '📜' : '⚔️'} Adversarial Debate — Event #${eventId}
+          </span>
+          <span style="margin-left:10px;font-size:11px;font-weight:600;
+                       color:${verdictColor};background:${verdictColor}15;
+                       border:1px solid ${verdictColor}40;padding:2px 8px;border-radius:4px">
+            ${result.verdict}
+          </span>
+          ${result._stored ? `<span style="margin-left:6px;font-size:10px;color:var(--text-muted);background:var(--bg-secondary);border:1px solid var(--border);padding:2px 6px;border-radius:4px">STORED</span>` : ''}
+        </div>
+        <button onclick="document.getElementById('pm-debate-modal').remove()"
+          style="background:none;border:none;cursor:pointer;font-size:18px;
+                 color:var(--text-muted);padding:2px 6px;border-radius:4px;line-height:1"
+          onmouseover="this.style.background='var(--bg-secondary)'"
+          onmouseout="this.style.background='none'">✕</button>
+      </div>
+
+      <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
+
+        <!-- Final verdict -->
+        <div style="background:${verdictColor}10;border:1px solid ${verdictColor}30;
+                    border-radius:6px;padding:10px 14px">
+          <div style="font-size:10px;font-weight:700;color:${verdictColor};letter-spacing:.5px;margin-bottom:4px">
+            FINAL TAG
+          </div>
+          <div style="font-size:13px;font-weight:700;color:var(--text-primary)">
+            ${result.error_type !== 'none' ? result.error_type : '(none — no clear error)'}
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${result.reason || ''}</div>
+          ${sourceLabel ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic">${sourceLabel}</div>` : ''}
+        </div>
+
+        <!-- Phase 1: Model A -->
+        <div style="border:1px solid var(--border);border-radius:6px;padding:10px 14px">
+          <div style="font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.5px;margin-bottom:6px">
+            PHASE 1 — ${(result.model_a || 'Model A').toUpperCase()}
+          </div>
+          <div style="font-size:12px;font-weight:600;color:var(--text-primary);margin-bottom:3px">
+            ${p1.tags_a || '(none)'}
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.5">${p1.reason_a || ''}</div>
+        </div>
+
+        <!-- Phase 1: Model B -->
+        <div style="border:1px solid var(--border);border-radius:6px;padding:10px 14px">
+          <div style="font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.5px;margin-bottom:6px">
+            PHASE 1 — ${(result.model_b || 'Model B').toUpperCase()}
+          </div>
+          <div style="font-size:12px;font-weight:600;color:var(--text-primary);margin-bottom:3px">
+            ${p1.tags_b || '(none)'}
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.5">${p1.reason_b || ''}</div>
+        </div>
+
+        ${phase3Html}
+
+        <!-- Models + timing footer -->
+        <div style="font-size:11px;color:var(--text-muted);text-align:right">
+          ${result.model_a} vs ${result.model_b} · ${result.elapsed_ms ? (result.elapsed_ms/1000).toFixed(1)+'s' : ''}
+        </div>
+      </div>
+    </div>`;
+
+  // Click outside to close
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  // ESC to close (one-shot listener — removed when modal is dismissed)
+  const escHandler = (e) => {
+    if (e.key === 'Escape') {
+      modal.remove();
+      document.removeEventListener('keydown', escHandler);
+    }
+  };
+  document.addEventListener('keydown', escHandler);
+  // Also clean up the keydown listener when the modal is removed by other means
+  const observer = new MutationObserver(() => {
+    if (!document.body.contains(modal)) {
+      document.removeEventListener('keydown', escHandler);
+      observer.disconnect();
+    }
+  });
+  observer.observe(document.body, { childList: true });
+  document.body.appendChild(modal);
+}
+
+// ── View a stored adversarial debate transcript (no model call) ───────────────
+// 📜 button on rows where ai_learning_events.postmortem_debate is non-null.
+// Reads from the in-memory cache populated by _renderLearningContent.
+function viewStoredDebate(eventId) {
+  const ev = _learningEventsById[eventId];
+  if (!ev || !ev.postmortem_debate) {
+    toast('No stored debate for this event', 'error');
+    return;
+  }
+  let debate;
+  try {
+    debate = typeof ev.postmortem_debate === 'string'
+      ? JSON.parse(ev.postmortem_debate)
+      : ev.postmortem_debate;
+  } catch (e) {
+    toast('Could not parse stored debate JSON', 'error');
+    return;
+  }
+  const p1 = debate.phase_1 || {};
+  // Reconstruct a result-shaped object for the modal
+  const result = {
+    ok:                true,
+    id:                eventId,
+    error_type:        ev.error_type || debate.final_tags || 'none',
+    error_type_source: ev.error_type_source || 'debated',
+    verdict:           debate.verdict || '?',
+    reason:            '(stored transcript — see per-phase reasoning below)',
+    model_a:           p1.model_a || '?',
+    model_b:           p1.model_b || '?',
+    debate:            debate,
+    elapsed_ms:        null,
+    _stored:           true,
+  };
+  showPostmortemDebateModal(result, eventId);
+}
+
+// ── Debate stats card — per-pairing agreement breakdown ────────────────────────
+async function renderDebateStatsCard() {
+  const el = document.getElementById('ll-debate-stats-card');
+  if (!el) return;
+
+  let data;
+  try {
+    const r = await fetch(`${API}/api/learning/debate-stats`);
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  if (!data.pairs?.length) return;   // No debates yet — hide card
+
+  // For each pair, compute "agreement rate" = (consensus + partial) / total
+  const rows = data.pairs.map(p => {
+    const agreement = p.total ? Math.round((p.consensus + p.partial) / p.total * 100) : 0;
+    const concedeStr = p.concede_rate != null
+      ? `${Math.round(p.concede_rate * 100)}% <span class="text-xs text-muted">(${p.concede_count}/${p.concede_total})</span>`
+      : '—';
+    return `
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px;font-weight:600;font-size:11px">${p.model_a}</td>
+        <td style="padding:5px 8px;font-weight:600;font-size:11px">${p.model_b}</td>
+        <td style="padding:5px 8px;text-align:right">${p.total}</td>
+        <td style="padding:5px 8px;text-align:right;color:#16a34a">${p.consensus}</td>
+        <td style="padding:5px 8px;text-align:right;color:#d97706">${p.partial}</td>
+        <td style="padding:5px 8px;text-align:right;color:#dc2626">${p.diverged}</td>
+        <td style="padding:5px 8px;text-align:right;color:#0ea5e9">${p.singleton_a + p.singleton_b}</td>
+        <td style="padding:5px 8px;text-align:right;font-weight:600">${agreement}%</td>
+        <td style="padding:5px 8px;text-align:right">${concedeStr}</td>
+      </tr>`;
+  }).join('');
+
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div class="card-title" style="margin:0">📊 Debate Stats</div>
+      <span class="text-xs text-muted">${data.total_debates} debate${data.total_debates !== 1 ? 's' : ''} · ${data.pairs.length} pairing${data.pairs.length !== 1 ? 's' : ''}</span>
+    </div>
+    <p class="text-xs text-muted" style="margin-bottom:8px">
+      Which model pairings actually disagree (useful) vs always rubber-stamp.
+      High <strong>diverged %</strong> with low <strong>concede rate</strong> = healthy adversarial pressure.
+    </p>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border);background:var(--bg-secondary)">
+            <th style="text-align:left;padding:5px 8px">Model A</th>
+            <th style="text-align:left;padding:5px 8px">Model B</th>
+            <th style="text-align:right;padding:5px 8px" title="Total debates run between this pair">Total</th>
+            <th style="text-align:right;padding:5px 8px" title="Both models agreed on tag set">Cons</th>
+            <th style="text-align:right;padding:5px 8px" title="Partial overlap — intersection kept">Part</th>
+            <th style="text-align:right;padding:5px 8px" title="Full divergence → Phase 3 challenge round">Div</th>
+            <th style="text-align:right;padding:5px 8px" title="Only one model parsed (no debate possible)">Sgl</th>
+            <th style="text-align:right;padding:5px 8px" title="(Consensus + Partial) / Total — how often models reached agreement without challenge">Agree%</th>
+            <th style="text-align:right;padding:5px 8px" title="When diverged, how often A conceded to B in Phase 3 (high = A is less confident)">A→B</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${data.skipped ? `<p class="text-xs text-muted" style="margin-top:6px">⚠ ${data.skipped} transcript${data.skipped !== 1 ? 's' : ''} could not be parsed (skipped from stats)</p>` : ''}`;
 }
 
 // ── Toggle a single tag on/off within the multi-tag set ───────────────────────

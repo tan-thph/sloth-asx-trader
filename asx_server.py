@@ -235,7 +235,8 @@ with get_db() as _mig:
         ("skill_score",         "REAL"),     # 0–10 quality score for outcome attribution
         ("debate_summary",      "TEXT"),     # condensed bull/bear from local model
         ("prompt_hash",         "TEXT"),     # sha1-like fingerprint of the exact prompt used
-        ("error_type_source",   "TEXT"),     # 'manual' | 'auto' — how error_type was set
+        ("error_type_source",   "TEXT"),     # 'manual' | 'auto' | 'debated*' — how error_type was set
+        ("postmortem_debate",   "TEXT"),     # JSON blob of full adversarial debate transcript
     ]:
         if _col not in _le_cols:
             _mig.execute(f"ALTER TABLE ai_learning_events ADD COLUMN {_col} {_defn}")
@@ -3358,7 +3359,8 @@ def learning_stats():
                        outcome_status, realized_pnl_pct, realized_pnl_aud, regime, prompt_version,
                        was_executed, suggested_stop, suggested_target, rr_ratio,
                        holding_period_days, exit_reason, rationale_summary,
-                       error_type, error_type_source, debate_summary, skill_score
+                       error_type, error_type_source, debate_summary, skill_score,
+                       postmortem_debate
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
 
@@ -3417,6 +3419,87 @@ def learning_stats():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/learning/debate-stats")
+def learning_debate_stats():
+    """
+    Aggregate statistics from stored adversarial-debate transcripts.
+    Groups by (model_a, model_b) pair and counts each verdict type.
+    Also tracks concede rate (when DIVERGED → Phase 3, how often A conceded).
+
+    Response:
+        {
+          "pairs": [
+            {
+              "model_a": "qwen3.5:9b", "model_b": "gemma3:4b",
+              "total": 12, "consensus": 5, "partial": 4, "diverged": 3,
+              "singleton_a": 0, "singleton_b": 0,
+              "concede_count": 1, "concede_total": 3, "concede_rate": 0.33
+            }, ...
+          ],
+          "total_debates": 12
+        }
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT postmortem_debate
+                FROM ai_learning_events
+                WHERE postmortem_debate IS NOT NULL AND postmortem_debate != ''
+            """).fetchall()
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+    pairs: dict = {}   # (model_a, model_b) → stats dict
+    skipped = 0
+
+    for r in rows:
+        try:
+            d = json.loads(r["postmortem_debate"])
+        except Exception:
+            skipped += 1
+            continue
+        p1 = d.get("phase_1") or {}
+        ma = p1.get("model_a") or "?"
+        mb = p1.get("model_b") or "?"
+        verdict = d.get("verdict") or "?"
+        key = (ma, mb)
+        p = pairs.setdefault(key, {
+            "model_a":      ma,
+            "model_b":      mb,
+            "total":        0,
+            "consensus":    0,
+            "partial":      0,
+            "diverged":     0,
+            "singleton_a":  0,
+            "singleton_b":  0,
+            "concede_count": 0,
+            "concede_total": 0,
+        })
+        p["total"] += 1
+        if   verdict == "CONSENSUS":   p["consensus"]   += 1
+        elif verdict == "PARTIAL":     p["partial"]     += 1
+        elif verdict == "SINGLETON_A": p["singleton_a"] += 1
+        elif verdict == "SINGLETON_B": p["singleton_b"] += 1
+        elif verdict == "DIVERGED":
+            p["diverged"]      += 1
+            p["concede_total"] += 1
+            # Phase 3 transcript records maintain=true/false
+            if (d.get("phase_3") or {}).get("maintains") is False:
+                p["concede_count"] += 1
+
+    result_pairs = []
+    for p in sorted(pairs.values(), key=lambda x: -x["total"]):
+        p["concede_rate"] = round(p["concede_count"] / p["concede_total"], 2) \
+            if p["concede_total"] else None
+        result_pairs.append(p)
+
+    return jsonify({
+        "pairs":         result_pairs,
+        "total_debates": sum(p["total"] for p in result_pairs),
+        "skipped":       skipped,
+    })
 
 
 @app.route("/api/learning/calibration")
@@ -3811,89 +3894,51 @@ def debate_bull_bear():
     })
 
 
-@app.route("/api/debate/postmortem", methods=["POST"])
-def debate_postmortem():
+# ── Shared postmortem helpers ─────────────────────────────────────────────────
+# Used by both /api/debate/postmortem (single model) and
+# /api/debate/postmortem-debate (adversarial two-model).
+
+VALID_PM_TYPES = {
+    "overconfident", "missed_catalyst", "regime_mismatch",
+    "poor_entry", "stop_too_tight",
+    "poor_rr", "external_shock", "thesis_broken", "none",
+}
+
+def _pm_build_summary(row) -> str:
     """
-    Auto-tag a closed learning event with an error_type using a local model.
-    The model is given the trade summary and asked to classify the failure.
-
-    Request body:
-        {
-          "id":            123,           // ai_learning_events.id
-          "model":         "qwen3:9b",   // optional
-          "timeout":       30             // optional
-        }
-
-    Response:
-        {"ok": true, "id": 123, "error_type": "overconfident", "reason": "..."}
+    Compact trade summary for postmortem classification.
+    recommendation must be first — without it models assume BUY direction
+    and misinterpret entry prices for SELL/TRIM trades.
     """
-    data    = request.get_json() or {}
-    ev_id   = data.get("id")
-    model   = data.get("model") or "qwen3:9b"
-    # Default 60 s, max 120 s. No retries — if it times out once it will again.
-    tout    = min(int(data.get("timeout", 60)), 120)
-
-    if not ev_id:
-        return jsonify({"ok": False, "error": "id required"}), 400
-
-    # Load the event
-    try:
-        with get_db() as conn:
-            row = conn.execute(
-                "SELECT * FROM ai_learning_events WHERE id=?", (ev_id,)
-            ).fetchone()
-    except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 500
-
-    if not row:
-        return jsonify({"ok": False, "error": "event not found"}), 404
-
     status = row["outcome_status"]
-    if status not in ("win", "loss", "breakeven"):
-        return jsonify({"ok": False, "error": f"event is '{status}', not closed"}), 400
-
-    # Wins don't need error classification — errors on wins are just luck, not skill failure
-    if status == "win":
-        return jsonify({
-            "ok": False,
-            "error": "Wins don't get error tags — error tags are for losses and breakevens only.",
-        }), 400
-
-    # Compact trade summary with enough context for meaningful classification
-    # recommendation (BUY/SELL/TRIM) must be first — without it the model assumes
-    # BUY direction and misinterprets entry prices for SELL/TRIM trades.
-    summary = (
+    return (
         f"{row['recommendation'] or '?'} {row['ticker']} {status.upper()}"
-        + (f" | PnL={row['realized_pnl_pct']:.1f}%"            if row["realized_pnl_pct"]       is not None else "")
-        + (f" | hold={row['holding_period_days']}d"              if row["holding_period_days"]    is not None else "")
-        + (f" | AI_conf={row['ai_confidence']:.0%}"              if row["ai_confidence"]          is not None else "")
-        + (f" | RR={row['rr_ratio']:.1f}"                        if row["rr_ratio"]               is not None else "")
-        + (f" | entry={row['actual_entry_price']:.3f}"           if row["actual_entry_price"]     is not None else "")
-        + (f" | stop={row['suggested_stop']:.3f}"                if row["suggested_stop"]         is not None else "")
-        + (f" | target={row['suggested_target']:.3f}"            if row["suggested_target"]       is not None else "")
-        + (f" | exit={row['exit_reason']}"                       if row["exit_reason"]            else "")
-        + (f" | regime={row['regime']}"                          if row["regime"]                 else "")
-        + (f" | sector={row['sector']}"                          if row["sector"]                 else "")
+        + (f" | PnL={row['realized_pnl_pct']:.1f}%"           if row["realized_pnl_pct"]    is not None else "")
+        + (f" | hold={row['holding_period_days']}d"             if row["holding_period_days"] is not None else "")
+        + (f" | AI_conf={row['ai_confidence']:.0%}"             if row["ai_confidence"]       is not None else "")
+        + (f" | RR={row['rr_ratio']:.1f}"                       if row["rr_ratio"]            is not None else "")
+        + (f" | entry={row['actual_entry_price']:.3f}"          if row["actual_entry_price"]  is not None else "")
+        + (f" | stop={row['suggested_stop']:.3f}"               if row["suggested_stop"]      is not None else "")
+        + (f" | target={row['suggested_target']:.3f}"           if row["suggested_target"]    is not None else "")
+        + (f" | exit={row['exit_reason']}"                      if row["exit_reason"]         else "")
+        + (f" | regime={row['regime']}"                         if row["regime"]              else "")
+        + (f" | sector={row['sector']}"                         if row["sector"]              else "")
     )
 
-    # Include the original AI rationale — most useful context for classification
-    rationale = (row["rationale_summary"] or "").strip()[:250]
-    exit_reason = row["exit_reason"] or ""
 
-    # Exit-reason context — factual only, no tag suggestions.
-    # Suggesting tags causes the model to pattern-match on exit_reason instead of reasoning.
-    if exit_reason == "stop_hit":
-        exit_hint = "The pre-set stop loss price was triggered."
-    elif exit_reason == "time_exit":
-        exit_hint = "The position was closed after the expected holding period without reaching stop or target."
-    elif exit_reason == "manual":
-        exit_hint = "The position was closed manually before reaching stop or target."
-    elif exit_reason == "protective_stop":
-        exit_hint = "The position was deliberately closed early to protect capital."
-    else:
-        exit_hint = ""
+def _pm_exit_hint(exit_reason: str) -> str:
+    """Factual exit context — no tag suggestions (causes model to pattern-match on method)."""
+    return {
+        "stop_hit":       "The pre-set stop loss price was triggered.",
+        "time_exit":      "The position was closed after the expected holding period without reaching stop or target.",
+        "manual":         "The position was closed manually before reaching stop or target.",
+        "protective_stop":"The position was deliberately closed early to protect capital.",
+    }.get(exit_reason, "")
 
-    prompt = (
+
+def _pm_build_prompt(summary: str, rationale: str, exit_hint: str) -> str:
+    """Full postmortem classification prompt."""
+    return (
         f"ASX closed trade (LOSS or BREAKEVEN): {summary}\n"
         + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "No original rationale stored.\n")
         + (f"Exit context: {exit_hint}\n" if exit_hint else "")
@@ -3917,49 +3962,118 @@ def debate_postmortem():
         "No markdown, no explanation outside JSON. /no_think"
     )
 
+
+def _pm_validate_tags(error_type: str, ev_id: int, model: str, label: str = "") -> str:
+    """
+    Validate a comma-separated tag string against VALID_PM_TYPES.
+
+    - Splits on comma, validates each individually (multi-tag responses
+      like 'poor_rr,stop_too_tight' must be checked per-tag, not as a whole).
+    - Logs and strips invalid tags.
+    - Strips 'none' if mixed with real tags ('none' is mutually exclusive).
+    - Returns clean string or '' if nothing valid remains.
+    """
+    if not error_type:
+        return ""
+    tags         = [t.strip() for t in error_type.split(",") if t.strip()]
+    valid_tags   = [t for t in tags if t in VALID_PM_TYPES]
+    invalid_tags = [t for t in tags if t not in VALID_PM_TYPES]
+    if invalid_tags:
+        app.logger.info(
+            f"[PostMortem{label}] event#{ev_id} — stripped invalid tags "
+            f"{invalid_tags} from '{error_type}' via {model}"
+        )
+    # 'none' is mutually exclusive with real tags — strip it when others are present
+    real_tags = [t for t in valid_tags if t != "none"]
+    if real_tags and len(real_tags) < len(valid_tags):
+        app.logger.info(
+            f"[PostMortem{label}] event#{ev_id} — stripped 'none' from mixed tag "
+            f"set '{','.join(valid_tags)}' via {model}"
+        )
+        valid_tags = real_tags
+    return ",".join(valid_tags) if valid_tags else ""
+
+
+def _pm_parse(raw: str, ev_id: int, model: str, label: str = ""):
+    """
+    Parse postmortem model output → (error_type, reason).
+    Strips think tags, handles JSON + regex fallback, validates each tag.
+    Returns ('', '') on complete failure.
+    """
+    raw = _strip_think_tags(raw)
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$",       "", raw)
+    app.logger.debug(f"[PostMortem{label}] raw output for event#{ev_id}: {raw[:200]}")
+    try:
+        parsed     = json.loads(raw)
+        error_type = parsed.get("error_type", "")
+        reason     = parsed.get("reason", "")
+    except Exception:
+        m          = re.search(r'"error_type"\s*:\s*"([^"]+)"', raw)
+        error_type = m.group(1) if m else ""
+        m2         = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
+        reason     = m2.group(1) if m2 else raw[:120]
+
+    error_type = _pm_validate_tags(error_type, ev_id, model, label)
+    return error_type, reason
+
+
+# ── Single-model postmortem endpoint ──────────────────────────────────────────
+
+@app.route("/api/debate/postmortem", methods=["POST"])
+def debate_postmortem():
+    """
+    Auto-tag a closed learning event with an error_type using a local model.
+
+    Request body:
+        { "id": 123, "model": "qwen3:9b", "timeout": 30 }
+
+    Response:
+        {"ok": true, "id": 123, "error_type": "overconfident", "reason": "..."}
+    """
+    data  = request.get_json() or {}
+    ev_id = data.get("id")
+    model = data.get("model") or "qwen3:9b"
+    tout  = min(int(data.get("timeout", 60)), 120)
+
+    if not ev_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT * FROM ai_learning_events WHERE id=?", (ev_id,)
+            ).fetchone()
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+    if not row:
+        return jsonify({"ok": False, "error": "event not found"}), 404
+
+    status = row["outcome_status"]
+    if status not in ("win", "loss", "breakeven"):
+        return jsonify({"ok": False, "error": f"event is '{status}', not closed"}), 400
+
+    # Wins don't need error classification
+    if status == "win":
+        return jsonify({
+            "ok": False,
+            "error": "Wins don't get error tags — error tags are for losses and breakevens only.",
+        }), 400
+
+    summary   = _pm_build_summary(row)
+    rationale = (row["rationale_summary"] or "").strip()[:250]
+    exit_hint = _pm_exit_hint(row["exit_reason"] or "")
+    prompt    = _pm_build_prompt(summary, rationale, exit_hint)
+
     # think=False: suppress thinking tokens so they don't eat num_predict budget
     # retries=0 — timeout means model is too slow; caller should switch to a smaller model
     result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 
-    # Parse model output — expect {"error_type": "...", "reason": "..."}
-    raw = result["text"].strip()
-    raw = _strip_think_tags(raw)          # safety net: strip any residual think tags
-    raw = re.sub(r"^```[a-z]*\n?", "", raw)
-    raw = re.sub(r"\n?```$", "", raw)
-    app.logger.debug(f"[PostMortem] raw output for event#{ev_id}: {raw[:200]}")
-    try:
-        parsed    = json.loads(raw)
-        error_type = parsed.get("error_type", "")
-        reason    = parsed.get("reason", "")
-    except Exception:
-        # If JSON parse fails, try regex extraction
-        m = re.search(r'"error_type"\s*:\s*"([^"]+)"', raw)
-        error_type = m.group(1) if m else ""
-        m2 = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
-        reason = m2.group(1) if m2 else raw[:120]
+    error_type, reason = _pm_parse(result["text"].strip(), ev_id, model)
 
-    VALID_TYPES = {"overconfident", "missed_catalyst", "regime_mismatch",
-                   "poor_entry", "stop_too_tight",
-                   "poor_rr", "external_shock", "thesis_broken", "none"}
-
-    # Validate each tag individually — the model may return "tag1,tag2" per the prompt
-    # instructions. Checking the whole string against VALID_TYPES rejects every multi-tag
-    # response as invalid, even when every individual tag is correct.
-    if error_type:
-        tags = [t.strip() for t in error_type.split(",") if t.strip()]
-        valid_tags   = [t for t in tags if t in VALID_TYPES]
-        invalid_tags = [t for t in tags if t not in VALID_TYPES]
-        if invalid_tags:
-            app.logger.info(
-                f"[PostMortem] event#{ev_id} ({row['ticker']}) — stripped invalid tags "
-                f"{invalid_tags} from '{error_type}' via {model}"
-            )
-        # Keep valid tags; if none remain, treat as empty
-        error_type = ",".join(valid_tags) if valid_tags else ""
-
-    # Persist if we got something useful — mark source as 'auto'
     if error_type and error_type != "none":
         try:
             with get_db() as conn:
@@ -3981,7 +4095,7 @@ def debate_postmortem():
     else:
         app.logger.info(
             f"[PostMortem] event#{ev_id} ({row['ticker']}) → parse failure via {model}"
-            f" | raw: {raw[:120]}"
+            f" | raw: {result['text'][:120]}"
         )
 
     return jsonify({
@@ -3990,6 +4104,243 @@ def debate_postmortem():
         "error_type": error_type or "none",
         "reason":     reason,
         "model":      model,
+    })
+
+
+# ── Adversarial two-model postmortem debate endpoint ──────────────────────────
+
+@app.route("/api/debate/postmortem-debate", methods=["POST"])
+def debate_postmortem_debate():
+    """
+    Three-phase adversarial postmortem: two models classify independently,
+    then Model A is challenged to maintain or concede on full divergence.
+
+    Phase 1 — Both models classify the trade independently.
+    Phase 2 — Compare tag sets:
+               identical  → CONSENSUS  (debated-consensus)
+               overlap    → PARTIAL    (debated-merged, keep intersection)
+               no overlap → DIVERGED   → Phase 3
+    Phase 3 — Model A sees its own result plus Model B's position and must
+               respond {maintain, final_tags, reason}.  If it concedes,
+               Model B's tags are used.
+
+    Request body:
+        { "id": 123, "model_a": "qwen3.5:9b", "model_b": "gemma3:4b", "timeout": 60 }
+
+    Response:
+        {
+          "ok": true, "id": 123,
+          "error_type": "stop_too_tight",
+          "error_type_source": "debated-consensus",
+          "reason": "...", "verdict": "CONSENSUS",
+          "model_a": "...", "model_b": "...",
+          "debate": { ... full transcript ... },
+          "elapsed_ms": 8200
+        }
+    """
+    data    = request.get_json() or {}
+    ev_id   = data.get("id")
+    model_a = data.get("model_a") or "qwen3:9b"
+    model_b = data.get("model_b") or "gemma3:4b"
+    tout    = min(int(data.get("timeout", 60)), 120)
+
+    if not ev_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT * FROM ai_learning_events WHERE id=?", (ev_id,)
+            ).fetchone()
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+    if not row:
+        return jsonify({"ok": False, "error": "event not found"}), 404
+
+    status = row["outcome_status"]
+    if status not in ("loss", "breakeven"):
+        return jsonify({"ok": False, "error": f"Debate only runs on losses/breakevens, got '{status}'"}), 400
+
+    summary     = _pm_build_summary(row)
+    rationale   = (row["rationale_summary"] or "").strip()[:250]
+    exit_hint   = _pm_exit_hint(row["exit_reason"] or "")
+    base_prompt = _pm_build_prompt(summary, rationale, exit_hint)
+
+    # ── Phase 1: Independent classification ───────────────────────────────────
+    t0    = time.time()
+    app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1A — {model_a}…")
+    res_a = _call_ollama(model_a, base_prompt, timeout=tout, retries=0, think=False)
+    app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1A done ({int((time.time()-t0)*1000)}ms)")
+
+    t1 = time.time()
+    app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1B — {model_b}…")
+    res_b = _call_ollama(model_b, base_prompt, timeout=tout, retries=0, think=False)
+    app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1B done ({int((time.time()-t1)*1000)}ms)")
+
+    if not res_a["ok"]:
+        return jsonify({"ok": False, "error": f"Model A ({model_a}) failed: {res_a['error']}"})
+    if not res_b["ok"]:
+        return jsonify({"ok": False, "error": f"Model B ({model_b}) failed: {res_b['error']}"})
+
+    tags_a_str, reason_a = _pm_parse(res_a["text"].strip(), ev_id, model_a, label=f"/{model_a}")
+    tags_b_str, reason_b = _pm_parse(res_b["text"].strip(), ev_id, model_b, label=f"/{model_b}")
+
+    # Tag sets — exclude "none" from overlap logic (treat as empty)
+    set_a       = set(t for t in tags_a_str.split(",") if t) if tags_a_str else set()
+    set_b       = set(t for t in tags_b_str.split(",") if t) if tags_b_str else set()
+    set_a_logic = set_a - {"none"}
+    set_b_logic = set_b - {"none"}
+
+    # Did each model actually produce *parseable* output? Empty tags + empty reason
+    # means parse failure (vs an intentional "none" verdict which has a reason).
+    a_parsed_ok = bool(tags_a_str) or bool(reason_a.strip())
+    b_parsed_ok = bool(tags_b_str) or bool(reason_b.strip())
+
+    transcript = {
+        "phase_1": {
+            "model_a":  model_a, "tags_a":  tags_a_str, "reason_a": reason_a,
+            "model_b":  model_b, "tags_b":  tags_b_str, "reason_b": reason_b,
+        }
+    }
+
+    # ── Phase 2: Agreement check ──────────────────────────────────────────────
+    # First handle parse failures — running a debate on garbage wastes a Phase 3 call.
+    if not a_parsed_ok and not b_parsed_ok:
+        # Both failed — return error, persist nothing
+        return jsonify({
+            "ok": False,
+            "id": ev_id,
+            "error": f"Both models failed to produce parseable output. "
+                     f"A raw: {res_a['text'][:80]} | B raw: {res_b['text'][:80]}",
+        })
+
+    if a_parsed_ok and not b_parsed_ok:
+        # Only A produced usable output — accept it as singleton
+        verdict      = "SINGLETON_A"
+        final_tags   = tags_a_str
+        final_reason = reason_a
+        final_source = "debated-singleton"
+
+    elif b_parsed_ok and not a_parsed_ok:
+        # Only B produced usable output — accept it as singleton
+        verdict      = "SINGLETON_B"
+        final_tags   = tags_b_str
+        final_reason = reason_b
+        final_source = "debated-singleton"
+
+    elif set_a == set_b or (not set_a_logic and not set_b_logic):
+        # Both produced output AND agree (including both saying "none")
+        verdict      = "CONSENSUS"
+        final_tags   = tags_a_str or tags_b_str
+        final_reason = reason_a or reason_b
+        final_source = "debated-consensus"
+
+    elif set_a_logic & set_b_logic:
+        # Partial overlap — keep only agreed tags
+        verdict      = "PARTIAL"
+        merged       = sorted(set_a_logic & set_b_logic)
+        final_tags   = ",".join(merged)
+        final_reason = f"A: {reason_a[:80]} | B: {reason_b[:80]}"
+        final_source = "debated-merged"
+
+    else:
+        # ── Phase 3: Challenge round (full divergence only) ───────────────────
+        verdict = "DIVERGED"
+        t2 = time.time()
+        app.logger.info(
+            f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 3 — "
+            f"challenging {model_a}: {tags_a_str or 'none'} vs {model_b}: {tags_b_str or 'none'}"
+        )
+        challenge_prompt = (
+            f"You previously classified this trade as: {tags_a_str or 'none'}\n"
+            f"Your reason: {reason_a}\n\n"
+            f"Another model ({model_b}) classified it as: {tags_b_str or 'none'}\n"
+            f"Their reason: {reason_b}\n\n"
+            "Trade summary for reference:\n"
+            f"{summary}\n\n"
+            "Do you maintain your classification, or concede to the other model?\n"
+            'Respond with JSON only: {"maintain":true,"final_tags":"TAG1,TAG2","reason":"one sentence"}\n'
+            'To concede: {"maintain":false,"final_tags":"TAG1,TAG2","reason":"one sentence"}\n'
+            "No markdown, no explanation outside JSON. /no_think"
+        )
+        res_ch = _call_ollama(model_a, challenge_prompt, timeout=tout, retries=0, think=False)
+        app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 3 done ({int((time.time()-t2)*1000)}ms)")
+
+        transcript["phase_3"] = {
+            "challenger": model_a,
+            "raw": (res_ch.get("text", "")[:300] if res_ch["ok"] else res_ch["error"]),
+        }
+
+        # Default if challenge call fails or parse fails — A keeps its tags
+        final_tags   = tags_a_str
+        final_reason = reason_a
+        final_source = "debated"
+
+        if res_ch["ok"]:
+            ch_raw = res_ch["text"].strip()
+            ch_raw = _strip_think_tags(ch_raw)
+            ch_raw = re.sub(r"^```[a-z]*\n?", "", ch_raw)
+            ch_raw = re.sub(r"\n?```$",       "", ch_raw)
+            try:
+                ch = json.loads(ch_raw)
+                maintains = bool(ch.get("maintain", True))
+                ch_tags   = ch.get("final_tags", "")
+                ch_reason = ch.get("reason", "")
+            except Exception:
+                m_m       = re.search(r'"maintain"\s*:\s*(true|false)', ch_raw, re.I)
+                maintains = (m_m.group(1).lower() == "true") if m_m else True
+                m_t       = re.search(r'"final_tags"\s*:\s*"([^"]+)"', ch_raw)
+                ch_tags   = m_t.group(1) if m_t else tags_a_str
+                m_r       = re.search(r'"reason"\s*:\s*"([^"]+)"', ch_raw)
+                ch_reason = m_r.group(1) if m_r else ""
+
+            transcript["phase_3"]["maintains"]  = maintains
+            transcript["phase_3"]["final_tags"] = ch_tags
+
+            if maintains:
+                # Validate A's possibly-refined final tags directly (no JSON roundtrip)
+                clean_tags  = _pm_validate_tags(ch_tags or tags_a_str, ev_id, model_a, label="/challenge")
+                final_tags   = clean_tags or tags_a_str
+                final_reason = ch_reason or reason_a
+            else:
+                # A conceded — use B's tags
+                final_tags   = tags_b_str
+                final_reason = f"Conceded to {model_b}: {ch_reason or reason_b}"
+
+    transcript["verdict"]    = verdict
+    transcript["final_tags"] = final_tags
+
+    elapsed_ms = int((time.time() - t0) * 1000)
+    app.logger.info(
+        f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) → {verdict} "
+        f"| final={final_tags or 'none'} in {elapsed_ms}ms"
+    )
+
+    # Persist results — only store if we have an actual tag (not 'none' or empty)
+    if final_tags and final_tags != "none":
+        try:
+            with get_db() as conn:
+                conn.execute(
+                    """UPDATE ai_learning_events
+                          SET error_type=?, error_type_source=?, postmortem_debate=?
+                        WHERE id=?""",
+                    (final_tags, final_source, json.dumps(transcript), ev_id)
+                )
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 500
+
+    return jsonify({
+        "ok":                True,
+        "id":                ev_id,
+        "error_type":        final_tags or "none",
+        "error_type_source": final_source,
+        "reason":            final_reason,
+        "verdict":           verdict,
+        "model_a":           model_a,
+        "model_b":           model_b,
+        "debate":            transcript,
+        "elapsed_ms":        elapsed_ms,
     })
 
 
