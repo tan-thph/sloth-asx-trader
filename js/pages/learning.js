@@ -242,27 +242,33 @@ function _renderLearningContent(d) {
     const col = map[o] || '#9ca3af';
     return `<span style="background:${col}20;color:${col};border-radius:3px;padding:1px 6px;font-size:10px;font-weight:600">${o || 'open'}</span>`;
   };
-  // Tag dropdown — only shown on closed events; empty cell for open/expired
+  // Tag buttons — only rendered for closed trades; click to set, click again to clear
   const CLOSED_STATUSES = new Set(['win', 'loss', 'breakeven']);
+  const tagButtons = (evId, currentTag) => {
+    const tags = [
+      ['overconfident',   'OC', 'Overconfident — stated confidence was too high for market conditions'],
+      ['missed_catalyst', 'MC', 'Missed catalyst — earnings, news or event not accounted for'],
+      ['regime_mismatch', 'RM', 'Regime mismatch — wrong strategy for the prevailing market regime'],
+      ['poor_entry',      'PE', 'Poor entry — timing or entry price was off'],
+      ['stop_too_tight',  'ST', 'Stop too tight — stopped out on normal volatility before move played out'],
+    ];
+    return `<div style="display:flex;gap:2px">` +
+      tags.map(([key, short, tip]) => {
+        const active = currentTag === key;
+        const meta   = errorTypeLabels[key] || { color: '#6b7280' };
+        return `<button
+          onclick="tagLearningEvent(${evId},'${active ? '' : key}')"
+          title="${tip}"
+          style="font-size:9px;padding:1px 5px;border-radius:2px;line-height:1.5;cursor:pointer;
+                 border:1px solid ${meta.color}${active ? '' : '55'};font-weight:${active ? 700 : 500};
+                 background:${active ? meta.color : 'transparent'};color:${active ? '#fff' : meta.color}"
+        >${short}</button>`;
+      }).join('') +
+    `</div>`;
+  };
   const tagCell = (evId, currentTag, status) => {
     if (!CLOSED_STATUSES.has(status)) return '';  // open/expired — no tag UI
-    const opts = [
-      ['', '— tag —'],
-      ['overconfident',   'Overconfident'],
-      ['missed_catalyst', 'Missed catalyst'],
-      ['regime_mismatch', 'Regime mismatch'],
-      ['poor_entry',      'Poor entry'],
-      ['stop_too_tight',  'Stop too tight'],
-    ];
-    const meta = currentTag ? (errorTypeLabels[currentTag] || { color: '#6b7280' }) : null;
-    const borderColor = meta ? meta.color : 'var(--border)';
-    return `<select
-      data-ll-tag="${evId}"
-      onchange="tagLearningEvent(${evId}, this.value || null)"
-      style="font-size:10px;padding:2px 4px;border-radius:3px;border:1px solid ${borderColor};
-             background:var(--bg-secondary);color:${meta ? meta.color : 'var(--text-muted)'};
-             cursor:pointer;max-width:115px;font-weight:${meta ? '600' : '400'}"
-    >${opts.map(([v, l]) => `<option value="${v}"${currentTag === v ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+    return tagButtons(evId, currentTag);
   };
 
   const recentCard = `
@@ -283,7 +289,7 @@ function _renderLearningContent(d) {
                 <th style="text-align:left;padding:4px 6px">Regime</th>
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
-                <th style="text-align:left;padding:4px 6px">Tag</th>
+                <th style="text-align:left;padding:4px 6px" title="OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight — click to tag, click again to clear">Tag reason ℹ</th>
                 <th style="padding:4px 6px;width:28px"></th>
               </tr>
             </thead>
@@ -373,28 +379,17 @@ async function deleteLearningEvent(id) {
 //            'poor_entry' | 'stop_too_tight' | null (clear)
 async function tagLearningEvent(id, errorType) {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  const et = errorType || null;  // empty string (toggle-off) → null (clear in DB)
   try {
     const resp = await fetch(`${API}/api/learning/outcome`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ id, error_type: errorType }),
+      body:    JSON.stringify({ id, error_type: et }),
     });
     const result = await resp.json();
     if (result.ok) {
-      // Instant DOM update — change select border/text colour to match tag, no page reload
-      const sel = document.querySelector(`select[data-ll-tag="${id}"]`);
-      if (sel) {
-        const _errorTypeColors = {
-          overconfident: '#dc2626', missed_catalyst: '#d97706', regime_mismatch: '#7c3aed',
-          poor_entry: '#ea580c', stop_too_tight: '#0891b2',
-        };
-        const col = errorType ? (_errorTypeColors[errorType] || '#6b7280') : 'var(--border)';
-        sel.style.borderColor  = col;
-        sel.style.color        = errorType ? col : 'var(--text-muted)';
-        sel.style.fontWeight   = errorType ? '600' : '400';
-        sel.value              = errorType || '';
-      }
-      toast(errorType ? `Tagged: ${errorType.replace(/_/g,' ')}` : 'Tag cleared', 'success');
+      // Re-render learning page so button active state reflects new tag correctly
+      showPage('learning');
     } else {
       toast('Tag error: ' + (result.error || 'unknown'), 'error');
     }
