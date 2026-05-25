@@ -506,7 +506,7 @@ async function renderLearningDebateCard() {
       <p class="text-xs text-muted" style="margin-top:6px">
         Ollama is not running. Install from
         <a href="https://ollama.com/download" target="_blank" style="color:#3b82f6">ollama.com/download</a>,
-        then run <code style="background:var(--bg-secondary);padding:1px 4px;border-radius:2px">ollama pull qwen3:9b</code>
+        then run <code style="background:var(--bg-secondary);padding:1px 4px;border-radius:2px">ollama pull qwen3.5:9b</code>
         to enable bull/bear debate before Claude analyses your portfolio.
       </p>
       <button onclick="startOllamaAndRefreshDebateCard()"
@@ -518,7 +518,7 @@ async function renderLearningDebateCard() {
 
   // Ollama is running — show models, selector, and aggression control
   const models = status.models || [];
-  const recommended = ['qwen3:9b', 'qwen3:4b', 'gemma4', 'gemma3:4b', 'qwen3:0.6b'];
+  const recommended = ['qwen3.5:9b', 'qwen3:9b', 'qwen3:4b', 'gemma4', 'gemma3:4b', 'qwen3:0.6b'];
   const pulledRec = models.filter(m => recommended.some(r => m.startsWith(r.split(':')[0])));
   const currentModel = state.debate?.model || '';
   const currentAgg   = state.debate?.aggression || 'light';
@@ -558,7 +558,7 @@ async function renderLearningDebateCard() {
     ${pulledRec.length === 0 ? `
       <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px">
         ⚠ No recommended model found. Pull one:
-        <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:9b</code>
+        <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3.5:9b</code>
         (best) · <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:0.6b</code> (fast)
       </div>` : ''}
 
