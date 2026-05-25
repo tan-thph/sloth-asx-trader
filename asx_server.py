@@ -3590,10 +3590,19 @@ def learning_calibration():
 _OLLAMA_BASE = "http://localhost:11434"
 
 
-def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1) -> dict:
+def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1,
+                 think: bool | None = None, num_predict: int = 200) -> dict:
     """
     Send a prompt to a local Ollama model via /api/generate.
     Returns {"ok": True, "text": "..."} or {"ok": False, "error": "..."}.
+
+    Args:
+        think:       None = let Ollama decide (default for debate/analysis calls).
+                     False = disable extended thinking for JSON-output endpoints —
+                     prevents thinking tokens from eating num_predict budget before
+                     the model can emit JSON. Ignored by non-thinking models.
+        num_predict: Max output tokens. Default 200 is sufficient for JSON responses;
+                     use higher values for free-text debate output.
 
     Retry policy:
       - HTTP 503 (model still loading): retry up to `retries` times with backoff.
@@ -3606,18 +3615,21 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1) -
         if attempt > 0:
             time.sleep(min(2 ** attempt, 8))   # 2 s, 4 s … for 503 retries only
         try:
+            payload = {
+                "model":      model,
+                "prompt":     prompt,
+                "stream":     False,
+                "keep_alive": "10m",        # keep model in VRAM between calls
+                "options": {
+                    "num_predict": num_predict,
+                    "temperature": 0.3,     # lower temp → more deterministic classification
+                },
+            }
+            if think is not None:
+                payload["think"] = think   # Ollama ≥0.6: disable/enable thinking tokens
             resp = requests.post(
                 f"{_OLLAMA_BASE}/api/generate",
-                json={
-                    "model":      model,
-                    "prompt":     prompt,
-                    "stream":     False,
-                    "keep_alive": "10m",        # keep model in VRAM between calls
-                    "options": {
-                        "num_predict": 200,     # cap output tokens → faster + less OOM risk
-                        "temperature": 0.3,     # lower temp → more deterministic classification
-                    },
-                },
+                json=payload,
                 timeout=timeout,
             )
             if resp.ok:
@@ -3647,13 +3659,31 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1) -
 
 
 def _strip_think_tags(text: str) -> str:
-    """Remove <think>...</think> blocks emitted by reasoning models (e.g. qwen3).
+    """Remove <think>...</think> blocks emitted by reasoning models (e.g. qwen3/qwen3.5).
 
-    If stripping leaves nothing (the entire response was a thinking block),
-    return the original text so callers can still attempt regex extraction.
+    Handles three cases:
+    1. Complete block: <think>…</think> — stripped cleanly, remainder returned.
+    2. Entire response inside block: stripping leaves nothing — return original
+       so callers can still attempt regex extraction inside the think content.
+    3. Unclosed block: model was cut off by num_predict before writing </think>
+       and never emitted JSON. Detected and flagged so callers see empty string
+       (all fallbacks will also fail — this is the correct signal to surface an
+       error rather than return a garbage parse).
+
+    NOTE: passing think=False to _call_ollama is the primary fix for case 3.
+    This function is the safety net for models that ignore that flag.
     """
+    # Case 1 & 2: complete think block(s)
     stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    return stripped if stripped else text
+    if stripped:
+        return stripped
+    # Case 2: everything was inside think tags — return original for regex fallback
+    if "</think>" in text:
+        return text
+    # Case 3: unclosed think tag — model was truncated, no JSON was ever written
+    if "<think>" in text:
+        return ""   # signal to caller: nothing parseable here
+    return text
 
 
 @app.route("/api/debate/status")
@@ -3880,14 +3910,15 @@ def debate_postmortem():
         "No markdown, no explanation outside JSON. /no_think"
     )
 
+    # think=False: suppress thinking tokens so they don't eat num_predict budget
     # retries=0 — timeout means model is too slow; caller should switch to a smaller model
-    result = _call_ollama(model, prompt, timeout=tout, retries=0)
+    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 
     # Parse model output — expect {"error_type": "...", "reason": "..."}
     raw = result["text"].strip()
-    raw = _strip_think_tags(raw)          # remove <think>...</think> from reasoning models
+    raw = _strip_think_tags(raw)          # safety net: strip any residual think tags
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
     app.logger.debug(f"[PostMortem] raw output for event#{ev_id}: {raw[:200]}")
@@ -3990,7 +4021,7 @@ def debate_staleness():
         "No markdown, no explanation outside JSON. /no_think"
     )
 
-    result = _call_ollama(model, prompt, timeout=tout, retries=0)
+    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False)
     if not result["ok"]:
         return jsonify({"ok": False, "error": result["error"]})
 
@@ -4074,12 +4105,14 @@ def debate_skill():
         "No markdown. /no_think"
     )
 
-    result = _call_ollama(model, prompt, timeout=tout, retries=0)
+    # think=False: suppress thinking tokens so they don't consume num_predict before JSON
+    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False)
     if not result["ok"]:
         return jsonify({"ok": False, "error": result["error"]})
 
     raw = result["text"].strip()
-    raw = _strip_think_tags(raw)          # strip <think>...</think> from reasoning models
+    raw = _strip_think_tags(raw)          # safety net: strip any residual think tags
+    app.logger.debug(f"[Skill] raw output for event#{ev_id}: {repr(raw[:200])}")
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$",       "", raw)
     try:
@@ -4092,7 +4125,7 @@ def debate_skill():
         skill_raw = float(m.group(1)) if m else None
         m2        = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
         reason    = m2.group(1) if m2 else ""
-        # Fallback 2: prose forms — "7/10", "7 out of 10", "score: 7", "score is 7"
+        # Fallback 2: prose forms — "7/10", "7 out of 10", "score: 7"
         if skill_raw is None:
             m3 = re.search(r'\b(\d+(?:\.\d+)?)\s*/\s*10\b', raw)
             if not m3:
@@ -4104,7 +4137,11 @@ def debate_skill():
     try:
         skill_score = max(0.0, min(10.0, float(skill_raw)))
     except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "Could not parse skill_score from model output"})
+        app.logger.warning(
+            f"[Skill] parse failure for event#{ev_id} via {model} — raw: {repr(raw[:200])}"
+        )
+        return jsonify({"ok": False,
+                        "error": f"Could not parse skill_score from model output: {raw[:120]!r}"})
 
     try:
         with get_db() as conn:
