@@ -101,12 +101,14 @@ Exclusion rules differ by calibration check — they are not a blanket filter:
 | Where excluded | `protective_stop` | `external_shock` |
 |---|---|---|
 | Confidence-band calibration | ❌ Excluded | ❌ Excluded |
-| Regime / sector / R:R / decay stats | ✅ Included | ✅ Included |
-| Learnable error patterns (check 6) | ✅ Included (if tagged) | ❌ Excluded |
+| Error pattern learning | ✅ If has error tags | ❌ Excluded |
+| Regime / Sector / Decay / R:R | ✅ Included | ✅ Included |
+
+Protective stops are excluded from confidence calibration regardless of tags, but contribute to error pattern learning if they carry analytical error tags (e.g. `regime_mismatch`, `poor_entry`).
 
 - **Confidence bands**: both excluded — neither reflects model quality. One is deliberate capital protection, the other a market accident.
+- **Error pattern learning**: `external_shock` excluded (nothing learnable from a black swan). `protective_stop` losses are included if tagged — a `regime_mismatch` tag on a protective stop is still a learnable signal that the trade was entered in the wrong conditions.
 - **Regime/sector/strategy stats**: both included — they happened, Claude should see the full outcome picture. Excluding them would inflate the win rate and make Claude overconfident.
-- **Error-type synergy**: `external_shock` excluded (nothing learnable from a black swan). `protective_stop` losses **are** included if they carry error tags — e.g. a `regime_mismatch` tag on a protective stop is still a learnable signal that the trade was entered in the wrong conditions.
 
 The count of confidence-band exclusions is shown in the block prefix as `Nexcl` so Claude knows they were filtered.
 
@@ -200,7 +202,7 @@ Target size: 30–60 tokens.
 | `thesis_broken` | TB | New info invalidated thesis post-entry | ✅ Yes |
 | `external_shock` | ES | Black swan / unpredictable market event | ❌ Excluded |
 
-`protective_stop` exit_reason is also excluded from confidence-band calibration — it classifies how the trade was exited (deliberate capital protection), not why the thesis failed. But `protective_stop` losses with error tags still contribute to error-type synergy (check 6).
+`protective_stop` exit_reason is excluded from confidence-band calibration — it classifies how the trade was exited (deliberate capital protection), not why the thesis failed. Protective stops are excluded from confidence calibration regardless of tags, but contribute to error pattern learning if they carry analytical error tags.
 
 ---
 
