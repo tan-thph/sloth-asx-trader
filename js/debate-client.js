@@ -102,6 +102,7 @@ function preferredDebateModel(pulledModels = []) {
 
   const PRIORITY = [
     'qwen3:9b', 'qwen3:8b', 'qwen3:4b', 'qwen3:0.6b',
+    'gemma4',                                         // gemma4:e4b etc.
     'gemma3:4b', 'gemma3:2b', 'llama3.2:3b', 'phi4-mini',
   ];
   for (const p of PRIORITY) {

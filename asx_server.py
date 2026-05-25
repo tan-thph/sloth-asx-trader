@@ -3626,6 +3626,14 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1) -
             # 503 = Ollama still loading the model weights — worth retrying
             if resp.status_code == 503 and attempt < retries:
                 continue
+            if resp.status_code == 404:
+                # Model not pulled — surface Ollama's own message if available
+                try:
+                    body = resp.json().get("error", "")
+                except Exception:
+                    body = resp.text[:120]
+                return {"ok": False,
+                        "error": f"Model not found — run: ollama pull <model>. Detail: {body}"}
             return {"ok": False, "error": f"Ollama HTTP {resp.status_code}"}
         except requests.exceptions.ConnectionError:
             return {"ok": False, "error": "Ollama not running — run: ollama serve"}

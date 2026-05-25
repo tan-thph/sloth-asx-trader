@@ -518,7 +518,7 @@ async function renderLearningDebateCard() {
 
   // Ollama is running — show models, selector, and aggression control
   const models = status.models || [];
-  const recommended = ['qwen3:9b', 'qwen3:4b', 'gemma3:4b', 'qwen3:0.6b'];
+  const recommended = ['qwen3:9b', 'qwen3:4b', 'gemma4', 'gemma3:4b', 'qwen3:0.6b'];
   const pulledRec = models.filter(m => recommended.some(r => m.startsWith(r.split(':')[0])));
   const currentModel = state.debate?.model || '';
   const currentAgg   = state.debate?.aggression || 'light';
