@@ -349,25 +349,32 @@ function _renderLearningContent(d) {
                          onmouseover="this.style.color='#15803d'" onmouseout="this.style.color='var(--text-muted)'"
                        >🛡?</button>`
                     : '';
-                // 🤖 post-mortem button only for losses/breakevens without a tag yet
-                const showPm = TAG_STATUSES.has(ev.outcome_status) && !ev.error_type;
-                // 🔬 skill score — show badge if scored, button if closed and unscored
-                const skillBadge = ev.skill_score != null
-                  ? `<span id="skill-${ev.id}"
-                       title="Skill score: ${ev.skill_score}/10 — how much outcome reflects analysis quality vs luck"
+                // 🤖 post-mortem — always show for loss/breakeven so re-runs are possible
+                const showPm = TAG_STATUSES.has(ev.outcome_status);
+                const pmTitle = ev.error_type
+                  ? 'Re-run auto-tag (will overwrite existing tag)'
+                  : 'Auto-tag with local model (Ollama)';
+                // 🔬 skill score — badge (if scored) + button always shown for closed trades
+                // Badge and button are separate elements so the button survives after scoring.
+                const skillScore = ev.skill_score;
+                const skillBadgeEl = skillScore != null
+                  ? `<span id="skill-badge-${ev.id}"
+                       title="Skill score: ${skillScore}/10 — how much outcome reflects analysis quality vs luck"
                        style="font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600;
-                              background:${ev.skill_score>=7?'#dcfce7':ev.skill_score>=4?'#fef3c7':'#fee2e2'};
-                              color:${ev.skill_score>=7?'#15803d':ev.skill_score>=4?'#92400e':'#991b1b'}"
-                     >${ev.skill_score.toFixed(1)}</span>`
-                  : isClosed
-                    ? `<button id="skill-btn-${ev.id}"
-                         onclick="triggerSkillScore(${ev.id})"
-                         title="Score outcome quality (skill vs luck) with local model"
-                         style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1;color:var(--text-muted)"
-                         onmouseover="this.style.background='var(--bg-secondary)'"
-                         onmouseout="this.style.background='none'"
-                       >🔬</button>`
-                    : '';
+                              background:${skillScore>=7?'#dcfce7':skillScore>=4?'#fef3c7':'#fee2e2'};
+                              color:${skillScore>=7?'#15803d':skillScore>=4?'#92400e':'#991b1b'}"
+                     >${skillScore.toFixed(1)}</span>`
+                  : `<span id="skill-badge-${ev.id}"></span>`;
+                const skillBtnEl = isClosed
+                  ? `<button id="skill-btn-${ev.id}"
+                       onclick="triggerSkillScore(${ev.id})"
+                       title="${skillScore != null ? 'Re-score outcome quality' : 'Score outcome quality (skill vs luck)'}"
+                       style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1;color:var(--text-muted)"
+                       onmouseover="this.style.background='var(--bg-secondary)'"
+                       onmouseout="this.style.background='none'"
+                     >🔬</button>`
+                  : '';
+                const skillBadge = skillBadgeEl + skillBtnEl;
                 return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
                   <td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
                   <td style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
@@ -381,7 +388,7 @@ function _renderLearningContent(d) {
                   <td style="padding:3px 6px;text-align:center;white-space:nowrap">
                     ${showPm ? `<button id="pm-btn-${ev.id}"
                       onclick="triggerDebatePostmortem(${ev.id})"
-                      title="Auto-tag with local model (Ollama)"
+                      title="${pmTitle}"
                       style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1"
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
@@ -764,16 +771,18 @@ async function triggerSkillScore(eventId) {
 
     if (result?.ok) {
       const score = result.skill_score;
-      // Replace button with score badge inline (no full page re-render needed)
-      const cell = btn?.parentElement;
-      if (cell) {
-        const bg    = score >= 7 ? '#dcfce7' : score >= 4 ? '#fef3c7' : '#fee2e2';
-        const color = score >= 7 ? '#15803d' : score >= 4 ? '#92400e' : '#991b1b';
-        cell.innerHTML = `<span id="skill-${eventId}"
+      const bg    = score >= 7 ? '#dcfce7' : score >= 4 ? '#fef3c7' : '#fee2e2';
+      const color = score >= 7 ? '#15803d' : score >= 4 ? '#92400e' : '#991b1b';
+      // Update badge span only — button stays in the DOM so the user can re-score
+      const badgeEl = document.getElementById(`skill-badge-${eventId}`);
+      if (badgeEl) {
+        badgeEl.outerHTML = `<span id="skill-badge-${eventId}"
           title="Skill score: ${score}/10 — ${(result.reason||'').slice(0,80)}"
           style="font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600;background:${bg};color:${color}"
         >${score.toFixed(1)}</span>`;
       }
+      // Re-enable button and update tooltip to reflect re-score mode
+      if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Re-score outcome quality'; }
       toast(`🔬 Skill score: ${score}/10 — ${(result.reason||'').slice(0,60)}`, 'success');
     } else {
       toast(`Skill score failed: ${result?.error || 'no response'}`, 'error');
