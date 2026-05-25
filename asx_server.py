@@ -3832,20 +3832,36 @@ def debate_postmortem():
     # Compact trade summary with enough context for meaningful classification
     summary = (
         f"{row['ticker']} {status.upper()}"
-        + (f" | PnL={row['realized_pnl_pct']:.1f}%"    if row["realized_pnl_pct"]    is not None else "")
-        + (f" | hold={row['holding_period_days']}d"      if row["holding_period_days"] is not None else "")
-        + (f" | AI_conf={row['ai_confidence']:.0%}"      if row["ai_confidence"]       is not None else "")
-        + (f" | exit={row['exit_reason']}"               if row["exit_reason"]         else "")
-        + (f" | regime={row['regime']}"                  if row["regime"]              else "")
-        + (f" | sector={row['sector']}"                  if row["sector"]              else "")
+        + (f" | PnL={row['realized_pnl_pct']:.1f}%"            if row["realized_pnl_pct"]       is not None else "")
+        + (f" | hold={row['holding_period_days']}d"              if row["holding_period_days"]    is not None else "")
+        + (f" | AI_conf={row['ai_confidence']:.0%}"              if row["ai_confidence"]          is not None else "")
+        + (f" | RR={row['rr_ratio']:.1f}"                        if row["rr_ratio"]               is not None else "")
+        + (f" | entry={row['actual_entry_price']:.3f}"           if row["actual_entry_price"]     is not None else "")
+        + (f" | stop={row['suggested_stop']:.3f}"                if row["suggested_stop"]         is not None else "")
+        + (f" | target={row['suggested_target']:.3f}"            if row["suggested_target"]       is not None else "")
+        + (f" | exit={row['exit_reason']}"                       if row["exit_reason"]            else "")
+        + (f" | regime={row['regime']}"                          if row["regime"]                 else "")
+        + (f" | sector={row['sector']}"                          if row["sector"]                 else "")
     )
 
-    # Include the original AI rationale — this is the most useful context for classification
+    # Include the original AI rationale — most useful context for classification
     rationale = (row["rationale_summary"] or "").strip()[:250]
+    exit_reason = row["exit_reason"] or ""
+
+    # Build exit-aware guidance hint to steer the model when rationale is thin
+    if exit_reason == "stop_hit":
+        exit_hint = "The stop was hit — consider stop_too_tight (normal volatility) or overconfident (stop placed poorly)."
+    elif exit_reason == "time_exit":
+        exit_hint = "Trade was closed on time — consider thesis_broken (thesis didn't play out) or poor_entry (wrong timing)."
+    elif exit_reason == "manual":
+        exit_hint = "Trade was closed manually — consider thesis_broken or missed_catalyst."
+    else:
+        exit_hint = ""
 
     prompt = (
         f"ASX closed trade (LOSS or BREAKEVEN): {summary}\n"
-        + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "")
+        + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "No original rationale stored.\n")
+        + (f"Hint: {exit_hint}\n" if exit_hint else "")
         + "\n"
         "Select 1-2 error tags from this list (comma-separate if multiple apply):\n"
         "  overconfident   - AI confidence was too high given the actual risk\n"
@@ -3856,8 +3872,10 @@ def debate_postmortem():
         "  poor_rr         - reward:risk ratio was too low from the start to justify the trade\n"
         "  external_shock  - outcome driven by unpredictable external event (policy change, black swan)\n"
         "  thesis_broken   - thesis was invalidated by new information that emerged after entry\n"
-        "  none            - loss was reasonable/random, no clear systematic error\n"
+        "  none            - ONLY use this if you have a specific reason the loss was unforeseeable\n"
         "\n"
+        "You MUST pick at least one tag. Use the exit reason, R:R ratio, holding period, and confidence "
+        "as signals even if rationale is missing.\n"
         'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence"}\n'
         "No markdown, no explanation outside JSON. /no_think"
     )
@@ -3872,6 +3890,7 @@ def debate_postmortem():
     raw = _strip_think_tags(raw)          # remove <think>...</think> from reasoning models
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
+    app.logger.debug(f"[PostMortem] raw output for event#{ev_id}: {raw[:200]}")
     try:
         parsed    = json.loads(raw)
         error_type = parsed.get("error_type", "")
@@ -3887,6 +3906,10 @@ def debate_postmortem():
                    "poor_entry", "stop_too_tight",
                    "poor_rr", "external_shock", "thesis_broken", "none"}
     if error_type not in VALID_TYPES:
+        app.logger.info(
+            f"[PostMortem] event#{ev_id} ({row['ticker']}) → INVALID tag '{error_type}' via {model}"
+            f" — rejected. Raw: {raw[:120]}"
+        )
         error_type = ""  # reject hallucinated categories
 
     # Persist if we got something useful — mark source as 'auto'
@@ -3903,8 +3926,16 @@ def debate_postmortem():
             )
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 500
+    elif error_type == "none":
+        app.logger.info(
+            f"[PostMortem] event#{ev_id} ({row['ticker']}) → none (model found no systematic error) via {model}"
+            f" | {reason[:80] if reason else ''}"
+        )
     else:
-        app.logger.info(f"[PostMortem] event#{ev_id} ({row['ticker']}) → no clear error via {model}")
+        app.logger.info(
+            f"[PostMortem] event#{ev_id} ({row['ticker']}) → parse failure via {model}"
+            f" | raw: {raw[:120]}"
+        )
 
     return jsonify({
         "ok":         True,
