@@ -3689,9 +3689,11 @@ def debate_bull_bear():
 
     if not bull_result.get("ok") or not bear_result.get("ok"):
         err = bull_result.get("error") or bear_result.get("error") or "unknown"
+        app.logger.warning(f"[Debate] {ticker} FAILED via {model} ({elapsed_ms}ms): {err}")
         return jsonify({"ok": False, "ticker": ticker, "error": err,
                         "elapsed_ms": elapsed_ms})
 
+    app.logger.info(f"[Debate] {ticker} bull+bear via {model} → {elapsed_ms}ms ✓")
     return jsonify({
         "ok":         True,
         "ticker":     ticker,
@@ -3799,8 +3801,14 @@ def debate_postmortem():
                     "UPDATE ai_learning_events SET error_type=?, error_type_source='auto' WHERE id=?",
                     (error_type, ev_id)
                 )
+            app.logger.info(
+                f"[PostMortem] event#{ev_id} ({row['ticker']}) → {error_type} via {model}"
+                f" | {reason[:60] if reason else 'no reason'}"
+            )
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 500
+    else:
+        app.logger.info(f"[PostMortem] event#{ev_id} ({row['ticker']}) → no clear error via {model}")
 
     return jsonify({
         "ok":         True,
@@ -3817,6 +3825,7 @@ if __name__ == "__main__":
     print("  http://localhost:5000")
     print("  Open asx_trading.html in your browser")
     print("=" * 60)
+    print(f"  Debate Engine: {_OLLAMA_BASE} (GET /api/debate/status to check)")
     if _NE_OK:
         _ensure_news_scheduler()
         print("  News Scanner: enabled (4×/day via Ollama)")

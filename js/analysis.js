@@ -410,11 +410,23 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       if (_debateTickers.length) {
         const _dStatus = await debateStatus();
         if (_dStatus.available) {
-          toast('Local model debate running…', 'info');
+          const _debModel = typeof preferredDebateModel === 'function'
+            ? preferredDebateModel(_dStatus.models) : '?';
+          toast(`🤖 ${_debModel} debating ${_debateTickers.join(', ')}…`, 'info');
+          const _debateT0 = Date.now();
           _debateResults  = await fetchDebateBatch(_debateTickers);
           _debatePreamble = buildDebatePreamble(_debateResults);
-          if (_debatePreamble) {
-            console.log(`[Debate] Injected for ${Object.keys(_debateResults).length} ticker(s)`);
+
+          const _debated  = Object.values(_debateResults).filter(d => d?.ok);
+          const _cached   = _debated.filter(d => d._fromCache).length;
+          const _fresh    = _debated.length - _cached;
+          const _debMs    = Date.now() - _debateT0;
+          if (_debated.length > 0) {
+            const _cacheNote = _cached > 0 ? ` (${_cached} cached, ${_fresh} fresh)` : '';
+            toast(`🤖 Debate done in ${(_debMs/1000).toFixed(1)}s${_cacheNote} — ${_debated.length} ticker(s) ready`, 'success');
+            console.log(`[Debate] ${_debated.length} ticker(s) | ${_fresh} fresh, ${_cached} cached | ${_debMs}ms`);
+          } else {
+            console.log('[Debate] No successful debates — skipping preamble');
           }
         }
       }

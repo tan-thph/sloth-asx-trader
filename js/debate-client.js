@@ -130,16 +130,20 @@ function _aggressionParams() {
  * @param {string} ticker   e.g. 'BHP.AX'
  * @param {object} signals  From state.liveSignals[ticker]
  * @param {object} [opts]
- * @param {string} [opts.model]    Override model name
- * @param {number} [opts.timeout]  Per-side timeout seconds (default 45)
- * @returns {Promise<{ok:boolean, bull?:string, bear?:string, model?:string, elapsed_ms?:number}|null>}
+ * @param {string}  [opts.model]      Override model name
+ * @param {number}  [opts.timeout]    Per-side timeout seconds (default 45)
+ * @param {boolean} [opts.skipCache]  Bypass 4h cache (e.g. for test button)
+ * @returns {Promise<{ok:boolean, bull?:string, bear?:string, model?:string,
+ *                    elapsed_ms?:number, _fromCache?:boolean}|null>}
  */
 async function fetchDebate(ticker, signals, opts = {}) {
   if (!state.serverOk) return null;
 
-  // Cache check
-  const cached = _getCachedDebate(ticker, signals);
-  if (cached) return cached;
+  // Cache check (skip if opts.skipCache=true)
+  if (!opts.skipCache) {
+    const cached = _getCachedDebate(ticker, signals);
+    if (cached) return { ...cached, _fromCache: true };
+  }
 
   const status = await debateStatus();
   if (!status.available) return null;
@@ -155,7 +159,10 @@ async function fetchDebate(ticker, signals, opts = {}) {
     });
     if (r.ok) {
       const result = await r.json();
-      if (result.ok) _setCachedDebate(ticker, signals, result);
+      if (result.ok) {
+        _setCachedDebate(ticker, signals, result);
+        return { ...result, _fromCache: false };
+      }
       return result;
     }
     return null;

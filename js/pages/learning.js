@@ -523,15 +523,103 @@ async function renderLearningDebateCard() {
         (best) · <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:0.6b</code> (fast)
       </div>` : ''}
 
-    <div style="font-size:12px;color:var(--text-muted);line-height:1.5">
+    <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:10px">
       ${currentAgg === 'none'
         ? '⏸ Debate is disabled — no local model calls during analysis.'
         : `Bull/bear debate runs automatically before each portfolio analysis.
            Results are appended to Claude's user message and stored as
            <em>debate_summary</em> in the learning log for later review.
            Does <strong>not</strong> affect prompt-cache hits.`}
-    </div>`;
+    </div>
 
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <button id="ll-test-debate-btn" onclick="runTestDebate()"
+        style="font-size:11px;padding:4px 12px;border-radius:4px;
+               background:var(--bg-secondary);border:1px solid var(--border);
+               color:var(--text-primary);cursor:pointer">
+        ▶ Test Debate
+      </button>
+      <span class="text-xs text-muted">Runs a live bull/bear call right now against your first portfolio ticker.</span>
+    </div>
+
+    <div id="ll-debate-result" style="display:none;margin-top:12px"></div>`;
+
+}
+
+// ── Live test debate — fires a fresh call and shows result inline ──────────────
+async function runTestDebate() {
+  const btn = document.getElementById('ll-test-debate-btn');
+  const resultEl = document.getElementById('ll-debate-result');
+  if (!btn || !resultEl) return;
+
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  const status = await debateStatus();
+  if (!status.available) {
+    toast('Ollama is not running', 'error');
+    return;
+  }
+
+  // Pick first portfolio ticker with live signals
+  const portfolio = typeof mergedPortfolio === 'function' ? mergedPortfolio() : state.portfolio || [];
+  const ticker = portfolio.map(h => h.ticker).find(t => state.liveSignals?.[t] && !state.liveSignals[t].error);
+  if (!ticker) {
+    toast('No live signals available — run a portfolio analysis first', 'info');
+    return;
+  }
+
+  const model = typeof preferredDebateModel === 'function'
+    ? preferredDebateModel(status.models) : 'qwen3:9b';
+
+  btn.disabled = true;
+  btn.textContent = `⏳ Asking ${model}…`;
+  resultEl.style.display = 'none';
+
+  const t0 = Date.now();
+  try {
+    const result = await fetchDebate(ticker, state.liveSignals[ticker] || {}, {
+      skipCache: true,
+      model,
+      timeout: 60,
+    });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+
+    if (!result?.ok) {
+      resultEl.style.display = 'block';
+      resultEl.innerHTML = `
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:5px;padding:10px;font-size:12px;color:#dc2626">
+          ⚠ Debate failed: ${result?.error || 'no response'}
+        </div>`;
+      return;
+    }
+
+    resultEl.style.display = 'block';
+    resultEl.innerHTML = `
+      <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div style="background:var(--bg-secondary);padding:6px 10px;font-size:11px;
+                    color:var(--text-muted);display:flex;justify-content:space-between">
+          <span><strong>${ticker}</strong> · ${model}</span>
+          <span>${elapsed}s${result._fromCache ? ' · from cache' : ' · fresh'}</span>
+        </div>
+        <div style="padding:10px;display:flex;flex-direction:column;gap:8px">
+          <div style="font-size:12px">
+            <div style="font-size:10px;font-weight:700;color:#16a34a;margin-bottom:3px;letter-spacing:.5px">BULL CASE</div>
+            <div style="color:var(--text-primary);line-height:1.5">${result.bull}</div>
+          </div>
+          <div style="border-top:1px solid var(--border);padding-top:8px;font-size:12px">
+            <div style="font-size:10px;font-weight:700;color:#dc2626;margin-bottom:3px;letter-spacing:.5px">BEAR CASE</div>
+            <div style="color:var(--text-primary);line-height:1.5">${result.bear}</div>
+          </div>
+        </div>
+      </div>`;
+    toast(`✓ Test debate for ${ticker} completed in ${elapsed}s`, 'success');
+  } catch (e) {
+    resultEl.style.display = 'block';
+    resultEl.innerHTML = `<div style="color:#dc2626;font-size:12px">Error: ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Test Debate';
+  }
 }
 
 function setDebateModel(model) {
@@ -571,40 +659,45 @@ async function startOllamaAndRefreshDebateCard() {
 async function triggerDebatePostmortem(eventId) {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   const btn = document.getElementById(`pm-btn-${eventId}`);
-  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; btn.title = 'Asking local model…'; }
 
   try {
     const status = await debateStatus();
     if (!status.available) {
-      toast('Ollama not running — start it first', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+      toast('Ollama is not running — start it first', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
       return;
     }
     const model = typeof preferredDebateModel === 'function'
       ? preferredDebateModel(status.models) : 'qwen3:9b';
+
+    toast(`🤖 Asking ${model} for post-mortem on event #${eventId}…`, 'info');
+    const t0 = Date.now();
 
     const r = await fetch(`${API}/api/debate/postmortem`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ id: eventId, model }),
     });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     const result = await r.json();
+
     if (result.ok) {
       const tag = result.error_type !== 'none' ? result.error_type : null;
-      toast(
-        tag ? `Auto-tagged as "${tag}" — ${result.reason?.slice(0, 60)}` : 'No clear error found',
-        tag ? 'success' : 'info'
-      );
-      // Refresh page so tag reflects
-      if (tag) showPage('learning');
-      else if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+      if (tag) {
+        toast(`🤖 Tagged as "${tag}" in ${elapsed}s — ${(result.reason || '').slice(0, 70)}`, 'success');
+        showPage('learning');
+      } else {
+        toast(`🤖 No clear error found (${elapsed}s) — tag manually if needed`, 'info');
+        if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
+      }
     } else {
-      toast('Post-mortem error: ' + (result.error || 'unknown'), 'error');
-      if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+      toast(`Post-mortem failed (${elapsed}s): ${result.error || 'unknown'}`, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
     }
   } catch (e) {
-    toast('Post-mortem failed: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+    toast('Post-mortem error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
   }
 }
 
