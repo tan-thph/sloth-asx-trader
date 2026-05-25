@@ -250,6 +250,7 @@ Target size: 30–60 tokens.
 - **Calibration block format:** `CALIBRATION(Ncls,YYYY-MM→YYYY-MM,regime,Nexcl): …` — `Nexcl` is omitted when zero.
 - **Staleness banner:** renders with spinner immediately on page load for old recs; Ollama fills it async without page reload.
 - **Skill score badge colours:** green ≥7 · amber 4–6.9 · red <4.
+- **Thinking-model compatibility (May 2026):** `qwen3:9b` and similar reasoning models emit `<think>...</think>` blocks before the JSON response. With `num_predict: 200`, these blocks can consume all tokens leaving no JSON. Fix: `_strip_think_tags()` applied to all three JSON endpoints (postmortem, staleness, skill) before parsing; `/no_think` appended to each prompt as a soft instruction to suppress extended thinking; skill endpoint also has prose-fallback extraction (`7/10`, `7 out of 10`, `score: 7`) in case the model responds in plain text.
 
 ---
 

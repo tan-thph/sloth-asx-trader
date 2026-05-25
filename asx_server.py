@@ -3638,6 +3638,16 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1) -
     return {"ok": False, "error": "Ollama did not respond after retries"}
 
 
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks emitted by reasoning models (e.g. qwen3).
+
+    If stripping leaves nothing (the entire response was a thinking block),
+    return the original text so callers can still attempt regex extraction.
+    """
+    stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    return stripped if stripped else text
+
+
 @app.route("/api/debate/status")
 def debate_status():
     """
@@ -3841,7 +3851,7 @@ def debate_postmortem():
         "  none            - loss was reasonable/random, no clear systematic error\n"
         "\n"
         'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence"}\n'
-        "No markdown, no explanation outside JSON."
+        "No markdown, no explanation outside JSON. /no_think"
     )
 
     # retries=0 — timeout means model is too slow; caller should switch to a smaller model
@@ -3851,7 +3861,7 @@ def debate_postmortem():
 
     # Parse model output — expect {"error_type": "...", "reason": "..."}
     raw = result["text"].strip()
-    # Tolerate the model wrapping in markdown code fences
+    raw = _strip_think_tags(raw)          # remove <think>...</think> from reasoning models
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
     try:
@@ -3938,7 +3948,7 @@ def debate_staleness():
         "  INVALIDATED - original thesis is no longer supported by current signals\n"
         "\n"
         'Reply with JSON only: {"verdict":"VALID|WEAKENED|INVALIDATED","reason":"one sentence"}\n'
-        "No markdown, no explanation outside JSON."
+        "No markdown, no explanation outside JSON. /no_think"
     )
 
     result = _call_ollama(model, prompt, timeout=tout, retries=0)
@@ -3946,6 +3956,7 @@ def debate_staleness():
         return jsonify({"ok": False, "error": result["error"]})
 
     raw = result["text"].strip()
+    raw = _strip_think_tags(raw)
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$",       "", raw)
     try:
@@ -4021,7 +4032,7 @@ def debate_skill():
         " 10 = outcome fully explained by the signals and thesis\n"
         "\n"
         'Reply with JSON only: {"skill_score":7,"reason":"one sentence"}\n'
-        "No markdown."
+        "No markdown. /no_think"
     )
 
     result = _call_ollama(model, prompt, timeout=tout, retries=0)
@@ -4029,6 +4040,7 @@ def debate_skill():
         return jsonify({"ok": False, "error": result["error"]})
 
     raw = result["text"].strip()
+    raw = _strip_think_tags(raw)          # strip <think>...</think> from reasoning models
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$",       "", raw)
     try:
@@ -4036,10 +4048,19 @@ def debate_skill():
         skill_raw  = parsed.get("skill_score")
         reason     = parsed.get("reason", "")
     except Exception:
+        # Fallback 1: JSON field anywhere in text
         m         = re.search(r'"skill_score"\s*:\s*([0-9.]+)', raw)
         skill_raw = float(m.group(1)) if m else None
         m2        = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
         reason    = m2.group(1) if m2 else ""
+        # Fallback 2: prose forms — "7/10", "7 out of 10", "score: 7", "score is 7"
+        if skill_raw is None:
+            m3 = re.search(r'\b(\d+(?:\.\d+)?)\s*/\s*10\b', raw)
+            if not m3:
+                m3 = re.search(r'\b(\d+(?:\.\d+)?)\s+out\s+of\s+10\b', raw, re.IGNORECASE)
+            if not m3:
+                m3 = re.search(r'\bscore[:\s]+(\d+(?:\.\d+)?)\b', raw, re.IGNORECASE)
+            skill_raw = float(m3.group(1)) if m3 else None
 
     try:
         skill_score = max(0.0, min(10.0, float(skill_raw)))
