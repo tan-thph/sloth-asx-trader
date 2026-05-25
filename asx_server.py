@@ -3377,14 +3377,20 @@ def learning_stats():
                 WHERE exit_reason IS NOT NULL AND outcome_status IN ('win','loss','breakeven')
                 GROUP BY exit_reason ORDER BY cnt DESC
             """).fetchall()
-            fail_type = conn.execute("""
-                SELECT error_type, COUNT(*) as cnt FROM ai_learning_events
-                WHERE error_type IS NOT NULL
-                GROUP BY error_type ORDER BY cnt DESC
+            # error_type may be comma-separated (multi-tag) — split and aggregate
+            fail_type_rows = conn.execute("""
+                SELECT error_type FROM ai_learning_events
+                WHERE error_type IS NOT NULL AND error_type != ''
             """).fetchall()
+            type_counts: dict = {}
+            for r in fail_type_rows:
+                for tag in (r["error_type"] or "").split(","):
+                    tag = tag.strip()
+                    if tag:
+                        type_counts[tag] = type_counts.get(tag, 0) + 1
             failure_patterns = {
                 "by_exit_reason": {r["exit_reason"]: r["cnt"] for r in fail_exit},
-                "by_error_type":  {r["error_type"]:  r["cnt"] for r in fail_type},
+                "by_error_type":  dict(sorted(type_counts.items(), key=lambda x: -x[1])),
             }
 
             # Failed tickers
@@ -3494,7 +3500,11 @@ def learning_calibration():
             for r in loss_rows:
                 et = r["error_type"] if "error_type" in r.keys() else None
                 if et:
-                    type_counts[et] = type_counts.get(et, 0) + 1
+                    # comma-separated multi-tag support
+                    for tag in et.split(","):
+                        tag = tag.strip()
+                        if tag:
+                            type_counts[tag] = type_counts.get(tag, 0) + 1
             if type_counts:
                 top_et, top_cnt = max(type_counts.items(), key=lambda x: x[1])
                 top_pct = top_cnt / len(loss_rows)
@@ -3549,7 +3559,16 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1) -
         try:
             resp = requests.post(
                 f"{_OLLAMA_BASE}/api/generate",
-                json={"model": model, "prompt": prompt, "stream": False},
+                json={
+                    "model":      model,
+                    "prompt":     prompt,
+                    "stream":     False,
+                    "keep_alive": "10m",        # keep model in VRAM between calls
+                    "options": {
+                        "num_predict": 200,     # cap output tokens → faster + less OOM risk
+                        "temperature": 0.3,     # lower temp → more deterministic classification
+                    },
+                },
                 timeout=timeout,
             )
             if resp.ok:
@@ -3670,21 +3689,11 @@ def debate_bull_bear():
 
     t0 = time.time()
 
-    # Run both sides concurrently (2 threads)
-    bull_result = {}
-    bear_result = {}
-
-    def _run_bull():
-        bull_result.update(_call_ollama(model, bull_prompt, timeout=tout))
-
-    def _run_bear():
-        bear_result.update(_call_ollama(model, bear_prompt, timeout=tout))
-
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        fb = ex.submit(_run_bull)
-        fc = ex.submit(_run_bear)
-        fb.result()
-        fc.result()
+    # Run bull then bear SEQUENTIALLY — Ollama queues concurrent requests anyway
+    # and running them in parallel doubles peak VRAM/RAM usage, causing crashes
+    # on machines with limited memory (the primary cause of "Ollama stopped working").
+    bull_result = _call_ollama(model, bull_prompt, timeout=tout)
+    bear_result = _call_ollama(model, bear_prompt, timeout=tout)
 
     elapsed_ms = int((time.time() - t0) * 1000)
 
@@ -3746,24 +3755,44 @@ def debate_postmortem():
     if status not in ("win", "loss", "breakeven"):
         return jsonify({"ok": False, "error": f"event is '{status}', not closed"}), 400
 
-    # Compact trade summary — fewer tokens → faster generation
+    # Wins don't need error classification — errors on wins are just luck, not skill failure
+    if status == "win":
+        return jsonify({
+            "ok": False,
+            "error": "Wins don't get error tags — error tags are for losses and breakevens only.",
+        }), 400
+
+    # Compact trade summary with enough context for meaningful classification
     summary = (
         f"{row['ticker']} {status.upper()}"
-        + (f" PnL={row['realized_pnl_pct']:.1f}%"    if row["realized_pnl_pct"]      is not None else "")
-        + (f" hold={row['holding_period_days']}d"      if row["holding_period_days"]   is not None else "")
-        + (f" conf={row['ai_confidence']:.0%}"         if row["ai_confidence"]         is not None else "")
-        + (f" exit={row['exit_reason']}"               if row["exit_reason"]           else "")
-        + (f" regime={row['regime']}"                  if row["regime"]                else "")
+        + (f" | PnL={row['realized_pnl_pct']:.1f}%"    if row["realized_pnl_pct"]    is not None else "")
+        + (f" | hold={row['holding_period_days']}d"      if row["holding_period_days"] is not None else "")
+        + (f" | AI_conf={row['ai_confidence']:.0%}"      if row["ai_confidence"]       is not None else "")
+        + (f" | exit={row['exit_reason']}"               if row["exit_reason"]         else "")
+        + (f" | regime={row['regime']}"                  if row["regime"]              else "")
+        + (f" | sector={row['sector']}"                  if row["sector"]              else "")
     )
 
-    # Ultra-compact prompt — shorter input = faster output on small models
+    # Include the original AI rationale — this is the most useful context for classification
+    rationale = (row["rationale_summary"] or "").strip()[:250]
+
     prompt = (
-        f"Trade: {summary}\n"
-        "Pick ONE tag: overconfident | missed_catalyst | regime_mismatch | poor_entry | stop_too_tight | none\n"
-        'Reply JSON only: {"error_type":"TAG","reason":"one sentence"}'
+        f"ASX closed trade (LOSS or BREAKEVEN): {summary}\n"
+        + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "")
+        + "\n"
+        "Select 1-2 error tags from this list (comma-separate if multiple apply):\n"
+        "  overconfident   - AI confidence was too high given the actual risk\n"
+        "  missed_catalyst - key event (earnings/news/macro) was not accounted for\n"
+        "  regime_mismatch - wrong strategy for the market regime at the time\n"
+        "  poor_entry      - entry timing or price was suboptimal\n"
+        "  stop_too_tight  - stop was hit by normal volatility before the move played out\n"
+        "  none            - loss was reasonable/random, no clear systematic error\n"
+        "\n"
+        'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence"}\n'
+        "No markdown, no explanation outside JSON."
     )
 
-    # retries=0 — a timeout means the model is too slow for this prompt; don't compound it
+    # retries=0 — timeout means model is too slow; caller should switch to a smaller model
     result = _call_ollama(model, prompt, timeout=tout, retries=0)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})

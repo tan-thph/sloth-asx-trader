@@ -257,47 +257,48 @@ function _renderLearningContent(d) {
     const col = map[o] || '#9ca3af';
     return `<span style="background:${col}20;color:${col};border-radius:3px;padding:1px 6px;font-size:10px;font-weight:600">${o || 'open'}</span>`;
   };
-  // Tag buttons — only rendered for closed trades; click to set, click again to clear
-  const CLOSED_STATUSES = new Set(['win', 'loss', 'breakeven']);
-  const tagButtons = (evId, currentTag) => {
+  // Tag buttons — LOSS and BREAKEVEN only; wins don't get error tags (errors on wins = luck, not failure).
+  // Multiple tags supported — stored as comma-separated string ("overconfident,regime_mismatch").
+  // Each button toggles independently; auto-tagged buttons show 🤖 prefix + dashed border.
+  const TAG_STATUSES    = new Set(['loss', 'breakeven']);
+  const CLOSED_STATUSES = new Set(['win', 'loss', 'breakeven']); // kept for postmortem compat
+
+  const tagButtons = (evId, currentTagStr, tagSource) => {
+    const activeTags = new Set(
+      (currentTagStr || '').split(',').map(t => t.trim()).filter(Boolean)
+    );
     const tags = [
-      ['overconfident',   'OC', 'Overconfident — stated confidence was too high for market conditions'],
-      ['missed_catalyst', 'MC', 'Missed catalyst — earnings, news or event not accounted for'],
+      ['overconfident',   'OC', 'Overconfident — stated AI confidence was too high for actual risk'],
+      ['missed_catalyst', 'MC', 'Missed catalyst — key earnings/news/macro event not accounted for'],
       ['regime_mismatch', 'RM', 'Regime mismatch — wrong strategy for the prevailing market regime'],
-      ['poor_entry',      'PE', 'Poor entry — timing or entry price was off'],
-      ['stop_too_tight',  'ST', 'Stop too tight — stopped out on normal volatility before move played out'],
+      ['poor_entry',      'PE', 'Poor entry — timing or price was suboptimal'],
+      ['stop_too_tight',  'ST', 'Stop too tight — normal volatility triggered stop before the move played out'],
     ];
-    return `<div style="display:flex;gap:2px">` +
+    const escapedCurrent = JSON.stringify(currentTagStr || '');
+    return `<div style="display:flex;gap:2px;flex-wrap:wrap">` +
       tags.map(([key, short, tip]) => {
-        const active = currentTag === key;
-        const meta   = errorTypeLabels[key] || { color: '#6b7280' };
+        const active  = activeTags.has(key);
+        const isAuto  = active && tagSource === 'auto';
+        const meta    = errorTypeLabels[key] || { color: '#6b7280' };
+        const border  = active
+          ? (isAuto ? `1.5px dashed ${meta.color}` : `1px solid ${meta.color}`)
+          : `1px solid ${meta.color}55`;
         return `<button
-          onclick="tagLearningEvent(${evId},'${active ? '' : key}')"
-          title="${tip}"
+          onclick="toggleLearningTag(${evId}, ${escapedCurrent}, '${key}')"
+          title="${tip}${isAuto ? ' (auto — click to toggle)' : ''}"
           style="font-size:9px;padding:1px 5px;border-radius:2px;line-height:1.5;cursor:pointer;
-                 border:1px solid ${meta.color}${active ? '' : '55'};font-weight:${active ? 700 : 500};
-                 background:${active ? meta.color : 'transparent'};color:${active ? '#fff' : meta.color}"
-        >${short}</button>`;
+                 border:${border};font-weight:${active ? 700 : 500};
+                 background:${active ? meta.color : 'transparent'};
+                 color:${active ? '#fff' : meta.color}"
+        >${isAuto && active ? '🤖 ' : ''}${short}</button>`;
       }).join('') +
     `</div>`;
   };
-  // tagCell: show shortcode buttons for closed trades; if auto-tagged, show badge + clear button
-  const tagCell = (evId, currentTag, status, tagSource) => {
-    if (!CLOSED_STATUSES.has(status)) return '';
-    if (currentTag && tagSource === 'auto') {
-      // Auto-tagged by local model — show badge with dashed border + clear option
-      const meta = errorTypeLabels[currentTag] || { label: currentTag, color: '#6b7280' };
-      return `<div style="display:flex;align-items:center;gap:4px">
-        <span title="Auto-tagged by local model — click to remove"
-          style="font-size:10px;padding:1px 6px;border-radius:3px;border:1.5px dashed ${meta.color};
-                 color:${meta.color};white-space:nowrap;cursor:default">
-          🤖 ${currentTag.replace(/_/g,' ')}
-        </span>
-        <button onclick="tagLearningEvent(${evId},'')" title="Clear auto-tag"
-          style="font-size:10px;background:none;border:none;cursor:pointer;color:var(--text-muted);padding:0 2px">×</button>
-      </div>`;
-    }
-    return tagButtons(evId, currentTag);
+
+  // tagCell: error tags only for loss/breakeven; open/win/expired get nothing
+  const tagCell = (evId, currentTagStr, status, tagSource) => {
+    if (!TAG_STATUSES.has(status)) return '';
+    return tagButtons(evId, currentTagStr, tagSource);
   };
 
   const recentCard = `
@@ -318,7 +319,7 @@ function _renderLearningContent(d) {
                 <th style="text-align:left;padding:4px 6px">Regime</th>
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
-                <th style="text-align:left;padding:4px 6px" title="OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight — click to tag, click again to clear">Tag reason ℹ</th>
+                <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
                 <th style="padding:4px 6px;width:28px"></th>
               </tr>
             </thead>
@@ -328,8 +329,9 @@ function _renderLearningContent(d) {
                 const pnlStr  = pnlPct != null ? (pnlPct >= 0 ? '+' : '') + Number(pnlPct).toFixed(1) + '%' : '—';
                 const pnlColor = pnlPct > 0 ? '#16a34a' : pnlPct < 0 ? '#dc2626' : 'var(--text-secondary)';
                 const isOpen   = !ev.outcome_status || ev.outcome_status === 'open';
-                // 🤖 post-mortem button only for closed trades without a tag yet
-                const showPm = CLOSED_STATUSES.has(ev.outcome_status) && !ev.error_type;
+                // 🤖 post-mortem button only for losses/breakevens without a tag yet
+                // (wins excluded — error tags don't apply to profitable trades)
+                const showPm = TAG_STATUSES.has(ev.outcome_status) && !ev.error_type;
                 return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
                   <td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
                   <td style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
@@ -704,9 +706,24 @@ async function triggerDebatePostmortem(eventId) {
   }
 }
 
+// ── Toggle a single tag on/off within the multi-tag set ───────────────────────
+// Called by each tag button with the full current tag string and the key to toggle.
+async function toggleLearningTag(id, currentTagStr, key) {
+  const activeTags = new Set(
+    (currentTagStr || '').split(',').map(t => t.trim()).filter(Boolean)
+  );
+  if (activeTags.has(key)) {
+    activeTags.delete(key);
+  } else {
+    activeTags.add(key);
+  }
+  const newTagStr = [...activeTags].sort().join(',') || null;
+  await tagLearningEvent(id, newTagStr);
+}
+
 // ── Tag a learning event with an error type (manual annotation) ───────────────
-// errorType: 'overconfident' | 'missed_catalyst' | 'regime_mismatch' |
-//            'poor_entry' | 'stop_too_tight' | null (clear)
+// errorType: comma-separated string or null (to clear all tags)
+// e.g. 'overconfident', 'overconfident,regime_mismatch', null
 async function tagLearningEvent(id, errorType) {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   const et = errorType || null;  // empty string (toggle-off) → null (clear in DB)

@@ -120,8 +120,10 @@ function preferredDebateModel(pulledModels = []) {
 function _aggressionParams() {
   const ag = (typeof state !== 'undefined') ? (state.debate?.aggression || 'light') : 'light';
   if (ag === 'none')  return { maxTickers: 0, concurrency: 1 };
-  if (ag === 'full')  return { maxTickers: 8, concurrency: 3 };
-  return { maxTickers: 3, concurrency: 2 }; // 'light'
+  // concurrency=1 keeps tickers sequential — Ollama already queues internally
+  // and concurrent external requests double peak memory, causing crashes.
+  if (ag === 'full')  return { maxTickers: 8, concurrency: 1 };
+  return { maxTickers: 3, concurrency: 1 }; // 'light'
 }
 
 /**
