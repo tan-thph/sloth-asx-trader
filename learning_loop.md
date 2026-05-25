@@ -52,8 +52,8 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `prompt_hash`         | TEXT       | 12-char djb2 fingerprint of prompt version + regime + date |
 
 > **Note on `loss_quality`:** This is a *computed property*, not a stored column. It is derived at calibration time from existing fields:
-> - `exit_reason = 'protective_stop'` → **good** loss (deliberate capital defence, excluded from calibration)
-> - `error_type` contains `external_shock` → **good** loss (market accident, excluded from calibration)
+> - `exit_reason = 'protective_stop'` → **good** loss (deliberate capital defence, excluded from confidence calibration)
+> - `error_type` contains `external_shock` → **good** loss (market accident, excluded from confidence calibration)
 > - `error_type` contains `overconfident` or `poor_entry` → **bad** loss (model error, full weight)
 > - Otherwise → **neutral**
 >
@@ -96,16 +96,16 @@ weight = exp(-ln(2) × days_since_close / 45)
 Old data fades gracefully — it still contributes when sample sizes are small, but cannot dominate when fresh data exists. The default window is 90 days (extended from 60d) with a 180-day hard cap.
 
 **2. Protective stop & external shock exclusion** ✅
-Exclusion rules differ by purpose:
+Exclusion rules differ by calibration check — they are not a blanket filter:
 
 | Where excluded | `protective_stop` | `external_shock` |
 |---|---|---|
-| Confidence-band calibration | ❌ Yes | ❌ Yes |
-| Regime / sector / R:R stats | ✅ Included | ✅ Included |
-| Learnable error patterns (check 6) | ✅ Included (if tagged) | ❌ Yes |
+| Confidence-band calibration | ❌ Excluded | ❌ Excluded |
+| Regime / sector / R:R / decay stats | ✅ Included | ✅ Included |
+| Learnable error patterns (check 6) | ✅ Included (if tagged) | ❌ Excluded |
 
-- **Confidence bands**: both excluded — neither reflects model quality (one is deliberate capital protection, the other a market accident).
-- **Regime/sector/strategy stats**: both included — they happened, Claude should see the full outcome picture. This prevents Claude from becoming overly conservative by seeing an artificially inflated win rate.
+- **Confidence bands**: both excluded — neither reflects model quality. One is deliberate capital protection, the other a market accident.
+- **Regime/sector/strategy stats**: both included — they happened, Claude should see the full outcome picture. Excluding them would inflate the win rate and make Claude overconfident.
 - **Error-type synergy**: `external_shock` excluded (nothing learnable from a black swan). `protective_stop` losses **are** included if they carry error tags — e.g. a `regime_mismatch` tag on a protective stop is still a learnable signal that the trade was entered in the wrong conditions.
 
 The count of confidence-band exclusions is shown in the block prefix as `Nexcl` so Claude knows they were filtered.
@@ -118,7 +118,7 @@ If fewer than 3 trades exist in the current regime, the calibration block warns 
 This prevents a freshly-transitioned regime from inheriting the previous regime's failure patterns.
 
 **4. Date range in calibration block** ✅
-Every calibration block now includes the date range and regime so Claude can contextualise the data:
+Every calibration block includes the date range and regime so Claude can contextualise the data:
 ```
 CALIBRATION(12cls,2026-02→2026-05,bullTrending,2excl): conf 70-80%:61%WR(…)
 ```
@@ -143,7 +143,7 @@ A high-skill win from last week: `1.0 × 0.9 = 0.90` effective weight.
 `fetchCalibrationBlock(regime, sectors)` in `analysis.js` calls `GET /api/learning/calibration` after regime detection. The backend:
 1. Fetches last 90 days of closed events (max 180d)
 2. Applies exponential decay weighting (half-life 45d)
-3. Excludes `external_shock` / `protective_stop` from confidence band calculations
+3. Excludes `external_shock` / `protective_stop` from confidence band calculations only
 4. Only emits findings where signal is statistically meaningful (n ≥ 3 + delta threshold)
 5. Warns on thin same-regime data rather than silently omitting
 6. Returns a block labelled with date range + regime for Claude context
@@ -189,8 +189,8 @@ Target size: 30–60 tokens.
 
 ### Error Tag Reference
 
-| Tag | Short | When to use | Included in calibration? |
-|-----|-------|-------------|--------------------------|
+| Tag | Short | When to use | Calibration? |
+|-----|-------|-------------|--------------|
 | `overconfident` | OC | AI confidence too high for actual risk | ✅ Yes |
 | `missed_catalyst` | MC | Key event not accounted for | ✅ Yes |
 | `regime_mismatch` | RM | Wrong strategy for regime | ✅ Yes |
@@ -200,7 +200,7 @@ Target size: 30–60 tokens.
 | `thesis_broken` | TB | New info invalidated thesis post-entry | ✅ Yes |
 | `external_shock` | ES | Black swan / unpredictable market event | ❌ Excluded |
 
-`protective_stop` exit_reason is also excluded — it classifies how the trade was exited (deliberate capital protection), not why the thesis failed.
+`protective_stop` exit_reason is also excluded from confidence-band calibration — it classifies how the trade was exited (deliberate capital protection), not why the thesis failed. But `protective_stop` losses with error tags still contribute to error-type synergy (check 6).
 
 ---
 
@@ -222,9 +222,78 @@ Target size: 30–60 tokens.
 ### Ollama stability rules
 - Bull and bear calls are **sequential** (not concurrent) to avoid VRAM spikes
 - `keep_alive: "10m"` keeps model in VRAM between calls
-- `num_predict: 200` caps output length
+- `num_predict` is per-endpoint: **200** for postmortem/staleness (short JSON), **350** for skill score (longer reason string)
+- `think: false` passed to Ollama for all JSON-output endpoints — suppresses thinking tokens that would consume the token budget before any JSON is written
 - No retry on timeout — fail immediately, caller switches to smaller model
-- Batch concurrency always 1 — Ollama queues internally; external concurrency only wastes memory
+- Batch concurrency always 1 — Ollama queues internally; external concurrency wastes VRAM
+
+### Model priority (Auto selection)
+`preferredDebateModel()` selects from pulled models in this order:
+```
+qwen3.5:9b → qwen3.5:4b → qwen3:9b → qwen3:8b → qwen3:4b → qwen3:0.6b
+→ gemma4 → gemma3:4b → gemma3:2b → llama3.2:3b → phi4-mini
+```
+Explicit user preference (saved in `state.debate.model`) overrides Auto if the model is still pulled. If the saved preference is no longer pulled, Auto silently falls back to the priority list — no error.
+
+### Thinking model compatibility
+Reasoning models (qwen3.5, qwen3, some gemma4 variants) emit `<think>…</think>` blocks before output. Three mitigations in order of priority:
+
+1. **`think: false` API flag** (primary) — Ollama suppresses thinking tokens entirely before generation. The model outputs JSON directly. Passed on every JSON-output call. Ignored by non-thinking models.
+2. **`/no_think` prompt suffix** (secondary) — instruction-level control; qwen3/3.5 respects this even if the API flag isn't honoured.
+3. **`_strip_think_tags()`** (safety net) — strips complete `<think>…</think>` blocks post-generation. Also detects unclosed `<think>` tags (model truncated mid-thought) and returns `""` so callers surface a clean error rather than attempting to parse incomplete output.
+
+If all three fail and `skill_raw` is still unparseable, the error response now includes the first 120 chars of raw output (`WARNING` logged) to assist diagnosis.
+
+---
+
+## Postmortem Classification — Prompt Design
+
+### Trade summary fields sent to model
+```
+{recommendation} {ticker} {outcome_status}
+| PnL={realized_pnl_pct}%
+| hold={holding_period_days}d
+| AI_conf={ai_confidence}
+| RR={rr_ratio}
+| entry={actual_entry_price}
+| stop={suggested_stop}
+| target={suggested_target}
+| exit={exit_reason}
+| regime={regime}
+| sector={sector}
+```
+
+`recommendation` (BUY/SELL/TRIM) is listed first so the model knows trade direction. Without it, the model assumes BUY for all trades and misinterprets entry prices for SELL/TRIM (e.g. calling a high entry "suboptimal" on a short where a higher entry is better).
+
+### Exit context hints
+Exit reason is translated to a factual description only — no tag suggestions:
+
+| `exit_reason` | Hint sent to model |
+|---|---|
+| `stop_hit` | "The pre-set stop loss price was triggered." |
+| `time_exit` | "The position was closed after the expected holding period without reaching stop or target." |
+| `manual` | "The position was closed manually before reaching stop or target." |
+| `protective_stop` | "The position was deliberately closed early to protect capital." |
+
+**Why no tag suggestions?** Early versions included hints like "consider stop_too_tight or overconfident" for `stop_hit`. This caused the model to pattern-match on exit reason rather than analyse the trade, producing identical templated reasons for all manual closes, all stop_hits, etc.
+
+### Classification instructions
+The model is explicitly told:
+- Classify the **primary reason** the trade failed
+- Do **not** base the tag solely on the exit method
+- Reason from P&L, holding period, confidence, R:R, entry/stop/target prices
+- Cite specific numbers in the reason string
+- `none` is only valid if the loss was genuinely unforeseeable with available data
+
+### Logging
+```
+DEBUG  [PostMortem] raw output for event#N: <first 200 chars of model output>
+INFO   [PostMortem] event#N (TICKER) → <tag> via <model> | <reason[:60]>
+INFO   [PostMortem] event#N (TICKER) → none (model found no systematic error) via <model>
+INFO   [PostMortem] event#N (TICKER) → INVALID tag '<tag>' via <model> — rejected. Raw: ...
+INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
+```
+`none` (deliberate model decision) and parse failure are now logged separately — previously both appeared as "no clear error".
 
 ---
 
@@ -234,9 +303,14 @@ Target size: 30–60 tokens.
 |----------|-----------|
 | User message for calibration + debate | Preserves Anthropic system-prompt cache |
 | Exponential decay vs hard cutoff | Smooth fade; no artificial cliffs at day 60/90 |
-| Derived `loss_quality` not stored | Avoids duplicate column; derived from existing `error_type` + `exit_reason` |
-| `external_shock` excluded from calibration | Market accidents don't reflect model quality |
+| Derived `loss_quality` not stored | Avoids duplicate column; derived from `error_type` + `exit_reason` |
+| `external_shock` excluded from confidence calibration only | Market accidents don't reflect model quality, but they happened and should show in regime stats |
+| `protective_stop` excluded from confidence calibration, included in error synergy if tagged | Capital protection is not a model error; but if the trade also had a learnable tag (e.g. `regime_mismatch`), that signal should count |
 | Regime freshness gate (warn, don't omit) | Thin data is itself useful context for Claude |
+| Factual exit hints, no tag suggestions | Prescriptive hints cause pattern-matching on exit method, not trade analysis |
+| `recommendation` first in postmortem summary | Model assumes BUY direction without it; SELL/TRIM entry analysis is inverted |
+| `think: false` API flag, not just text stripping | Text stripping requires a closing `</think>` tag; truncated output has none. API-level suppression prevents thinking tokens from consuming the token budget entirely |
+| `num_predict=350` for skill (vs 200 for others) | Skill reason strings run 30–50 tokens longer than postmortem/staleness JSON; 200 caused truncation |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
 | Lessons Database deferred | Needs proper design: what is a "lesson"? How injected? Until defined, premature to implement. |
 
@@ -245,12 +319,13 @@ Target size: 30–60 tokens.
 ## Implementation Notes
 
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
-- **Calibration default window extended** from 60d to 90d — more data for decay weighting to work with.
-- **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion.
+- **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
+- **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.
 - **Calibration block format:** `CALIBRATION(Ncls,YYYY-MM→YYYY-MM,regime,Nexcl): …` — `Nexcl` is omitted when zero.
 - **Staleness banner:** renders with spinner immediately on page load for old recs; Ollama fills it async without page reload.
 - **Skill score badge colours:** green ≥7 · amber 4–6.9 · red <4.
-- **Thinking-model compatibility (May 2026):** `qwen3:9b` and similar reasoning models emit `<think>...</think>` blocks before the JSON response. With `num_predict: 200`, these blocks can consume all tokens leaving no JSON. Fix: `_strip_think_tags()` applied to all three JSON endpoints (postmortem, staleness, skill) before parsing; `/no_think` appended to each prompt as a soft instruction to suppress extended thinking; skill endpoint also has prose-fallback extraction (`7/10`, `7 out of 10`, `score: 7`) in case the model responds in plain text.
+- **Ollama 404 error:** now surfaces `"Model not found — run: ollama pull <model>"` with Ollama's own error body, instead of the opaque `"Ollama HTTP 404"`.
+- **`qwen3.5:9b` is a valid Ollama model** (confirmed). It is a thinking/reasoning model — `think: false` and `/no_think` both apply. Works for all JSON endpoints after the thinking-model fixes.
 
 ---
 
