@@ -3860,8 +3860,10 @@ def debate_postmortem():
         }), 400
 
     # Compact trade summary with enough context for meaningful classification
+    # recommendation (BUY/SELL/TRIM) must be first — without it the model assumes
+    # BUY direction and misinterprets entry prices for SELL/TRIM trades.
     summary = (
-        f"{row['ticker']} {status.upper()}"
+        f"{row['recommendation'] or '?'} {row['ticker']} {status.upper()}"
         + (f" | PnL={row['realized_pnl_pct']:.1f}%"            if row["realized_pnl_pct"]       is not None else "")
         + (f" | hold={row['holding_period_days']}d"              if row["holding_period_days"]    is not None else "")
         + (f" | AI_conf={row['ai_confidence']:.0%}"              if row["ai_confidence"]          is not None else "")
@@ -4110,8 +4112,9 @@ def debate_skill():
         "No markdown. /no_think"
     )
 
-    # think=False: suppress thinking tokens so they don't consume num_predict before JSON
-    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False)
+    # think=False: suppress thinking tokens; num_predict=350 gives headroom for
+    # the JSON wrapper + a full reason sentence without truncation
+    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False, num_predict=350)
     if not result["ok"]:
         return jsonify({"ok": False, "error": result["error"]})
 
