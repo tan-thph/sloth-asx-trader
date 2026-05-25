@@ -3469,6 +3469,283 @@ def learning_calibration():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================
+# INTERNAL DEBATE ENGINE
+# Uses a local Ollama model (e.g. qwen3:9b) to generate a
+# structured bull/bear debate before Claude analyses a ticker.
+# All endpoints degrade gracefully — if Ollama is not running,
+# the frontend simply skips the debate step.
+# ============================================================
+
+_OLLAMA_BASE = "http://localhost:11434"
+
+
+def _call_ollama(model: str, prompt: str, timeout: int = 45) -> dict:
+    """
+    Send a prompt to a local Ollama model via /api/generate.
+    Returns {"ok": True, "text": "..."} or {"ok": False, "error": "..."}.
+    Uses streaming=False so we get a single JSON response.
+    """
+    try:
+        resp = requests.post(
+            f"{_OLLAMA_BASE}/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=timeout,
+        )
+        if resp.ok:
+            data = resp.json()
+            return {"ok": True, "text": data.get("response", "").strip()}
+        return {"ok": False, "error": f"Ollama HTTP {resp.status_code}"}
+    except requests.exceptions.ConnectionError:
+        return {"ok": False, "error": "Ollama not running — start it with ollama serve"}
+    except requests.exceptions.Timeout:
+        return {"ok": False, "error": f"Ollama timeout after {timeout}s"}
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)}
+
+
+@app.route("/api/debate/status")
+def debate_status():
+    """
+    Health check: is Ollama up and which models are pulled?
+    Returns {"available": bool, "models": [...], "url": "..."}.
+    """
+    try:
+        r = requests.get(f"{_OLLAMA_BASE}/api/tags", timeout=3)
+        if r.ok:
+            tags = r.json()
+            models = [m["name"] for m in tags.get("models", [])]
+            return jsonify({"available": True, "models": models, "url": _OLLAMA_BASE})
+        return jsonify({"available": False, "models": [], "url": _OLLAMA_BASE,
+                        "error": f"Ollama HTTP {r.status_code}"})
+    except Exception as ex:
+        return jsonify({"available": False, "models": [], "url": _OLLAMA_BASE,
+                        "error": str(ex)})
+
+
+@app.route("/api/debate", methods=["POST"])
+def debate_bull_bear():
+    """
+    Generate a structured bull/bear debate for one ticker using a local model.
+
+    Request body:
+        {
+          "ticker":  "BHP.AX",
+          "signals": {
+              "current_price": 42.50,
+              "rsi_14":        28.3,
+              "bb_pct_b":      0.08,
+              "volume_z_score": 2.1,
+              "return_60d":    -12.4,
+              "obv_trend":     "rising",
+              "sma_200":       38.10,
+              "adx_14":        22.5,
+              "atr_14":        1.20
+          },
+          "model":   "qwen3:9b",   // optional, default qwen3:9b
+          "timeout": 45            // optional, seconds per side
+        }
+
+    Response:
+        {
+          "ok": true,
+          "ticker": "BHP.AX",
+          "model": "qwen3:9b",
+          "bull": "...",
+          "bear": "...",
+          "elapsed_ms": 12400
+        }
+    """
+    data      = request.get_json() or {}
+    ticker    = (data.get("ticker") or "").upper()
+    signals   = data.get("signals") or {}
+    model     = data.get("model") or "qwen3:9b"
+    tout      = min(int(data.get("timeout", 45)), 90)
+
+    if not ticker:
+        return jsonify({"ok": False, "error": "ticker required"}), 400
+
+    # ── Format key signals for the prompt ─────────────────────────────────────
+    price   = signals.get("current_price", "?")
+    rsi     = signals.get("rsi_14")
+    bb_pct  = signals.get("bb_pct_b")
+    vol_z   = signals.get("volume_z_score")
+    ret60   = signals.get("return_60d")
+    obv     = signals.get("obv_trend", "?")
+    sma200  = signals.get("sma_200")
+    adx     = signals.get("adx_14")
+
+    sig_text = (
+        f"Ticker: {ticker} | Price: {price}"
+        + (f" | RSI(14)={rsi:.1f}" if rsi is not None else "")
+        + (f" | BB%b={bb_pct:.2f}" if bb_pct is not None else "")
+        + (f" | VolZ={vol_z:.1f}σ" if vol_z is not None else "")
+        + (f" | 60d_ret={ret60:.1f}%" if ret60 is not None else "")
+        + (f" | OBV={obv}" if obv else "")
+        + (f" | SMA200={sma200:.2f}" if sma200 is not None else "")
+        + (f" | ADX={adx:.1f}" if adx is not None else "")
+    )
+
+    # ── Bull prompt ────────────────────────────────────────────────────────────
+    bull_prompt = (
+        f"You are a disciplined ASX swing trader. Given these signals:\n{sig_text}\n\n"
+        "Write 2–3 concise sentences arguing FOR a long entry (bull case). "
+        "Focus on mean-reversion opportunity, oversold signals, and risk/reward. "
+        "Be specific to the numbers. No waffle. No markdown."
+    )
+
+    # ── Bear prompt ────────────────────────────────────────────────────────────
+    bear_prompt = (
+        f"You are a disciplined ASX swing trader. Given these signals:\n{sig_text}\n\n"
+        "Write 2–3 concise sentences arguing AGAINST a long entry (bear case). "
+        "Focus on downtrend risk, momentum, and what could go wrong. "
+        "Be specific to the numbers. No waffle. No markdown."
+    )
+
+    t0 = time.time()
+
+    # Run both sides concurrently (2 threads)
+    bull_result = {}
+    bear_result = {}
+
+    def _run_bull():
+        bull_result.update(_call_ollama(model, bull_prompt, timeout=tout))
+
+    def _run_bear():
+        bear_result.update(_call_ollama(model, bear_prompt, timeout=tout))
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fb = ex.submit(_run_bull)
+        fc = ex.submit(_run_bear)
+        fb.result()
+        fc.result()
+
+    elapsed_ms = int((time.time() - t0) * 1000)
+
+    if not bull_result.get("ok") or not bear_result.get("ok"):
+        err = bull_result.get("error") or bear_result.get("error") or "unknown"
+        return jsonify({"ok": False, "ticker": ticker, "error": err,
+                        "elapsed_ms": elapsed_ms})
+
+    return jsonify({
+        "ok":         True,
+        "ticker":     ticker,
+        "model":      model,
+        "bull":       bull_result["text"],
+        "bear":       bear_result["text"],
+        "elapsed_ms": elapsed_ms,
+    })
+
+
+@app.route("/api/debate/postmortem", methods=["POST"])
+def debate_postmortem():
+    """
+    Auto-tag a closed learning event with an error_type using a local model.
+    The model is given the trade summary and asked to classify the failure.
+
+    Request body:
+        {
+          "id":            123,           // ai_learning_events.id
+          "model":         "qwen3:9b",   // optional
+          "timeout":       30             // optional
+        }
+
+    Response:
+        {"ok": true, "id": 123, "error_type": "overconfident", "reason": "..."}
+    """
+    data    = request.get_json() or {}
+    ev_id   = data.get("id")
+    model   = data.get("model") or "qwen3:9b"
+    tout    = min(int(data.get("timeout", 30)), 60)
+
+    if not ev_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+
+    # Load the event
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT * FROM ai_learning_events WHERE id=?", (ev_id,)
+            ).fetchone()
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+    if not row:
+        return jsonify({"ok": False, "error": "event not found"}), 404
+
+    status = row["outcome_status"]
+    if status not in ("win", "loss", "breakeven"):
+        return jsonify({"ok": False, "error": f"event is '{status}', not closed"}), 400
+
+    # Build a compact trade summary for the model
+    summary = (
+        f"Ticker: {row['ticker']} | Outcome: {status}"
+        + (f" | PnL: {row['realized_pnl_pct']:.1f}%" if row["realized_pnl_pct"] is not None else "")
+        + (f" | HoldDays: {row['holding_period_days']}" if row["holding_period_days"] is not None else "")
+        + (f" | AI_conf: {row['ai_confidence']:.0%}" if row["ai_confidence"] is not None else "")
+        + (f" | ExitReason: {row['exit_reason']}" if row["exit_reason"] else "")
+        + (f" | Regime: {row['regime']}" if row["regime"] else "")
+    )
+
+    prompt = (
+        "Classify this closed trade into exactly ONE of these error types:\n"
+        "  overconfident   — stated confidence was too high vs actual outcome\n"
+        "  missed_catalyst — an earnings/news event was not accounted for\n"
+        "  regime_mismatch — wrong strategy for the prevailing market regime\n"
+        "  poor_entry      — entry timing or price was off\n"
+        "  stop_too_tight  — stopped out by normal volatility\n"
+        "  none            — no clear error (winning trade or random outcome)\n\n"
+        f"Trade summary: {summary}\n\n"
+        "Reply with ONLY a JSON object on one line, e.g.:\n"
+        '{"error_type":"overconfident","reason":"Confidence was 80% but RSI already extended"}\n'
+        "No extra text."
+    )
+
+    result = _call_ollama(model, prompt, timeout=tout)
+    if not result["ok"]:
+        return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
+
+    # Parse model output — expect {"error_type": "...", "reason": "..."}
+    raw = result["text"].strip()
+    # Tolerate the model wrapping in markdown code fences
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+    try:
+        parsed    = json.loads(raw)
+        error_type = parsed.get("error_type", "")
+        reason    = parsed.get("reason", "")
+    except Exception:
+        # If JSON parse fails, try regex extraction
+        m = re.search(r'"error_type"\s*:\s*"([^"]+)"', raw)
+        error_type = m.group(1) if m else ""
+        m2 = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
+        reason = m2.group(1) if m2 else raw[:120]
+
+    VALID_TYPES = {"overconfident", "missed_catalyst", "regime_mismatch",
+                   "poor_entry", "stop_too_tight", "none"}
+    if error_type not in VALID_TYPES:
+        error_type = ""  # reject hallucinated categories
+
+    # Persist if we got something useful
+    if error_type and error_type != "none":
+        try:
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE ai_learning_events SET error_type=? WHERE id=?",
+                    (error_type, ev_id)
+                )
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 500
+
+    return jsonify({
+        "ok":         True,
+        "id":         ev_id,
+        "error_type": error_type or "none",
+        "reason":     reason,
+        "model":      model,
+    })
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  ASX Trading Assistant – Backend Server")

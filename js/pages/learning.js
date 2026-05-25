@@ -50,6 +50,11 @@ async function renderLearningPage(gen) {
   if (state._renderGen !== gen) return;
 
   el.innerHTML = _renderLearningContent(data);
+
+  // Async: load debate engine status without blocking the main render
+  if (typeof debateStatus === 'function') {
+    renderLearningDebateCard().catch(() => {});
+  }
 }
 
 function _renderLearningContent(d) {
@@ -299,6 +304,8 @@ function _renderLearningContent(d) {
                 const pnlStr  = pnlPct != null ? (pnlPct >= 0 ? '+' : '') + Number(pnlPct).toFixed(1) + '%' : '—';
                 const pnlColor = pnlPct > 0 ? '#16a34a' : pnlPct < 0 ? '#dc2626' : 'var(--text-secondary)';
                 const isOpen   = !ev.outcome_status || ev.outcome_status === 'open';
+                // 🤖 post-mortem button only for closed trades without a tag yet
+                const showPm = CLOSED_STATUSES.has(ev.outcome_status) && !ev.error_type;
                 return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
                   <td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
                   <td style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
@@ -308,7 +315,14 @@ function _renderLearningContent(d) {
                   <td style="padding:3px 6px">${outcomeChip(ev.outcome_status)}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
                   <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status)}</td>
-                  <td style="padding:3px 6px;text-align:center">
+                  <td style="padding:3px 6px;text-align:center;white-space:nowrap">
+                    ${showPm ? `<button id="pm-btn-${ev.id}"
+                      onclick="triggerDebatePostmortem(${ev.id})"
+                      title="Auto-tag with local model (Ollama)"
+                      style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1"
+                      onmouseover="this.style.background='var(--bg-secondary)'"
+                      onmouseout="this.style.background='none'"
+                    >🤖</button>` : ''}
                     <button
                       onclick="deleteLearningEvent(${ev.id})"
                       title="Remove event"
@@ -347,9 +361,14 @@ function _renderLearningContent(d) {
       </table>
     </div>` : '';
 
+  // ── Internal Debate Engine status card ────────────────────────────────────────
+  // Rendered async after the main content — see renderLearningDebateCard()
+  const debateCardPlaceholder = `
+    <div id="ll-debate-card" class="card section-gap" style="display:none"></div>`;
+
   return summaryCards + calibCard +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
-    failureCard + recentCard + failedCard;
+    failureCard + recentCard + failedCard + debateCardPlaceholder;
 }
 
 // ── Delete a single learning event (optimise calibration dataset) ─────────────
@@ -371,6 +390,121 @@ async function deleteLearningEvent(id) {
     }
   } catch (e) {
     toast('Error removing event: ' + e.message, 'error');
+  }
+}
+
+// ── Debate engine status card (async, rendered after main content) ────────────
+async function renderLearningDebateCard() {
+  const el = document.getElementById('ll-debate-card');
+  if (!el) return;
+
+  const status = await debateStatus();
+
+  if (!status.available) {
+    el.style.display = 'block';
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="card-title" style="margin:0">🤖 Local Debate Engine</div>
+        <span style="font-size:11px;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;padding:2px 8px;border-radius:4px">Offline</span>
+      </div>
+      <p class="text-xs text-muted" style="margin-top:6px">
+        Ollama is not running. Install from
+        <a href="https://ollama.com/download" target="_blank" style="color:#3b82f6">ollama.com/download</a>,
+        then run <code style="background:var(--bg-secondary);padding:1px 4px;border-radius:2px">ollama pull qwen3:9b</code>
+        to enable bull/bear debate before Claude analyses your portfolio.
+      </p>
+      <button onclick="startOllamaAndRefreshDebateCard()"
+        style="margin-top:8px;font-size:11px;padding:4px 12px;border-radius:4px;background:#3b82f6;color:#fff;border:none;cursor:pointer">
+        Try Starting Ollama
+      </button>`;
+    return;
+  }
+
+  // Ollama is running — show models and instructions
+  const models = status.models || [];
+  const recommended = ['qwen3:9b', 'qwen3:4b', 'gemma3:4b', 'qwen3:0.6b'];
+  const pulledRec = models.filter(m => recommended.some(r => m.startsWith(r.split(':')[0])));
+  const preferred = typeof preferredDebateModel === 'function' ? preferredDebateModel(models) : models[0] || '—';
+
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <div class="card-title" style="margin:0">🤖 Local Debate Engine</div>
+      <span style="font-size:11px;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;padding:2px 8px;border-radius:4px">● Online</span>
+    </div>
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px;margin-bottom:10px">
+      <span class="text-muted">URL</span>
+      <span style="font-family:monospace">${status.url}</span>
+      <span class="text-muted">Active model</span>
+      <span style="font-weight:600">${preferred}</span>
+      <span class="text-muted">Pulled models</span>
+      <span>${models.length ? models.slice(0,6).join(', ') + (models.length > 6 ? ` +${models.length - 6} more` : '') : 'None'}</span>
+    </div>
+    ${pulledRec.length === 0 ? `
+      <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+        ⚠ No recommended debate model found. Pull one with:<br>
+        <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:9b</code> (best quality)
+        or <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:0.6b</code> (fastest)
+      </div>` : ''}
+    <p class="text-xs text-muted" style="margin:0">
+      When Ollama is online and a model is pulled, portfolio analysis automatically runs a bull/bear
+      debate for each ticker before calling Claude. The debate output is appended to Claude's
+      user message and does <strong>not</strong> affect prompt-cache hits.
+    </p>`;
+}
+
+async function startOllamaAndRefreshDebateCard() {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  try {
+    await fetch(`${API}/api/ollama/start`, { method: 'POST' });
+    toast('Ollama start command sent — retrying in 4s…', 'info');
+    setTimeout(() => {
+      if (typeof clearDebateStatusCache === 'function') clearDebateStatusCache();
+      renderLearningDebateCard().catch(() => {});
+    }, 4000);
+  } catch {
+    toast('Could not reach backend', 'error');
+  }
+}
+
+// ── Auto-tag a closed learning event using local model post-mortem ─────────────
+async function triggerDebatePostmortem(eventId) {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  const btn = document.getElementById(`pm-btn-${eventId}`);
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+
+  try {
+    const status = await debateStatus();
+    if (!status.available) {
+      toast('Ollama not running — start it first', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+      return;
+    }
+    const model = typeof preferredDebateModel === 'function'
+      ? preferredDebateModel(status.models) : 'qwen3:9b';
+
+    const r = await fetch(`${API}/api/debate/postmortem`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ id: eventId, model }),
+    });
+    const result = await r.json();
+    if (result.ok) {
+      const tag = result.error_type !== 'none' ? result.error_type : null;
+      toast(
+        tag ? `Auto-tagged as "${tag}" — ${result.reason?.slice(0, 60)}` : 'No clear error found',
+        tag ? 'success' : 'info'
+      );
+      // Refresh page so tag reflects
+      if (tag) showPage('learning');
+      else if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+    } else {
+      toast('Post-mortem error: ' + (result.error || 'unknown'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+    }
+  } catch (e) {
+    toast('Post-mortem failed: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
   }
 }
 

@@ -392,18 +392,44 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     ? await fetchCalibrationBlock(_activeRegime, _portfolioSectors)
     : '';
 
+  // ── Internal Debate (optional — Ollama local model) ─────────────────────────
+  // Run bull/bear debates for portfolio tickers with fresh signals.
+  // Result goes in user message (not system prompt) to preserve prompt-cache hits.
+  let _debatePreamble = '';
+  if (typeof fetchDebateBatch === 'function' && state.serverOk) {
+    try {
+      const _debateTickers = mergedPortfolio()
+        .map(h => h.ticker)
+        .filter(t => state.liveSignals[t] && !state.liveSignals[t].error)
+        .slice(0, 8); // cap at 8 tickers to limit latency
+      if (_debateTickers.length) {
+        const _dStatus = await debateStatus();
+        if (_dStatus.available) {
+          toast('Local model debate running…', 'info');
+          const _debates = await fetchDebateBatch(_debateTickers, 3);
+          _debatePreamble = buildDebatePreamble(_debates);
+          if (_debatePreamble) {
+            console.log(`[Debate] Injected for ${Object.keys(_debates).length} ticker(s)`);
+          }
+        }
+      }
+    } catch (_debateErr) {
+      console.warn('[Debate] skipped:', _debateErr.message);
+    }
+  }
+
   // ── Assemble dynamic system prompt (core cached + regime/date modules) ──────
   const _systemArray = typeof buildSystemArray === 'function'
     ? buildSystemArray({ regime: _activeRegime, portfolio: mergedPortfolio() })
     : [{ type: 'text', text: ANALYSIS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
 
-  // Inject calibration and regime into the final user message
+  // Inject calibration, regime, and (optional) debate into the final user message
   const regimeCtx = _activeRegime && _activeRegime !== 'unknown'
     ? `\nACTIVE_REGIME: ${_activeRegime} (confidence: ${(_regimeResult.confidence * 100).toFixed(0)}%)`
     : '';
 
   const fullUserMessage = userMessage
-    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote) + regimeCtx;
+    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote) + regimeCtx + _debatePreamble;
 
   try {
     const { text, usage: _usage } = await callClaude('portfolio', fullUserMessage, {
