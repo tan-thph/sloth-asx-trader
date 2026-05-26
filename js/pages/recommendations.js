@@ -903,18 +903,32 @@ function markExecuted(id, execPrice, execFee, execQty) {
             (r.action === 'BUY' || r.action === 'TOP_UP')
           );
           for (const pr of parentRecs) {
+            // Compute per-entry outcome so a TOP_UP at a higher price than exit
+            // isn't wrongly marked 'win' just because the overall position was profitable.
+            const prEntry = pr.executedPrice || pr.priceRange?.[0] || null;
+            const prQty   = pr.qty || null;
+            let prOutcome = outcome;   // fallback: inherit overall exit outcome
+            let prPnlPct  = null;
+            let prPnlAud  = null;
+            if (prEntry && prEntry > 0) {
+              prPnlPct  = +((tradePrice - prEntry) / prEntry * 100).toFixed(2);
+              if (prQty) prPnlAud = +((tradePrice - prEntry) * prQty).toFixed(2);
+              prOutcome = tradePrice > prEntry ? 'win' : tradePrice < prEntry ? 'loss' : 'breakeven';
+            }
             fetch(`${API}/api/learning/outcome`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                id: pr._learningId,
-                outcome_status:     outcome,
-                exit_reason:        exitReason,
-                actual_exit_price:  tradePrice,
+                id:                  pr._learningId,
+                outcome_status:      prOutcome,
+                exit_reason:         exitReason,
+                actual_exit_price:   tradePrice,
                 holding_period_days: holdDays,
+                ...(prPnlPct != null ? { realized_pnl_pct: prPnlPct } : {}),
+                ...(prPnlAud != null ? { realized_pnl_aud: prPnlAud } : {}),
               }),
             }).catch(() => {});
             const rh = state.recHistory.find(r => r.id === pr.id);
-            if (rh) rh.outcome = outcome;
+            if (rh) rh.outcome = prOutcome;
           }
         }
       }
