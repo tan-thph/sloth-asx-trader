@@ -72,61 +72,26 @@ function renderPerformance() {
     : 0;
   const sortinoRatio = downsideDev > 0 ? meanRet / downsideDev : null;
 
-  // Calmar ratio: annualised return / max drawdown.
-  // Requires ≥ 90d of trading history — shorter spans extrapolate too aggressively.
-  // Annualisation factor is clamped so a 31-day span doesn't 12× the numerator
-  // while max-drawdown stays raw, which produced absurd Calmar values previously.
-  let calmarRatio = null;
-  // 'trades' | 'span' | 'noderawdown' | false
-  let calmarInsufficient = closedTrades.length < 5 ? 'trades' : false;
-  if (!calmarInsufficient) {
-    const sorted = [...closedTrades].sort((a,b) => (a.date||'').localeCompare(b.date||''));
-    let cumPnl = 0, peak = 0, maxDD = 0;
-    sorted.forEach(t => {
-      cumPnl += Number(t.pnl)||0;
-      if (cumPnl > peak) peak = cumPnl;
-      const dd = peak > 0 ? (peak - cumPnl) / peak * 100 : 0;
-      if (dd > maxDD) maxDD = dd;
-    });
-    const firstDate = sorted[0]?.date;
-    const lastDate  = sorted[sorted.length-1]?.date;
-    const daySpan   = firstDate && lastDate
-      ? (new Date(lastDate) - new Date(firstDate)) / 86400000 : 0;
-    if (daySpan < 90) {
-      calmarInsufficient = 'span';
-    } else {
-      // Clamp to ≤ 4× to suppress wild extrapolation on short histories.
-      const annFactor = Math.min(365 / daySpan, 4);
-      const annReturn = realised * annFactor;
-      const cost0     = totalCostVal || 1;
-      if (maxDD === 0) {
-        calmarInsufficient = 'nodrawdown';
-      } else {
-        calmarRatio = (annReturn / cost0 * 100) / maxDD;
-      }
-    }
-  }
+  // Profit Factor = gross wins / gross losses (replaces Calmar — works immediately, no history req)
+  const grossWins   = closedTrades.filter(t=>t.pnl>0).reduce((s,t)=>s+Number(t.pnl),0);
+  const grossLosses = Math.abs(closedTrades.filter(t=>t.pnl<0).reduce((s,t)=>s+Number(t.pnl),0));
+  const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? Infinity : null);
 
-  // Streaks and avg hold days
+  // Avg Win $ / Avg Loss $ (replaces Avg Hold — no closeDate dependency)
+  const winPnls  = closedTrades.filter(t=>t.pnl>0).map(t=>Number(t.pnl));
+  const lossPnls = closedTrades.filter(t=>t.pnl<0).map(t=>Math.abs(Number(t.pnl)));
+  const avgWinAud  = winPnls.length  ? winPnls.reduce((s,v)=>s+v,0)/winPnls.length   : null;
+  const avgLossAud = lossPnls.length ? lossPnls.reduce((s,v)=>s+v,0)/lossPnls.length : null;
+  const payoffRatio = avgWinAud != null && avgLossAud != null && avgLossAud > 0
+    ? avgWinAud / avgLossAud : null;
+
+  // Streaks
   const sortedTrades = [...closedTrades].sort((a,b) => (a.date||'').localeCompare(b.date||''));
   let winStreak=0, lossStreak=0, curW=0, curL=0;
   sortedTrades.forEach(t => {
     if (t.pnl > 0) { curW++; curL=0; if(curW>winStreak) winStreak=curW; }
     else            { curL++; curW=0; if(curL>lossStreak) lossStreak=curL; }
   });
-  const holdDays = t => {
-    // closeDate is set on SELL entries; date is open (buy) date for BUY, open date for SELL.
-    // Fallback: if status='closed' and only date exists, the entry pre-dates the closeDate field.
-    const open  = t.date;
-    const close = t.closeDate;
-    if (!open || !close) return null;
-    const diff = Math.round((new Date(close) - new Date(open)) / 86400000);
-    return diff >= 0 ? diff : null;
-  };
-  const winHolds  = closedTrades.filter(t=>t.pnl>0).map(holdDays).filter(d=>d!=null);
-  const lossHolds = closedTrades.filter(t=>t.pnl<0).map(holdDays).filter(d=>d!=null);
-  const avgHoldWin  = winHolds.length  ? winHolds.reduce((s,v)=>s+v,0)/winHolds.length   : null;
-  const avgHoldLoss = lossHolds.length ? lossHolds.reduce((s,v)=>s+v,0)/lossHolds.length : null;
 
   const confBuckets=[0.5,0.6,0.7,0.8,0.9].map(c=>{
     const b=state.recHistory.filter(r=>r.confidence>=c&&r.confidence<c+0.1&&r.outcome!=='open'&&r.outcome!=='skipped');
@@ -244,24 +209,20 @@ function renderPerformance() {
             <div style="font-size:18px;font-weight:600;color:${sortinoRatio==null?'var(--text-secondary)':sortinoRatio>=1?'#16a34a':sortinoRatio>=0?'#d97706':'#dc2626'}">
               ${sortinoRatio==null?'—':fmt(sortinoRatio,2)}
             </div>
-            <div class="text-xs text-muted">Downside deviation only · ≥ 1.0 = good</div>
+            <div class="text-xs text-muted">Return / downside deviation · ≥ 1.0 = good</div>
           </div>
-          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
-            <div class="text-xs">Calmar Ratio</div>
-            <div style="font-size:18px;font-weight:600;color:${calmarRatio==null?'var(--text-secondary)':calmarRatio>=1?'#16a34a':calmarRatio>=0?'#d97706':'#dc2626'}">
-              ${calmarRatio==null?'—':fmt(calmarRatio,2)}
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"
+               title="Gross wins ÷ gross losses. > 1.5 = edge exists. > 2.0 = strong edge.">
+            <div class="text-xs">Profit Factor</div>
+            <div style="font-size:18px;font-weight:600;color:${profitFactor==null?'var(--text-secondary)':profitFactor===Infinity?'#16a34a':profitFactor>=2?'#16a34a':profitFactor>=1.5?'#16a34a':profitFactor>=1?'#d97706':'#dc2626'}">
+              ${profitFactor==null?'—':profitFactor===Infinity?'∞':fmt(profitFactor,2)}
             </div>
-            <div class="text-xs text-muted">${
-              calmarInsufficient === 'trades'     ? `Needs ≥ 5 closed trades (have ${closedTrades.length})` :
-              calmarInsufficient === 'span'       ? 'Needs ≥ 90 days between first & last closed trade' :
-              calmarInsufficient === 'nodrawdown' ? 'No drawdown yet — all trades profitable' :
-              'Ann. return / max drawdown · ≥ 1.0 = good'
-            }</div>
+            <div class="text-xs text-muted">${losses===0?'No losing trades yet':'Gross wins / gross losses · ≥ 1.5 = edge'}</div>
           </div>
         </div>
       </div>
       <div class="card">
-        <div class="card-title">Trade Streaks &amp; Hold Duration</div>
+        <div class="card-title">Trade Streaks &amp; Payoff</div>
         <div class="grid-2" style="gap:8px">
           <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
             <div class="text-xs">Longest Win Streak</div>
@@ -274,16 +235,20 @@ function renderPerformance() {
             <div class="text-xs text-muted">Consecutive losses</div>
           </div>
           <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"
-               title="Hold duration = close date minus open date. Only counted for trades executed via Recommendations tab (which records both open and close dates).">
-            <div class="text-xs">Avg Hold — Winners</div>
-            <div style="font-size:18px;font-weight:600">${avgHoldWin!=null?Math.round(avgHoldWin)+'d':'—'}</div>
-            <div class="text-xs text-muted">${winHolds.length > 0 ? `${winHolds.length} winning trade${winHolds.length!==1?'s':''}` : 'No winning closes yet'}</div>
+               title="Average dollar P&L on winning trades.">
+            <div class="text-xs">Avg Win</div>
+            <div style="font-size:18px;font-weight:600;color:${avgWinAud==null?'var(--text-secondary)':'#16a34a'}">
+              ${avgWinAud==null?'—':'$'+fmt(avgWinAud)}
+            </div>
+            <div class="text-xs text-muted">${winPnls.length>0?`${winPnls.length} winning trade${winPnls.length!==1?'s':''}·${payoffRatio!=null?' ratio '+fmt(payoffRatio,1)+'×':''}` : 'No winning trades yet'}</div>
           </div>
           <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"
-               title="Hold duration = close date minus open date. Only counted for trades executed via Recommendations tab (which records both open and close dates).">
-            <div class="text-xs">Avg Hold — Losers</div>
-            <div style="font-size:18px;font-weight:600">${avgHoldLoss!=null?Math.round(avgHoldLoss)+'d':'—'}</div>
-            <div class="text-xs text-muted">${lossHolds.length > 0 ? `${lossHolds.length} losing trade${lossHolds.length!==1?'s':''}` : 'No losing closes yet'}</div>
+               title="Average dollar loss on losing trades. Avg Win ÷ Avg Loss = payoff ratio.">
+            <div class="text-xs">Avg Loss</div>
+            <div style="font-size:18px;font-weight:600;color:${avgLossAud==null?'var(--text-secondary)':'#dc2626'}">
+              ${avgLossAud==null?'—':'$'+fmt(avgLossAud)}
+            </div>
+            <div class="text-xs text-muted">${lossPnls.length>0?`${lossPnls.length} losing trade${lossPnls.length!==1?'s':''}` : 'No losing trades yet'}</div>
           </div>
         </div>
       </div>
