@@ -371,6 +371,63 @@ async function fetchPostmortemDebate(eventId, modelA, modelB, opts = {}) {
   }
 }
 
+// ── Cloud adjudicator (Gemini / Groq) ────────────────────────────────────────
+// User-initiated 🧑‍⚖️ feature — sends a stored adversarial debate transcript
+// to a cloud model that scores each local model 0-10 and picks a winner.
+
+let _adjStatus    = null;
+let _adjStatusTs  = 0;
+const _ADJ_TTL    = 60_000;
+
+/** Check if a cloud adjudicator (Gemini or Groq API key) is configured. 60s cache. */
+async function adjudicatorStatus() {
+  const now = Date.now();
+  if (_adjStatus && (now - _adjStatusTs) < _ADJ_TTL) return _adjStatus;
+  try {
+    const r = await fetch(`${API}/api/debate/adjudicator-status`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (r.ok) {
+      _adjStatus   = await r.json();
+      _adjStatusTs = now;
+      return _adjStatus;
+    }
+  } catch {}
+  _adjStatus   = { available: false, provider: null, model: '' };
+  _adjStatusTs = now;
+  return _adjStatus;
+}
+
+function clearAdjudicatorStatusCache() {
+  _adjStatus   = null;
+  _adjStatusTs = 0;
+}
+
+/**
+ * Send a stored debate to the cloud adjudicator.
+ * The backend auto-detects provider (Gemini preferred, Groq fallback).
+ * @param {number} eventId
+ * @returns {Promise<{ok, provider, model, winner, score_a, score_b,
+ *                    final_tags, reason, error_type, error_type_source,
+ *                    elapsed_ms}|null>}
+ */
+async function fetchAdjudication(eventId) {
+  if (!state.serverOk) return null;
+  try {
+    const r = await fetch(`${API}/api/debate/adjudicate`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ id: eventId }),
+      signal:  AbortSignal.timeout(60_000),  // cloud calls are <30s typically
+    });
+    if (r.ok) return await r.json();
+    // Try to surface the JSON error body if available
+    try { return await r.json(); } catch { return null; }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Trigger a post-mortem auto-tag for a closed learning event (fire-and-forget).
  * @param {number} eventId

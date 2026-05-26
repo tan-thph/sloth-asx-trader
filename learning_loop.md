@@ -182,6 +182,8 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 | `POST /api/debate`                 | Write  | Bull/Bear debate (sequential, 4h signal-hash cache) |
 | `POST /api/debate/postmortem`         | Write  | Auto-tag error_type for loss/breakeven events (single model) |
 | `POST /api/debate/postmortem-debate`  | Write  | Adversarial two-model debate → CONSENSUS / PARTIAL / DIVERGED |
+| `POST /api/debate/adjudicate`         | Write  | Cloud adjudicator (Gemini/Groq auto-pick) scores both local models + picks winner |
+| `GET  /api/debate/adjudicator-status` | Read   | Is a cloud adjudicator configured? Used by UI to enable/disable 🧑‍⚖️ button |
 | `POST /api/debate/staleness`          | Write  | Freshness check for pending recs ≥ 2 days old |
 | `POST /api/debate/skill`              | Write  | Score closed trade outcome quality 0–10 |
 
@@ -201,6 +203,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
   - 🤖 postmortem button (loss/breakeven, re-runnable — overwrites existing tag)
   - ⚔️ adversarial debate button (loss/breakeven, user-initiated only)
   - 📜 stored-debate viewer (only shown on rows where `postmortem_debate` is non-null — opens transcript modal with no model call)
+  - ⚖️ cloud adjudicator (only shown on rows with stored debate; user-initiated; scores both local models 0-10 and picks a winner via Gemini/Groq)
   - 🔬 skill score button (all closed events, re-runnable); badge when scored (green/amber/red)
   - ✕ delete button
 - Debate Summaries (last 5 with stored debate_summary)
@@ -341,20 +344,39 @@ Model A is shown:
 - Model B's Phase 1 tags + reason  
 - The original trade summary (for reference)
 
-Model A must respond: `{"maintain": bool, "final_tags": "TAG1,TAG2", "reason": "one sentence"}`
+The prompt explicitly forbids restating prior reasoning — Model A must either cite specific numbers showing why B's interpretation is wrong, or concede.
 
-- If **maintains**: Model A's (possibly refined) `final_tags` are used
+Model A must respond: `{"maintain": bool, "final_tags": "TAG1,TAG2", "reason": "specific rebuttal citing numbers"}`
+
+- If **maintains** AND rebuttal contains at least one digit: Model A's (possibly refined) `final_tags` are used
+- If **maintains** but rebuttal has NO digits: **auto-concede** is applied (the incumbent cannot win by silence — recorded in `phase_3.auto_concede_reason`)
 - If **concedes**: Model B's Phase 1 tags are used
 
 `error_type_source` is `debated` in either case.
 
+### Post-classification sanity check (`_pm_sanity_check_tags`)
+After all phases (and also after the single-model 🤖 path), tags are validated against the actual trade numbers and stripped if logically inconsistent:
+
+| Tag | Stripped when |
+|---|---|
+| `stop_too_tight` | `\|entry − stop\| / entry > 15%` (a wide stop cannot be "tight") |
+| `poor_rr`        | `rr_ratio >= 2.0` (the trade was set up with adequate reward) |
+
+This catches model self-contradictions (e.g. a model calling a 43%-distance stop "too tight" while citing the 43% distance in its own reason). Direction-agnostic (absolute distance), so works for both BUY and SELL. Logged at INFO with the specific contradiction.
+
 ### Storage
 Results are stored in:
-- `error_type` — final resolved tags
-- `error_type_source` — one of: `debated-consensus`, `debated-merged`, `debated`
+- `error_type` — final resolved tags (post sanity-check)
+- `error_type_source` — one of: `debated-consensus`, `debated-merged`, `debated-singleton`, `debated`
 - `postmortem_debate` — full JSON transcript of all phases for later inspection
 
-The transcript is available in future via the modal shown immediately after the debate completes.
+The transcript contains:
+- `trade` — recommendation, entry/stop/target, P&L, R:R, regime, hold days, AI confidence — surfaced in the modal so users can spot direction misreads (e.g. SELL trade tagged as `poor_entry` by a model that assumed BUY)
+- `phase_1` — both models' tags and reasons
+- `phase_3` (optional) — challenger, full raw response (600 chars), `maintains` flag, `final_tags`, optional `auto_concede_reason`
+- `verdict`, `final_tags`
+
+The modal is shown immediately after the debate completes and is re-openable later via the 📜 button on rows with stored transcripts.
 
 ### Model Selection
 - **Primary model**: `state.debate.model` (or Auto via `preferredDebateModel()`)
@@ -363,6 +385,50 @@ The transcript is available in future via the modal shown immediately after the 
 
 ### Why user-initiated only
 The divergence pattern between models is valuable but computationally expensive: up to 3 Ollama calls × model timeout. Running this automatically on every loss would block the UI for 3–5 minutes per event and keep Ollama occupied. The 🤖 button already provides fast single-model tagging; ⚔️ is for when you want a second opinion on a disputed or surprising classification.
+
+---
+
+## Cloud Adjudicator (Phase 4)
+
+**Endpoint:** `POST /api/debate/adjudicate`  
+**Trigger:** ⚖️ button per row — **never automatic**. Only visible on rows with stored `postmortem_debate`.  
+**Provider:** auto-detected — Gemini preferred (uses configured `google_api_key`), Groq as fallback (`groq_api_key`). Keys read from the existing `blob_store.news_settings` entry (same place News Scanner uses them).  
+**Status check:** `GET /api/debate/adjudicator-status` returns `{available, provider, model}` so the UI can show a useful error if no key is configured.
+
+### Purpose
+The local debate (Phase 1–3) can deadlock with a stubborn incumbent or both models missing the actual issue (e.g. both flagging `poor_entry` when the real problem was `overconfident` position sizing). The adjudicator brings in a larger, capable cloud model to:
+
+1. **Score each local model's reasoning 0-10** on four criteria:
+   - Did it cite specific numbers (R:R, stop distance, P&L)?
+   - Is the reasoning internally consistent?
+   - Are the tags well-supported by the trade data?
+   - Did it interpret trade direction (BUY/SELL/TRIM) correctly?
+2. **Pick a winner** (A, B, or NEITHER) and final tags.
+
+`NEITHER` means both models missed the real issue — the adjudicator proposes its own tags.
+
+### Storage
+- `error_type` is overwritten with the adjudicator's `final_tags` (unless empty/invalid)
+- `error_type_source` becomes `'adjudicated'`
+- `postmortem_debate.phase_4` is appended:
+  ```json
+  {
+    "provider":   "gemini",
+    "model":      "gemini-2.0-flash",
+    "winner":     "A" | "B" | "NEITHER",
+    "score_a":    7.5,
+    "score_b":    4.0,
+    "final_tags": "stop_too_tight,poor_rr",
+    "reason":     "Model A engaged with the R:R numbers; B was generic.",
+    "elapsed_ms": 2840
+  }
+  ```
+
+### Output validation
+The adjudicator's `final_tags` go through the same `_pm_validate_tags` + `_pm_sanity_check_tags` pipeline as the local models — even a cloud model can't claim `stop_too_tight` on a 43%-wide stop.
+
+### Why cloud and not stronger local
+A 70B+ local model would need 40 GB+ VRAM and run for minutes per call. Cloud providers like Gemini Flash and Groq Llama-3.3-70B answer in 1-3 seconds per call for a few thousandths of a cent. The adjudicator is the right place to spend cloud cost — it runs on demand, on already-disputed cases.
 
 ### Classification instructions
 The model is explicitly told:
@@ -408,6 +474,13 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Adversarial debate: user-initiated only | 3 sequential Ollama calls × up to 120s each; auto-running on every loss would block UI for minutes. 🤖 fast-path handles the common case; ⚔️ is for disputes |
 | PARTIAL verdict: keep intersection only | Higher confidence than either model's full output. A tag both agreed on is stronger signal than either individual response |
 | Phase 3 challenges Model A (not arbitrary) | Model A runs first and is the "incumbent"; Model B is the challenger. Incumbent defends first — this mirrors how human debates work and produces more decisive outcomes |
+| Phase 3 maintain requires numeric rebuttal | A "maintain" response containing zero digits is auto-downgraded to concede. Prevents the incumbent from winning by silently restating prior reasoning. Models that engage with specific numbers can still maintain |
+| Sanity check after final tags determined | Catches model self-contradictions like `stop_too_tight` on a 43%-distance stop. Cheaper and more reliable than asking the model to verify its own output |
+| Trade context block at top of debate modal | Surfaces recommendation (BUY/SELL/TRIM) and prices upfront so users can spot direction misreads. The model can still hallucinate direction in its reason, but the user sees the actual numbers |
+| Phase 3 raw response shown via collapsible `<details>` | Lets users see exactly what the challenger wrote without dominating the modal. Critical for diagnosing whether the model engaged with B's points or just rubber-stamped |
+| Adjudicator is user-initiated, not auto | Costs real money per call. Worth spending on disputed cases (the user explicitly clicks ⚖️) but wasteful as a default on every postmortem |
+| Adjudicator output validated by same `_pm_sanity_check_tags` | Even a 70B+ cloud model can produce contradictory tags. Same validation pipeline = same guarantees |
+| Provider auto-pick (Gemini > Groq) | Gemini Flash has a generous free tier and you're already using it for ASX announcements — zero extra cost in common case. Groq is the fallback because it's also free up to per-day limits |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
 | Lessons Database deferred | Needs proper design: what is a "lesson"? How injected? Until defined, premature to implement. |
 

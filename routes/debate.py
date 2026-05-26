@@ -6,12 +6,14 @@ postmortem analysis on closed trades and skill scoring. Degrades gracefully
 when Ollama is not running.
 
 Endpoints:
-  /api/debate/status              GET    — Ollama reachable + available models
-  /api/debate                     POST   — bull+bear debate for one ticker
-  /api/debate/postmortem          POST   — postmortem on a closed event
-  /api/debate/postmortem-debate   POST   — adversarial 2-model postmortem
-  /api/debate/staleness           POST   — re-check pending recs for invalidation
-  /api/debate/skill                POST   — 0-10 quality score for an event
+  /api/debate/status                 GET    — Ollama reachable + available models
+  /api/debate                        POST   — bull+bear debate for one ticker
+  /api/debate/postmortem             POST   — postmortem on a closed event
+  /api/debate/postmortem-debate      POST   — adversarial 2-model postmortem
+  /api/debate/adjudicate             POST   — cloud adjudicator (Gemini/Groq)
+  /api/debate/adjudicator-status     GET    — is a cloud adjudicator configured?
+  /api/debate/staleness              POST   — re-check pending recs for invalidation
+  /api/debate/skill                  POST   — 0-10 quality score for an event
 """
 
 import json
@@ -391,6 +393,149 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
     )
 
 
+# ── Cloud adjudicator helpers (Gemini / Groq) ─────────────────────────────────
+# Used by the user-initiated 🧑‍⚖️ adjudicator. Reads API keys from the
+# blob_store 'news_settings' entry (same place news + announcements use).
+
+def _get_adjudicator_provider() -> dict:
+    """
+    Auto-detect which cloud provider to use, preferring Gemini.
+
+    Returns a dict: {"provider": "gemini"|"groq"|None,
+                     "api_key": "...", "model": "..."}
+    The 'model' is the default for that provider; the endpoint may override.
+    """
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT value FROM blob_store WHERE key='news_settings'"
+            ).fetchone()
+    except Exception:
+        row = None
+    settings = json.loads(row["value"]) if row else {}
+
+    google_key = settings.get("google_api_key", "") or ""
+    groq_key   = settings.get("groq_api_key", "") or ""
+
+    if google_key:
+        return {
+            "provider": "gemini",
+            "api_key":  google_key,
+            "model":    settings.get("google_model") or "gemini-2.0-flash",
+        }
+    if groq_key:
+        return {
+            "provider": "groq",
+            "api_key":  groq_key,
+            "model":    settings.get("groq_model") or "llama-3.1-8b-instant",
+        }
+    return {"provider": None, "api_key": "", "model": ""}
+
+
+def _call_gemini_json(api_key: str, model: str, prompt: str, timeout: int = 30) -> dict:
+    """
+    Call Gemini, return {"ok": True, "text": "..."} or {"ok": False, "error": "..."}.
+    Mirrors _call_ollama return shape so the rest of the code is provider-agnostic.
+    """
+    try:
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            params={"key": api_key},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 500},
+            },
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            return {"ok": False, "error": f"Gemini HTTP {r.status_code}: {r.text[:120]}"}
+        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return {"ok": True, "text": (text or "").strip()}
+    except requests.exceptions.Timeout:
+        return {"ok": False, "error": f"Gemini timeout after {timeout}s"}
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)}
+
+
+def _call_groq_json(api_key: str, model: str, prompt: str, timeout: int = 30) -> dict:
+    """Call Groq; same shape as _call_gemini_json / _call_ollama."""
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model":       model,
+                "messages":    [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+                "max_tokens":  500,
+            },
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:120]}"}
+        text = r.json()["choices"][0]["message"]["content"]
+        return {"ok": True, "text": (text or "").strip()}
+    except requests.exceptions.Timeout:
+        return {"ok": False, "error": f"Groq timeout after {timeout}s"}
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)}
+
+
+def _call_cloud_adjudicator(provider: str, api_key: str, model: str,
+                            prompt: str, timeout: int = 30) -> dict:
+    """Dispatch to gemini or groq. Returns {"ok", "text"} or {"ok", "error"}."""
+    if provider == "gemini":
+        return _call_gemini_json(api_key, model, prompt, timeout=timeout)
+    if provider == "groq":
+        return _call_groq_json(api_key, model, prompt, timeout=timeout)
+    return {"ok": False, "error": f"Unknown adjudicator provider: {provider}"}
+
+
+def _pm_sanity_check_tags(final_tags: str, row, ev_id: int, label: str = "") -> str:
+    """
+    Post-classification logical-consistency check.
+
+    Strips tags that contradict the actual trade numbers:
+      - 'stop_too_tight' is invalid when stop distance from entry > 15% of price.
+        A 43%-from-entry stop is wide, not tight, regardless of what the model said.
+      - 'poor_rr' is invalid when actual R:R ratio >= 2.0. The trade was set up
+        with adequate reward potential; it failed for another reason.
+
+    This catches model self-contradictions (e.g. qwen3.5 calling a 43%-distance
+    stop "too tight" while simultaneously noting the 43% distance in its reason).
+
+    Direction-aware: uses absolute stop distance so SELL/BUY both work.
+    Silently no-op when fields are missing.
+    """
+    if not final_tags:
+        return final_tags
+    tags  = set(t.strip() for t in final_tags.split(",") if t.strip())
+    entry = row["actual_entry_price"]
+    stop  = row["suggested_stop"]
+    rr    = row["rr_ratio"]
+
+    stripped = []
+
+    if "stop_too_tight" in tags and entry and stop:
+        stop_dist_pct = abs(entry - stop) / entry
+        if stop_dist_pct > 0.15:
+            tags.discard("stop_too_tight")
+            stripped.append(
+                f"stop_too_tight (stop is {stop_dist_pct:.0%} from entry — wide, not tight)"
+            )
+
+    if "poor_rr" in tags and rr is not None and rr >= 2.0:
+        tags.discard("poor_rr")
+        stripped.append(f"poor_rr (R:R={rr:.1f} is healthy, not poor)")
+
+    if stripped:
+        current_app.logger.info(
+            f"[PostMortem{label}] event#{ev_id} sanity-check stripped: {stripped}"
+        )
+
+    return ",".join(sorted(tags)) if tags else ""
+
+
 def _pm_validate_tags(error_type: str, ev_id: int, model: str, label: str = "") -> str:
     """
     Validate a comma-separated tag string against VALID_PM_TYPES.
@@ -512,6 +657,8 @@ def debate_postmortem():
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 
     error_type, reason = _pm_parse(result["text"].strip(), ev_id, model)
+    # Logical-consistency check — strip tags that contradict the trade numbers
+    error_type = _pm_sanity_check_tags(error_type, row, ev_id)
 
     if error_type and error_type != "none":
         try:
@@ -648,6 +795,23 @@ def debate_postmortem_debate():
     b_parsed_ok = bool(tags_b_str) or bool(reason_b.strip())
 
     transcript = {
+        # Trade context — surfaces direction (BUY/SELL/TRIM) + key prices so
+        # the modal can show whether the models even interpreted direction
+        # correctly. Helps spot cases where a SELL trade gets labelled
+        # "poor_entry" because the model assumed BUY direction.
+        "trade": {
+            "recommendation": row["recommendation"],
+            "ticker":         row["ticker"],
+            "entry":          row["actual_entry_price"],
+            "stop":           row["suggested_stop"],
+            "target":         row["suggested_target"],
+            "pnl_pct":        row["realized_pnl_pct"],
+            "exit_reason":    row["exit_reason"],
+            "regime":         row["regime"],
+            "rr_ratio":       row["rr_ratio"],
+            "hold_days":      row["holding_period_days"],
+            "ai_confidence":  row["ai_confidence"],
+        },
         "phase_1": {
             "model_a":  model_a, "tags_a":  tags_a_str, "reason_a": reason_a,
             "model_b":  model_b, "tags_b":  tags_b_str, "reason_b": reason_b,
@@ -709,9 +873,19 @@ def debate_postmortem_debate():
             f"Their reason: {reason_b}\n\n"
             "Trade summary for reference:\n"
             f"{summary}\n\n"
-            "Do you maintain your classification, or concede to the other model?\n"
-            'Respond with JSON only: {"maintain":true,"final_tags":"TAG1,TAG2","reason":"one sentence"}\n'
-            'To concede: {"maintain":false,"final_tags":"TAG1,TAG2","reason":"one sentence"}\n'
+            "RULES for your response:\n"
+            "  1. You MUST engage with the other model's specific claims — do not "
+            "just restate your earlier reasoning.\n"
+            "  2. To MAINTAIN your tags, cite specific numbers (P&L %, R:R ratio, "
+            "stop distance, entry/target prices) showing why their interpretation "
+            "is factually wrong.\n"
+            "  3. To CONCEDE, explain which of their points convinced you.\n"
+            "  4. If you cannot rebut their points with numbers, you must concede.\n"
+            "  5. A response that simply repeats your prior reason without "
+            "addressing theirs is treated as a CONCEDE.\n"
+            "\n"
+            'Respond with JSON only: {"maintain":true,"final_tags":"TAG1,TAG2","reason":"specific rebuttal citing numbers from the trade summary"}\n'
+            'To concede: {"maintain":false,"final_tags":"TAG1,TAG2","reason":"which of their points convinced you"}\n'
             "No markdown, no explanation outside JSON."
         )
         res_ch = _call_ollama(model_a, challenge_prompt, timeout=tout, retries=0, think=False)
@@ -719,7 +893,9 @@ def debate_postmortem_debate():
 
         transcript["phase_3"] = {
             "challenger": model_a,
-            "raw": (res_ch.get("text", "")[:300] if res_ch["ok"] else res_ch["error"]),
+            # 600 chars — enough to show whether the rebuttal engaged with
+            # specific numbers (fix #3: surface raw response in modal)
+            "raw": (res_ch.get("text", "")[:600] if res_ch["ok"] else res_ch["error"]),
         }
 
         # Default if challenge call fails or parse fails — A keeps its tags
@@ -745,6 +921,17 @@ def debate_postmortem_debate():
                 m_r       = re.search(r'"reason"\s*:\s*"([^"]+)"', ch_raw)
                 ch_reason = m_r.group(1) if m_r else ""
 
+            # Enforce challenge rule #5: a "maintain" must cite numbers.
+            # If the rebuttal has zero digits, the model isn't engaging with
+            # specifics — auto-concede so the incumbent can't win by silence.
+            if maintains and not re.search(r"\d", ch_reason or ""):
+                current_app.logger.info(
+                    f"[PostMortemDebate] event#{ev_id} — Phase 3 maintain has no "
+                    f"numeric rebuttal, auto-concede applied"
+                )
+                maintains = False
+                transcript["phase_3"]["auto_concede_reason"] = "no numeric rebuttal"
+
             transcript["phase_3"]["maintains"]  = maintains
             transcript["phase_3"]["final_tags"] = ch_tags
 
@@ -757,6 +944,12 @@ def debate_postmortem_debate():
                 # A conceded — use B's tags
                 final_tags   = tags_b_str
                 final_reason = f"Conceded to {model_b}: {ch_reason or reason_b}"
+
+    # Logical-consistency check — strip tags that contradict trade numbers
+    # (e.g. 'stop_too_tight' on a 43%-distance stop). Applied AFTER all phases
+    # so it catches contradictions whether they came from Phase 1, merged, or
+    # the Phase 3 challenge round.
+    final_tags = _pm_sanity_check_tags(final_tags, row, ev_id, label="Debate")
 
     transcript["verdict"]    = verdict
     transcript["final_tags"] = final_tags
@@ -791,6 +984,222 @@ def debate_postmortem_debate():
         "model_b":           model_b,
         "debate":            transcript,
         "elapsed_ms":        elapsed_ms,
+    })
+
+
+@bp.route("/api/debate/adjudicate", methods=["POST"])
+def debate_adjudicate():
+    """
+    Cloud-model adjudicator for a stored adversarial debate transcript.
+
+    User-initiated only — fires when the user clicks 🧑‍⚖️ on a debate row.
+    Reads the stored postmortem_debate JSON, asks a cloud model (Gemini or
+    Groq, auto-detected from configured API keys) to score each local model's
+    reasoning 0-10 and pick a winner. Result is persisted as a new `phase_4`
+    block in the transcript, and error_type is updated if the adjudicator
+    picks a winner with new tags.
+
+    Request:  {"id": 123}
+    Response: {
+      "ok": true, "id": 123,
+      "provider": "gemini", "model": "gemini-2.0-flash",
+      "winner": "A" | "B" | "neither",
+      "score_a": 7, "score_b": 4,
+      "final_tags": "stop_too_tight,poor_rr",
+      "reason": "Model A engaged with the R:R numbers; B was generic.",
+      "error_type": "stop_too_tight,poor_rr",
+      "error_type_source": "adjudicated"
+    }
+    """
+    data  = request.get_json() or {}
+    ev_id = data.get("id")
+    if not ev_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+
+    # Auto-detect provider from stored API keys
+    cfg = _get_adjudicator_provider()
+    if not cfg["provider"]:
+        return jsonify({
+            "ok": False,
+            "error": "No cloud adjudicator configured. Set a Gemini or Groq API key "
+                     "in News Scanner → Settings.",
+        }), 400
+
+    # Load the event + its stored debate transcript
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT * FROM ai_learning_events WHERE id=?", (ev_id,)
+            ).fetchone()
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+    if not row:
+        return jsonify({"ok": False, "error": "event not found"}), 404
+    if not row["postmortem_debate"]:
+        return jsonify({"ok": False, "error": "no stored debate to adjudicate"}), 400
+
+    try:
+        transcript = json.loads(row["postmortem_debate"])
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"could not parse stored debate: {ex}"}), 500
+
+    p1      = transcript.get("phase_1") or {}
+    model_a = p1.get("model_a", "Model A")
+    model_b = p1.get("model_b", "Model B")
+    tags_a  = p1.get("tags_a", "(none)")
+    tags_b  = p1.get("tags_b", "(none)")
+    reason_a = p1.get("reason_a", "")
+    reason_b = p1.get("reason_b", "")
+
+    # Build trade summary from row (don't trust transcript.trade — old debates
+    # may not have it; row is the source of truth either way)
+    summary = _pm_build_summary(row)
+
+    # Adjudicator prompt — asks for scores + winner + final tags
+    valid_tags_list = ", ".join(sorted(VALID_PM_TYPES - {"none"}))
+    prompt = (
+        f"You are an expert trading-postmortem adjudicator. Two local models classified "
+        f"a closed trade and disagreed. Judge their reasoning quality and pick a winner.\n\n"
+        f"TRADE: {summary}\n\n"
+        f"--- MODEL A ({model_a}) ---\n"
+        f"Tags: {tags_a}\n"
+        f"Reason: {reason_a}\n\n"
+        f"--- MODEL B ({model_b}) ---\n"
+        f"Tags: {tags_b}\n"
+        f"Reason: {reason_b}\n\n"
+        f"Scoring criteria (0-10 each):\n"
+        f"  - Did the model cite specific numbers (R:R, stop distance, P&L)?\n"
+        f"  - Is the reasoning internally consistent (e.g. don't call a 40% stop 'tight')?\n"
+        f"  - Are the tags well-supported by the trade data?\n"
+        f"  - Did the model interpret trade direction (BUY/SELL/TRIM) correctly?\n\n"
+        f"Valid tags: {valid_tags_list}\n\n"
+        f"Reply with JSON only:\n"
+        f'{{"winner":"A"|"B"|"neither","score_a":0-10,"score_b":0-10,'
+        f'"final_tags":"TAG1,TAG2","reason":"one or two sentences explaining the judgment"}}\n'
+        f"\"neither\" winner means both models missed the real issue — set final_tags to "
+        f"what the right tags should be. No markdown, no text outside JSON."
+    )
+
+    t0 = time.time()
+    current_app.logger.info(
+        f"[Adjudicate] event#{ev_id} ({row['ticker']}) via {cfg['provider']}:{cfg['model']}"
+    )
+    res = _call_cloud_adjudicator(
+        cfg["provider"], cfg["api_key"], cfg["model"], prompt, timeout=40
+    )
+    elapsed_ms = int((time.time() - t0) * 1000)
+
+    if not res["ok"]:
+        return jsonify({"ok": False, "error": res["error"]})
+
+    # Parse output (strip markdown fences, allow regex fallback)
+    raw = res["text"]
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$",       "", raw)
+    current_app.logger.debug(f"[Adjudicate] raw output for event#{ev_id}: {raw[:300]}")
+
+    winner = ""; score_a = None; score_b = None
+    final_tags_raw = ""; reason = ""
+    try:
+        parsed = json.loads(raw)
+        winner         = (parsed.get("winner") or "").upper()
+        score_a        = parsed.get("score_a")
+        score_b        = parsed.get("score_b")
+        final_tags_raw = parsed.get("final_tags", "") or ""
+        reason         = parsed.get("reason", "") or ""
+    except Exception:
+        # Regex fallback
+        m_w = re.search(r'"winner"\s*:\s*"([^"]+)"', raw)
+        m_a = re.search(r'"score_a"\s*:\s*([0-9.]+)', raw)
+        m_b = re.search(r'"score_b"\s*:\s*([0-9.]+)', raw)
+        m_t = re.search(r'"final_tags"\s*:\s*"([^"]+)"', raw)
+        m_r = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
+        winner         = (m_w.group(1) if m_w else "").upper()
+        score_a        = float(m_a.group(1)) if m_a else None
+        score_b        = float(m_b.group(1)) if m_b else None
+        final_tags_raw = m_t.group(1) if m_t else ""
+        reason         = m_r.group(1) if m_r else raw[:200]
+
+    # Validate + sanity-check final tags
+    final_tags = _pm_validate_tags(final_tags_raw, ev_id, cfg["model"], label="/adjudicate")
+    final_tags = _pm_sanity_check_tags(final_tags, row, ev_id, label="Adjudicate")
+
+    # Clamp scores
+    def _clamp(v):
+        if v is None: return None
+        try: return max(0.0, min(10.0, float(v)))
+        except Exception: return None
+    score_a = _clamp(score_a)
+    score_b = _clamp(score_b)
+
+    # Normalise winner
+    if winner not in ("A", "B", "NEITHER"):
+        winner = "NEITHER"
+
+    # Append phase_4 to transcript
+    transcript["phase_4"] = {
+        "provider":   cfg["provider"],
+        "model":      cfg["model"],
+        "winner":     winner,
+        "score_a":    score_a,
+        "score_b":    score_b,
+        "final_tags": final_tags,
+        "reason":     reason,
+        "elapsed_ms": elapsed_ms,
+    }
+
+    # Persist updated transcript + (if winner) updated error_type
+    update_error_type = bool(final_tags) and winner in ("A", "B", "NEITHER")
+    try:
+        with get_db() as conn:
+            if update_error_type:
+                conn.execute(
+                    """UPDATE ai_learning_events
+                          SET error_type=?, error_type_source='adjudicated',
+                              postmortem_debate=?
+                        WHERE id=?""",
+                    (final_tags, json.dumps(transcript), ev_id)
+                )
+            else:
+                conn.execute(
+                    """UPDATE ai_learning_events
+                          SET postmortem_debate=?
+                        WHERE id=?""",
+                    (json.dumps(transcript), ev_id)
+                )
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+    current_app.logger.info(
+        f"[Adjudicate] event#{ev_id} ({row['ticker']}) → winner={winner} "
+        f"A={score_a} B={score_b} tags={final_tags or 'none'} in {elapsed_ms}ms"
+    )
+
+    return jsonify({
+        "ok":                True,
+        "id":                ev_id,
+        "provider":          cfg["provider"],
+        "model":             cfg["model"],
+        "winner":            winner,
+        "score_a":           score_a,
+        "score_b":           score_b,
+        "final_tags":        final_tags,
+        "reason":            reason,
+        "error_type":        final_tags or "none",
+        "error_type_source": "adjudicated" if update_error_type else (row["error_type_source"] or "debated"),
+        "elapsed_ms":        elapsed_ms,
+    })
+
+
+@bp.route("/api/debate/adjudicator-status")
+def debate_adjudicator_status():
+    """Quick check: is a cloud adjudicator available? Used by UI to enable/disable the 🧑‍⚖️ button."""
+    cfg = _get_adjudicator_provider()
+    return jsonify({
+        "available": bool(cfg["provider"]),
+        "provider":  cfg["provider"],
+        "model":     cfg["model"],
     })
 
 

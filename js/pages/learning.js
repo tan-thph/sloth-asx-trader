@@ -419,6 +419,13 @@ function _renderLearningContent(d) {
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
                     >&#128220;<span style="font-size:8px;display:block;line-height:1;text-align:center">Tr</span></button>` : ''}
+                    ${ev.postmortem_debate ? `<button id="adj-btn-${ev.id}"
+                      onclick="triggerAdjudication(${ev.id})"
+                      title="Cloud adjudicator — score both models 0-10 and pick a winner (uses configured Gemini/Groq key)"
+                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
+                      onmouseover="this.style.background='var(--bg-secondary)'"
+                      onmouseout="this.style.background='none'"
+                    >&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span></button>` : ''}
                     <button
                       onclick="deleteLearningEvent(${ev.id})"
                       title="Remove event"
@@ -944,19 +951,113 @@ function showPostmortemDebateModal(result, eventId) {
     'debated':           p3?.maintains
       ? `${result.model_a} held its ground in challenge round`
       : `${result.model_a} conceded to ${result.model_b}`,
+    'adjudicated':       'Cloud adjudicator decided (see Phase 4 below)',
   }[result.error_type_source] || '';
 
+  // Helper: format a number with sign + 1 decimal, or em-dash
+  const _fnum = (v, dp = 2) => v == null ? '—' : Number(v).toFixed(dp);
+  const _fpct = (v, dp = 1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(dp) + '%';
+
+  // Fix #4: Trade context block — shows recommendation direction + prices
+  // upfront so the user can immediately spot model misreads (e.g. SELL trade
+  // tagged with "poor_entry" because model assumed BUY direction).
+  // Gracefully omitted for older stored debates that pre-date the trade field.
+  const trade = d.trade;
+  let stopDistPct = null, targetDistPct = null;
+  if (trade?.entry && trade?.stop)   stopDistPct   = ((trade.stop   - trade.entry) / trade.entry) * 100;
+  if (trade?.entry && trade?.target) targetDistPct = ((trade.target - trade.entry) / trade.entry) * 100;
+
+  const tradeBlock = trade ? `
+    <div style="background:var(--bg-secondary);border:1px solid var(--border);
+                border-radius:6px;padding:10px 14px">
+      <div style="font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.5px;margin-bottom:6px">
+        TRADE CONTEXT
+      </div>
+      <div style="font-size:12px;color:var(--text-primary);display:grid;grid-template-columns:auto 1fr;gap:4px 14px">
+        <span style="color:var(--text-muted)">Action</span>
+        <span><strong>${trade.recommendation || '?'}</strong> ${trade.ticker || ''}${trade.hold_days != null ? ` · held ${trade.hold_days}d` : ''}${trade.regime ? ` · ${trade.regime}` : ''}</span>
+
+        <span style="color:var(--text-muted)">Entry</span>
+        <span>$${_fnum(trade.entry, 3)}</span>
+
+        <span style="color:var(--text-muted)">Stop</span>
+        <span>$${_fnum(trade.stop, 3)}${stopDistPct != null ? ` <span style="color:var(--text-muted)">(${_fpct(stopDistPct)})</span>` : ''}</span>
+
+        <span style="color:var(--text-muted)">Target</span>
+        <span>$${_fnum(trade.target, 3)}${targetDistPct != null ? ` <span style="color:var(--text-muted)">(${_fpct(targetDistPct)})</span>` : ''}</span>
+
+        <span style="color:var(--text-muted)">P&amp;L · Exit</span>
+        <span>
+          <span style="color:${trade.pnl_pct > 0 ? '#16a34a' : trade.pnl_pct < 0 ? '#dc2626' : 'var(--text-muted)'};font-weight:600">${_fpct(trade.pnl_pct)}</span>
+          ${trade.exit_reason ? ` · <span style="color:var(--text-muted)">${trade.exit_reason}</span>` : ''}
+        </span>
+
+        ${trade.rr_ratio != null || trade.ai_confidence != null ? `
+        <span style="color:var(--text-muted)">R:R · Conf</span>
+        <span>${trade.rr_ratio != null ? trade.rr_ratio.toFixed(1) : '—'} · ${trade.ai_confidence != null ? (trade.ai_confidence * 100).toFixed(0) + '%' : '—'}</span>
+        ` : ''}
+      </div>
+    </div>` : '';
+
+  // Phase 4 (cloud adjudicator) — present only when 🧑‍⚖️ has been run.
+  // Shows scores per model + winner + adjudicator reasoning.
+  const p4 = d.phase_4;
+  const phase4Html = p4 ? (() => {
+    const winnerLabel = p4.winner === 'A' ? `Model A (${result.model_a})`
+                      : p4.winner === 'B' ? `Model B (${result.model_b})`
+                      : 'Neither (both missed something)';
+    const winnerColor = p4.winner === 'NEITHER' ? '#d97706'
+                      : (p4.winner === 'A' || p4.winner === 'B') ? '#7c3aed' : '#6b7280';
+    const _scoreBar = (label, score, color) => {
+      if (score == null) return `<div style="font-size:11px;color:var(--text-muted)">${label}: —</div>`;
+      const pct = Math.max(0, Math.min(100, score * 10));
+      return `
+        <div style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:3px">
+          <span style="width:80px;color:var(--text-primary)">${label}</span>
+          <div style="flex:1;background:var(--bg-secondary);border-radius:3px;height:8px;overflow:hidden">
+            <div style="width:${pct}%;height:100%;background:${color}"></div>
+          </div>
+          <span style="width:36px;text-align:right;font-weight:600">${score.toFixed(1)}/10</span>
+        </div>`;
+    };
+    return `
+      <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div style="font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.5px">
+            PHASE 4 — CLOUD ADJUDICATOR
+          </div>
+          <span style="font-size:10px;color:var(--text-muted);background:var(--bg-secondary);border:1px solid var(--border);padding:1px 6px;border-radius:3px">${p4.provider || '?'}:${p4.model || '?'}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-primary);margin-bottom:6px">
+          Winner: <strong style="color:${winnerColor}">${winnerLabel}</strong>
+          ${p4.final_tags ? ` → final tags: <strong>${p4.final_tags}</strong>` : ''}
+        </div>
+        ${_scoreBar(result.model_a || 'Model A', p4.score_a, '#16a34a')}
+        ${_scoreBar(result.model_b || 'Model B', p4.score_b, '#0ea5e9')}
+        ${p4.reason ? `<div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-top:6px">${p4.reason}</div>` : ''}
+      </div>`;
+  })() : '';
+
+  // Fix #3: show raw Phase 3 response so user can see whether the challenger
+  // actually rebutted with numbers or just restated. Also flag auto-concede
+  // (triggered when maintain=true but the rebuttal contains no digits).
   const phase3Html = p3 ? `
     <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
       <div style="font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.5px;margin-bottom:6px">
         PHASE 3 — CHALLENGE ROUND (${result.model_a})
       </div>
-      <div style="font-size:12px;line-height:1.5;color:var(--text-primary)">
+      <div style="font-size:12px;line-height:1.5;color:var(--text-primary);margin-bottom:6px">
         ${p3.maintains
           ? `<span style="color:#16a34a;font-weight:600">Maintained</span> → final: <strong>${p3.final_tags || result.error_type}</strong>`
           : `<span style="color:#dc2626;font-weight:600">Conceded</span> to ${result.model_b} → final: <strong>${p3.final_tags || result.error_type}</strong>`
         }
+        ${p3.auto_concede_reason ? `<span style="font-size:10px;margin-left:8px;color:#d97706;background:#fef3c7;border:1px solid #fde68a;padding:1px 6px;border-radius:3px" title="The maintain response contained no numeric rebuttal — auto-concede was applied">auto-concede: ${p3.auto_concede_reason}</span>` : ''}
       </div>
+      ${p3.raw ? `
+        <details style="margin-top:6px">
+          <summary style="font-size:11px;color:var(--text-muted);cursor:pointer">Raw rebuttal text</summary>
+          <pre style="margin-top:4px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;padding:8px;white-space:pre-wrap;word-break:break-word;color:var(--text-primary);max-height:200px;overflow-y:auto">${(p3.raw || '').replace(/</g,'&lt;')}</pre>
+        </details>` : ''}
     </div>` : '';
 
   const modal = document.createElement('div');
@@ -988,6 +1089,8 @@ function showPostmortemDebateModal(result, eventId) {
       </div>
 
       <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
+
+        ${tradeBlock}
 
         <!-- Final verdict -->
         <div style="background:${verdictColor}10;border:1px solid ${verdictColor}30;
@@ -1026,6 +1129,8 @@ function showPostmortemDebateModal(result, eventId) {
 
         ${phase3Html}
 
+        ${phase4Html}
+
         <!-- Models + timing footer -->
         <div style="font-size:11px;color:var(--text-muted);text-align:right">
           ${result.model_a} vs ${result.model_b} · ${result.elapsed_ms ? (result.elapsed_ms/1000).toFixed(1)+'s' : ''}
@@ -1052,6 +1157,51 @@ function showPostmortemDebateModal(result, eventId) {
   });
   observer.observe(document.body, { childList: true });
   document.body.appendChild(modal);
+}
+
+// ── Cloud adjudicator (Gemini / Groq) — score both models + pick winner ───────
+// Triggered by the AI judge button. Reads stored debate transcript, sends it
+// to a configured cloud model, scores Phase 1 reasoning 0-10 per model and
+// picks a winner. The result is appended as phase_4 in the transcript and
+// (if winner is A or B) overwrites error_type with error_type_source='adjudicated'.
+async function triggerAdjudication(eventId) {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  const btn = document.getElementById(`adj-btn-${eventId}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '&#8987;'; btn.title = 'Adjudicating…'; }
+
+  try {
+    // Check provider availability first so we can give a useful error
+    const status = await adjudicatorStatus();
+    if (!status.available) {
+      toast('No cloud adjudicator configured. Set a Gemini or Groq API key in News Scanner → Settings.', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span>'; btn.title = 'Cloud adjudicator'; }
+      return;
+    }
+
+    toast(`&#9878; ${status.provider}:${status.model} adjudicating event #${eventId}…`, 'info');
+    const t0 = Date.now();
+    const result = await fetchAdjudication(eventId);
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span>'; btn.title = 'Cloud adjudicator'; }
+
+    if (!result?.ok) {
+      toast(`Adjudicate failed (${elapsed}s): ${result?.error || 'no response'}`, 'error');
+      return;
+    }
+
+    const w = result.winner === 'NEITHER' ? 'NEITHER' : `Model ${result.winner}`;
+    toast(`Adjudicator: ${w} (A=${result.score_a ?? '—'}, B=${result.score_b ?? '—'}) in ${elapsed}s`, 'success');
+
+    // Re-render the page so the cache (_learningEventsById) is refreshed with
+    // the new transcript, THEN open the modal so it shows phase_4.
+    showPage('learning');
+    // Small delay to let render complete before opening modal
+    setTimeout(() => viewStoredDebate(eventId), 100);
+  } catch (e) {
+    toast('Adjudicate error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span>'; btn.title = 'Cloud adjudicator'; }
+  }
 }
 
 // ── View a stored adversarial debate transcript (no model call) ───────────────
