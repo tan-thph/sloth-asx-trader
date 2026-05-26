@@ -338,7 +338,7 @@ function _renderLearningContent(d) {
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
                 <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
-                <th style="text-align:center;padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. 🔬 = trigger Ollama scoring">🔬</th>
+                <th style="text-align:center;padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. Sk = trigger Ollama scoring">🔬 Sk</th>
                 <th style="padding:4px 6px;width:28px"></th>
               </tr>
             </thead>
@@ -353,13 +353,13 @@ function _renderLearningContent(d) {
                 const isProtective = ev.exit_reason === 'protective_stop';
                 const protectiveEl = isProtective
                   ? `<span title="Protective stop — excluded from confidence calibration (market accident, not model error)"
-                       style="font-size:10px;color:#15803d;margin-left:3px;cursor:default">🛡</span>`
+                       style="font-size:10px;color:#15803d;margin-left:3px;cursor:default">🛡<span style="font-size:8px;vertical-align:middle;margin-left:1px">P</span></span>`
                   : (ev.exit_reason === 'stop_hit' && TAG_STATUSES.has(ev.outcome_status))
                     ? `<button onclick="markProtectiveStop(${ev.id})"
                          title="Mark as protective stop — this loss was deliberate capital protection during a market shock, not a model error. Excluded from calibration."
                          style="background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;color:var(--text-muted);line-height:1"
                          onmouseover="this.style.color='#15803d'" onmouseout="this.style.color='var(--text-muted)'"
-                       >🛡?</button>`
+                       >🛡<span style="font-size:8px;vertical-align:middle">?</span></button>`
                     : '';
                 // 🤖 post-mortem — always show for loss/breakeven so re-runs are possible
                 const showPm = TAG_STATUSES.has(ev.outcome_status);
@@ -381,10 +381,10 @@ function _renderLearningContent(d) {
                   ? `<button id="skill-btn-${ev.id}"
                        onclick="triggerSkillScore(${ev.id})"
                        title="${skillScore != null ? 'Re-score outcome quality' : 'Score outcome quality (skill vs luck)'}"
-                       style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1;color:var(--text-muted)"
+                       style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2;color:var(--text-muted)"
                        onmouseover="this.style.background='var(--bg-secondary)'"
                        onmouseout="this.style.background='none'"
-                     >🔬</button>`
+                     >🔬<span style="font-size:8px;display:block;line-height:1;text-align:center">Sk</span></button>`
                   : '';
                 const skillBadge = skillBadgeEl + skillBtnEl;
                 return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
@@ -401,24 +401,24 @@ function _renderLearningContent(d) {
                     ${showPm ? `<button id="pm-btn-${ev.id}"
                       onclick="triggerDebatePostmortem(${ev.id})"
                       title="${pmTitle}"
-                      style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1"
+                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
-                    >🤖</button>` : ''}
+                    >🤖<span style="font-size:8px;display:block;line-height:1;text-align:center">PM</span></button>` : ''}
                     ${showPm ? `<button id="adv-btn-${ev.id}"
                       onclick="triggerAdversarialPostmortem(${ev.id})"
                       title="${ev.postmortem_debate ? 'Re-run adversarial debate (will overwrite stored transcript)' : 'Adversarial debate: two models classify independently, then argue to a conclusion'}"
-                      style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1"
+                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
-                    >⚔️</button>` : ''}
+                    >&#9876;<span style="font-size:8px;display:block;line-height:1;text-align:center">vs</span></button>` : ''}
                     ${ev.postmortem_debate ? `<button
                       onclick="viewStoredDebate(${ev.id})"
                       title="View stored debate transcript (no model call)"
-                      style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 3px;border-radius:3px;line-height:1"
+                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
-                    >📜</button>` : ''}
+                    >&#128220;<span style="font-size:8px;display:block;line-height:1;text-align:center">Tr</span></button>` : ''}
                     <button
                       onclick="deleteLearningEvent(${ev.id})"
                       title="Remove event"
@@ -539,7 +539,7 @@ async function renderLearningDebateCard() {
     el.style.display = 'block';
     el.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:space-between">
-        <div class="card-title" style="margin:0">🤖 Local Debate Engine</div>
+        <div class="card-title" style="margin:0">&#x1F916; Local Debate Engine</div>
         <span style="font-size:11px;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;padding:2px 8px;border-radius:4px">Offline</span>
       </div>
       <p class="text-xs text-muted" style="margin-top:6px">

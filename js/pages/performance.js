@@ -77,8 +77,9 @@ function renderPerformance() {
   // Annualisation factor is clamped so a 31-day span doesn't 12× the numerator
   // while max-drawdown stays raw, which produced absurd Calmar values previously.
   let calmarRatio = null;
-  let calmarInsufficient = false;
-  if (closedTrades.length >= 5) {
+  // 'trades' | 'span' | 'noderawdown' | false
+  let calmarInsufficient = closedTrades.length < 5 ? 'trades' : false;
+  if (!calmarInsufficient) {
     const sorted = [...closedTrades].sort((a,b) => (a.date||'').localeCompare(b.date||''));
     let cumPnl = 0, peak = 0, maxDD = 0;
     sorted.forEach(t => {
@@ -92,16 +93,18 @@ function renderPerformance() {
     const daySpan   = firstDate && lastDate
       ? (new Date(lastDate) - new Date(firstDate)) / 86400000 : 0;
     if (daySpan < 90) {
-      calmarInsufficient = true;
+      calmarInsufficient = 'span';
     } else {
       // Clamp to ≤ 4× to suppress wild extrapolation on short histories.
       const annFactor = Math.min(365 / daySpan, 4);
       const annReturn = realised * annFactor;
       const cost0     = totalCostVal || 1;
-      calmarRatio = maxDD > 0 ? (annReturn / cost0 * 100) / maxDD : null;
+      if (maxDD === 0) {
+        calmarInsufficient = 'nodrawdown';
+      } else {
+        calmarRatio = (annReturn / cost0 * 100) / maxDD;
+      }
     }
-  } else {
-    calmarInsufficient = true;
   }
 
   // Streaks and avg hold days
@@ -248,7 +251,12 @@ function renderPerformance() {
             <div style="font-size:18px;font-weight:600;color:${calmarRatio==null?'var(--text-secondary)':calmarRatio>=1?'#16a34a':calmarRatio>=0?'#d97706':'#dc2626'}">
               ${calmarRatio==null?'—':fmt(calmarRatio,2)}
             </div>
-            <div class="text-xs text-muted">${calmarInsufficient ? 'Needs ≥ 90 days of closed trades' : 'Ann. return / max drawdown · ≥ 1.0 = good'}</div>
+            <div class="text-xs text-muted">${
+              calmarInsufficient === 'trades'     ? `Needs ≥ 5 closed trades (have ${closedTrades.length})` :
+              calmarInsufficient === 'span'       ? 'Needs ≥ 90 days between first & last closed trade' :
+              calmarInsufficient === 'nodrawdown' ? 'No drawdown yet — all trades profitable' :
+              'Ann. return / max drawdown · ≥ 1.0 = good'
+            }</div>
           </div>
         </div>
       </div>
@@ -265,15 +273,17 @@ function renderPerformance() {
             <div style="font-size:18px;font-weight:600;color:${lossStreak>=3?'#dc2626':lossStreak>=2?'#d97706':'var(--text-primary)'}">${lossStreak} trade${lossStreak!==1?'s':''}</div>
             <div class="text-xs text-muted">Consecutive losses</div>
           </div>
-          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"
+               title="Hold duration = close date minus open date. Only counted for trades executed via Recommendations tab (which records both open and close dates).">
             <div class="text-xs">Avg Hold — Winners</div>
             <div style="font-size:18px;font-weight:600">${avgHoldWin!=null?Math.round(avgHoldWin)+'d':'—'}</div>
-            <div class="text-xs text-muted">${winHolds.length} closed wins with dates</div>
+            <div class="text-xs text-muted">${winHolds.length > 0 ? `${winHolds.length} winning trade${winHolds.length!==1?'s':''}` : 'No winning closes yet'}</div>
           </div>
-          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)"
+               title="Hold duration = close date minus open date. Only counted for trades executed via Recommendations tab (which records both open and close dates).">
             <div class="text-xs">Avg Hold — Losers</div>
             <div style="font-size:18px;font-weight:600">${avgHoldLoss!=null?Math.round(avgHoldLoss)+'d':'—'}</div>
-            <div class="text-xs text-muted">${lossHolds.length} closed losses with dates</div>
+            <div class="text-xs text-muted">${lossHolds.length > 0 ? `${lossHolds.length} losing trade${lossHolds.length!==1?'s':''}` : 'No losing closes yet'}</div>
           </div>
         </div>
       </div>
