@@ -47,7 +47,7 @@ async function renderLearningPage(gen) {
   } catch (e) {
     if (state._renderGen !== gen) return;
     el.innerHTML = `<div class="card"><div class="text-muted text-sm" style="padding:12px">
-      Could not load Learning Loop stats: ${e.message}<br>
+      ⚠️ Could not load Learning Loop stats: ${e.message}<br>
       <span class="text-xs">Make sure the backend server is running and has processed at least one AI call.</span>
     </div></div>`;
     return;
@@ -89,7 +89,7 @@ function _renderLearningContent(d) {
   const pct = (v) => v == null ? '—' : Number(v).toFixed(0) + '%';
   const rateColor = r => r == null ? 'var(--text-secondary)' : r >= 60 ? '#16a34a' : r >= 45 ? '#d97706' : '#dc2626';
   const sampleBadge = n => n < 5
-    ? `<span title="Limited data — treat with caution" style="margin-left:4px;font-size:10px;color:#d97706;background:#fef3c7;border-radius:3px;padding:1px 5px">n=${n} !</span>`
+    ? `<span title="Limited data — treat with caution" style="margin-left:4px;font-size:10px;color:#d97706;background:#fef3c7;border-radius:3px;padding:1px 5px">n=${n} ⚠</span>`
     : `<span style="margin-left:4px;font-size:10px;color:var(--text-muted)">(n=${n})</span>`;
 
   // Derive summary stats from conf_bands for high-conf win rate
@@ -132,14 +132,14 @@ function _renderLearningContent(d) {
       <div class="card-title">Confidence Calibration</div>
       ${insufficientData ? `
       <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start">
-        
+        <span style="font-size:16px;line-height:1">⚠️</span>
         <div>
           <strong>Not enough data yet (${closed} closed trade${closed !== 1 ? 's' : ''})</strong> — calibration signals are unreliable below 10 closed trades.
           Keep running analyses and marking trade outcomes; patterns will emerge naturally.
         </div>
       </div>` : ''}
       <p class="text-xs text-muted mb-1">
-        Predicted confidence vs actual win rate per band. ! = fewer than 5 samples — treat cautiously.
+        Predicted confidence vs actual win rate per band. ⚠ = fewer than 5 samples — treat cautiously.
         Calibration notes are injected into Claude when n≥3 and |delta|>5pp.
       </p>
       <table style="width:100%;border-collapse:collapse;font-size:12px">
@@ -308,7 +308,7 @@ function _renderLearningContent(d) {
                  border:${border};font-weight:${active ? 700 : 500};
                  background:${active ? meta.color : 'transparent'};
                  color:${active ? '#fff' : meta.color}"
-        >${isAuto && active ? '[A] ' : ''}${short}</button>`;
+        >${isAuto && active ? '🤖 ' : ''}${short}</button>`;
       }).join('') +
     `</div>`;
   };
@@ -337,8 +337,8 @@ function _renderLearningContent(d) {
                 <th style="text-align:left;padding:4px 6px">Regime</th>
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
-                <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, [A] = auto-tagged">Error tags ℹ</th>
-                <th style="text-align:center;padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. Sk = trigger Ollama scoring">Sk</th>
+                <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
+                <th style="text-align:center;padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. Sk = trigger Ollama scoring">🔬 Sk</th>
                 <th style="padding:4px 6px;width:28px"></th>
               </tr>
             </thead>
@@ -353,13 +353,13 @@ function _renderLearningContent(d) {
                 const isProtective = ev.exit_reason === 'protective_stop';
                 const protectiveEl = isProtective
                   ? `<span title="Protective stop — excluded from confidence calibration (market accident, not model error)"
-                       style="font-size:10px;color:#15803d;margin-left:3px;cursor:default;font-weight:700">[P]</span>`
+                       style="font-size:10px;color:#15803d;margin-left:3px;cursor:default">🛡<span style="font-size:8px;vertical-align:middle;margin-left:1px">P</span></span>`
                   : (ev.exit_reason === 'stop_hit' && TAG_STATUSES.has(ev.outcome_status))
                     ? `<button onclick="markProtectiveStop(${ev.id})"
                          title="Mark as protective stop — this loss was deliberate capital protection during a market shock, not a model error. Excluded from calibration."
-                         style="background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;color:var(--text-muted);line-height:1;font-weight:700"
+                         style="background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;color:var(--text-muted);line-height:1"
                          onmouseover="this.style.color='#15803d'" onmouseout="this.style.color='var(--text-muted)'"
-                       >[P]?</button>`
+                       >🛡<span style="font-size:8px;vertical-align:middle">?</span></button>`
                     : '';
                 // 🤖 post-mortem — always show for loss/breakeven so re-runs are possible
                 const showPm = TAG_STATUSES.has(ev.outcome_status);
@@ -381,10 +381,10 @@ function _renderLearningContent(d) {
                   ? `<button id="skill-btn-${ev.id}"
                        onclick="triggerSkillScore(${ev.id})"
                        title="${skillScore != null ? 'Re-score outcome quality' : 'Score outcome quality (skill vs luck)'}"
-                       style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 5px;border-radius:3px;line-height:1.4;color:var(--text-muted)"
+                       style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2;color:var(--text-muted)"
                        onmouseover="this.style.background='var(--bg-secondary)'"
                        onmouseout="this.style.background='none'"
-                     >Sk</button>`
+                     >🔬<span style="font-size:8px;display:block;line-height:1;text-align:center">Sk</span></button>`
                   : '';
                 const skillBadge = skillBadgeEl + skillBtnEl;
                 return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
@@ -401,24 +401,24 @@ function _renderLearningContent(d) {
                     ${showPm ? `<button id="pm-btn-${ev.id}"
                       onclick="triggerDebatePostmortem(${ev.id})"
                       title="${pmTitle}"
-                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 5px;border-radius:3px;line-height:1.4;color:var(--text-muted)"
+                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
-                    >PM</button>` : ''}
+                    >🤖<span style="font-size:8px;display:block;line-height:1;text-align:center">PM</span></button>` : ''}
                     ${showPm ? `<button id="adv-btn-${ev.id}"
                       onclick="triggerAdversarialPostmortem(${ev.id})"
                       title="${ev.postmortem_debate ? 'Re-run adversarial debate (will overwrite stored transcript)' : 'Adversarial debate: two models classify independently, then argue to a conclusion'}"
-                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 5px;border-radius:3px;line-height:1.4;color:var(--text-muted)"
+                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
-                    >vs</button>` : ''}
+                    >&#9876;<span style="font-size:8px;display:block;line-height:1;text-align:center">vs</span></button>` : ''}
                     ${ev.postmortem_debate ? `<button
                       onclick="viewStoredDebate(${ev.id})"
                       title="View stored debate transcript (no model call)"
-                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 5px;border-radius:3px;line-height:1.4;color:var(--text-muted)"
+                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
                       onmouseover="this.style.background='var(--bg-secondary)'"
                       onmouseout="this.style.background='none'"
-                    >Tr</button>` : ''}
+                    >&#128220;<span style="font-size:8px;display:block;line-height:1;text-align:center">Tr</span></button>` : ''}
                     <button
                       onclick="deleteLearningEvent(${ev.id})"
                       title="Remove event"
@@ -437,7 +437,7 @@ function _renderLearningContent(d) {
   // ── Failed tickers ─────────────────────────────────────────────────────────
   const failedCard = failed.length ? `
     <div class="card section-gap">
-      <div class="card-title">Recently Failed Tickers (${failed.length})</div>
+      <div class="card-title">⚠️ Recently Failed Tickers (${failed.length})</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead>
           <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
@@ -460,7 +460,7 @@ function _renderLearningContent(d) {
   // ── Debate Insights card (recent stored bull/bear summaries) ─────────────────
   const debateInsightsCard = debateInsights.length ? `
     <div class="card section-gap">
-      <div class="card-title">Recent Debate Summaries</div>
+      <div class="card-title">💬 Recent Debate Summaries</div>
       <p class="text-xs text-muted" style="margin-bottom:8px">
         Stored bull/bear context from local model debate at analysis time.
         Useful for post-mortem: was the model's bear case correct?
@@ -539,7 +539,7 @@ async function renderLearningDebateCard() {
     el.style.display = 'block';
     el.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:space-between">
-        <div class="card-title" style="margin:0">Local Debate Engine</div>
+        <div class="card-title" style="margin:0">&#x1F916; Local Debate Engine</div>
         <span style="font-size:11px;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;padding:2px 8px;border-radius:4px">Offline</span>
       </div>
       <p class="text-xs text-muted" style="margin-top:6px">
@@ -578,7 +578,7 @@ async function renderLearningDebateCard() {
   el.style.display = 'block';
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <div class="card-title" style="margin:0">Local Debate Engine</div>
+      <div class="card-title" style="margin:0">🤖 Local Debate Engine</div>
       <span style="font-size:11px;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;padding:2px 8px;border-radius:4px">● Online · ${models.length} model${models.length !== 1 ? 's' : ''} pulled</span>
     </div>
 
@@ -603,7 +603,7 @@ async function renderLearningDebateCard() {
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
       <div>
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Opposition model <span style="font-weight:400">(for vs debate)</span></div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Opposition model <span style="font-weight:400">(for ⚔️ debate)</span></div>
         <select onchange="setOppositionModel(this.value)"
           style="width:100%;font-size:12px;padding:4px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary)">
           ${oppModelOptions}
@@ -611,21 +611,21 @@ async function renderLearningDebateCard() {
       </div>
       <div style="display:flex;align-items:flex-end">
         <p class="text-xs text-muted" style="margin:0;line-height:1.4">
-          "vs" on each loss row runs an adversarial 3-phase debate between primary and opposition models — only on demand.
+          ⚔️ on each loss row runs an adversarial 3-phase debate between primary and opposition models — only on demand.
         </p>
       </div>
     </div>
 
     ${pulledRec.length === 0 ? `
       <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px">
-        No recommended model found. Pull one:
+        ⚠ No recommended model found. Pull one:
         <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3.5:9b</code>
         (best) · <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:0.6b</code> (fast)
       </div>` : ''}
 
     <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:10px">
       ${currentAgg === 'none'
-        ? 'Debate is disabled — no local model calls during analysis.'
+        ? '⏸ Debate is disabled — no local model calls during analysis.'
         : `Bull/bear debate runs automatically before each portfolio analysis.
            Results are appended to Claude's user message and stored as
            <em>debate_summary</em> in the learning log for later review.
@@ -672,7 +672,7 @@ async function runTestDebate() {
     ? preferredDebateModel(status.models) : 'qwen3:9b';
 
   btn.disabled = true;
-  btn.textContent = `Asking ${model}…`;
+  btn.textContent = `⏳ Asking ${model}…`;
   resultEl.style.display = 'none';
 
   const t0 = Date.now();
@@ -712,7 +712,7 @@ async function runTestDebate() {
           </div>
         </div>
       </div>`;
-    toast(`Test debate for ${ticker} completed in ${elapsed}s`, 'success');
+    toast(`✓ Test debate for ${ticker} completed in ${elapsed}s`, 'success');
   } catch (e) {
     resultEl.style.display = 'block';
     resultEl.innerHTML = `<div style="color:#dc2626;font-size:12px">Error: ${e.message}</div>`;
@@ -766,19 +766,19 @@ async function startOllamaAndRefreshDebateCard() {
 async function triggerDebatePostmortem(eventId) {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   const btn = document.getElementById(`pm-btn-${eventId}`);
-  if (btn) { btn.disabled = true; btn.textContent = '...'; btn.title = 'Asking local model…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; btn.title = 'Asking local model…'; }
 
   try {
     const status = await debateStatus();
     if (!status.available) {
       toast('Ollama is not running — start it first', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'PM'; btn.title = 'Auto-tag with local model (Ollama)'; }
+      if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
       return;
     }
     const model = typeof preferredDebateModel === 'function'
       ? preferredDebateModel(status.models) : 'qwen3:9b';
 
-    toast(`Asking ${model} for post-mortem on event #${eventId}… (up to 60 s)`, 'info');
+    toast(`🤖 Asking ${model} for post-mortem on event #${eventId}… (up to 60 s)`, 'info');
     const t0 = Date.now();
 
     const r = await fetch(`${API}/api/debate/postmortem`, {
@@ -793,21 +793,21 @@ async function triggerDebatePostmortem(eventId) {
     if (result.ok) {
       const tag = result.error_type !== 'none' ? result.error_type : null;
       if (tag) {
-        toast(`Tagged as "${tag}" in ${elapsed}s — ${(result.reason || '').slice(0, 70)}`, 'success');
+        toast(`🤖 Tagged as "${tag}" in ${elapsed}s — ${(result.reason || '').slice(0, 70)}`, 'success');
         showPage('learning');
       } else {
-        toast(`No clear error found (${elapsed}s) — tag manually if needed`, 'info');
-        if (btn) { btn.disabled = false; btn.textContent = 'PM'; btn.title = 'Auto-tag with local model (Ollama)'; }
+        toast(`🤖 No clear error found (${elapsed}s) — tag manually if needed`, 'info');
+        if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
       }
     } else {
       const isTimeout = (result.error || '').includes('timeout');
       const hint = isTimeout ? ' Try a smaller model (qwen3:0.6b).' : '';
       toast(`Post-mortem failed (${elapsed}s): ${result.error || 'unknown'}${hint}`, 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'PM'; btn.title = 'Auto-tag with local model (Ollama)'; }
+      if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
     }
   } catch (e) {
     toast('Post-mortem error: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'PM'; btn.title = 'Auto-tag with local model (Ollama)'; }
+    if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
   }
 }
 
@@ -815,19 +815,19 @@ async function triggerDebatePostmortem(eventId) {
 async function triggerSkillScore(eventId) {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   const btn = document.getElementById(`skill-btn-${eventId}`);
-  if (btn) { btn.disabled = true; btn.textContent = '...'; btn.title = 'Scoring…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; btn.title = 'Scoring…'; }
 
   try {
     const status = await debateStatus();
     if (!status.available) {
       toast('Ollama is not running — start it first', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'Sk'; btn.title = 'Score outcome quality with local model'; }
+      if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Score outcome quality with local model'; }
       return;
     }
     const model = typeof preferredDebateModel === 'function'
       ? preferredDebateModel(status.models) : 'qwen3:9b';
 
-    toast(`Asking ${model} to score event #${eventId}…`, 'info');
+    toast(`🔬 Asking ${model} to score event #${eventId}…`, 'info');
     const result = await fetchSkillScore(eventId, { model });
 
     if (result?.ok) {
@@ -843,31 +843,31 @@ async function triggerSkillScore(eventId) {
         >${score.toFixed(1)}</span>`;
       }
       // Re-enable button and update tooltip to reflect re-score mode
-      if (btn) { btn.disabled = false; btn.textContent = 'Sk'; btn.title = 'Re-score outcome quality'; }
-      toast(`Skill score: ${score}/10 — ${(result.reason||'').slice(0,60)}`, 'success');
+      if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Re-score outcome quality'; }
+      toast(`🔬 Skill score: ${score}/10 — ${(result.reason||'').slice(0,60)}`, 'success');
     } else {
       toast(`Skill score failed: ${result?.error || 'no response'}`, 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'Sk'; btn.title = 'Score outcome quality with local model'; }
+      if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Score outcome quality with local model'; }
     }
   } catch (e) {
     toast('Skill score error: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Sk'; btn.title = 'Score outcome quality with local model'; }
+    if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Score outcome quality with local model'; }
   }
 }
 
 // ── Adversarial two-model postmortem debate ────────────────────────────────────
-// Triggered only by the "vs" button — never runs automatically.
+// Triggered only by the ⚔️ button — never runs automatically.
 // Uses primary model (state.debate.model) vs opposition model (state.debate.oppositionModel).
 async function triggerAdversarialPostmortem(eventId) {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   const btn = document.getElementById(`adv-btn-${eventId}`);
-  if (btn) { btn.disabled = true; btn.textContent = '...'; btn.title = 'Debate running…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; btn.title = 'Debate running…'; }
 
   try {
     const status = await debateStatus();
     if (!status.available) {
       toast('Ollama is not running — start it first', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'vs'; btn.title = 'Adversarial postmortem debate'; }
+      if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
       return;
     }
 
@@ -881,21 +881,21 @@ async function triggerAdversarialPostmortem(eventId) {
       modelB = models.find(m => m !== modelA) || '';
     }
     if (!modelB) {
-      toast('Debate needs at least 2 pulled models. Pull a second model (e.g. gemma3:4b).', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'vs'; btn.title = 'Adversarial postmortem debate'; }
+      toast('⚔️ Debate needs at least 2 pulled models. Pull a second model (e.g. gemma3:4b).', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
       return;
     }
 
-    toast(`${modelA} vs ${modelB} — classifying event #${eventId}… (up to 3 min)`, 'info');
+    toast(`⚔️ ${modelA} vs ${modelB} — classifying event #${eventId}… (up to 3 min)`, 'info');
     const t0 = Date.now();
 
     const result = await fetchPostmortemDebate(eventId, modelA, modelB, { timeout: 90 });
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
-    if (btn) { btn.disabled = false; btn.textContent = 'vs'; btn.title = 'Adversarial postmortem debate'; }
+    if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
 
     if (!result?.ok) {
-      toast(`Debate failed (${elapsed}s): ${result?.error || 'no response'}`, 'error');
+      toast(`⚔️ Debate failed (${elapsed}s): ${result?.error || 'no response'}`, 'error');
       return;
     }
 
@@ -903,14 +903,14 @@ async function triggerAdversarialPostmortem(eventId) {
 
     const tag = (result.error_type && result.error_type !== 'none') ? result.error_type : null;
     if (tag) {
-      toast(`${result.verdict}: "${tag}" in ${elapsed}s`, 'success');
+      toast(`⚔️ ${result.verdict}: "${tag}" in ${elapsed}s`, 'success');
       showPage('learning');
     } else {
-      toast(`${result.verdict}: no clear error found (${elapsed}s)`, 'info');
+      toast(`⚔️ ${result.verdict}: no clear error found (${elapsed}s)`, 'info');
     }
   } catch (e) {
     toast('Debate error: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'vs'; btn.title = 'Adversarial postmortem debate'; }
+    if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
   }
 }
 
@@ -971,7 +971,7 @@ function showPostmortemDebateModal(result, eventId) {
                   padding:14px 18px;border-bottom:1px solid var(--border)">
         <div>
           <span style="font-size:14px;font-weight:700;color:var(--text-primary)">
-            Adversarial Debate — Event #${eventId}
+            ${result._stored ? '📜' : '⚔️'} Adversarial Debate — Event #${eventId}
           </span>
           <span style="margin-left:10px;font-size:11px;font-weight:600;
                        color:${verdictColor};background:${verdictColor}15;
@@ -1127,7 +1127,7 @@ async function renderDebateStatsCard() {
   el.style.display = 'block';
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-      <div class="card-title" style="margin:0">Debate Stats</div>
+      <div class="card-title" style="margin:0">📊 Debate Stats</div>
       <span class="text-xs text-muted">${data.total_debates} debate${data.total_debates !== 1 ? 's' : ''} · ${data.pairs.length} pairing${data.pairs.length !== 1 ? 's' : ''}</span>
     </div>
     <p class="text-xs text-muted" style="margin-bottom:8px">
@@ -1152,7 +1152,7 @@ async function renderDebateStatsCard() {
         <tbody>${rows}</tbody>
       </table>
     </div>
-    ${data.skipped ? `<p class="text-xs text-muted" style="margin-top:6px">${data.skipped} transcript${data.skipped !== 1 ? 's' : ''} could not be parsed (skipped from stats)</p>` : ''}`;
+    ${data.skipped ? `<p class="text-xs text-muted" style="margin-top:6px">⚠ ${data.skipped} transcript${data.skipped !== 1 ? 's' : ''} could not be parsed (skipped from stats)</p>` : ''}`;
 }
 
 // ── Toggle a single tag on/off within the multi-tag set ───────────────────────
@@ -1182,7 +1182,7 @@ async function markProtectiveStop(id) {
     });
     const result = await resp.json();
     if (result.ok) {
-      toast('Marked as protective stop — excluded from confidence calibration', 'success');
+      toast('🛡 Marked as protective stop — excluded from confidence calibration', 'success');
       showPage('learning');
     } else {
       toast('Error: ' + (result.error || 'unknown'), 'error');
