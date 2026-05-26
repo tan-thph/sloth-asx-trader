@@ -41,7 +41,7 @@ const ANALYSIS_SYSTEM_PROMPT =
   2. REAL DATA ONLY: Never invent indicator values. Base every rec on data explicitly provided in the user message.
   3. RISK/REWARD: Only recommend trades with R:R ≥ 2:1. Stop-loss at 1.5×ATR(14) below entry. Target at next confirmed S/R level.
   4. POSITION SIZING: qty = floor(min(cash × 0.15, portfolioValue × 0.15) / entryPrice). Never exceed 15% single-position weight.
-  5. CONVICTION THRESHOLD: Minimum confidence = 0.62. Require ≥ 3 independent non-technical factors (earnings revision, macro tailwind, valuation each count as one). Technicals are tie-breakers only — a single RSI/MACD/Stochastic/BB signal does NOT satisfy this rule. If < 3 independent factors align, action = HOLD and exclude from recs[].
+  5. CONVICTION THRESHOLD: Minimum confidence = 0.62. Require ≥ 3 independent non-technical factors (earnings revision, macro tailwind, valuation each count as one). Technicals are tie-breakers only — a single RSI/MACD/Stochastic/BB signal does NOT satisfy this rule. If < 3 independent factors align, omit that ticker from recs[] entirely — do NOT add a HOLD entry. recs[] must contain only actionable trades (BUY/SELL/TRIM/TOP_UP).
   6. SELL/TRIM VALIDITY: Only recommend if holding exists. priceRange[0] = limit sell price.
      netProfit for SELL/TRIM = (priceRange[0] − holding.avgPrice) × qty − brokerage.
      Note: the client will override this with authoritative cost-basis data post-response. Your value is for display only.
@@ -98,7 +98,7 @@ const ANALYSIS_SYSTEM_PROMPT =
        - Negative Sharpe ratio
        - Any degree of technical weakness (RSI, OBV, death cross, etc.)
        - "Moderate fundamental concern" without a qualifying disclosure above
-     If within the 7-day window and no catastrophe applies: set action = HOLD, exclude from recs[], add to dataGaps[] with note "anti-churn: BUY was N days ago — TRIM deferred to [date]".
+     If within the 7-day window and no catastrophe applies: omit the ticker from recs[] entirely, add to dataGaps[] with note "anti-churn: BUY was N days ago — TRIM deferred to [date]".
   2. A SELL/TRIM is only justified if: (a) holding period > 1 day AND (b) one of: position weight > 15% requiring risk control, OR a genuine fundamental/macro regime shift that permanently damages the investment thesis.
   3. Prefer holding winners over taking profits at a price target — raise the target or hold for compounding. TRIM is acceptable if position weight exceeds 15% or the original thesis has materially changed.
   4. Before any SELL/TRIM: estimate net profit after round-trip brokerage (from account settings). If profit < $100 OR < 2% of position value, reject as wasteful churning.
@@ -500,7 +500,7 @@ Output format:
   "recs": [
     {
       "ticker": string,
-      "action": "BUY"|"SELL"|"TRIM"|"TOP_UP"|"HOLD",
+      "action": "BUY"|"SELL"|"TRIM"|"TOP_UP",
       "approved": boolean,
       "rejectReason": string (if approved:false; null otherwise),
       "rank": integer (1=best; null if rejected),

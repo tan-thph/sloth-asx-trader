@@ -93,7 +93,7 @@ function renderDashboard() {
       </div>
       <div class="card">
         <div class="card-title">Recent Recommendations</div>
-        ${state.recHistory.slice(0,8).map(r=>`
+        ${state.recHistory.filter(r=>(r.action||'').toUpperCase()!=='HOLD').slice(0,8).map(r=>`
           <div class="rec-card ${r.executed?'executed-card':'skipped-card'}" style="margin-bottom:8px">
             <div class="flex-between mb-1">
               <div class="flex-row">${actionBadge(r.action)}<strong>${r.ticker}</strong><span class="text-xs">${r.date}</span></div>

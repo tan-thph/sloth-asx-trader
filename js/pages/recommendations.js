@@ -2,12 +2,12 @@
 // RECOMMENDATIONS
 // ============================================================
 function renderRecommendations() {
-  const pending=state.recommendations.filter(r=>r.status==='pending');
+  const pending=state.recommendations.filter(r=>r.status==='pending'&&(r.action||'').toUpperCase()!=='HOLD');
   return `
     <div class="tabs">
       <button class="tab active" id="tab-pending" onclick="switchRecTab('pending')">Pending (${pending.length})</button>
       <button class="tab" id="tab-run" onclick="switchRecTab('run')">▶ Run Analysis</button>
-      <button class="tab" id="tab-history" onclick="switchRecTab('history')">History (${state.recHistory.length})</button>
+      <button class="tab" id="tab-history" onclick="switchRecTab('history')">History (${state.recHistory.filter(r=>(r.action||'').toUpperCase()!=='HOLD').length})</button>
       <button class="tab" id="tab-rules" onclick="switchRecTab('rules')">⚙ Rules</button>
     </div>
     <div id="rec-content">${renderPendingRecs(pending)}</div>
@@ -18,7 +18,7 @@ function switchRecTab(tab) {
   const activeTab = document.getElementById('tab-'+tab);
   if(activeTab) activeTab.classList.add('active');
   if(tab==='pending') {
-    document.getElementById('rec-content').innerHTML=renderPendingRecs(state.recommendations.filter(r=>r.status==='pending'));
+    document.getElementById('rec-content').innerHTML=renderPendingRecs(state.recommendations.filter(r=>r.status==='pending'&&(r.action||'').toUpperCase()!=='HOLD'));
     if (typeof initRecStalenessChecks === 'function') initRecStalenessChecks().catch(() => {});
   }
   else if(tab==='run') document.getElementById('rec-content').innerHTML=renderRunAnalysisPanel();
@@ -535,6 +535,7 @@ if (!state.recHistoryFilter) state.recHistoryFilter = {
 };
 
 function applyRecHistoryFilter(hist) {
+  if ((hist.action||'').toUpperCase() === 'HOLD') return false;
   const f = state.recHistoryFilter;
   if (f.ticker && !hist.ticker.includes(f.ticker.toUpperCase())) return false;
   if (f.action !== 'all' && hist.action !== f.action) return false;

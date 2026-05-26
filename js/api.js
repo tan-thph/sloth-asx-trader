@@ -176,7 +176,7 @@ async function loadStateFromDb() {
 
     if (data.portfolio !== undefined)    state.portfolio    = _validArray(data.portfolio).map(_validHolding).filter(Boolean);
     if (data.tradeJournal !== undefined) state.tradeJournal = _validArray(data.tradeJournal).map(_validTrade).filter(Boolean);
-    if (data.recHistory !== undefined)   state.recHistory   = _validArray(data.recHistory);
+    if (data.recHistory !== undefined)   state.recHistory   = _validArray(data.recHistory).filter(r => (r.action||'').toUpperCase() !== 'HOLD');
     if (data.cash != null)               state.cash         = _validNumber(data.cash, 0);
     if (data.settings && Object.keys(data.settings).length) {
       state.settings = {...state.settings, ...data.settings};
@@ -195,8 +195,8 @@ async function loadStateFromDb() {
     if (data.macroDate != null)         state.macroDate         = data.macroDate;
     if (data.analysisLastSummary != null) state.analysisLastSummary = data.analysisLastSummary;
     if (Array.isArray(data.recommendations)) {
-      // Only restore pending recs — executed/skipped ones are already in recHistory
-      state.recommendations = data.recommendations.filter(r => r.status === 'pending');
+      // Only restore pending non-HOLD recs — executed/skipped ones are already in recHistory
+      state.recommendations = data.recommendations.filter(r => r.status === 'pending' && (r.action||'').toUpperCase() !== 'HOLD');
     }
     if (data.dayTrading != null) {
       state.dayTrading = { ...state.dayTrading, ...data.dayTrading };
