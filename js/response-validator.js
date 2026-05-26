@@ -8,21 +8,27 @@
 //   → calls callClaude() up to maxAttempts times, validating each response
 // ============================================================
 
+// Fields required for actionable recs (BUY/SELL/TRIM/TOP_UP).
+// HOLD recs skip target/stop/qty/priceRange since they describe no trade.
 const REC_SCHEMA = {
-  ticker:     { type: 'string',  required: true,  pattern: /^[A-Z]{2,5}(\.AX)?$/ },
+  ticker:     { type: 'string',  required: true,  pattern: /^[A-Z0-9]{2,5}(\.AX)?$/ },
   action:     { type: 'string',  required: true,  enum: ['BUY', 'SELL', 'TRIM', 'TOP_UP', 'HOLD'] },
-  priceRange: { type: 'array',   required: true  },
-  target:     { type: 'number',  required: true,  min: 0 },
-  stopLoss:   { type: 'number',  required: true,  min: 0 },
-  qty:        { type: 'number',  required: true,  min: 1, integer: true },
+  priceRange: { type: 'array',   requiredUnless: 'HOLD' },
+  target:     { type: 'number',  requiredUnless: 'HOLD', min: 0 },
+  stopLoss:   { type: 'number',  requiredUnless: 'HOLD', min: 0 },
+  qty:        { type: 'number',  requiredUnless: 'HOLD', min: 1, integer: true },
   confidence: { type: 'number',  required: true,  min: 0, max: 1 },
   rrRatio:    { type: 'number',  required: false, min: 0 },
   scenarios:  { type: 'array',   required: false },
 };
 
-// _validateField — returns an error string or null
-function _validateField(value, schema, fieldName) {
-  if (schema.required && (value == null || value === '')) {
+// _validateField — returns an error string or null.
+// `action` is passed so `requiredUnless: 'HOLD'` style rules can opt out
+// schema fields for non-trade actions.
+function _validateField(value, schema, fieldName, action) {
+  const isRequired = schema.required
+    || (schema.requiredUnless && action !== schema.requiredUnless);
+  if (isRequired && (value == null || value === '')) {
     return `${fieldName}: required but missing`;
   }
   if (value == null) return null;  // optional, absent — OK
@@ -77,10 +83,10 @@ const _REC_BUSINESS_RULES = [
     },
     message: r => `stopLoss $${r.stopLoss} ≥ entry low $${Array.isArray(r.priceRange) ? r.priceRange[0] : '?'}`,
   },
-  // priceRange must be a 2-element array with lo ≤ hi
+  // priceRange must be a 2-element array with lo ≤ hi (not required for HOLD)
   {
     id: 'price-range-valid',
-    check: r => Array.isArray(r.priceRange) && r.priceRange.length === 2 && r.priceRange[0] <= r.priceRange[1],
+    check: r => r.action === 'HOLD' || (Array.isArray(r.priceRange) && r.priceRange.length === 2 && r.priceRange[0] <= r.priceRange[1]),
     message: r => `priceRange invalid: ${JSON.stringify(r.priceRange)}`,
     fix: r => Array.isArray(r.priceRange) && r.priceRange.length === 2
       ? { ...r, priceRange: [Math.min(...r.priceRange), Math.max(...r.priceRange)] }
@@ -144,8 +150,9 @@ function validateRec(rec) {
   let allFixed = true;
 
   // Schema checks
+  const action = (rec.action || '').toUpperCase();
   for (const [field, schema] of Object.entries(REC_SCHEMA)) {
-    const err = _validateField(rec[field], schema, field);
+    const err = _validateField(rec[field], schema, field, action);
     if (err) errors.push(err);
   }
 

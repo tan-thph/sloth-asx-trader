@@ -29,8 +29,10 @@ sys.path.insert(0, ROOT)
 # test calls share the same in-memory DB (each new sqlite3.connect(':memory:')
 # would create a *separate* isolated DB, breaking cross-call state).
 import asx_server
+import db as db_module  # extracted module — also needs patching
 
 _orig_get_db = asx_server.get_db
+_orig_db_get_db = db_module.get_db
 _shared_conn: sqlite3.Connection | None = None
 
 
@@ -61,13 +63,33 @@ def _test_get_db():
     return _SharedConnCtx()
 
 
+def _install_in_memory_db():
+    """Patch get_db in db module, asx_server, and every routes/*.py blueprint
+    module. `from db import get_db` binds at import time, so each module needs
+    its local binding rewritten as well.
+    Must be called before init_db().
+    """
+    asx_server.get_db = _test_get_db
+    db_module.get_db = _test_get_db
+    import importlib
+    for name in ("routes.portfolio", "routes.dividends", "routes.market",
+                 "routes.backtest", "routes.scanner", "routes.learning",
+                 "routes.debate", "routes.news", "routes.claude"):
+        try:
+            mod = importlib.import_module(name)
+            if hasattr(mod, "get_db"):
+                setattr(mod, "get_db", _test_get_db)
+        except ImportError:
+            pass  # module may not exist yet during the split process
+
+
 class TestLearningLoopRoutes(unittest.TestCase):
     """Tests for /api/learning/* endpoints."""
 
     @classmethod
     def setUpClass(cls):
         # Patch get_db globally before init_db so the in-memory DB is used
-        asx_server.get_db = _test_get_db
+        _install_in_memory_db()
         asx_server.init_db()
         cls.client = asx_server.app.test_client()
         asx_server.app.config["TESTING"] = True
@@ -242,7 +264,7 @@ class TestQuoteRoute(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        asx_server.get_db = _test_get_db
+        _install_in_memory_db()
         asx_server.init_db()
         cls.client = asx_server.app.test_client()
         asx_server.app.config["TESTING"] = True
@@ -263,7 +285,7 @@ class TestDividendsRoute(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        asx_server.get_db = _test_get_db
+        _install_in_memory_db()
         asx_server.init_db()
         cls.client = asx_server.app.test_client()
         asx_server.app.config["TESTING"] = True
@@ -293,11 +315,13 @@ class TestPolymarketRoute(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        asx_server.get_db = _test_get_db
+        _install_in_memory_db()
         asx_server.init_db()
-        # Force cache miss so route actually runs
-        asx_server._PM_CACHE["data"] = None
-        asx_server._PM_CACHE["fetched_at"] = 0.0
+        # Force cache miss so route actually runs (cache lives in routes.market now)
+        from routes import market as _market_mod
+        _market_mod._PM_CACHE["data"] = None
+        _market_mod._PM_CACHE["fetched_at"] = 0.0
+        cls._market_mod = _market_mod
         cls.client = asx_server.app.test_client()
         asx_server.app.config["TESTING"] = True
 
@@ -309,7 +333,7 @@ class TestPolymarketRoute(unittest.TestCase):
         self.assertIn("markets", body)
         self.assertIn("fetched_at", body)
         self.assertIsInstance(body["markets"], list)
-        self.assertEqual(len(body["markets"]), len(asx_server._PM_QUERIES))
+        self.assertEqual(len(body["markets"]), len(self._market_mod._PM_QUERIES))
 
     def test_polymarket_each_entry_has_required_keys(self):
         resp = self.client.get("/api/polymarket")
@@ -420,8 +444,10 @@ class TestJSFunctionPresence(unittest.TestCase):
                                        "Manually imported position"))
 
     # learning-loop.js — new v2 functions
-    def test_buildCalibrationPromptBlock_defined(self):
-        self.assertTrue(self._contains("js/learning-loop.js", "function buildCalibrationPromptBlock"))
+    def test_calibration_block_fetcher_defined(self):
+        # Renamed from buildCalibrationPromptBlock → fetchCalibrationBlock when
+        # calibration moved to the backend in v2 of the learning loop.
+        self.assertTrue(self._contains("js/learning-loop.js", "function fetchCalibrationBlock"))
 
     def test_refreshLearningCache_defined(self):
         self.assertTrue(self._contains("js/learning-loop.js", "function refreshLearningCache"))
@@ -435,8 +461,9 @@ class TestJSFunctionPresence(unittest.TestCase):
     def test_detectStrategyDecay_has_volatility(self):
         self.assertTrue(self._contains("js/learning-loop.js", "recentVolatility"))
 
-    def test_refreshLearningCache_wired_in_analysis(self):
-        self.assertTrue(self._contains("js/analysis.js", "refreshLearningCache"))
+    def test_calibration_wired_in_analysis(self):
+        # analysis.js now calls fetchCalibrationBlock() instead of refreshLearningCache().
+        self.assertTrue(self._contains("js/analysis.js", "fetchCalibrationBlock"))
 
     def test_learning_loop_uses_backend_cache(self):
         self.assertTrue(self._contains("js/learning-loop.js", "state._learningCache"))
@@ -467,7 +494,7 @@ class TestLearningLoopRSScoringIntegration(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        asx_server.get_db = _test_get_db
+        _install_in_memory_db()
         asx_server.init_db()
         # Seed a win and a loss at the 70-80% confidence band
         with _test_get_db() as conn:
@@ -501,6 +528,557 @@ class TestLearningLoopRSScoringIntegration(unittest.TestCase):
             # We seeded 1 win + 1 loss = 50 % (plus any prior events from other tests)
             self.assertGreaterEqual(wr, 0)
             self.assertLessEqual(wr, 100)
+
+
+class TestRegressionBugs(unittest.TestCase):
+    """Regression tests for bugs fixed in the 2026-05 review pass.
+
+    One test per bug; if the test fails, the bug has returned.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    # ── Bug #1: quant-engine liquidity unit ──────────────────────────────────
+    def test_quant_engine_liquidity_in_shares_not_dollars(self):
+        """qty_by_liquidity must be 5% of SHARES, not 5% of dollars."""
+        with open(os.path.join(ROOT, "js/quant-engine.js"), encoding="utf-8") as f:
+            src = f.read()
+        # Must reference shares-based variable; must not multiply raw adv20 by 0.05 as shares
+        self.assertIn("advShares", src, "quant-engine.js must derive a share count from adv_20")
+        self.assertNotIn("adv20 * (_ap.maxLiquidityPct", src,
+                         "Old dollar-as-shares math should be gone")
+
+    # ── Bug #2: priceAlerts persistence ──────────────────────────────────────
+    def test_pricealerts_in_save_payload(self):
+        with open(os.path.join(ROOT, "js/api.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("priceAlerts: state.priceAlerts", src,
+                      "saveStateToDb must send priceAlerts")
+        self.assertIn("data.priceAlerts", src,
+                      "loadStateFromDb must restore priceAlerts")
+
+    def test_pricealerts_in_load_response(self):
+        """/api/db/load response includes priceAlerts key."""
+        resp = self.client.get("/api/db/load")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("priceAlerts", body, "/api/db/load must return priceAlerts")
+
+    # ── Bug #3: alert spam ────────────────────────────────────────────────────
+    def test_alert_spam_guard_in_alerts_js(self):
+        with open(os.path.join(ROOT, "js/alerts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_stopAlertedAt", src,
+                      "alerts.js must track _stopAlertedAt to prevent spam")
+        self.assertIn("_targetAlertedAt", src,
+                      "alerts.js must track _targetAlertedAt")
+
+    # ── Bug #4: panic regime qty=0 ────────────────────────────────────────────
+    def test_regime_panic_blocks_qty(self):
+        with open(os.path.join(ROOT, "js/regime-engine.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("sizeMult === 0", src,
+                      "regime-engine must hard-block on sizeMult=0")
+        self.assertIn("_regimeBlocked", src,
+                      "regime-engine must flag _regimeBlocked")
+
+    def test_analysis_drops_regime_blocked_recs(self):
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_regimeBlocked", src,
+                      "analysis.js must filter out _regimeBlocked recs")
+
+    # ── Bug #5: sector map dedup ──────────────────────────────────────────────
+    def test_sector_map_no_duplicates(self):
+        """ASX_SECTOR_MAP must have each ticker exactly once."""
+        from indicators import ASX_SECTOR_MAP
+        # If dict was built from duplicate literal keys Python silently kept last;
+        # we re-parse the source to detect duplicates.
+        import re
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Find the ASX_SECTOR_MAP literal
+        m = re.search(r"ASX_SECTOR_MAP = \{(.*?)\n\}", src, re.DOTALL)
+        self.assertIsNotNone(m, "ASX_SECTOR_MAP literal not found")
+        keys = re.findall(r"'([A-Z0-9]+)':", m.group(1))
+        dupes = {k for k in keys if keys.count(k) > 1}
+        self.assertEqual(dupes, set(), f"Duplicate keys in ASX_SECTOR_MAP: {dupes}")
+
+    # ── Bug #6: ASX universe dedup ────────────────────────────────────────────
+    def test_asx_universes_have_no_duplicates(self):
+        for u in ("asx20", "asx50", "asx100", "asx200"):
+            tickers = asx_server._ASX_UNIVERSE[u]
+            self.assertEqual(len(tickers), len(set(tickers)),
+                             f"_ASX_UNIVERSE['{u}'] contains duplicates")
+
+    # ── Bug #8: ticker regex accepts digits ───────────────────────────────────
+    def test_ticker_regex_accepts_digits(self):
+        with open(os.path.join(ROOT, "js/response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        # Must include 0-9 in the character class
+        self.assertIn("[A-Z0-9]", src,
+                      "ticker pattern must accept digits (A2M, S32, MP1, 360)")
+
+    # ── Bug #9: HOLD schema opt-out ───────────────────────────────────────────
+    def test_validator_hold_optional_fields(self):
+        with open(os.path.join(ROOT, "js/response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("requiredUnless", src,
+                      "validator must support requiredUnless for HOLD recs")
+
+    # ── Bug #11: html closing tag ─────────────────────────────────────────────
+    def test_html_has_close_tag(self):
+        with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("</html>", src, "asx_trading.html must close with </html>")
+
+    # ── Bug #12: gitignore covers key.txt ─────────────────────────────────────
+    def test_gitignore_blocks_key_files(self):
+        with open(os.path.join(ROOT, ".gitignore"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("key.txt", src, ".gitignore must list key.txt")
+
+
+class TestInfraImprovements(unittest.TestCase):
+    """Tests for the production-grade upgrades."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_db_module_exposes_get_db(self):
+        import db as db_module
+        self.assertTrue(callable(db_module.get_db))
+        self.assertTrue(callable(db_module.init_db))
+        self.assertTrue(callable(db_module.log_failed_ticker))
+
+    def test_ttl_cache_decorator_exists(self):
+        self.assertTrue(callable(asx_server.ttl_cache),
+                        "ttl_cache decorator must be exposed")
+
+    def test_ttl_cache_memoises(self):
+        calls = []
+        @asx_server.ttl_cache(seconds=30)
+        def slow(x):
+            calls.append(x)
+            return x * 2
+
+        self.assertEqual(slow(3), 6)
+        self.assertEqual(slow(3), 6)
+        self.assertEqual(len(calls), 1, "ttl_cache should memoise repeated calls")
+
+    def test_claude_proxy_settings_endpoint_exists(self):
+        resp = self.client.get("/api/claude/settings")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("has_key", body)
+
+    def test_claude_proxy_rejects_without_key(self):
+        """Proxy must refuse to forward if no server-stored key exists."""
+        # Clear any key first
+        self.client.post("/api/claude/settings",
+                         data=json.dumps({"api_key": ""}),
+                         content_type="application/json")
+        resp = self.client.post("/api/claude/proxy",
+                                data=json.dumps({"model": "x", "messages": []}),
+                                content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+        body = json.loads(resp.data)
+        self.assertEqual(body["error"]["type"], "no_proxy_key")
+
+    def test_claude_proxy_settings_validates_format(self):
+        """POST with malformed key should be rejected."""
+        resp = self.client.post("/api/claude/settings",
+                                data=json.dumps({"api_key": "not-a-real-key"}),
+                                content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_frontend_error_boundary_present(self):
+        with open(os.path.join(ROOT, "js/navigation.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_renderPageUnsafe", src,
+                      "navigation.js must wrap render in error boundary")
+        self.assertIn("Page crashed", src)
+
+    def test_state_validators_present(self):
+        with open(os.path.join(ROOT, "js/api.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_validHolding", src,
+                      "api.js must sanitise loaded portfolio holdings")
+
+    def test_gunicorn_config_exists(self):
+        path = os.path.join(ROOT, "gunicorn.conf.py")
+        self.assertTrue(os.path.isfile(path), "gunicorn.conf.py must exist")
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("worker_class", src)
+        self.assertIn("threads", src)
+
+
+class TestStage1DataCapture(unittest.TestCase):
+    """Regression tests for Stage 1 — Data capture improvements."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_debate_bull_bear_uses_think_false(self):
+        """Bull/bear Ollama calls must pass think=False to avoid thinking-token budget waste."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Both bull and bear calls must now have think=False, num_predict=350
+        self.assertIn("think=False, num_predict=350", src,
+                      "Bull/bear Ollama calls must use think=False and num_predict=350")
+        # Check it appears at least twice (bull AND bear call)
+        self.assertGreaterEqual(src.count("think=False, num_predict=350"), 2)
+
+    def test_entry_signals_json_in_db_migrations(self):
+        """entry_signals_json column must be in _LE_MIGRATIONS."""
+        import db as _db
+        col_names = [col for col, _ in _db._LE_MIGRATIONS]
+        self.assertIn("entry_signals_json", col_names,
+                      "_LE_MIGRATIONS must include entry_signals_json TEXT column")
+
+    def test_entry_signals_json_accepted_by_log_endpoint(self):
+        """POST /api/learning/log must accept and persist entry_signals_json."""
+        signals = {"rsi_14": 32.5, "bb_pct_b": 0.08, "adx_14": 18.0,
+                   "atr_pct": 1.2, "return_5d": -2.1, "return_20d": -6.4}
+        resp = self.client.post(
+            "/api/learning/log",
+            data=json.dumps({
+                "ticker": "BHP.AX", "event_type": "recommendation",
+                "recommendation": "BUY", "ai_confidence": 0.72,
+                "entry_signals_json": json.dumps(signals),
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+        self.assertIn("id", body)
+
+    def test_entry_signals_json_captured_in_analysis_js(self):
+        """logRecsToLearningLoop must build and send entry_signals_json."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("entry_signals_json", src,
+                      "analysis.js must include entry_signals_json in learning log payload")
+        self.assertIn("liveSignals", src)
+
+    def test_detect_exit_reason_helper_present(self):
+        """_detectExitReason must be defined in both recommendations.js and performance.js."""
+        for fn in ("js/pages/recommendations.js", "js/pages/performance.js"):
+            with open(os.path.join(ROOT, fn), encoding="utf-8") as f:
+                src = f.read()
+            self.assertIn("_detectExitReason", src,
+                          f"{fn} must define _detectExitReason helper")
+            self.assertIn("stop_hit", src)
+            self.assertIn("target_hit", src)
+
+    def test_exit_reason_no_longer_hardcoded_manual(self):
+        """recommendations.js must call _detectExitReason instead of hardcoding 'manual'."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        # Old hardcoded pattern must be gone
+        self.assertNotIn("exit_reason: 'manual'", src,
+                         "Exit reason must be auto-detected, not hardcoded 'manual'")
+        self.assertIn("_detectExitReason(", src)
+
+    def test_buy_parent_reconcile_present(self):
+        """markExecuted must reconcile parent BUY learning events on full position close."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("positionClosed", src,
+                      "markExecuted must detect full position close for BUY reconcile")
+        self.assertIn("parentRecs", src)
+
+
+class TestStage2AutoClassification(unittest.TestCase):
+    """Regression tests for Stage 2 — Auto-classification."""
+
+    def test_auto_postmortem_triggered_on_loss(self):
+        """markExecuted must fire triggerPostmortem when outcome is loss/breakeven."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("triggerPostmortem", src,
+                      "markExecuted must call triggerPostmortem on loss/breakeven")
+        self.assertIn("fetchSkillScore", src,
+                      "markExecuted must call fetchSkillScore after close")
+
+    def test_calibration_accepts_tickers_param(self):
+        """GET /api/learning/calibration must accept 'tickers' query param."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("tickers_req", src,
+                      "calibration endpoint must parse 'tickers' query param")
+        self.assertIn("per-ticker:", src,
+                      "calibration must emit per-ticker memory line")
+
+    def test_calibration_query_includes_ticker_column(self):
+        """The calibration SQL query must SELECT ticker for per-ticker stats."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # The SELECT in calibration must include ticker
+        self.assertIn('SELECT ai_confidence, outcome_status, regime, sector, ticker,', src)
+
+    def test_fetch_calibration_block_accepts_tickers(self):
+        """fetchCalibrationBlock in learning-loop.js must accept tickers argument."""
+        with open(os.path.join(ROOT, "js/learning-loop.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function fetchCalibrationBlock(regime, sectors, tickers)", src)
+        self.assertIn("tickers.join(',')", src)
+
+    def test_analysis_passes_portfolio_tickers_to_calibration(self):
+        """analysis.js must pass portfolio tickers to fetchCalibrationBlock."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_portfolioTickers", src)
+        self.assertIn("fetchCalibrationBlock(_activeRegime, _portfolioSectors, _portfolioTickers)", src)
+
+
+class TestStage3PromptInstructions(unittest.TestCase):
+    """Regression tests for Stage 3 — Prompt instructions."""
+
+    def test_prompt_version_bumped_to_v5(self):
+        """PROMPT_VERSION must be bumped to v5 after Stage 3 changes."""
+        with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("PROMPT_VERSION = '2026-05-v5'", src,
+                      "PROMPT_VERSION must be bumped to 2026-05-v5")
+
+    def test_calibration_algorithm_in_system_prompt(self):
+        """System prompt must prescribe the calibration algorithm (confidence += adj, clamped)."""
+        with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("clamp(orig_conf + adj", src,
+                      "System prompt must describe confidence += adj clamped algorithm")
+        self.assertIn("per-ticker", src,
+                      "System prompt must mention per-ticker calibration adjustment")
+
+    def test_debate_block_usage_rule_in_prompt(self):
+        """System prompt must include the debate-block usage rule."""
+        with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("Local Debate", src,
+                      "System prompt must contain guidance on handling Local Debate blocks")
+        self.assertIn("BULL and BEAR", src)
+
+
+class TestStage4ActiveFeedback(unittest.TestCase):
+    """Regression tests for Stage 4 — Active feedback (synthesizer)."""
+
+    def test_debate_returns_synthesis_field(self):
+        """/api/debate response must include 'synthesis' key (even if None)."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"synthesis":', src,
+                      "debate_bull_bear must include synthesis field in response")
+        self.assertIn("synth_prompt", src)
+        self.assertIn("key_pivot", src)
+
+    def test_debate_format_includes_synthesis_line(self):
+        """formatDebateBlock in debate-client.js must include SYNTHESIS line when present."""
+        with open(os.path.join(ROOT, "js/debate-client.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("SYNTHESIS:", src,
+                      "debate-client.js must format synthesis as SYNTHESIS: line")
+        self.assertIn("key_pivot", src)
+        self.assertIn("debate.synthesis", src)
+
+
+class TestDebateImprovements(unittest.TestCase):
+    """Regression tests for D1–D7 debate engine improvements."""
+
+    def test_debate_signals_include_5d_20d_returns(self):
+        """sig_text must include 5d and 20d returns (D4)."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("return_5d", src)
+        self.assertIn("return_20d", src)
+        self.assertIn("atr_pct", src)
+        # Check these are in sig_text construction
+        self.assertIn("5d=", src)
+        self.assertIn("20d=", src)
+
+    def test_signal_hash_includes_5d_20d(self):
+        """Signal hash must include return_5d, return_20d, atr_pct (D4)."""
+        with open(os.path.join(ROOT, "js/debate-client.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("return_5d", src)
+        self.assertIn("return_20d", src)
+        self.assertIn("atr_pct", src)
+        # Verify it's in the hash function, not just in general usage
+        hash_fn_idx = src.index("function _signalHash")
+        hash_fn_end = src.index("\n}", hash_fn_idx) + 2
+        hash_body = src[hash_fn_idx:hash_fn_end]
+        self.assertIn("return_5d", hash_body)
+
+    def test_sell_trim_get_exit_biased_prompts(self):
+        """SELL/TRIM actions must trigger exit-biased bull/bear prompts (D7)."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("is_exit", src)
+        self.assertIn("exiting this position", src)
+        self.assertIn("hold case", src.lower())
+
+    def test_action_passed_to_debate_endpoint(self):
+        """fetchDebate must pass action field in request body (D7)."""
+        with open(os.path.join(ROOT, "js/debate-client.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("action: opts.action", src)
+        self.assertIn("actions?.[t]", src)
+
+    def test_synthesizer_num_predict_increased(self):
+        """Synthesizer num_predict must be 180, not 120 (D1)."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Should have 180 for synthesizer, NOT 120
+        self.assertIn("num_predict=180", src)
+        self.assertNotIn("num_predict=120", src)
+
+    def test_synthesizer_json_extraction_improved(self):
+        """Synthesizer must try json.loads first then scan from end (D2)."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("json.loads(clean)", src)
+        self.assertIn("reversed(list(re.finditer", src)
+
+    def test_no_think_removed_from_prompts(self):
+        """All prompt strings must not contain /no_think (D3)."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("/no_think", src,
+                         "D3: /no_think is redundant with think=False and must be removed")
+
+    def test_entry_signals_in_postmortem_prompt_builder(self):
+        """_pm_build_prompt must accept and inject entry_signals_str (D5)."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("entry_signals_str", src)
+        self.assertIn("Entry signals at the time", src)
+
+    def test_skill_prompt_includes_entry_signals(self):
+        """Skill score prompt must include entry_signals when available (D6)."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Both the SELECT and the prompt injection must be present
+        self.assertIn("entry_signals_json", src)
+        # entry_signals_json must appear in the SELECT for debate_skill
+        skill_idx = src.index("def debate_skill()")
+        skill_body = src[skill_idx:skill_idx + 2000]
+        self.assertIn("entry_signals_json", skill_body)
+
+    def test_synthesis_winner_in_debate_summary(self):
+        """buildDebateSummary must include synthesis winner in stored record (L5)."""
+        with open(os.path.join(ROOT, "js/debate-client.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("synthesis.winner", src)
+        # Verify the summary builder uses it
+        idx = src.index("function buildDebateSummary")
+        body = src[idx:idx + 400]
+        self.assertIn("synthesis", body)
+
+
+class TestLearningImprovements(unittest.TestCase):
+    """Regression tests for L1–L4 and L6 learning loop improvements."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_regime_warning_skips_zero_trades(self):
+        """Calibration must not emit regime warning when 0 trades exist (L1)."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # The condition must be '0 < len(reg) < 3', not just 'len(reg) < 3'
+        self.assertIn("0 < len(reg) < 3", src,
+                      "L1: regime warning must gate on 0 < n < 3, not n < 3")
+
+    def test_error_type_threshold_lowered(self):
+        """Error-type threshold must be 0.33, not 0.40 (L2)."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("top_pct >= 0.33", src,
+                      "L2: error-type threshold must be 0.33 (was 0.40)")
+        self.assertNotIn("top_pct >= 0.40", src)
+
+    def test_auto_expire_not_in_stats_get(self):
+        """Auto-expire must NOT run inside learning_stats GET handler (L3)."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # _expire_old_events must be a standalone function
+        self.assertIn("def _expire_old_events(", src)
+        # It should be called from learning_log, not from learning_stats
+        stats_idx = src.index("def learning_stats()")
+        stats_body = src[stats_idx:stats_idx + 500]
+        self.assertNotIn("_expire_old_events", stats_body,
+                         "L3: auto-expire must not run inside the GET /stats handler")
+        log_idx = src.index("def learning_log()")
+        log_body = src[log_idx:log_idx + 500]
+        self.assertIn("_expire_old_events", log_body,
+                      "L3: auto-expire must run inside learning_log (write path)")
+
+    def test_calibration_ttl_cache_present(self):
+        """Calibration must use a module-level TTL cache (L4)."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_calib_cache", src)
+        self.assertIn("_CALIB_TTL", src)
+        self.assertIn("_calib_compute(", src)
+
+    def test_calibration_compute_extracted(self):
+        """_calib_compute must be a pure function separate from the route (L4)."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # _calib_compute must return a dict, not call jsonify
+        idx = src.index("def _calib_compute(")
+        end = src.index("\ndef ", idx + 1)
+        body = src[idx:end]
+        self.assertNotIn("jsonify", body,
+                         "_calib_compute must return a dict, not a Flask response")
+        self.assertIn("return {", body)
+
+    def test_debate_synthesis_winner_in_db_migrations(self):
+        """debate_synthesis_winner column must be in _LE_MIGRATIONS (L6)."""
+        import db as _db
+        col_names = [col for col, _ in _db._LE_MIGRATIONS]
+        self.assertIn("debate_synthesis_winner", col_names)
+
+    def test_debate_synthesis_winner_accepted_by_log(self):
+        """POST /api/learning/log must accept debate_synthesis_winner (L6)."""
+        resp = self.client.post(
+            "/api/learning/log",
+            data=json.dumps({
+                "ticker": "CBA.AX", "event_type": "recommendation",
+                "recommendation": "BUY", "ai_confidence": 0.75,
+                "debate_synthesis_winner": "bull",
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+
+    def test_synthesis_winner_logged_in_analysis(self):
+        """analysis.js must log debate_synthesis_winner in learning payload (L6)."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("debate_synthesis_winner", src)
+        self.assertIn("_debate?.synthesis?.winner", src)
 
 
 if __name__ == "__main__":

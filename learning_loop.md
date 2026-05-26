@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
 **Last Updated:** May 2026
-**Status:** Phases 1–5, 7 Complete · Phase 6 & 8 Planned
+**Status:** Phases 1–5, 7 Complete · Stages 1–4 + D1–D7 + L1–L6 improvements applied · Phase 6 & 8 Planned
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -47,10 +47,12 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `sector`              | TEXT       | GICS sector |
 | `error_type`          | TEXT       | Comma-separated tags (loss/breakeven only) |
 | `error_type_source`   | TEXT       | `'manual'` / `'auto'` / `'debated-consensus'` / `'debated-merged'` / `'debated-singleton'` / `'debated'` |
-| `skill_score`         | REAL       | 0–10 analysis quality vs luck (Ollama scored) |
-| `debate_summary`      | TEXT       | ≤200-char bull/bear summary stored at analysis time |
-| `prompt_hash`         | TEXT       | 12-char djb2 fingerprint of prompt version + regime + date |
-| `postmortem_debate`   | TEXT       | JSON blob of full adversarial debate transcript (Phase 3) |
+| `skill_score`              | REAL       | 0–10 analysis quality vs luck (Ollama scored) |
+| `debate_summary`           | TEXT       | ≤200-char bull/bear summary stored at analysis time |
+| `prompt_hash`              | TEXT       | 12-char djb2 fingerprint of prompt version + regime + date |
+| `postmortem_debate`        | TEXT       | JSON blob of full adversarial debate transcript (Phase 3) |
+| `entry_signals_json`       | TEXT       | JSON snapshot of live signals at rec generation time — used by postmortem and skill-score prompts (Stage 1 / D5 / D6) |
+| `debate_synthesis_winner`  | TEXT       | Synthesizer verdict at analysis time: `'bull'`/`'bear'`/`'neutral'` for BUY recs, `'hold'`/`'exit'`/`'neutral'` for SELL/TRIM (Stage 4 / L6) |
 
 > **Note on `loss_quality`:** This is a *computed property*, not a stored column. It is derived at calibration time from existing fields:
 > - `exit_reason = 'protective_stop'` → **good** loss (deliberate capital defence, excluded from confidence calibration)
@@ -70,13 +72,17 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 
 1. **Recommendation Generated** (`analysis.js` → `logRecsToLearningLoop()`)
    - `POST /api/learning/log` — creates partial record, returns `id`
-   - Stores `rec._learningId`, persists `debate_summary`, `prompt_hash`
+   - Stores `rec._learningId`, persists `debate_summary`, `prompt_hash`, `entry_signals_json` (signal snapshot), `debate_synthesis_winner`
 
 2. **Trade Executed** (`recommendations.js` → `markExecuted()`)
    - `POST /api/learning/outcome` — updates entry price, outcome fields
+   - `exit_reason` auto-detected via `_detectExitReason(exitPrice, stopLoss, target)` — sets `stop_hit`/`target_hit` (±0.5% tolerance) or falls back to `manual` (Stage 1)
+   - Auto-triggers `triggerPostmortem()` (fire-and-forget) for loss/breakeven outcomes (Stage 2)
+   - Auto-reconciles parent BUY/TOP_UP learning events when a SELL/TRIM fully closes the position (Stage 1)
 
 3. **Trade Closed** (`performance.js` → `syncClosedTradesToLearningLoop()`)
    - Reconciles journal against `rec_history` and patches outcome for closed trades
+   - `exit_reason` also auto-detected here via `_detectExitReason()` (Stage 1)
 
 4. **Manual Trades** — Supported via Branch B (full record creation on SELL/TRIM)
 
@@ -114,10 +120,11 @@ Protective stops are excluded from confidence calibration regardless of tags, bu
 The count of confidence-band exclusions is shown in the block prefix as `Nexcl` so Claude knows they were filtered.
 
 **3. Regime freshness gate** ✅
-If fewer than 3 trades exist in the current regime, the calibration block warns Claude rather than omitting data silently:
+If 1–2 trades exist in the current regime, the calibration block warns Claude rather than omitting data silently (L1):
 ```
 ⚠only 1 trade in bullTrending regime—calibration limited
 ```
+0 trades = silently omitted (nothing to warn about). 3+ trades = full decay-weighted win rate shown.
 This prevents a freshly-transitioned regime from inheriting the previous regime's failure patterns.
 
 **4. Date range in calibration block** ✅
@@ -143,16 +150,21 @@ A high-skill win from last week: `1.0 × 0.9 = 0.90` effective weight.
 
 ## Calibration Injection
 
-`fetchCalibrationBlock(regime, sectors)` in `analysis.js` calls `GET /api/learning/calibration` after regime detection. The backend:
-1. Fetches last 90 days of closed events (max 180d)
+`fetchCalibrationBlock(regime, sectors, tickers)` in `analysis.js` calls `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` after regime detection. The backend:
+1. Fetches last 90 days of closed events (max 180d) — pure `_calib_compute()` function, TTL-cached 5 min (L4)
 2. Applies exponential decay weighting (half-life 45d)
 3. Excludes `external_shock` / `protective_stop` from confidence band calculations only
 4. Only emits findings where signal is statistically meaningful (n ≥ 3 + delta threshold)
-5. Warns on thin same-regime data rather than silently omitting
-6. Returns a block labelled with date range + regime for Claude context
+5. Warns on thin same-regime data (1–2 trades) rather than silently omitting (L1)
+6. Dominant error type threshold: 33% of losses, min 3 losses (L2, lowered from 40%/4)
+7. Per-ticker stats: emits `per-ticker:BHP.AX:62%(Δ+14pp,n=5)✓strong` for portfolio tickers with >15pp delta vs overall WR (Stage 2)
+8. Returns a block labelled with date range + regime for Claude context
+9. Auto-expire (events >120 days old → `expired`) runs on write path only, not on this GET (L3)
 
 Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` — never the system prompt (preserves Anthropic's server-side prompt cache).
 Target size: 30–60 tokens.
+
+The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes an explicit calibration algorithm: `confidence += adj_value, clamped [0.50, 0.95]` (Stage 3). It also includes a debate-block usage rule: treat Local Debate as a second opinion, weight synthesis winner, don't anchor to it over fundamentals (Stage 3).
 
 ---
 
@@ -214,11 +226,16 @@ Target size: 30–60 tokens.
 
 ## Internal Debate System (Ollama)
 
-**Status:** Phases 1–5, 7 implemented.
+**Status:** Phases 1–5, 7 implemented. D1–D7 improvements applied May 2026.
 
 ### Implemented
-- Bull/Bear pre-analysis injected into Claude user message (4h signal-hash cache)
-- Single-model post-mortem auto-tagging (`/api/debate/postmortem`) — losses/breakevens only
+- Bull/Bear pre-analysis injected into Claude user message (4h signal-hash cache, keyed on 10 signal fields including 5d/20d returns and ATR%)
+- Direction-aware prompts (D7): BUY recs → bull/bear/neutral framing; SELL/TRIM recs → hold/exit/neutral framing
+- Synthesizer round returns `{winner, margin, key_pivot}` — `winner` stored as `debate_synthesis_winner` in DB; included in `formatDebateBlock()` SYNTHESIS line (Stage 4 / L5 / L6)
+- Extended signal set in debate prompt: `return_5d`, `return_20d`, `atr_pct`, `atr_14` added alongside existing RSI, BB%b, volume_z, OBV, ADX, SMA200 (D4)
+- `entry_signals_json` injected into postmortem prompts (D5) and skill-score prompts (D6)
+- Improved synthesizer JSON extraction: try full parse first, then reverse-scan for last valid `{...}` object (D2)
+- Single-model post-mortem auto-tagging (`/api/debate/postmortem`) — losses/breakevens only; **auto-triggered on close** (Stage 2)
 - **Adversarial two-model postmortem debate** (`/api/debate/postmortem-debate`) — user-initiated via ⚔️ button
 - Entry staleness check (`/api/debate/staleness`) — banner on recs ≥ 2 days old
 - Skill score (`/api/debate/skill`) — 🔬 button on all closed events
@@ -231,7 +248,7 @@ Target size: 30–60 tokens.
 ### Ollama stability rules
 - Bull and bear calls are **sequential** (not concurrent) to avoid VRAM spikes
 - `keep_alive: "10m"` keeps model in VRAM between calls
-- `num_predict` is per-endpoint: **200** for postmortem/staleness (short JSON), **350** for skill score (longer reason string)
+- `num_predict` is per-endpoint: **180** for synthesizer (D1, increased from 120), **200** for postmortem/staleness (short JSON), **350** for skill score (longer reason string)
 - `think: false` passed to Ollama for all JSON-output endpoints — suppresses thinking tokens that would consume the token budget before any JSON is written
 - No retry on timeout — fail immediately, caller switches to smaller model
 - Batch concurrency always 1 — Ollama queues internally; external concurrency wastes VRAM
@@ -245,11 +262,12 @@ qwen3.5:9b → qwen3.5:4b → qwen3:9b → qwen3:8b → qwen3:4b → qwen3:0.6b
 Explicit user preference (saved in `state.debate.model`) overrides Auto if the model is still pulled. If the saved preference is no longer pulled, Auto silently falls back to the priority list — no error.
 
 ### Thinking model compatibility
-Reasoning models (qwen3.5, qwen3, some gemma4 variants) emit `<think>…</think>` blocks before output. Three mitigations in order of priority:
+Reasoning models (qwen3.5, qwen3, some gemma4 variants) emit `<think>…</think>` blocks before output. Two mitigations in order of priority:
 
 1. **`think: false` API flag** (primary) — Ollama suppresses thinking tokens entirely before generation. The model outputs JSON directly. Passed on every JSON-output call. Ignored by non-thinking models.
-2. **`/no_think` prompt suffix** (secondary) — instruction-level control; qwen3/3.5 respects this even if the API flag isn't honoured.
-3. **`_strip_think_tags()`** (safety net) — strips complete `<think>…</think>` blocks post-generation. Also detects unclosed `<think>` tags (model truncated mid-thought) and returns `""` so callers surface a clean error rather than attempting to parse incomplete output.
+2. **`_strip_think_tags()`** (safety net) — strips complete `<think>…</think>` blocks post-generation. Also detects unclosed `<think>` tags (model truncated mid-thought) and returns `""` so callers surface a clean error rather than attempting to parse incomplete output.
+
+> **`/no_think` prompt suffix removed (D3):** Previously added as a text instruction at the end of every prompt. The API flag is the correct suppression mechanism — the text suffix is fragile (model may ignore it, or it may be truncated). Removed from all postmortem, staleness, skill, and challenge prompts.
 
 If all three fail and `skill_raw` is still unparseable, the error response now includes the first 120 chars of raw output (`WARNING` logged) to assist diagnosis.
 
@@ -271,6 +289,8 @@ If all three fail and `skill_raw` is still unparseable, the error response now i
 | regime={regime}
 | sector={sector}
 ```
+
+Plus (when available): `entry_signals_json` unpacked as `key=value` pairs appended to the prompt (D5/D6). This gives the model the actual technical picture at the time of entry — rather than inferring conditions from price/stop/target alone.
 
 `recommendation` (BUY/SELL/TRIM) is listed first so the model knows trade direction. Without it, the model assumes BUY for all trades and misinterprets entry prices for SELL/TRIM (e.g. calling a high entry "suboptimal" on a short where a higher entry is better).
 
@@ -377,7 +397,14 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Factual exit hints, no tag suggestions | Prescriptive hints cause pattern-matching on exit method, not trade analysis |
 | `recommendation` first in postmortem summary | Model assumes BUY direction without it; SELL/TRIM entry analysis is inverted |
 | `think: false` API flag, not just text stripping | Text stripping requires a closing `</think>` tag; truncated output has none. API-level suppression prevents thinking tokens from consuming the token budget entirely |
+| `/no_think` text suffix removed | API flag is the correct suppression path; text suffix is fragile and can be overridden or ignored. Removed from all prompts (D3) |
+| `num_predict=180` for synthesizer (vs 120) | Short synthesizer JSON ran into token limit at 120 when `key_pivot` was verbose; 180 prevents truncation (D1) |
 | `num_predict=350` for skill (vs 200 for others) | Skill reason strings run 30–50 tokens longer than postmortem/staleness JSON; 200 caused truncation |
+| Direction-aware debate prompts (D7) | SELL/TRIM recs ask "hold vs exit" not "bull vs bear" — framing matters; wrong framing produces off-target synthesis |
+| `entry_signals_json` in postmortem/skill prompts (D5/D6) | Model can reason from actual signal values rather than inferring conditions from price/stop/target alone |
+| Calibration TTL cache 5 min (L4) | Calibration query is CPU-heavy (Python loops over 300 rows); caching avoids re-computation on every Claude call |
+| Auto-postmortem on close (Stage 2) | Removes manual ⚡ step; loss/breakeven events now classified as soon as they close, building the error pattern database faster |
+| Auto-detect exit reason (Stage 1) | Eliminates `exit_reason='manual'` blanket; stop_hit/target_hit now correctly detected ±0.5% so calibration has accurate exit stats |
 | Adversarial debate: user-initiated only | 3 sequential Ollama calls × up to 120s each; auto-running on every loss would block UI for minutes. 🤖 fast-path handles the common case; ⚔️ is for disputes |
 | PARTIAL verdict: keep intersection only | Higher confidence than either model's full output. A tag both agreed on is stronger signal than either individual response |
 | Phase 3 challenges Model A (not arbitrary) | Model A runs first and is the "incumbent"; Model B is the challenger. Incumbent defends first — this mirrors how human debates work and produces more decisive outcomes |
@@ -388,6 +415,13 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 
 ## Implementation Notes
 
+- **Stage 1–4 improvements (May 2026):**
+  - Stage 1: `entry_signals_json` + `debate_synthesis_winner` columns; `_detectExitReason()` auto-detects stop/target hits; parent BUY reconcile on full position close
+  - Stage 2: auto-postmortem on loss/breakeven close; per-ticker calibration stats via `tickers` param
+  - Stage 3: explicit calibration algorithm + debate-block usage rule in system prompt; `PROMPT_VERSION='2026-05-v5'`
+  - Stage 4: synthesizer returns `{winner, margin, key_pivot}`; stored in DB and shown in SYNTHESIS line
+- **D1–D7 debate improvements (May 2026):** synthesizer `num_predict` 120→180 (D1); reversed JSON scan (D2); `/no_think` suffix removed (D3); 5d/20d/ATR signals in debate + hash (D4); `entry_signals_json` in postmortem/skill prompts (D5/D6); direction-aware prompts for SELL/TRIM (D7)
+- **L1–L6 learning improvements (May 2026):** regime warning skips 0 trades (L1); error-type threshold 40%→33%, min losses 4→3 (L2); auto-expire moved to write path only (L3); `_calib_compute()` pure function + 5-min TTL cache (L4); synthesis winner in `buildDebateSummary` (L5); `debate_synthesis_winner` logged from JS (L6)
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
 - **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
 - **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.

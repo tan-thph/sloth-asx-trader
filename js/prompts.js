@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-05-v4';
+const PROMPT_VERSION = '2026-05-v5';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -182,6 +182,16 @@ const ANALYSIS_SYSTEM_PROMPT =
       explicitly cite what changed since the failure. State this in the reasoning field.
     - For any ticker with outcome = win: note what drove it and whether that driver still holds.
     - Apply any CALIBRATION adjustments from the user message before setting confidence scores.
+      Algorithm: read the CALIBRATION block (if present). For each rec, find the matching
+      confidence band (e.g. "conf 70-80%: adj+0.08"). Apply: new_conf = clamp(orig_conf + adj, 0, 0.98).
+      If a per-ticker line appears (e.g. "BHP.AX:45%(Δ−18pp)⚠weak"), apply an extra −0.10 to that
+      ticker's confidence regardless of band. Ignore CALIBRATION if fewer than 5 closed trades.
+
+    - If "--- Local Debate [model]: TICKER ---" blocks appear in the user message, treat them as
+      adversarial pre-analysis by a local model. They are not authoritative. Use them as sanity checks:
+      if your rec contradicts BOTH the BULL and BEAR stances on the same ticker, explicitly address
+      the gap in that rec's bearCase. If your stance agrees with BULL, you may omit mention; the
+      debate is already priced in. Never quote the debate text verbatim in JSON fields.
 
   SECTION 7 — PRE-FLIGHT CHECKS
 

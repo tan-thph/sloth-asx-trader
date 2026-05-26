@@ -127,9 +127,44 @@ async function saveStateToDb() {
         macroDate: state.macroDate,
         analysisLastSummary: state.analysisLastSummary,
         dayTrading: state.dayTrading,
+        priceAlerts: state.priceAlerts,
       })
     });
   } catch(e) { /* silent — don't interrupt UX */ }
+}
+
+// Validators — coerce DB inputs to safe shapes so a bad migration or manual
+// edit can't crash the UI. Each validator returns a sanitised value (never throws).
+
+function _validNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function _validArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+function _validHolding(h) {
+  if (!h || typeof h !== 'object' || !h.ticker) return null;
+  return {
+    ticker:       String(h.ticker).toUpperCase(),
+    shares:       _validNumber(h.shares, 0),
+    avgPrice:     _validNumber(h.avgPrice, 0),
+    currentPrice: _validNumber(h.currentPrice, 0),
+    sector:       typeof h.sector === 'string' ? h.sector : 'Other',
+  };
+}
+
+function _validTrade(t) {
+  if (!t || typeof t !== 'object' || !t.ticker || !t.action) return null;
+  return {
+    ...t,
+    ticker: String(t.ticker).toUpperCase(),
+    qty:    _validNumber(t.qty, 0),
+    entryPrice: _validNumber(t.entryPrice, 0),
+    fees:   _validNumber(t.fees, 10),
+  };
 }
 
 async function loadStateFromDb() {
@@ -139,10 +174,10 @@ async function loadStateFromDb() {
     const data = await r.json();
     if (!data.hasData) return false;
 
-    if (data.portfolio !== undefined)    state.portfolio    = data.portfolio;
-    if (data.tradeJournal !== undefined) state.tradeJournal = data.tradeJournal;
-    if (data.recHistory !== undefined)   state.recHistory   = data.recHistory;
-    if (data.cash != null)               state.cash         = data.cash;
+    if (data.portfolio !== undefined)    state.portfolio    = _validArray(data.portfolio).map(_validHolding).filter(Boolean);
+    if (data.tradeJournal !== undefined) state.tradeJournal = _validArray(data.tradeJournal).map(_validTrade).filter(Boolean);
+    if (data.recHistory !== undefined)   state.recHistory   = _validArray(data.recHistory);
+    if (data.cash != null)               state.cash         = _validNumber(data.cash, 0);
     if (data.settings && Object.keys(data.settings).length) {
       state.settings = {...state.settings, ...data.settings};
     }
@@ -169,6 +204,7 @@ async function loadStateFromDb() {
       state.dayTrading.analysisRunning = false;
       state.dayTrading.scanProgress = null;
     }
+    if (Array.isArray(data.priceAlerts)) state.priceAlerts = data.priceAlerts;
     return true;
   } catch(e) {
     return false;

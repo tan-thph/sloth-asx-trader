@@ -31,76 +31,74 @@ def safe_float(v, default=None):
 
 # ── ASX Sector Lookup ──────────────────────────────────────────────────────────
 
+# Canonical ticker → sector lookup. Each ticker appears exactly once;
+# add new entries in the matching sector block to avoid silent overwrites.
 ASX_SECTOR_MAP = {
-    # Banking & Finance
+    # Banking
     'CBA': 'Banking', 'WBC': 'Banking', 'ANZ': 'Banking', 'NAB': 'Banking',
-    'AMP': 'Insurance', 'SUN': 'Insurance', 'QBE': 'Insurance', 'IAG': 'Insurance',
-    'HUB24': 'Fintech', 'APT': 'Fintech', 'Z1P': 'Fintech',
+    'BEN': 'Banking', 'BOQ': 'Banking',
 
-    # Materials & Mining
-    'BHP': 'Mining', 'RIO': 'Mining', 'FCX': 'Mining', 'ORI': 'Mining',
-    'AGO': 'Mining', 'IVR': 'Mining', 'DDR': 'Mining',
-    'RMS': 'Materials', 'ALU': 'Materials', 'FMG': 'Mining',
+    # Financials (insurance, asset managers, exchanges, fintech)
+    'AMP': 'Financials', 'SUN': 'Financials', 'QBE': 'Financials', 'IAG': 'Financials',
+    'MQG': 'Financials', 'CGF': 'Financials', 'HUB': 'Financials', 'PPT': 'Financials',
+    'PTM': 'Financials', 'IFL': 'Financials', 'EQT': 'Financials', 'AUB': 'Financials',
+    'GQG': 'Financials', 'ASX': 'Financials', 'APT': 'Financials', 'Z1P': 'Financials',
+    'HUB24': 'Financials',
+
+    # Mining & Materials
+    'BHP': 'Mining', 'RIO': 'Mining', 'FMG': 'Mining', 'S32': 'Mining',
+    'MIN': 'Mining', 'IGO': 'Mining', 'NST': 'Mining', 'EVN': 'Mining',
+    'SFR': 'Mining', 'ILU': 'Mining', 'PLS': 'Mining', 'CMM': 'Mining',
+    'RRL': 'Mining', 'PRU': 'Mining', 'SAR': 'Mining', 'OZL': 'Mining',
+    'MGX': 'Mining', 'SBM': 'Mining',
+    'LYC': 'Materials', 'AWC': 'Materials', 'BSL': 'Materials',
+    'JHX': 'Materials', 'BLD': 'Materials', 'CSR': 'Materials', 'RWC': 'Materials',
+    'IPL': 'Materials', 'ORI': 'Materials', 'RMS': 'Materials', 'ALU': 'Materials',
 
     # Energy
-    'WOW': 'Energy', 'ORG': 'Energy', 'STO': 'Energy', 'APA': 'Energy',
-    'AEJ': 'Energy', 'ELD': 'Energy',
+    'WDS': 'Energy', 'STO': 'Energy', 'ORG': 'Energy', 'BPT': 'Energy',
+    'KAR': 'Energy', 'WHC': 'Energy', 'NHC': 'Energy', 'YAL': 'Energy',
 
-    # Healthcare & Pharmaceuticals
-    'CSL': 'Healthcare', 'COH': 'Healthcare', 'SHL': 'Healthcare',
-    'JHG': 'Healthcare', 'EVE': 'Healthcare', 'RHC': 'Healthcare',
-    'NVL': 'Healthcare', 'SIP': 'Healthcare',
-
-    # Telcos & Technology
-    'TLS': 'Telcos', 'VOC': 'Telcos',
-    'WTC': 'Technology', 'XRO': 'Technology', 'WFE': 'Technology',
-    'ADA': 'Technology', 'ALT': 'Technology', 'CCC': 'Technology',
-
-    # Consumer Discretionary
-    'JBH': 'Retail', 'DMP': 'Retail', 'ARG': 'Retail',
-    'QAN': 'Transport', 'TCL': 'Retail',
-
-    # Real Estate & Infrastructure
-    'GMG': 'REITs', 'SCG': 'REITs', 'SCA': 'REITs', 'GPT': 'REITs',
-    'Scentre': 'REITs', 'MGR': 'REITs',
-    'TCL': 'Infrastructure', 'ASX': 'Infrastructure',
-
-    # Consumer Staples
-    'WES': 'Retail', 'COL': 'Retail',
-
-    # Industrials
-    'MQG': 'Diversified', 'SKI': 'Diversified', 'BEN': 'Diversified',
-    'AZJ': 'Diversified', 'MPL': 'Industrial',
-
-    # Additional ASX200 tickers
-    'ALL': 'Gaming', 'SGP': 'REITs', 'CPU': 'Technology', 'NXT': 'Technology',
-    'LLC': 'REITs', 'MIN': 'Mining', 'IGO': 'Mining', 'LYC': 'Materials',
-    'NST': 'Mining', 'EVN': 'Mining', 'SFR': 'Mining', 'AWC': 'Materials',
-    'BSL': 'Materials', 'JHX': 'Materials', 'BLD': 'Materials', 'CSR': 'Materials',
-    'RWC': 'Materials', 'ILU': 'Mining', 'PLS': 'Mining', 'WHC': 'Energy',
-    'NHC': 'Energy', 'YAL': 'Energy', 'CMM': 'Mining', 'RRL': 'Mining',
-    'PRU': 'Mining', 'SAR': 'Mining', 'WDS': 'Energy', 'STO': 'Energy',
-    'BPT': 'Energy', 'KAR': 'Energy', 'IPL': 'Materials', 'ORI': 'Materials',
+    # Healthcare
+    'CSL': 'Healthcare', 'COH': 'Healthcare', 'SHL': 'Healthcare', 'RHC': 'Healthcare',
     'PME': 'Healthcare', 'MSB': 'Healthcare', 'HCA': 'Healthcare', 'EHE': 'Healthcare',
     'HLS': 'Healthcare', 'IDX': 'Healthcare', 'PNV': 'Healthcare', 'NAN': 'Healthcare',
-    'MYR': 'Retail', 'HVN': 'Retail', 'SUL': 'Retail', 'BRG': 'Retail',
-    'PMV': 'Retail', 'CKF': 'Retail', 'ARB': 'Retail', 'TPW': 'Technology',
-    'FLT': 'Travel', 'WEB': 'Travel', 'CTD': 'Travel', 'QAN': 'Transport',
-    'VCX': 'REITs', 'DXS': 'REITs', 'CHC': 'REITs', 'ARF': 'REITs',
-    'CIP': 'REITs', 'NSR': 'REITs', 'BWP': 'REITs', 'ABP': 'REITs',
-    'AZJ': 'Infrastructure', 'MND': 'Industrials', 'ALQ': 'Industrials',
-    'GWA': 'Industrials', 'NWH': 'Industrials', 'SSM': 'Industrials',
+    'RMD': 'Healthcare',
+
+    # Technology
+    'WTC': 'Technology', 'XRO': 'Technology', 'CPU': 'Technology', 'NXT': 'Technology',
+    'TPW': 'Technology', 'APX': 'Technology', 'NEA': 'Technology', 'ADA': 'Technology',
     'SEK': 'Technology', 'REA': 'Technology', 'CAR': 'Technology', 'IEL': 'Technology',
     'DTL': 'Technology', 'TNE': 'Technology', 'MP1': 'Technology',
-    'TWE': 'Consumer Staples', 'A2M': 'Consumer Staples', 'CCL': 'Consumer Staples',
-    'GNC': 'Consumer Staples', 'MQG': 'Financials', 'AMP': 'Financials',
-    'CGF': 'Financials', 'HUB': 'Financials', 'PPT': 'Financials',
-    'PTM': 'Financials', 'IFL': 'Financials', 'EQT': 'Financials',
-    'AUB': 'Financials', 'GQG': 'Financials', 'TPG': 'Telcos', 'REH': 'Industrials',
+
+    # Telcos / Communication
+    'TLS': 'Telcos', 'TPG': 'Telcos', 'VOC': 'Telcos',
+
+    # Consumer Discretionary (Retail / Travel / Gaming)
+    'JBH': 'Retail', 'DMP': 'Retail', 'WES': 'Retail', 'MYR': 'Retail',
+    'HVN': 'Retail', 'SUL': 'Retail', 'BRG': 'Retail', 'PMV': 'Retail',
+    'CKF': 'Retail', 'ARB': 'Retail', 'COL': 'Retail',
+    'FLT': 'Travel', 'WEB': 'Travel', 'CTD': 'Travel',
+    'ALL': 'Gaming',
+
+    # Consumer Staples
+    'WOW': 'Consumer Staples', 'TWE': 'Consumer Staples',
+    'A2M': 'Consumer Staples', 'CCL': 'Consumer Staples', 'GNC': 'Consumer Staples',
+
+    # REITs
+    'GMG': 'REITs', 'SCG': 'REITs', 'SCA': 'REITs', 'GPT': 'REITs',
+    'MGR': 'REITs', 'SGP': 'REITs', 'LLC': 'REITs', 'VCX': 'REITs',
+    'DXS': 'REITs', 'CHC': 'REITs', 'ARF': 'REITs', 'CIP': 'REITs',
+    'NSR': 'REITs', 'BWP': 'REITs', 'ABP': 'REITs',
+
+    # Industrials / Infrastructure / Transport
+    'TCL': 'Infrastructure', 'AZJ': 'Infrastructure',
+    'MND': 'Industrials', 'ALQ': 'Industrials', 'GWA': 'Industrials',
+    'NWH': 'Industrials', 'SSM': 'Industrials', 'REH': 'Industrials',
+    'QAN': 'Transport',
+
+    # Utilities
     'AGL': 'Utilities', 'APA': 'Utilities', 'SKI': 'Utilities',
-    'XRO': 'Technology', 'APX': 'Technology', 'NEA': 'Technology',
-    'S32': 'Mining', 'OZL': 'Mining', 'MGX': 'Mining', 'SBM': 'Mining',
-    'WES': 'Retail', 'COL': 'Retail', 'WOW': 'Consumer Staples',
 }
 
 _SECTOR_CACHE: dict[str, str] = {}   # in-memory cache, populated on first lookup

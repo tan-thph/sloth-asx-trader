@@ -158,7 +158,13 @@ function applyRegimeModifiers(rec, regime) {
   if (!rec) return rec;
   const mod = getRegimeModifiers(regime);
   const out = { ...rec };
-  if (mod.sizeMult !== 1.0 && out.qty) {
+  if (mod.sizeMult === 0) {
+    // Hard block — panic regime / zero allocation. Surface as a rejected rec
+    // so callers can omit it cleanly instead of seeing a forced qty=1.
+    out.qty = 0;
+    out._regimeBlocked = regime;
+    out._regimeAdjusted = true;
+  } else if (mod.sizeMult !== 1.0 && out.qty) {
     out.qty = Math.max(1, Math.floor(out.qty * mod.sizeMult));
     out._regimeAdjusted = true;
   }

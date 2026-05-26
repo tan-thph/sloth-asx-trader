@@ -386,10 +386,11 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   toast('Running AI trade analysis...','info');
 
   // ── Smart calibration — fetched after regime is known, filtered to context ──
-  // Derive sectors from current portfolio so backend can filter to relevant ones.
+  // Derive sectors + tickers from current portfolio for per-ticker memory branch.
   const _portfolioSectors = [...new Set(mergedPortfolio().map(h => h.sector).filter(Boolean))];
+  const _portfolioTickers = mergedPortfolio().map(h => h.ticker).filter(Boolean);
   const _calibrationNote = typeof fetchCalibrationBlock === 'function'
-    ? await fetchCalibrationBlock(_activeRegime, _portfolioSectors)
+    ? await fetchCalibrationBlock(_activeRegime, _portfolioSectors, _portfolioTickers)
     : '';
 
   // ── Internal Debate (optional — Ollama local model) ─────────────────────────
@@ -413,8 +414,14 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           const _debModel = typeof preferredDebateModel === 'function'
             ? preferredDebateModel(_dStatus.models) : '?';
           toast(`🤖 ${_debModel} debating ${_debateTickers.join(', ')}…`, 'info');
+          // D7: build action map so debate engine uses exit-biased prompts for SELL/TRIM
+          const _debateActions = {};
+          for (const t of _debateTickers) {
+            const rec = (state.recommendations || []).find(r => r.ticker === t);
+            if (rec) _debateActions[t] = rec.action || 'BUY';
+          }
           const _debateT0 = Date.now();
-          _debateResults  = await fetchDebateBatch(_debateTickers);
+          _debateResults  = await fetchDebateBatch(_debateTickers, undefined, { actions: _debateActions });
           _debatePreamble = buildDebatePreamble(_debateResults);
 
           const _debated  = Object.values(_debateResults).filter(d => d?.ok);
@@ -559,6 +566,13 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         const action = (r.action || '').toUpperCase();
         return (action === 'BUY' || action === 'TOP_UP') ? applyRegimeModifiers(r, _activeRegime) : r;
       });
+      // Drop recs hard-blocked by regime (e.g. panic → sizeMult=0)
+      const blocked = recs.filter(r => r._regimeBlocked).length;
+      recs = recs.filter(r => !r._regimeBlocked);
+      if (blocked > 0) {
+        const note = ` [Blocked ${blocked} BUY/TOP_UP rec(s) — regime ${_activeRegime} disallows new exposure]`;
+        summary = (summary ? summary + ' ' : '') + note.trim();
+      }
     }
 
     // ── Post-process AI recs: recompute SELL/TRIM P&L from real avg cost,
@@ -841,6 +855,20 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         ? buildDebateSummary(_debate)
         : null;
 
+      // entry_signals_json: compact snapshot of 6 key signals at log time for postmortem quality
+      const _sigs = state.liveSignals?.[r.ticker];
+      const entry_signals_json = _sigs ? JSON.stringify({
+        rsi_14:    _sigs.rsi_14   ?? null,
+        bb_pct_b:  _sigs.bb_pct_b ?? null,
+        adx_14:    _sigs.adx      ?? null,
+        atr_pct:   _sigs.atr_pct  ?? null,
+        return_5d: _sigs.return_5d  ?? null,
+        return_20d: _sigs.return_20d ?? null,
+      }) : null;
+
+      // L6: track synthesizer prediction for calibration feedback over time
+      const debate_synthesis_winner = _debate?.synthesis?.winner ?? null;
+
       const payload = {
         event_type:          'recommendation',
         ticker:              r.ticker,
@@ -856,9 +884,11 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         suggested_target:    r.target ?? null,
         rr_ratio:            rrRatio != null ? +rrRatio.toFixed(2) : null,
         sector:              r.sector || holding?.sector || null,
-        was_executed:        false,
-        market_context:      _mktCtx,
-        debate_summary:      _debateSummary,
+        was_executed:             false,
+        market_context:           _mktCtx,
+        debate_summary:           _debateSummary,
+        entry_signals_json,
+        debate_synthesis_winner,
       };
       const resp = await fetch(`${API}/api/learning/log`, {
         method:  'POST',

@@ -25,6 +25,31 @@ function showPage(page) {
   renderPage();
 }
 function renderPage() {
+  try {
+    _renderPageUnsafe();
+  } catch (err) {
+    console.error('[renderPage] crashed:', err);
+    const el = document.getElementById('main-content');
+    if (el) {
+      el.innerHTML = `
+        <div class="card" style="padding:18px;border-left:3px solid #dc2626">
+          <div style="font-weight:600;color:#dc2626;margin-bottom:6px">⚠ Page crashed</div>
+          <div class="text-sm text-muted" style="margin-bottom:10px">
+            The <code>${state.page}</code> page threw an exception during render.
+            Other pages should still work — pick one from the sidebar, or click reset to reload.
+          </div>
+          <details style="margin-bottom:10px">
+            <summary class="text-xs text-muted" style="cursor:pointer">Show error details</summary>
+            <pre style="font-size:11px;background:var(--bg-secondary);padding:8px;border-radius:4px;margin-top:6px;white-space:pre-wrap;word-break:break-word">${String(err && err.stack || err).replace(/</g,'&lt;')}</pre>
+          </details>
+          <button class="btn btn-sm" onclick="showPage('dashboard')">← Back to Dashboard</button>
+          <button class="btn btn-sm" onclick="location.reload()">⟳ Reload App</button>
+        </div>`;
+    }
+  }
+}
+
+function _renderPageUnsafe() {
   const el = document.getElementById('main-content');
   const gen = (state._renderGen = (state._renderGen || 0)); // snapshot current gen
   switch(state.page) {

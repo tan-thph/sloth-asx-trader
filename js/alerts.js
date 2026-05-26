@@ -76,22 +76,36 @@ function checkRecStopTargetAlerts() {
   // Find open executed recs that have a stop or target
   const openRecs = recs.filter(r => r.executed && (r.outcome === 'open' || !r.outcome));
 
+  let anyFired = false;
   openRecs.forEach(r => {
     const price = priceMap[r.ticker] ?? priceMap[r.ticker + '.AX'];
     if (price == null) return;
 
+    // Skip if we already alerted at this level — prevents firing on every refresh.
+    // Re-arm only when price re-enters the safe band (>5% buffer past trigger).
     if (r.stopLoss && price <= r.stopLoss) {
+      if (r._stopAlertedAt) return;
       fireAlert(
         `🛑 Stop hit: ${r.ticker}`,
         `Live price $${price.toFixed(2)} ≤ stop $${r.stopLoss.toFixed(2)}. Consider exiting.`,
         `sloth-stop-${r.ticker}`
       );
+      r._stopAlertedAt = new Date().toISOString();
+      anyFired = true;
     } else if (r.target && price >= r.target) {
+      if (r._targetAlertedAt) return;
       fireAlert(
         `✅ Target hit: ${r.ticker}`,
         `Live price $${price.toFixed(2)} ≥ target $${r.target.toFixed(2)}. Consider taking profits.`,
         `sloth-target-${r.ticker}`
       );
+      r._targetAlertedAt = new Date().toISOString();
+      anyFired = true;
+    } else {
+      // Price retreated from trigger zone — re-arm so next breach alerts again.
+      if (r._stopAlertedAt   && r.stopLoss && price > r.stopLoss * 1.02) r._stopAlertedAt   = null;
+      if (r._targetAlertedAt && r.target   && price < r.target   * 0.98) r._targetAlertedAt = null;
     }
   });
+  if (anyFired && typeof scheduleSave === 'function') scheduleSave();
 }

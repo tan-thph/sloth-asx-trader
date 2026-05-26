@@ -770,6 +770,13 @@ function confirmExecute(recId) {
   markExecuted(recId, price, fee, qty);
 }
 
+function _detectExitReason(exitPrice, stopLoss, target) {
+  if (!exitPrice || exitPrice <= 0) return 'manual';
+  if (stopLoss && exitPrice <= stopLoss * 1.005) return 'stop_hit';
+  if (target   && exitPrice >= target  * 0.995)  return 'target_hit';
+  return 'manual';
+}
+
 function markExecuted(id, execPrice, execFee, execQty) {
   const rec = state.recommendations.find(r => r.id === id); if(!rec) return;
   const time = nowSydney();
@@ -869,20 +876,52 @@ function markExecuted(id, execPrice, execFee, execQty) {
         sector,
       };
       if (outcome) {
+        const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target);
         outcomePayload.outcome_status      = outcome;
         outcomePayload.realized_pnl_aud    = +realizedPnl.toFixed(2);
         outcomePayload.realized_pnl_pct    = pnlPct;
         outcomePayload.holding_period_days = holdDays;
-        outcomePayload.exit_reason         = 'manual';
+        outcomePayload.exit_reason         = exitReason;
       }
       fetch(`${API}/api/learning/outcome`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(outcomePayload),
       }).catch(() => {});
+
+      // #2: when position fully closes, reconcile all open BUY/TOP_UP learning events for this ticker
+      if (isReducing && outcome) {
+        const remaining = getPortfolioHolding(rec.ticker);
+        const positionClosed = !remaining || (remaining.shares || 0) <= 0;
+        if (positionClosed) {
+          const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target);
+          const parentRecs = (state.recHistory || []).filter(r =>
+            r.ticker === rec.ticker &&
+            r._learningId &&
+            r._learningId !== rec._learningId &&
+            r.outcome === 'open' &&
+            (r.action === 'BUY' || r.action === 'TOP_UP')
+          );
+          for (const pr of parentRecs) {
+            fetch(`${API}/api/learning/outcome`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: pr._learningId,
+                outcome_status:     outcome,
+                exit_reason:        exitReason,
+                actual_exit_price:  tradePrice,
+                holding_period_days: holdDays,
+              }),
+            }).catch(() => {});
+            const rh = state.recHistory.find(r => r.id === pr.id);
+            if (rh) rh.outcome = outcome;
+          }
+        }
+      }
     } else if (isReducing && realizedPnl != null) {
       // No prior learning event (manually-imported position).
       const rrRatio = entryP && rec.stopLoss && rec.target && entryP !== rec.stopLoss
         ? +Math.abs((rec.target - entryP) / (entryP - rec.stopLoss)).toFixed(2) : null;
+      const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target);
       fetch(`${API}/api/learning/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -902,7 +941,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
           realized_pnl_aud:    +realizedPnl.toFixed(2),
           realized_pnl_pct:    pnlPct,
           holding_period_days: holdDays,
-          exit_reason:         'manual',
+          exit_reason:         exitReason,
           actual_entry_price:  entryP ?? null,
           actual_exit_price:   exitP  ?? null,
           sector,
@@ -913,9 +952,24 @@ function markExecuted(id, execPrice, execFee, execQty) {
           histEntry._learningId = res.id;
           const rh = state.recHistory.find(r => r.id === rec.id);
           if (rh) rh._learningId = res.id;
+          // #5: fire auto-postmortem on fresh-logged losses/breakevens
+          if ((outcome === 'loss' || outcome === 'breakeven') && typeof triggerPostmortem === 'function') {
+            triggerPostmortem(res.id).catch(() => {});
+          }
+          if (outcome && typeof fetchSkillScore === 'function') {
+            fetchSkillScore(res.id).catch(() => {});
+          }
         }
       }).catch(() => {});
     }
+  }
+
+  // #5: auto-postmortem on loss/breakeven when we already had a _learningId
+  if (state.serverOk && rec._learningId && (outcome === 'loss' || outcome === 'breakeven')) {
+    if (typeof triggerPostmortem === 'function') triggerPostmortem(rec._learningId).catch(() => {});
+  }
+  if (state.serverOk && rec._learningId && outcome) {
+    if (typeof fetchSkillScore === 'function') fetchSkillScore(rec._learningId).catch(() => {});
   }
 
   toast(`${rec.ticker} ${rec.action} ${qty} @ $${fmt(tradePrice)} (fee $${fmt(fees)}) — logged`, 'success');

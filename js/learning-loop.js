@@ -326,12 +326,13 @@ function computeRRRealization(recHistory) {
  * @param {string} regime   - Current market regime (e.g. 'riskOn')
  * @param {string[]} sectors - Sectors present in the current analysis
  */
-async function fetchCalibrationBlock(regime, sectors) {
+async function fetchCalibrationBlock(regime, sectors, tickers) {
   if (typeof state === 'undefined' || !state.serverOk) return '';
   try {
     const params = new URLSearchParams();
     if (regime) params.set('regime', regime);
     if (sectors && sectors.length) params.set('sectors', sectors.join(','));
+    if (tickers && tickers.length) params.set('tickers', tickers.join(','));
     const resp = await fetch(`${API}/api/learning/calibration?${params}`);
     if (!resp.ok) return '';
     const data = await resp.json();

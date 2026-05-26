@@ -60,9 +60,12 @@ function _signalHash(signals = {}) {
     pick(signals.rsi_14, 1),
     pick(signals.bb_pct_b),
     pick(signals.volume_z_score, 1),
+    pick(signals.return_5d, 1),   // D4: added to hash so cache invalidates when momentum shifts
+    pick(signals.return_20d, 1),
     pick(signals.return_60d, 1),
     signals.obv_trend || 'x',
     pick(signals.adx_14, 1),
+    pick(signals.atr_pct, 1),
   ].join('|');
 }
 
@@ -158,7 +161,10 @@ async function fetchDebate(ticker, signals, opts = {}) {
     const r = await fetch(`${API}/api/debate`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ ticker, signals, model, timeout: opts.timeout || 45 }),
+      body:    JSON.stringify({
+        ticker, signals, model, timeout: opts.timeout || 45,
+        action: opts.action || 'BUY',  // D7: pass direction for exit-biased prompts
+      }),
       signal:  AbortSignal.timeout(100_000), // 100 s hard cap
     });
     if (r.ok) {
@@ -199,7 +205,10 @@ async function fetchDebateBatch(tickers, concurrency, opts = {}) {
   for (let i = 0; i < limited.length; i += workers) {
     const chunk = limited.slice(i, i + workers);
     const settled = await Promise.allSettled(
-      chunk.map(t => fetchDebate(t, state.liveSignals[t] || {}, { ...opts, model }))
+      chunk.map(t => fetchDebate(t, state.liveSignals[t] || {}, {
+        ...opts, model,
+        action: opts.actions?.[t] || 'BUY',  // D7: per-ticker direction
+      }))
     );
     chunk.forEach((t, idx) => {
       const s = settled[idx];
@@ -215,10 +224,16 @@ async function fetchDebateBatch(tickers, concurrency, opts = {}) {
 function formatDebateBlock(ticker, debate) {
   if (!debate?.bull || !debate?.bear) return '';
   const modelTag = debate.model ? ` [${debate.model}]` : '';
+  let synthLine = '';
+  if (debate.synthesis?.winner) {
+    const { winner, margin, key_pivot } = debate.synthesis;
+    synthLine = `SYNTHESIS: ${winner.toUpperCase()} wins (${margin}) — ${key_pivot}\n`;
+  }
   return (
     `\n--- Local Debate${modelTag}: ${ticker} ---\n` +
     `BULL: ${debate.bull}\n` +
     `BEAR: ${debate.bear}\n` +
+    synthLine +
     `--- End Debate ---\n`
   );
 }
@@ -241,9 +256,13 @@ function buildDebatePreamble(debates) {
  */
 function buildDebateSummary(debate) {
   if (!debate?.bull || !debate?.bear) return null;
-  const bullSnip = debate.bull.slice(0, 80).replace(/\s+$/, '');
-  const bearSnip = debate.bear.slice(0, 80).replace(/\s+$/, '');
-  return `B:${bullSnip} / R:${bearSnip}`;
+  const bullSnip = debate.bull.slice(0, 70).replace(/\s+$/, '');
+  const bearSnip = debate.bear.slice(0, 70).replace(/\s+$/, '');
+  // L5: include synthesis winner so the stored record is more useful for review
+  const synth = debate.synthesis?.winner
+    ? `[${debate.synthesis.winner.toUpperCase()}:${debate.synthesis.margin || '?'}]`
+    : '';
+  return synth ? `${synth} B:${bullSnip} / R:${bearSnip}` : `B:${bullSnip} / R:${bearSnip}`;
 }
 
 /**

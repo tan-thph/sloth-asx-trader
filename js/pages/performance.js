@@ -1,6 +1,8 @@
 async function renderPerformancePage(gen) {
   const el = document.getElementById('main-content');
   if (state._renderGen !== gen) return;
+  // Refresh outcomes from journal once, BEFORE render — keeps render pure.
+  if (typeof reconcileRecOutcomes === 'function') reconcileRecOutcomes();
   el.innerHTML = renderPerformance(); // sync render first (no waiting)
   // Then fetch and draw equity curve overlay
   if (state.serverOk && state.portfolio.length) {
@@ -70,9 +72,13 @@ function renderPerformance() {
     : 0;
   const sortinoRatio = downsideDev > 0 ? meanRet / downsideDev : null;
 
-  // Calmar ratio: annualised return / max drawdown (from cumulative P&L curve)
+  // Calmar ratio: annualised return / max drawdown.
+  // Requires ≥ 90d of trading history — shorter spans extrapolate too aggressively.
+  // Annualisation factor is clamped so a 31-day span doesn't 12× the numerator
+  // while max-drawdown stays raw, which produced absurd Calmar values previously.
   let calmarRatio = null;
-  if (closedTrades.length >= 2) {
+  let calmarInsufficient = false;
+  if (closedTrades.length >= 5) {
     const sorted = [...closedTrades].sort((a,b) => (a.date||'').localeCompare(b.date||''));
     let cumPnl = 0, peak = 0, maxDD = 0;
     sorted.forEach(t => {
@@ -85,10 +91,17 @@ function renderPerformance() {
     const lastDate  = sorted[sorted.length-1]?.date;
     const daySpan   = firstDate && lastDate
       ? (new Date(lastDate) - new Date(firstDate)) / 86400000 : 0;
-    const annFactor = daySpan > 30 ? 365 / daySpan : 1;
-    const annReturn = realised * annFactor;
-    const cost0     = totalCostVal || 1;
-    calmarRatio = maxDD > 0 ? (annReturn / cost0 * 100) / maxDD : null;
+    if (daySpan < 90) {
+      calmarInsufficient = true;
+    } else {
+      // Clamp to ≤ 4× to suppress wild extrapolation on short histories.
+      const annFactor = Math.min(365 / daySpan, 4);
+      const annReturn = realised * annFactor;
+      const cost0     = totalCostVal || 1;
+      calmarRatio = maxDD > 0 ? (annReturn / cost0 * 100) / maxDD : null;
+    }
+  } else {
+    calmarInsufficient = true;
   }
 
   // Streaks and avg hold days
@@ -190,31 +203,9 @@ function renderPerformance() {
       <div class="card">
         <div class="card-title">Recommendation Outcomes</div>
         ${(()=>{
-          // Reconcile outcomes: for each executed rec, find matching trade journal entry and derive win/loss from P&L
-          const reconciledHistory = state.recHistory.map(r => {
-            if (!r.executed || r.outcome === 'skipped') return r;
-            const journalMatch = state.tradeJournal.find(t =>
-              t.recId === r.id && t.status === 'closed' && t.pnl != null
-            );
-            if (journalMatch) {
-              const outcome = journalMatch.pnl > 0 ? 'win' : journalMatch.pnl < 0 ? 'loss' : 'open';
-              return { ...r, outcome, actualProfit: journalMatch.pnl };
-            }
-            const sameDayTrade = state.tradeJournal.find(t =>
-              t.ticker === r.ticker && t.date === r.date && t.status === 'closed' && t.pnl != null
-            );
-            if (sameDayTrade) {
-              const outcome = sameDayTrade.pnl > 0 ? 'win' : sameDayTrade.pnl < 0 ? 'loss' : 'open';
-              return { ...r, outcome, actualProfit: sameDayTrade.pnl };
-            }
-            return r;
-          });
-          reconciledHistory.forEach((r, i) => {
-            if (state.recHistory[i] && r.outcome !== state.recHistory[i].outcome) {
-              state.recHistory[i].outcome = r.outcome;
-              state.recHistory[i].actualProfit = r.actualProfit;
-            }
-          });
+          // Read-only reconciliation for display. State mutation is handled
+          // separately by reconcileRecOutcomes() (called from journal close flows).
+          const reconciledHistory = computeReconciledRecHistory();
           const execWon  = reconciledHistory.filter(r=>r.executed&&r.outcome==='win').length;
           const execLost = reconciledHistory.filter(r=>r.executed&&r.outcome==='loss').length;
           const execOpen = reconciledHistory.filter(r=>r.executed&&r.outcome==='open').length;
@@ -257,7 +248,7 @@ function renderPerformance() {
             <div style="font-size:18px;font-weight:600;color:${calmarRatio==null?'var(--text-secondary)':calmarRatio>=1?'#16a34a':calmarRatio>=0?'#d97706':'#dc2626'}">
               ${calmarRatio==null?'—':fmt(calmarRatio,2)}
             </div>
-            <div class="text-xs text-muted">Ann. return / max drawdown · ≥ 1.0 = good</div>
+            <div class="text-xs text-muted">${calmarInsufficient ? 'Needs ≥ 90 days of closed trades' : 'Ann. return / max drawdown · ≥ 1.0 = good'}</div>
           </div>
         </div>
       </div>
@@ -533,6 +524,13 @@ function exportTradeJournalCSV() {
 // For each recHistory entry with a _learningId and a reconciled win/loss outcome,
 // call POST /api/learning/outcome. Also handles existing recs without a _learningId
 // by re-logging them as new events with was_executed:true.
+function _detectExitReason(exitPrice, stopLoss, target) {
+  if (!exitPrice || exitPrice <= 0) return 'manual';
+  if (stopLoss && exitPrice <= stopLoss * 1.005) return 'stop_hit';
+  if (target   && exitPrice >= target  * 0.995)  return 'target_hit';
+  return 'manual';
+}
+
 async function syncClosedTradesToLearningLoop() {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
 
@@ -586,7 +584,7 @@ async function syncClosedTradesToLearningLoop() {
           actual_entry_price:  r._entryPrice ?? null,
           actual_exit_price:   r._exitPrice  ?? null,
           sector:              r._sector     ?? null,
-          exit_reason:         'manual',
+          exit_reason:         _detectExitReason(r._exitPrice, r.stopLoss, r.target),
         }),
       });
       if ((await resp.json()).ok) updated++;
@@ -615,7 +613,7 @@ async function syncClosedTradesToLearningLoop() {
           actual_entry_price:  r._entryPrice ?? null,
           actual_exit_price:   r._exitPrice  ?? null,
           sector:              r._sector     ?? null,
-          exit_reason:         'manual',
+          exit_reason:         _detectExitReason(r._exitPrice, r.stopLoss, r.target),
         }),
       });
       const res = await resp.json();
@@ -625,4 +623,46 @@ async function syncClosedTradesToLearningLoop() {
 
   scheduleSave();
   toast(`Learning Loop sync: ${updated} outcomes updated, ${logged} historical trades logged`, 'success');
+}
+
+// ── Outcome reconciliation ────────────────────────────────────────────────────
+// computeReconciledRecHistory() — pure: returns a copy of state.recHistory with
+// each executed rec's outcome derived from the matching trade journal entry.
+// Used by renderPerformance() for display.
+function computeReconciledRecHistory() {
+  return state.recHistory.map(r => {
+    if (!r.executed || r.outcome === 'skipped') return r;
+    const journalMatch = state.tradeJournal.find(t =>
+      t.recId === r.id && t.status === 'closed' && t.pnl != null
+    );
+    if (journalMatch) {
+      const outcome = journalMatch.pnl > 0 ? 'win' : journalMatch.pnl < 0 ? 'loss' : 'open';
+      return { ...r, outcome, actualProfit: journalMatch.pnl };
+    }
+    const sameDayTrade = state.tradeJournal.find(t =>
+      t.ticker === r.ticker && t.date === r.date && t.status === 'closed' && t.pnl != null
+    );
+    if (sameDayTrade) {
+      const outcome = sameDayTrade.pnl > 0 ? 'win' : sameDayTrade.pnl < 0 ? 'loss' : 'open';
+      return { ...r, outcome, actualProfit: sameDayTrade.pnl };
+    }
+    return r;
+  });
+}
+
+// reconcileRecOutcomes() — mutates state.recHistory in place; call from trade
+// close flows (journal closeTrade, sync to learning loop). Persists via scheduleSave().
+function reconcileRecOutcomes() {
+  const reconciled = computeReconciledRecHistory();
+  let changed = 0;
+  reconciled.forEach((r, i) => {
+    const cur = state.recHistory[i];
+    if (cur && (r.outcome !== cur.outcome || r.actualProfit !== cur.actualProfit)) {
+      state.recHistory[i].outcome = r.outcome;
+      state.recHistory[i].actualProfit = r.actualProfit;
+      changed++;
+    }
+  });
+  if (changed > 0) scheduleSave();
+  return changed;
 }

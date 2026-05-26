@@ -41,7 +41,11 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   const capital = allocatedCash + portfolioValue;
   const price = signals.current_price;
   const atr   = signals.atr_14;
-  const adv20 = signals.adv_20 ?? signals.volume_avg_20 ?? 0;
+  // adv_20 is dollar turnover (close × volume); volume_avg_20 is share count.
+  // Track both so the liquidity cap below can convert correctly.
+  const advAud   = signals.adv_20 ?? null;                    // AUD (dollars)
+  const advShares = signals.volume_avg_20
+                    ?? (advAud && signals.current_price ? advAud / signals.current_price : 0);
   const bbUpper = signals.bb_upper;
   const sr = signals.support_resistance || {};
 
@@ -85,9 +89,9 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   const maxPosPct = _ap.maxPositionPct ?? QUANT_CONFIG.maxPositionPct;
   const qtyByPosition = Math.floor((allocatedCash * maxPosPct) / price);
 
-  // Liquidity cap (5% of 20-day average share volume)
-  const qtyByLiquidity = adv20 > 0
-    ? Math.floor(adv20 * (_ap.maxLiquidityPct ?? QUANT_CONFIG.maxLiquidityPct))
+  // Liquidity cap (5% of 20-day average share volume — in SHARES, not dollars)
+  const qtyByLiquidity = advShares > 0
+    ? Math.floor(advShares * (_ap.maxLiquidityPct ?? QUANT_CONFIG.maxLiquidityPct))
     : Infinity;
 
   // ── Volatility normalisation ───────────────────────────────────────────────

@@ -45,8 +45,13 @@ function _resolveSystemPrompt(agentType) {
 }
 
 async function callClaude(agentType, userMessage, options = {}) {
-  const key = getApiKey();
-  if (!key) throw new Error('No API key — add one in Settings');
+  // Two modes:
+  //   • Direct (default): browser → api.anthropic.com using key from localStorage
+  //   • Proxy (opt-in via state.settings.useBackendProxy): browser → /api/claude/proxy
+  //     → api.anthropic.com using key stored in SQLite settings table
+  const useProxy = !!(state.settings && state.settings.useBackendProxy);
+  const key = useProxy ? null : getApiKey();
+  if (!useProxy && !key) throw new Error('No API key — add one in Settings (or enable backend proxy)');
 
   const maxTokens = options.maxTokens ?? _AGENT_MAX_TOKENS[agentType] ?? 3000;
   const noCache   = options.noCache   ?? _AGENT_NO_CACHE[agentType]   ?? false;
@@ -72,13 +77,20 @@ async function callClaude(agentType, userMessage, options = {}) {
   if (system) body.system = system;
 
   // ── Headers ─────────────────────────────────────────────────────────────────
-  const headers = {
+  const headers = useProxy ? {
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01',
+  } : {
     'Content-Type': 'application/json',
     'x-api-key': key,
     'anthropic-version': '2023-06-01',
     'anthropic-dangerous-direct-browser-access': 'true',
   };
   if (!noCache) headers['anthropic-beta'] = 'prompt-caching-2024-07-31';
+
+  const endpoint = useProxy
+    ? `${API}/api/claude/proxy`
+    : 'https://api.anthropic.com/v1/messages';
 
   // ── Exponential backoff: 4 attempts (0s, 1s, 2s, 4s) ──────────────────────
   const RETRY_DELAYS = [0, 1000, 2000, 4000];
@@ -89,7 +101,7 @@ async function callClaude(agentType, userMessage, options = {}) {
 
     let resp;
     try {
-      resp = await fetch('https://api.anthropic.com/v1/messages', {
+      resp = await fetch(endpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
