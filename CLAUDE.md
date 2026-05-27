@@ -71,7 +71,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `announcement_engine.py` + `announcement_routes.py` | — | ASX announcements scraper, PDF parser, Gemini scorer, blueprint `/api/announcements/*`. |
 | `news_engine.py` | — | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
 | `gunicorn.conf.py` | — | Production WSGI config. 2 workers × 8 threads. |
-| `test_app.py` | ~1700 | 178 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
+| `test_app.py` | ~1950 | 195 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
 
 #### `routes/` — one blueprint per concern
 
@@ -79,7 +79,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 |---|--:|---|---|
 | `routes/portfolio.py`  | ~380 | `/api/cash`, `/api/db/*`, `/api/tax/eofy-pack` | Bulk state save/load, cash balance, EOFY tax pack ZIP download. |
 | `routes/dividends.py`  | ~395 | `/api/dividends/*`                              | yfinance + ASX scrape, 12 h cache, `_FRANKING_MAP` fallback. |
-| `routes/market.py`     | ~670 | `/health`, `/api/{analyse,quote,macro,rba-rate,polymarket,risk,portfolio/nav-history,earnings-calendar,log/ai_response}` | All yfinance read-only data + Anthropic response logging. Uses `@ttl_cache`. |
+| `routes/market.py`     | ~750 | `/health` (+ version/uptime/last_backup), `/api/{analyse,quote,macro,rba-rate,polymarket,risk,portfolio/nav-history,earnings-calendar,log/ai_response,log/ai_calls,log/ai_call/<id>}` | All yfinance read-only data + full prompt+response logging. ETFs skipped in `/api/earnings-calendar` via quoteType check. Uses `@ttl_cache`. |
 | `routes/backtest.py`   | ~575 | `/api/backtest`, `/api/backtest/ai-replay`     | Historical strategy backtest + replay scoring of executed AI recs. |
 | `routes/scanner.py`    | ~210 | `/api/market/scan*`                              | Background thread + `_scan_state` dict, sector diversification. Computes `breadth_ratio` (% of universe above 20-day SMA) after each scan; consumed by `/api/macro` via lazy import. |
 | `routes/learning.py`   | ~730 | `/api/learning/*`                                | Log → outcome → stats/calibration analytics. Decay-weighted win rates. `_calib_compute()` is a pure function cached 5 min. `GET /api/learning/calibration-stats` (Brier score + reliability-diagram bins). `GET /api/learning/digest-data` (structured failure data for postmortem digest AI prompt). |
@@ -89,7 +89,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `routes/alerts.py`     | ~100 | `/api/alerts/*`                                  | Telegram off-device alerts. `POST /api/alerts/telegram` (send), `POST /api/alerts/telegram/save` (persist creds to settings table), `GET /api/alerts/config` (has_telegram?). Credentials stored in `settings` table as `tg_token`/`tg_chat_id` — never logged. |
 | `routes/import_csv.py` | ~200 | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. Returns BUY rows only; SELL rows reported as skipped (require manual entry). |
 
-Total: **11 blueprints, 75 routes** (including announcements blueprint).
+Total: **11 blueprints, 78 routes** (including announcements blueprint). Three new routes in Sprint 9: `GET /api/log/ai_calls`, `GET /api/log/ai_call/<id>` (AI call log browse), plus `GET /health` enriched with version/uptime/last_backup.
 
 ### Frontend (JS) — load order matters
 
@@ -104,7 +104,7 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 → prompts.js → prompt-modules.js → claude-client.js → debate-client.js
 → response-validator.js → analysis.js
 → asx-universe.js → strategy.js → day-trading-analysis.js → pages/day-trading.js
-→ pages/news.js → pages/announcements.js → pages/scanner.js → pages/watchlist.js → pages/learning.js
+→ pages/news.js → pages/announcements.js → pages/scanner.js → pages/watchlist.js → pages/compare.js → pages/learning.js
 → pages/settings.js → alerts.js → navigation.js → init.js
 ```
 
@@ -132,7 +132,7 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 
 ### Pages
 
-`js/pages/*.js` — each is a render function `renderX()` plus event handlers. Most are pure HTML-string builders. `pages/scanner.js`, `pages/day-trading.js`, `pages/learning.js`, `pages/news.js`, `pages/announcements.js` have async pollers — `navigation.js` stops them on page change. `pages/watchlist.js` renders the Watchlist page (⭐ nav item); fetches live signals async per ticker and hosts the indicator-alert creation UI.
+`js/pages/*.js` — each is a render function `renderX()` plus event handlers. Most are pure HTML-string builders. `pages/scanner.js`, `pages/day-trading.js`, `pages/learning.js`, `pages/news.js`, `pages/announcements.js` have async pollers — `navigation.js` stops them on page change. `pages/watchlist.js` renders the Watchlist page (⭐ nav item); fetches live signals async per ticker and hosts the indicator-alert creation UI. `pages/compare.js` renders the side-by-side compare page (↔ nav, g+x shortcut); calls `POST /api/analyse/batch`; `compareFromOutside(tickerList)` lets other pages pre-load tickers into it.
 
 ---
 
@@ -238,6 +238,12 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 
 ### Broker CSV import
 - `POST /api/import/csv` — multipart upload; field `file` = CSV, optional `broker` hint (`commsec`|`selfwealth`|`auto`). Returns `{ok, broker, rows:[{action,ticker,shares,price,date,brokerage}], skipped:[{row,reason}], total}`.
+
+### AI Call Log (prompt + response audit trail)
+- `POST /api/log/ai_response` — updated: accepts `{text, system_prompt, user_message, agent_type, model, usage, duration_ms}`. Writes to `ai_call_log` table + enriched file. Keeps `blob_store.last_ai_raw_response` for backward compat. Now called automatically from `callClaude()` — no manual call needed at call sites.
+- `GET /api/log/ai_calls?limit=20&offset=0&agent_type=X` — browse recent calls (metadata + snippets). No full text in list.
+- `GET /api/log/ai_call/<id>` — full content for one logged call.
+- `GET /health` — now returns `{status, time, version, uptime_s, last_backup}`.
 
 ### Claude proxy (opt-in)
 - `GET /api/claude/settings` → `{has_key: bool}`
@@ -350,10 +356,8 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 | **Mobile compact mode** | Needs CSS breakpoint pass on every card/table. | Phone-friendly read-only mode during market hours. |
 | **Correlation-aware sizing (exact)** | Current impl warns by sector weight; actual correlation matrix (from `/api/risk`) not yet injected into quant sizing step. | Reduce size automatically when |corr| > 0.7 with existing holding. |
 | **DRP parcel tracking** | Dividend income forecast assumes no DRP (dividend reinvestment); DRP parcels need their own CGT lot management. | Accurate CGT cost-base for DRP investors. |
-| **Side-by-side ticker compare** | New view; 2–4 tickers' signals side-by-side. | Faster entry selection when you have multiple candidates. |
 | **Vitest frontend tests** | JS test infrastructure needs setting up (jsdom, mocking globals). | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
 | **Hoist `_detectExitReason` into `utils.js`** | Currently duplicated in two page files; dedup risks the fragile script order. | Single source of truth for exit classification. |
-| **Filter ETFs from `/api/earnings-calendar`** | ETF symbols (VAS, VHY, IVV…) have no fundamentals; yfinance logs a 404 ERROR per symbol. Harmless (endpoint still 200s) but noisy. | Cleaner logs. |
 | **`pip install feedparser`** | Optional dep; RSS falls back to a built-in XML parser when absent (logs a warning each scan). | More robust news-feed parsing. |
 
 ---

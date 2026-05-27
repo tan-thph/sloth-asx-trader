@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-27 (sprints 3–8 shipped)
+**Last Updated:** 2026-05-28 (sprints 3–9 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -11,7 +11,7 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 
 ---
 
-## 0. Shipped — 2026-05 sprints
+## 0. Shipped — 2026-05 sprints (through Sprint 9)
 
 | Fix / Feature | Area | Detail |
 |---|---|---|
@@ -65,6 +65,11 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **Exact correlation-aware sizing** | Risk (§2.5) | After Claude generates BUY recs, `analysis.js` fetches `/api/risk` with portfolio + rec tickers; reduces `qty`/`riskAUD` by 30% when |corr| > 0.7 or 50% when > 0.85 with any existing holding; annotates rec with `_corrNote`; shown as ⚡ Corr badge on rec cards. |
 | **Macro endpoint perf** | Reliability (§3.4) | `_macro_payload()` refactored: `^AXJO` fetched once at `period="3mo"` in the parallel block (previously fetched separately at 5d + 3mo = 2 serial calls); `AUDUSD=X` and `TIO=F` fetched at `period="1mo"` so 5d-change is computed from cached history (eliminates 2 more serial calls). Net: 3 serial yfinance fetches removed. |
 | **Keyboard shortcuts** | UX (§4) | `g`+letter page navigation added to `navigation.js` (IIFE); covers 14 pages. `?` toggles a `<dialog>` shortcut help panel. Shortcuts are suppressed when focus is in an input/textarea. |
+| **Prompt + response logging** | Debug/Audit | `ai_call_log` DB table. Every `callClaude()` call auto-logs: agent_type, model, system_prompt (8k cap), user_message (30k cap), response, tokens (in/out/cache_read/written), duration_ms. File output enriched with prompt header. New `GET /api/log/ai_calls` + `GET /api/log/ai_call/<id>` browse endpoints. Settings page "Recent AI Calls" card with agent filter + modal viewer. |
+| **Side-by-side ticker compare** | Research (§2.4) | New `js/pages/compare.js`. Up to 4 ASX tickers. Score bar chart + full indicator table (RSI, MACD, BB%B, ATR, Stoch, CCI, ADX, MFI, OBV, SMA20/50, 1w/1m/3m returns, buy/sell signals). Color-coded cells. Navigate: g+x, ↔ Compare nav button. Watchlist ↔ button pre-loads watchlist into compare inputs. |
+| **Prompt version A/B delta** | AI (§2.7) | Learning Loop prompt version table now has Δ vs prev column: shows win-rate delta (pp) with ↑/↓/↔ arrow; greyed out when either version has <3 closed events. Current version highlighted with indigo "current" badge. |
+| **ETF filter for earnings calendar** | Reliability | `_fetch_earnings` checks `quoteType` from yfinance info; returns `{skipped:'ETF'}` for ETF/MUTUALFUND/MONEYMARKET — eliminates 404 log noise without a fragile static ticker list. |
+| **App Info card in Settings** | UX (§4) | Shows `PROMPT_VERSION`, `CLAUDE_MODEL`, server version/uptime, last DB backup date. `GET /health` now returns `version`, `uptime_s`, `last_backup`. |
 
 ---
 
@@ -156,7 +161,7 @@ already exist (quant, regime, learning, dividends, CGT).
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
-| **Side-by-side ticker compare** | M | ★★ | Compare 2–4 tickers' signals/valuation/RS in one view before choosing. |
+| ✓ **Side-by-side ticker compare** | M | ★★ | **SHIPPED** — `js/pages/compare.js`, g+x shortcut, ↔ nav button, Watchlist ↔ button. See §0. |
 | ✓ **Saved screeners** | S | ★★ | **SHIPPED** — `state.savedScreeners`, ⊕ Save/Load/Delete in scanner config bar. See §0. |
 | **Economic calendar** | M | ★★ | RBA meetings, US Fed, CPI, jobs, ASX reporting season — overlaid on the dashboard so you trade around known catalysts. |
 | **Seasonality view** | M | ★ | ASX/ticker monthly seasonality (e.g. "Santa rally", May weakness) as context, clearly labelled as low-confidence. |
@@ -253,8 +258,9 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. Remaining: §2.5 correlation-aware sizing, §1.7 walk-forward backtest.
 5. ✓ **Sprint 6 shipped:** §2.7 portfolio-aware Q&A, §2.1 performance attribution, §2.5 sector-concentration warning, §2.6 thesis capture, §2.2 dividend forecast + franking credits — **all done**.
 6. ✓ **Sprint 7 shipped:** thesis review at exit, prompt-version P&L, target allocations + drift alerts, economic calendar (RBA dates + ex-div + earnings), franking 45-day rule warnings — **all done**.
-7. ✓ **Sprint 8 shipped:** A-VIX (ASX realized vol), cash/TD tracker, exact correlation-aware sizing, macro endpoint perf (3 serial fetches eliminated), keyboard shortcuts (`g`+letter + `?`) — **all done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias, §3.3 Vitest tests.
-8. **Polish:** §3.3 Vitest tests, §4 UX (compact mode, PWA), §3.7 types/modules.
+7. ✓ **Sprint 8 shipped:** A-VIX (ASX realized vol), cash/TD tracker, exact correlation-aware sizing, macro endpoint perf (3 serial fetches eliminated), keyboard shortcuts (`g`+letter + `?`) — **all done**.
+8. ✓ **Sprint 9 shipped:** Prompt+response logging (ai_call_log, full prompt in every call), side-by-side compare page, prompt version A/B delta, ETF earnings filter, App Info card — **all done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias, §3.3 Vitest tests.
+9. **Polish:** §3.3 Vitest tests, §4 UX (compact mode, PWA), §3.7 types/modules.
 
 ---
 
