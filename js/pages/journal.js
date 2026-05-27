@@ -240,7 +240,7 @@ function renderJournal() {
                 <td class="${pnl!=null?(pnl>=0?'text-success':'text-danger'):'text-muted'}">${pnl!=null?(pnl>=0?'+':'')+' $'+fmt(Math.abs(pnl)):'Open'}</td>
                 <td><span class="badge ${t.status==='open'?'badge-open':'badge-closed'}">${t.status}</span></td>
                 <td>${parcelBadge}</td>
-                <td><span class="badge ${t.recId&&t.recExecuted?'badge-executed':'badge-skipped'}">${t.recId?(t.recExecuted?'Rec: Yes':'Rec: No'):'Manual'}</span></td>
+                <td><span class="badge ${t.recId&&t.recExecuted?'badge-executed':'badge-skipped'}" title="${matchedRec?._thesis ? 'Thesis: '+matchedRec._thesis : ''}">${t.recId?(t.recExecuted?'Rec: Yes':'Rec: No'):'Manual'}</span>${matchedRec?._thesis?'<span style="font-size:10px;margin-left:3px" title="'+escapeHTML(matchedRec._thesis)+'">📋</span>':''}</td>
                 <td>${_journalRegimeBadge(matchedRec?.regime)}</td>
                 <td><button class="btn btn-sm btn-danger" onclick="removeJournalTrade(${realIdx})" title="Remove trade">✕</button></td>
               </tr>`;

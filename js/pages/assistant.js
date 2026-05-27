@@ -109,6 +109,26 @@ async function sendChat() {
       ).join('\n')
     : '';
 
+  // ── Market regime + macro context ─────────────────────────────────────────
+  let regimeCtx = '';
+  const cr = state.currentRegime;
+  if (cr && cr.regime && cr.regime !== 'unknown') {
+    const signals = (cr.signals || []).slice(0, 4).map(s => s.label || s).join(', ');
+    regimeCtx += `\n\nMARKET REGIME: ${cr.regime.toUpperCase()} (confidence ${cr.confidence != null ? (cr.confidence * 100).toFixed(0) + '%' : '?'})`;
+    if (signals) regimeCtx += ` — signals: ${signals}`;
+  }
+  const m = state.macroData;
+  if (m) {
+    const macroLines = [];
+    if (m.asx200_level != null)     macroLines.push(`ASX200: ${m.asx200_level.toFixed(0)}`);
+    if (m.asx200_5d_return != null) macroLines.push(`5d return: ${m.asx200_5d_return >= 0 ? '+' : ''}${m.asx200_5d_return.toFixed(2)}%`);
+    if (m.vix?.value != null)       macroLines.push(`VIX: ${m.vix.value.toFixed(1)}`);
+    if (m.sentiment)                macroLines.push(`Macro sentiment: ${m.sentiment}`);
+    if (m.bullish != null)          macroLines.push(`Bullish%: ${m.bullish}%`);
+    if (m.aud_usd != null)          macroLines.push(`AUD/USD: ${m.aud_usd.toFixed(4)}`);
+    if (macroLines.length) regimeCtx += '\nMACRO DATA: ' + macroLines.join(' | ');
+  }
+
   const system=`You are an expert ASX (Australian Stock Exchange) quantitative analyst and trading coach with deep knowledge of technical analysis, Australian equity markets, sector dynamics, and risk management. You support human traders who manually execute all trades — never suggest automated or algorithmic execution.
 
 PORTFOLIO CONTEXT (${new Date().toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'})}):
@@ -116,7 +136,7 @@ Portfolio value: $${fmt(pv)} | Net worth: $${fmt(pv + state.cash)} | Unrealised 
 Cash: $${fmt(state.cash)} | RBA: ${state.rbaRate.toFixed(2)}% | Brokerage: $${state.settings.brokerage}/trade | Max trades/day: ${state.settings.maxTradesPerDay}
 
 Holdings:
-  ${ps}${chatDivCtx}${indicatorCtx}${annCtx}${recCtx}${newsCtx}
+  ${ps}${chatDivCtx}${indicatorCtx}${annCtx}${recCtx}${newsCtx}${regimeCtx}
 
 RESPONSE FRAMEWORK — tailor depth to the question:
 • For indicator questions: interpret each indicator in context (e.g. "RSI14=68 approaching overbought but momentum still rising — watch for divergence"). Cross-reference at least 3 indicators before forming a view.

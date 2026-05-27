@@ -1285,5 +1285,116 @@ class TestSprint5(unittest.TestCase):
         self.assertIn("_STALE_DAYS", src)
 
 
+class TestSprint6(unittest.TestCase):
+    """Sprint 6 — portfolio Q&A, attribution, sector warnings, thesis, dividend forecast."""
+
+    def setUp(self):
+        _install_in_memory_db()
+        self.client = asx_server.app.test_client()
+
+    # ── 1. Portfolio-aware Q&A ────────────────────────────────────────────────
+    def test_assistant_includes_regime_context(self):
+        """assistant.js sendChat must include regime and macro context in system prompt."""
+        with open(os.path.join(ROOT, "js/pages/assistant.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("regimeCtx", src)
+        self.assertIn("state.currentRegime", src)
+        self.assertIn("state.macroData", src)
+        self.assertIn("MARKET REGIME", src)
+        self.assertIn("MACRO DATA", src)
+
+    def test_assistant_appends_regime_to_system(self):
+        """regimeCtx must be appended to the system prompt string."""
+        with open(os.path.join(ROOT, "js/pages/assistant.js"), encoding="utf-8") as f:
+            src = f.read()
+        # The system string template must end with regimeCtx
+        self.assertIn("${regimeCtx}", src)
+
+    # ── 2. Performance Attribution ────────────────────────────────────────────
+    def test_attribution_card_function(self):
+        """performance.js must define _buildAttributionCard function."""
+        with open(os.path.join(ROOT, "js/pages/performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _buildAttributionCard(closedTrades)", src)
+        self.assertIn("sectorMap", src)
+        self.assertIn("regimeMap", src)
+
+    def test_attribution_card_called_in_render(self):
+        """renderPerformance must call _buildAttributionCard."""
+        with open(os.path.join(ROOT, "js/pages/performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_buildAttributionCard(closedTrades)", src)
+
+    def test_attribution_uses_regime_from_rechistory(self):
+        """Attribution card looks up regime via recId → recHistory."""
+        with open(os.path.join(ROOT, "js/pages/performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("state.recHistory.find(r => r.id === t.recId)", src)
+
+    # ── 3. Sector concentration warning ──────────────────────────────────────
+    def test_sector_concentration_warning_function(self):
+        """recommendations.js must define _sectorConcentrationWarning."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _sectorConcentrationWarning(rec)", src)
+        self.assertIn("maxSectorPct", src)
+
+    def test_sector_warning_used_in_rec_card(self):
+        """Rec card header must call _sectorConcentrationWarning."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_sectorConcentrationWarning(r)", src)
+
+    # ── 4. Thesis capture ────────────────────────────────────────────────────
+    def test_thesis_input_in_rec_card(self):
+        """recommendations.js must render a thesis textarea on each rec card."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('id="thesis-${r.id}"', src)
+        self.assertIn("_thesis", src)
+
+    def test_thesis_captured_at_execution(self):
+        """markExecuted must capture thesis from DOM and pass to learning log."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("thesis-${id}", src)
+        self.assertIn("trade_thesis", src)
+        self.assertIn("rec._thesis", src)
+
+    def test_thesis_in_histentry(self):
+        """histEntry saved to recHistory must include _thesis field."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_thesis: rec._thesis || null", src)
+
+    def test_thesis_shown_in_journal(self):
+        """journal.js must show thesis tooltip when matchedRec._thesis is set."""
+        with open(os.path.join(ROOT, "js/pages/journal.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("matchedRec?._thesis", src)
+
+    # ── 5. Dividend income forecast ──────────────────────────────────────────
+    def test_div_forecast_card_function(self):
+        """performance.js must define _buildDivForecastCard function."""
+        with open(os.path.join(ROOT, "js/pages/performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _buildDivForecastCard()", src)
+        self.assertIn("Dividend Income Forecast", src)
+
+    def test_div_forecast_includes_franking(self):
+        """Dividend forecast must compute franking credit gross-up."""
+        with open(os.path.join(ROOT, "js/pages/performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("CORP_TAX", src)
+        self.assertIn("grossUp", src)
+        self.assertIn("frankingCredit", src)
+
+    def test_div_forecast_called_in_render(self):
+        """renderPerformance must call _buildDivForecastCard."""
+        with open(os.path.join(ROOT, "js/pages/performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_buildDivForecastCard()", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

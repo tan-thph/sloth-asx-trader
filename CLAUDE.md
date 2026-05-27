@@ -33,7 +33,7 @@ API key options (one of these is required for analysis):
 
 Tests:
 ```bash
-python test_app.py        # all 121 tests, ~9 s
+python test_app.py        # all 135 tests, ~10 s
 ```
 
 ---
@@ -71,7 +71,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `announcement_engine.py` + `announcement_routes.py` | — | ASX announcements scraper, PDF parser, Gemini scorer, blueprint `/api/announcements/*`. |
 | `news_engine.py` | — | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
 | `gunicorn.conf.py` | — | Production WSGI config. 2 workers × 8 threads. |
-| `test_app.py` | ~1350 | 121 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
+| `test_app.py` | ~1500 | 135 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
 
 #### `routes/` — one blueprint per concern
 
@@ -141,7 +141,7 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 ```js
 state.portfolio:          [{ ticker, shares, avgPrice, currentPrice, sector }]
 state.tradeJournal:       [{ id, date, ticker, action, qty, entryPrice, exitPrice, fees, pnl, status, recId, recExecuted, closeDate }]
-state.recHistory:         [{ id, date, ticker, action, confidence, ensembleConfidence, priceRange, target, stopLoss, qty, executed, outcome, actualProfit, regime, _learningId, _stopAlertedAt?, _targetAlertedAt? }]
+state.recHistory:         [{ id, date, ticker, action, confidence, ensembleConfidence, priceRange, target, stopLoss, qty, executed, outcome, actualProfit, regime, _learningId, _thesis?, _stopAlertedAt?, _targetAlertedAt? }]
 state.recommendations:    pending recs (same shape as recHistory entries with status='pending')
 state.liveSignals:        { TICKER: { current_price, rsi_14, bb_*, atr_14, adv_20 (AUD), volume_avg_20 (shares), score, ... } }
 state.currentRegime:      { regime, confidence, signals: [...] }
@@ -346,10 +346,9 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 | **FastAPI migration** | Half-day refactor of every route. Current Flask + gthread is fast enough. | Native async, auto-generated OpenAPI docs, faster I/O concurrency. |
 | **Walk-forward backtesting** | Requires vectorised OHLCV replay engine + parameter grid — a mini framework. | Robust strategy parameter tuning. |
 | **Mobile compact mode** | Needs CSS breakpoint pass on every card/table. | Phone-friendly read-only mode during market hours. |
-| **Correlation-aware sizing** | Risk page already has the correlation matrix — need to feed it into the quant engine's sizing step. | Warn/reduce size when a new BUY is highly correlated with existing holdings. |
-| **Thesis capture + review** | `trade_thesis` field exists in DB; need a review-surfacing flow at exit and a postmortem link. | Qualitative context in the Learning Loop so AI knows *why* you entered, not just what happened. |
-| **Performance attribution** | Decompose returns by ticker / sector / regime — data all available. | See what actually drove P&L rather than just the total. |
-| **Dividend income forecast + franking credits** | `dividendData` is not persisted (fetched on demand); need franking eligibility logic. | Project forward 12-month income, track DRP parcels, flag 45-day franking rule. |
+| **Correlation-aware sizing (exact)** | Current impl warns by sector weight; actual correlation matrix (from `/api/risk`) not yet injected into quant sizing step. | Reduce size automatically when |corr| > 0.7 with existing holding. |
+| **Thesis review prompt at exit** | Thesis is captured at trade entry; not yet surfaced as a prompt at close ("was your thesis correct?"). | Close the learning loop with qualitative reflection. |
+| **DRP parcel tracking** | Dividend income forecast assumes no DRP (dividend reinvestment); DRP parcels need their own CGT lot management. | Accurate CGT cost-base for DRP investors. |
 | **Economic calendar** | Needs a data source (RBA meeting dates, CPI, US Fed calendar). | Overlay known macro catalysts on Dashboard so you trade around them. |
 | **Side-by-side ticker compare** | New view; 2–4 tickers' signals side-by-side. | Faster entry selection when you have multiple candidates. |
 | **Vitest frontend tests** | JS test infrastructure needs setting up (jsdom, mocking globals). | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |

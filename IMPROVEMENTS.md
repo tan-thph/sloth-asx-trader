@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-27 (sprints 3–5 shipped)
+**Last Updated:** 2026-05-27 (sprints 3–6 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -50,6 +50,11 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **Regime overlay on journal** | Analytics (§2.4) | `_journalRegimeBadge()` helper + `Regime` column per row in Trade Journal; matches via `state.recHistory.find(r => r.id === t.recId)?.regime`. |
 | **Stale-position nudge** | Workflow (§2.3) | `_buildStaleNudgeCard()` on Dashboard: amber card listing holdings with no rec in 14+ days with day counts. |
 | **Persistence bug fix (watchlist/savedScreeners)** | Reliability | `watchlist` and `savedScreeners` were in the save payload but missing from `BLOB_KEYS` in `routes/portfolio.py` and the `db_load` response — silently discarded on every restart. Fixed. |
+| **Portfolio-aware Q&A** | AI (§2.7) | `sendChat()` in `assistant.js` now injects `state.currentRegime` (regime + confidence + signals) and `state.macroData` (ASX200, VIX, AUD/USD, sentiment, bullish%) into the system prompt's `MARKET REGIME` + `MACRO DATA` sections. |
+| **Performance attribution** | Analytics (§2.4) | `_buildAttributionCard(closedTrades)` added to `performance.js`: two side-by-side tables — P&L by sector (from holding.sector) and P&L by regime at entry (matched via recId → recHistory.regime). |
+| **Sector concentration warning** | Risk (§2.5) | `_sectorConcentrationWarning(rec)` in `recommendations.js`: amber/red badge on BUY rec cards when the rec's sector already > 70% of the sector concentration limit in the portfolio. Uses `state.portfolio[i].sector` — no backend call. |
+| **Thesis capture** | Workflow (§2.6) | Thesis textarea added to each rec card; captured at `markExecuted` and stored as `rec._thesis`; passed to learning loop as `trade_thesis`; persisted in `histEntry._thesis`; shown as tooltip (📋) on journal "Rec: Yes" badge. |
+| **Dividend income forecast + franking credits** | Tax / Analytics (§2.2) | `_buildDivForecastCard()` in `performance.js`: per-stock 12-month income, grossed-up income (100% franked at 30% corp tax), franking credits, frequency, yield on cost. Portfolio totals: cash income + grossed-up + franking credit estimate. |
 
 ---
 
@@ -114,7 +119,7 @@ already exist (quant, regime, learning, dividends, CGT).
 | **Target allocations + drift alerts** | M | ★★ | Set a target weight per holding/sector; flag when drift exceeds a band and suggest a rebalance trade list. |
 | **Multiple portfolios / accounts** | M | ★★ | Separate super vs personal vs trading accounts (still single-user) with combined and per-account views — affects CGT and sizing. |
 | **Cash & term-deposit tracker** | S | ★★ | Track idle cash + TD maturities so the dashboard shows true investable cash and prompts deployment. |
-| **Performance attribution** | M | ★★ | Decompose returns by ticker / sector / regime so you see *what actually drove* the P&L, not just the total. |
+| ✓ **Performance attribution** | M | ★★ | **SHIPPED** — `_buildAttributionCard()` in `performance.js`: P&L by sector and by regime at entry. See §0. |
 | ✓ **Benchmark comparison** | S | ★★ | **SHIPPED** — ^AXJO overlay on Value History canvas; normalized to portfolio start value. See §0. |
 
 ### 2.2 Tax & income (ASX-specific)
@@ -123,8 +128,8 @@ already exist (quant, regime, learning, dividends, CGT).
 |---|---|---|---|
 | ✓ **CGT-discount countdown** | S | ★★★ | **SHIPPED** — urgency banner in CGT page + sell warning in checklist. See §0. |
 | ✓ **Tax-loss-harvest planner** | M | ★★★ | **SHIPPED** — card on CGT page; ranks losers by unrealised loss; EOFY countdown; wash-sale flag. See §0. |
-| **Dividend income forecast** | M | ★★ | Project forward 12-month dividend income + **franking credits** from current holdings and known ex-div dates; track DRP (dividend reinvestment) parcels. |
-| **Franking-credit optimiser** | M | ★★ | Flag the 45-day holding rule for franking eligibility; estimate grossed-up yield per holding. |
+| ✓ **Dividend income forecast + franking credits** | M | ★★ | **SHIPPED** — `_buildDivForecastCard()` in `performance.js`: per-stock income, grossed-up at 30% corp tax, franking credits, frequency, yield on cost. See §0. |
+| **Franking-credit optimiser (45-day rule)** | M | ★★ | Flag the 45-day holding rule for franking eligibility; identify parcels approaching or failing the threshold. |
 | ✓ **EOFY tax pack** | S | ★★ | **SHIPPED** — `GET /api/tax/eofy-pack?year=N` ZIP download: CGT disposals CSV + trade fees CSV. See §0. |
 
 ### 2.3 Alerts & monitoring
@@ -154,7 +159,8 @@ already exist (quant, regime, learning, dividends, CGT).
 |---|---|---|---|
 | ✓ **Scenario / stress test** | M | ★★★ | **SHIPPED** — card on Risk page; shock presets + custom; per-holding beta × shock table. See §0. |
 | ✓ **Trailing & ATR-based stops** | M | ★★★ | **SHIPPED** — 2×ATR14 stops card on Risk page; one-click "Set Alert". See §0. |
-| **Correlation-aware sizing** | M | ★★ | Warn when a new BUY is highly correlated with existing holdings (concentration risk); the Risk page already computes the correlation matrix — feed it into the quant engine. |
+| ✓ **Correlation-aware sizing (sector)** | S | ★★ | **SHIPPED** — `_sectorConcentrationWarning(rec)` shows amber/red badge on BUY recs when the rec's sector already exceeds threshold. See §0. |
+| **Correlation-aware sizing (exact)** | M | ★★ | Use the `/api/risk` correlation matrix to quantify exact |corr| with each holding; auto-reduce sizing when |corr| > 0.7. |
 | ✓ **Risk-budget dashboard** | S | ★★ | **SHIPPED** — heat gauge at top of Risk page, configurable % budget. See §0. |
 | ✓ **Drawdown monitor + alert** | S | ★★ | **SHIPPED** — current + max drawdown from portfolio history; alert banner + configurable threshold. See §0. |
 
@@ -163,7 +169,8 @@ already exist (quant, regime, learning, dividends, CGT).
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
 | ✓ **Pre-trade checklist** | S | ★★★ | **SHIPPED** — 5-item modal gate, requires ≥4 ticks. See §0. |
-| **Thesis capture + review** | M | ★★★ | Record *why* you entered; auto-resurface it at exit / postmortem so the Learning Loop has qualitative context, not just numbers. `trade_thesis` DB column already exists — need a review-surfacing flow. |
+| ✓ **Thesis capture** | M | ★★★ | **SHIPPED** — textarea on rec cards, captured at execution, passed to learning loop as `trade_thesis`, shown in journal tooltip. See §0. |
+| **Thesis review at exit** | S | ★★★ | Surface `_thesis` when a position closes — "Was your thesis correct?" prompt before the postmortem fires. |
 | ✓ **Broker CSV import** | M | ★★★ | **SHIPPED** — CommSec/SelfWealth/generic detection; backend parses, normalises, returns rows. See §0. |
 | ✓ **Trade tags & notes** | S | ★★ | **SHIPPED** — `tags`/`trade_thesis` DB columns + inline input on rec cards + stored in learning events. See §0. |
 | ✓ **Morning briefing auto-generate** | M | ★★ | **SHIPPED** — `'briefing'` agent type; Dashboard "Generate Brief" button chains macro + regime + holdings. See §0. |
@@ -172,7 +179,7 @@ already exist (quant, regime, learning, dividends, CGT).
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
-| **Portfolio-aware Q&A** | M | ★★ | "Why is my portfolio down today?" / "What's my biggest risk?" — answer using live `state` + signals, not just generic chat. |
+| ✓ **Portfolio-aware Q&A** | M | ★★ | **SHIPPED** — `sendChat()` now injects regime + macro context (VIX, ASX200, sentiment, AUD/USD) into system prompt. See §0. |
 | ✓ **Postmortem digest** | S | ★★ | **SHIPPED** — `GET /api/learning/digest-data` + "Generate Digest" on Learning page. See §0. |
 | **Local-LLM fallback** | M | ★ | Use the existing Ollama setup for cheap/offline analysis when you don't want to spend on Claude calls (debate engine already uses it). |
 | **Prompt A/B tracking** | M | ★★ | Compare win-rate by `PROMPT_VERSION` so you know whether a prompt change actually helped (table exists; surface it). |
@@ -234,7 +241,7 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 2. ✓ **Don't lose data:** §3.2 backups, §3.1 retry + stale-cache — **done**. Remaining: secondary data provider fallback.
 3. ✓ **Highest daily payoff:** pre-trade checklist, CGT countdown, trade tags, heat gauge, drawdown monitor, Telegram, broker CSV, indicator alerts, tax-loss planner, EOFY pack, watchlist, morning briefing, regime journal, stale nudge — **all done**.
 4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. Remaining: §2.5 correlation-aware sizing, §1.7 walk-forward backtest.
-5. **Next priority:** §2.6 thesis capture + review (M, ★★★), §2.7 portfolio-aware Q&A (M, ★★), §2.1 performance attribution (M, ★★), §2.2 dividend forecast + franking credits (M, ★★).
+5. ✓ **Sprint 6 shipped:** §2.7 portfolio-aware Q&A, §2.1 performance attribution, §2.5 sector-concentration warning, §2.6 thesis capture, §2.2 dividend forecast + franking credits — **all done**. Remaining: exact correlation sizing, thesis-review-at-exit prompt, §1.1 look-ahead bias, §1.5 survivorship bias.
 6. **Polish:** §3.3 Vitest tests, §4 UX (keyboard shortcuts, compact mode, PWA), §3.7 types/modules.
 
 ---

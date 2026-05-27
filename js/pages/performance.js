@@ -1,3 +1,177 @@
+function _buildDivForecastCard() {
+  const holdings = mergedPortfolio().filter(h => {
+    const d = state.dividendData[h.ticker];
+    return d && d.annualDivPerShare != null && d.annualDivPerShare > 0;
+  });
+  if (!holdings.length) return '';
+
+  // Franking credit gross-up: assumes 100% franked at 30% corporate tax rate
+  // grossedUp = cash / (1 - 0.30); frankingCredit = grossedUp - cash
+  const CORP_TAX = 0.30;
+  const grossUp = v => v / (1 - CORP_TAX);
+
+  const pv = portfolioValue();
+  const tc = totalCost();
+  let totalAnnual = 0, totalGrossed = 0;
+
+  const rows = holdings.map(h => {
+    const d = state.dividendData[h.ticker];
+    const annual = h.shares * d.annualDivPerShare;
+    const grossed = grossUp(annual);
+    const frankingCredit = grossed - annual;
+    totalAnnual  += annual;
+    totalGrossed += grossed;
+
+    const freqMap = { 'Quarterly': 4, 'Semi-annual': 2, 'Monthly': 12, 'Annual': 1 };
+    const paymentsPerYear = freqMap[d.frequencyLabel] || 2;
+    const perPayment = annual / paymentsPerYear;
+    const yieldOnCost = h.avgPrice > 0 ? (d.annualDivPerShare / h.avgPrice * 100) : null;
+
+    return `<tr>
+      <td style="padding:5px 8px;font-size:12px;font-weight:600">${h.ticker}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right">$${d.annualDivPerShare.toFixed(4)}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right">${h.shares}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right;color:#16a34a;font-weight:600">+$${fmt(annual)}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right">+$${fmt(grossed)}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right;color:#6d28d9">+$${fmt(frankingCredit)}</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right">${d.frequencyLabel||'?'} (~$${fmt(perPayment)})</td>
+      <td style="padding:5px 8px;font-size:12px;text-align:right">${yieldOnCost != null ? fmt(yieldOnCost) + '%' : '—'}</td>
+    </tr>`;
+  });
+
+  const totalFranking = totalGrossed - totalAnnual;
+  const netYield = tc > 0 ? (totalAnnual / tc * 100) : 0;
+  const grossYield = tc > 0 ? (totalGrossed / tc * 100) : 0;
+
+  return `
+    <div class="card section-gap">
+      <div class="flex-between" style="margin-bottom:10px">
+        <div>
+          <div class="card-title" style="margin:0">Dividend Income Forecast (12 months)</div>
+          <div class="text-xs text-muted" style="margin-top:2px">Grossed-up assumes 100% franking at 30% corporate tax rate</div>
+        </div>
+        <div style="display:flex;gap:16px;align-items:center">
+          <div style="text-align:right">
+            <div class="text-xs text-muted">Annual cash income</div>
+            <div style="font-size:16px;font-weight:700;color:#16a34a">+$${fmt(totalAnnual)}</div>
+            <div class="text-xs text-muted">${fmt(netYield)}% yield on cost</div>
+          </div>
+          <div style="text-align:right">
+            <div class="text-xs text-muted">Grossed-up (with franking)</div>
+            <div style="font-size:16px;font-weight:700;color:#7c3aed">+$${fmt(totalGrossed)}</div>
+            <div class="text-xs text-muted">+$${fmt(totalFranking)} franking credits</div>
+          </div>
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:left">Ticker</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">$/share/yr</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Shares</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Cash Income</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Grossed-up</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right;color:#6d28d9">Franking Cr.</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Frequency</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Yield on Cost</th>
+          </tr></thead>
+          <tbody>${rows.join('')}
+            <tr style="border-top:1px solid var(--border)">
+              <td colspan="3" style="padding:6px 8px;font-size:12px;font-weight:700">Total</td>
+              <td style="padding:6px 8px;font-size:12px;font-weight:700;text-align:right;color:#16a34a">+$${fmt(totalAnnual)}</td>
+              <td style="padding:6px 8px;font-size:12px;font-weight:700;text-align:right">+$${fmt(totalGrossed)}</td>
+              <td style="padding:6px 8px;font-size:12px;font-weight:700;text-align:right;color:#6d28d9">+$${fmt(totalFranking)}</td>
+              <td style="padding:6px 8px;font-size:12px;text-align:right"></td>
+              <td style="padding:6px 8px;font-size:12px;font-weight:700;text-align:right">${fmt(netYield)}% cash · ${fmt(grossYield)}% grossed</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function _buildAttributionCard(closedTrades) {
+  if (!closedTrades.length) return '';
+
+  // Sector attribution
+  const sectorMap = {};
+  closedTrades.forEach(t => {
+    const holding = typeof getPortfolioHolding === 'function' ? getPortfolioHolding(t.ticker) : null;
+    const sector = t.sector || holding?.sector || 'Other';
+    if (!sectorMap[sector]) sectorMap[sector] = { wins: 0, losses: 0, pnl: 0 };
+    if (t.pnl > 0)  sectorMap[sector].wins++;
+    if (t.pnl < 0)  sectorMap[sector].losses++;
+    sectorMap[sector].pnl += Number(t.pnl) || 0;
+  });
+  const sectorRows = Object.entries(sectorMap)
+    .sort((a, b) => Math.abs(b[1].pnl) - Math.abs(a[1].pnl))
+    .map(([name, d]) => {
+      const tot = d.wins + d.losses;
+      const wr = tot ? (d.wins / tot * 100).toFixed(0) + '%' : '—';
+      const pnlCol = d.pnl >= 0 ? '#16a34a' : '#dc2626';
+      return `<tr>
+        <td style="padding:5px 8px;font-size:12px;font-weight:500">${name}</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:center">${d.wins}W / ${d.losses}L</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:center">${wr}</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:right;color:${pnlCol};font-weight:600">${d.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(d.pnl))}</td>
+      </tr>`;
+    }).join('');
+
+  // Regime attribution (match via recId → recHistory.regime)
+  const regimeMap = {};
+  closedTrades.forEach(t => {
+    const matchedRec = t.recId ? state.recHistory.find(r => r.id === t.recId) : null;
+    const regime = matchedRec?.regime || 'unknown';
+    if (!regimeMap[regime]) regimeMap[regime] = { wins: 0, losses: 0, pnl: 0 };
+    if (t.pnl > 0)  regimeMap[regime].wins++;
+    if (t.pnl < 0)  regimeMap[regime].losses++;
+    regimeMap[regime].pnl += Number(t.pnl) || 0;
+  });
+  const regimeRows = Object.entries(regimeMap)
+    .sort((a, b) => Math.abs(b[1].pnl) - Math.abs(a[1].pnl))
+    .map(([name, d]) => {
+      const tot = d.wins + d.losses;
+      const wr = tot ? (d.wins / tot * 100).toFixed(0) + '%' : '—';
+      const pnlCol = d.pnl >= 0 ? '#16a34a' : '#dc2626';
+      return `<tr>
+        <td style="padding:5px 8px;font-size:12px;font-weight:500">${name}</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:center">${d.wins}W / ${d.losses}L</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:center">${wr}</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:right;color:${pnlCol};font-weight:600">${d.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(d.pnl))}</td>
+      </tr>`;
+    }).join('');
+
+  const tableStyle = 'width:100%;border-collapse:collapse';
+  const thStyle = 'padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:left';
+
+  return `
+    <div class="card">
+      <div class="card-title">Performance Attribution</div>
+      <div class="grid-2" style="gap:12px">
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:6px;font-weight:600">By Sector</div>
+          ${sectorRows ? `<table style="${tableStyle}"><thead><tr>
+            <th style="${thStyle}">Sector</th>
+            <th style="${thStyle};text-align:center">W / L</th>
+            <th style="${thStyle};text-align:center">Win %</th>
+            <th style="${thStyle};text-align:right">P&amp;L</th>
+          </tr></thead><tbody>${sectorRows}</tbody></table>`
+          : '<div class="text-xs text-muted">No sector data available</div>'}
+        </div>
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:6px;font-weight:600">By Regime at Entry</div>
+          ${regimeRows ? `<table style="${tableStyle}"><thead><tr>
+            <th style="${thStyle}">Regime</th>
+            <th style="${thStyle};text-align:center">W / L</th>
+            <th style="${thStyle};text-align:center">Win %</th>
+            <th style="${thStyle};text-align:right">P&amp;L</th>
+          </tr></thead><tbody>${regimeRows}</tbody></table>`
+          : '<div class="text-xs text-muted">No regime data available</div>'}
+        </div>
+      </div>
+    </div>`;
+}
+
 async function renderPerformancePage(gen) {
   const el = document.getElementById('main-content');
   if (state._renderGen !== gen) return;
@@ -201,6 +375,8 @@ function renderPerformance() {
       </div>
     </div>
 
+    ${_buildDivForecastCard()}
+
     <div class="grid-2">
       <div class="card">
         <div class="card-title">Confidence Calibration</div>
@@ -296,6 +472,8 @@ function renderPerformance() {
         </div>
       </div>
     </div>
+
+    ${_buildAttributionCard(closedTrades)}
 
     <div class="card">
       <div class="flex-between" style="align-items:center">

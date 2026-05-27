@@ -255,6 +255,24 @@ async function runAnalysisFromPanel() {
   scheduleSave();
   await runAnalysis();
 }
+function _sectorConcentrationWarning(rec) {
+  if (!rec.sector || rec.action === 'SELL' || rec.action === 'TRIM') return '';
+  const isSameTicker = state.portfolio.some(h => h.ticker === rec.ticker);
+  if (isSameTicker) return '';
+  const sameSector = state.portfolio.filter(h => h.sector === rec.sector);
+  if (!sameSector.length) return '';
+  const pv = portfolioValue();
+  if (pv <= 0) return '';
+  const sectorVal = sameSector.reduce((s, h) => s + h.shares * (h.currentPrice || h.avgPrice), 0);
+  const sectorWt = sectorVal / pv * 100;
+  const maxSect = Number(state.analysisConfig?.rules?.maxSectorPct) || 30;
+  if (sectorWt < maxSect * 0.7) return '';
+  const col = sectorWt >= maxSect ? '#dc2626' : '#d97706';
+  const bg  = sectorWt >= maxSect ? '#fee2e2' : '#fef3c7';
+  const names = sameSector.map(h => h.ticker).join(', ');
+  return `<span style="background:${bg};color:${col};border-radius:3px;padding:1px 6px;font-size:10px;font-weight:600;white-space:nowrap" title="Sector ${rec.sector} is ${sectorWt.toFixed(0)}% of portfolio (max ${maxSect}%) via ${names}">⚠ ${rec.sector} ${sectorWt.toFixed(0)}%</span>`;
+}
+
 function renderPendingRecs(recs) {
   const summary = state.analysisLastSummary;
   if(!recs.length) {
@@ -370,7 +388,7 @@ function renderPendingRecs(recs) {
     <div class="rec-card" id="rec-${r.id}">
       <!-- Header row -->
       <div class="flex-between mb-1">
-        <div class="flex-row">${actionBadge(r.action)}<strong style="font-size:15px">${r.ticker}</strong><span class="text-xs">${r.sector||''}</span>${r.isWatchlist?'<span class="badge" style="background:#ede9fe;color:#6d28d9;border:none">★ Watchlist</span>':''}<span class="badge badge-pending">Pending</span><span class="text-xs text-muted">Generated ${r.generatedAt||r.date}</span></div>
+        <div class="flex-row">${actionBadge(r.action)}<strong style="font-size:15px">${r.ticker}</strong><span class="text-xs">${r.sector||''}</span>${_sectorConcentrationWarning(r)}${r.isWatchlist?'<span class="badge" style="background:#ede9fe;color:#6d28d9;border:none">★ Watchlist</span>':''}<span class="badge badge-pending">Pending</span><span class="text-xs text-muted">Generated ${r.generatedAt||r.date}</span></div>
         <div class="flex-row">
           <button class="btn btn-sm btn-success" onclick="confirmExecute('${r.id}')">✓ Mark Executed</button>
           <button class="btn btn-sm btn-danger" onclick="markSkipped('${r.id}')">✕ Skip</button>
@@ -450,6 +468,14 @@ function renderPendingRecs(recs) {
         <input type="text" id="tags-${r.id}" placeholder="e.g. breakout, earnings, dip-buy (comma-separated)" value="${r._tags||''}"
           style="flex:1;padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-light);background:var(--bg-secondary);color:var(--text-primary);font-size:11px;font-family:var(--font)"
           title="Trade tags for performance filtering">
+      </div>
+      <!-- Thesis capture -->
+      <div style="display:flex;gap:8px;align-items:flex-start;padding-top:6px">
+        <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;flex-shrink:0;padding-top:5px">Thesis:</span>
+        <textarea id="thesis-${r.id}" rows="2" placeholder="Write your investment thesis — what needs to stay true for this trade to work?"
+          oninput="persistExecField('${r.id}','_thesis',this.value)"
+          style="flex:1;padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-light);background:var(--bg-secondary);color:var(--text-primary);font-size:11px;font-family:var(--font);resize:vertical"
+          title="Investment thesis — reviewed at trade exit">${escapeHTML(r._thesis||'')}</textarea>
       </div>
       <!-- Feedback -->
       <div style="display:flex;gap:8px;align-items:center;padding-top:8px;border-top:0.5px solid var(--border-light)">
@@ -892,9 +918,11 @@ function markExecuted(id, execPrice, execFee, execQty) {
   rec.status = 'executed';
   rec.executedAt = time;
 
-  // Capture tags from the inline input field before the DOM changes
+  // Capture tags + thesis from inline inputs before the DOM changes
   const tagsVal = (document.getElementById(`tags-${id}`)?.value || '').trim();
   if (tagsVal) rec._tags = tagsVal;
+  const thesisVal = (document.getElementById(`thesis-${id}`)?.value || '').trim();
+  if (thesisVal) rec._thesis = thesisVal;
 
   const qty        = (execQty  !== undefined && !isNaN(execQty)  && execQty  > 0) ? execQty  : (rec.qty || 10);
   const fees       = (execFee  !== undefined && !isNaN(execFee))                  ? execFee  : state.settings.brokerage;
@@ -960,6 +988,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
     feedback: rec.feedback || null,
     journalId: tradeEntry.id,
     _learningId: rec._learningId || null,
+    _thesis: rec._thesis || null,
   };
   state.recHistory.unshift(histEntry);
 
@@ -986,7 +1015,8 @@ function markExecuted(id, execPrice, execFee, execQty) {
         actual_entry_price: entryP ?? null,
         actual_exit_price:  exitP  ?? null,
         sector,
-        ...(rec._tags ? { tags: rec._tags } : {}),
+        ...(rec._tags   ? { tags:         rec._tags   } : {}),
+        ...(rec._thesis ? { trade_thesis: rec._thesis } : {}),
       };
       if (outcome) {
         const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target, rec.action);
@@ -1073,7 +1103,8 @@ function markExecuted(id, execPrice, execFee, execQty) {
           actual_entry_price:  entryP ?? null,
           actual_exit_price:   exitP  ?? null,
           sector,
-          tags:                rec._tags || null,
+          tags:                rec._tags   || null,
+          trade_thesis:        rec._thesis || null,
           notes:               'Manually imported position — no prior BUY event logged',
         }),
       }).then(r => r.json()).then(res => {
