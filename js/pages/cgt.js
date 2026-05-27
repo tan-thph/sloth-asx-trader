@@ -513,5 +513,88 @@ function renderCGT() {
           </div>
         </div>`;
     })()}
+
+  ${_buildFranking45DayCard()}
   `;
+}
+
+function _buildFranking45DayCard() {
+  // The 45-day rule: hold shares "at risk" for ≥45 days (within 45 days before/after ex-div)
+  // to claim the franking credit offset. Days run from day after purchase to day of sale inclusive.
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const warnings = [];
+  const eligible = [];
+
+  (state.cgtParcels || []).filter(p => p.remainingQty > 0).forEach(p => {
+    const div = state.dividendData[p.ticker];
+    if (!div?.exDividendDate) return;
+    const exDate = new Date(div.exDividendDate.slice(0, 10));
+
+    let purchaseDate = null;
+    if (p.date) {
+      const parts = p.date.split('-');
+      if (parts.length === 3 && parts[2].length === 4) {
+        purchaseDate = new Date(+parts[2], +parts[1] - 1, +parts[0]);
+      } else {
+        purchaseDate = new Date(p.date);
+      }
+    }
+    if (!purchaseDate || isNaN(purchaseDate)) return;
+
+    // Days held since purchase
+    const heldDays = Math.floor((today - purchaseDate) / 86400000);
+    // Days since ex-div (negative = ex-div is in the future)
+    const daysSinceExDiv = Math.floor((today - exDate) / 86400000);
+
+    if (daysSinceExDiv >= 0 && daysSinceExDiv <= 90) {
+      // Ex-div has passed — need 45 days post-purchase, and purchase must have been ≤45 days before ex-div
+      const daysBeforeExDiv = Math.floor((exDate - purchaseDate) / 86400000);
+      const meetsPre  = daysBeforeExDiv >= 0 && daysBeforeExDiv <= 45;
+      const meetsPost = heldDays >= 45;
+      if (meetsPre && !meetsPost) {
+        const daysNeeded = 45 - heldDays;
+        warnings.push({ ticker: p.ticker, parcelId: p.id, qty: p.remainingQty, exDate, daysNeeded, issue: `Hold ${daysNeeded} more day(s) after purchase to qualify`, stage: 'holding' });
+      } else if (meetsPre && meetsPost) {
+        eligible.push({ ticker: p.ticker, parcelId: p.id, qty: p.remainingQty, exDate });
+      }
+    } else if (daysSinceExDiv < 0) {
+      // Ex-div is upcoming — check if purchase is within the 45-day window before ex-div
+      const daysToExDiv = Math.abs(daysSinceExDiv);
+      const mustHoldAfter = new Date(exDate); mustHoldAfter.setDate(mustHoldAfter.getDate() + 45);
+      if (daysToExDiv <= 45) {
+        // Bought within 45 days of ex-div — must hold until 45 days post-ex-div
+        const daysToCompliance = Math.ceil((mustHoldAfter - today) / 86400000);
+        warnings.push({ ticker: p.ticker, parcelId: p.id, qty: p.remainingQty, exDate, daysNeeded: daysToCompliance, issue: `Hold until ${mustHoldAfter.toLocaleDateString('en-AU')} (${daysToCompliance}d) for franking eligibility`, stage: 'pre-exdiv' });
+      }
+    }
+  });
+
+  if (!warnings.length && !eligible.length) return '';
+
+  const warnRows = warnings.map(w => `
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:0.5px solid var(--border-light)">
+      <span style="font-size:14px;flex-shrink:0">⚠️</span>
+      <div>
+        <div style="font-size:12px;font-weight:600">${w.ticker} — parcel #${w.parcelId} (${w.qty} sh)</div>
+        <div class="text-xs text-muted">${w.issue} · ex-div: ${w.exDate.toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'})}</div>
+      </div>
+    </div>`).join('');
+
+  const eligRows = eligible.map(e => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0">
+      <span style="color:#16a34a;font-weight:700;font-size:13px">✓</span>
+      <span style="font-size:12px">${e.ticker} parcel #${e.parcelId} — franking eligible (ex-div ${e.exDate.toLocaleDateString('en-AU',{day:'numeric',month:'short'})})</span>
+    </div>`).join('');
+
+  return `
+    <div class="card section-gap">
+      <div class="card-title">Franking Credit — 45-Day Rule</div>
+      <p class="text-xs text-muted" style="margin-bottom:10px">
+        To claim franking credits you must hold shares "at risk" for 45+ days around the ex-dividend date (30 days if ≤$5000 total franking).
+        Selling too early forfeits the offset.
+      </p>
+      ${warnRows ? `<div style="margin-bottom:10px">${warnRows}</div>` : ''}
+      ${eligRows}
+      ${!warnRows && !eligRows ? '<div class="text-xs text-muted">No parcels with upcoming ex-div dates in dividend data. Load dividends first.</div>' : ''}
+    </div>`;
 }

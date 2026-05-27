@@ -911,6 +911,41 @@ function _detectExitReason(exitPrice, stopLoss, target, action) {
   return 'manual';
 }
 
+function _showThesisReview(thesisText, learningId, ticker) {
+  document.getElementById('thesis-review-dialog')?.remove();
+  const dialog = document.createElement('dialog');
+  dialog.id = 'thesis-review-dialog';
+  dialog.style.cssText = 'padding:0;border:none;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.35);background:var(--bg-primary);color:var(--text-primary);max-width:420px;width:90vw';
+  dialog.innerHTML = `
+    <div style="padding:20px 22px">
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px">Thesis Review — ${ticker}</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Now that the position is closed, was your original thesis correct?</div>
+      <div style="background:var(--bg-secondary);border-left:3px solid #3b82f6;padding:10px 12px;border-radius:4px;font-size:12px;line-height:1.6;margin-bottom:16px;font-style:italic">"${escapeHTML(thesisText)}"</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="tr-held"    class="btn btn-sm btn-success"  style="flex:1">✓ Thesis Held</button>
+        <button id="tr-partial" class="btn btn-sm"              style="flex:1;background:#d97706;color:#fff;border-color:#d97706">⚡ Partially</button>
+        <button id="tr-broken"  class="btn btn-sm btn-danger"   style="flex:1">✗ Thesis Broken</button>
+      </div>
+      <div style="text-align:right;margin-top:10px">
+        <button class="btn btn-sm" onclick="document.getElementById('thesis-review-dialog')?.remove()">Skip</button>
+      </div>
+    </div>`;
+  document.body.appendChild(dialog);
+  dialog.showModal();
+  const submit = verdict => {
+    dialog.remove();
+    if (!learningId || !state.serverOk) return;
+    const noteTag = verdict === 'held' ? '[THESIS: held ✓]' : verdict === 'partial' ? '[THESIS: partial ⚡]' : '[THESIS: broken ✗]';
+    fetch(`${API}/api/learning/outcome`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: learningId, notes: `${noteTag} ${thesisText.slice(0, 200)}` }),
+    }).catch(() => {});
+  };
+  dialog.querySelector('#tr-held').onclick    = () => submit('held');
+  dialog.querySelector('#tr-partial').onclick = () => submit('partial');
+  dialog.querySelector('#tr-broken').onclick  = () => submit('broken');
+}
+
 function markExecuted(id, execPrice, execFee, execQty) {
   const rec = state.recommendations.find(r => r.id === id); if(!rec) return;
   const time = nowSydney();
@@ -1072,6 +1107,15 @@ function markExecuted(id, execPrice, execFee, execQty) {
             }).catch(() => {});
             const rh = state.recHistory.find(r => r.id === pr.id);
             if (rh) rh.outcome = prOutcome;
+          }
+
+          // #2b: thesis review — surface thesis from any parent BUY rec
+          const thesisRec = (state.recHistory || []).find(r =>
+            r.ticker === rec.ticker && r._thesis && (r.action === 'BUY' || r.action === 'TOP_UP')
+          );
+          if (thesisRec?._thesis) {
+            const reviewLearningId = thesisRec._learningId || rec._learningId;
+            setTimeout(() => _showThesisReview(thesisRec._thesis, reviewLearningId, rec.ticker), 400);
           }
         }
       }

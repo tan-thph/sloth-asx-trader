@@ -33,7 +33,7 @@ API key options (one of these is required for analysis):
 
 Tests:
 ```bash
-python test_app.py        # all 135 tests, ~10 s
+python test_app.py        # all 156 tests, ~10 s
 ```
 
 ---
@@ -71,7 +71,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `announcement_engine.py` + `announcement_routes.py` | — | ASX announcements scraper, PDF parser, Gemini scorer, blueprint `/api/announcements/*`. |
 | `news_engine.py` | — | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
 | `gunicorn.conf.py` | — | Production WSGI config. 2 workers × 8 threads. |
-| `test_app.py` | ~1500 | 135 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
+| `test_app.py` | ~1600 | 156 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
 
 #### `routes/` — one blueprint per concern
 
@@ -153,6 +153,7 @@ state.priceAlerts:        [{ id, ticker, type, value, ... }]  — types include 
 state.settings.telegramEnabled:   bool — mirrors alerts to Telegram when true
 state.settings.tgToken / tgChatId: stored locally in state but credentials saved server-side via POST /api/alerts/telegram/save
 state.settings.drawdownAlertPct:  number — alert threshold for drawdown monitor (default 10)
+state.targetAllocations:  { TICKER: number }  — ticker → target weight %; persisted in blob_store; used by Risk page drift card
 window._morningBrief:     { text, date } | undefined — last generated morning briefing note; lives on window so it survives renderPage() calls but clears on full page reload
 ```
 
@@ -347,9 +348,7 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 | **Walk-forward backtesting** | Requires vectorised OHLCV replay engine + parameter grid — a mini framework. | Robust strategy parameter tuning. |
 | **Mobile compact mode** | Needs CSS breakpoint pass on every card/table. | Phone-friendly read-only mode during market hours. |
 | **Correlation-aware sizing (exact)** | Current impl warns by sector weight; actual correlation matrix (from `/api/risk`) not yet injected into quant sizing step. | Reduce size automatically when |corr| > 0.7 with existing holding. |
-| **Thesis review prompt at exit** | Thesis is captured at trade entry; not yet surfaced as a prompt at close ("was your thesis correct?"). | Close the learning loop with qualitative reflection. |
 | **DRP parcel tracking** | Dividend income forecast assumes no DRP (dividend reinvestment); DRP parcels need their own CGT lot management. | Accurate CGT cost-base for DRP investors. |
-| **Economic calendar** | Needs a data source (RBA meeting dates, CPI, US Fed calendar). | Overlay known macro catalysts on Dashboard so you trade around them. |
 | **Side-by-side ticker compare** | New view; 2–4 tickers' signals side-by-side. | Faster entry selection when you have multiple candidates. |
 | **Vitest frontend tests** | JS test infrastructure needs setting up (jsdom, mocking globals). | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
 | **Hoist `_detectExitReason` into `utils.js`** | Currently duplicated in two page files; dedup risks the fragile script order. | Single source of truth for exit classification. |

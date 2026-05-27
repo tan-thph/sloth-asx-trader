@@ -130,6 +130,7 @@ async function saveStateToDb() {
         priceAlerts: state.priceAlerts,
         watchlist: state.watchlist,
         savedScreeners: state.savedScreeners,
+        targetAllocations: state.targetAllocations,
       })
     });
   } catch(e) { /* silent — don't interrupt UX */ }
@@ -209,6 +210,7 @@ async function loadStateFromDb() {
     if (Array.isArray(data.priceAlerts)) state.priceAlerts = data.priceAlerts;
     if (Array.isArray(data.watchlist)) state.watchlist = data.watchlist;
     if (Array.isArray(data.savedScreeners)) state.savedScreeners = data.savedScreeners;
+    if (data.targetAllocations && typeof data.targetAllocations === 'object') state.targetAllocations = data.targetAllocations;
     return true;
   } catch(e) {
     return false;

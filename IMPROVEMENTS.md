@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-27 (sprints 3–6 shipped)
+**Last Updated:** 2026-05-27 (sprints 3–7 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -55,6 +55,11 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **Sector concentration warning** | Risk (§2.5) | `_sectorConcentrationWarning(rec)` in `recommendations.js`: amber/red badge on BUY rec cards when the rec's sector already > 70% of the sector concentration limit in the portfolio. Uses `state.portfolio[i].sector` — no backend call. |
 | **Thesis capture** | Workflow (§2.6) | Thesis textarea added to each rec card; captured at `markExecuted` and stored as `rec._thesis`; passed to learning loop as `trade_thesis`; persisted in `histEntry._thesis`; shown as tooltip (📋) on journal "Rec: Yes" badge. |
 | **Dividend income forecast + franking credits** | Tax / Analytics (§2.2) | `_buildDivForecastCard()` in `performance.js`: per-stock 12-month income, grossed-up income (100% franked at 30% corp tax), franking credits, frequency, yield on cost. Portfolio totals: cash income + grossed-up + franking credit estimate. |
+| **Thesis review at exit** | Workflow (§2.6) | `_showThesisReview()` in `recommendations.js`: `<dialog>` modal fires when a position fully closes; shows the original entry thesis; three verdict buttons (Held / Partial / Broken) post to `/api/learning/outcome` with a `[THESIS: …]` notes tag for postmortem analysis. |
+| **Prompt version P&L** | Analytics (§2.1) | `routes/learning.py` stats query now sums `realized_pnl_aud` per prompt version; Learning page Prompt Version History table gains a "Realised P&L" column (green/red). |
+| **Target allocations + drift alerts** | Risk (§2.5) | `state.targetAllocations = {}` (ticker → target weight %); `_buildTargetAllocCard()` on Risk page shows Actual% vs Target% with inline edit inputs; amber when |drift| ≥5%, red when ≥10%. Persisted in `blob_store` via `targetAllocations` in `BLOB_KEYS`. |
+| **Economic calendar** | Workflow (§2.6) | `_buildEconomicCalendarCard()` on Dashboard: 45-day forward window with hard-coded RBA meeting dates (2026–2027), ex-div dates from `state.dividendData`, and earnings dates from `state.earningsCalendar`. |
+| **Franking 45-day rule** | Tax (§2.2) | `_buildFranking45DayCard()` on CGT page: iterates open parcels, checks each against its ex-div date; warns when the 45-day continuous-holding requirement around the ex-div date is at risk of not being met. |
 
 ---
 
@@ -241,8 +246,9 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 2. ✓ **Don't lose data:** §3.2 backups, §3.1 retry + stale-cache — **done**. Remaining: secondary data provider fallback.
 3. ✓ **Highest daily payoff:** pre-trade checklist, CGT countdown, trade tags, heat gauge, drawdown monitor, Telegram, broker CSV, indicator alerts, tax-loss planner, EOFY pack, watchlist, morning briefing, regime journal, stale nudge — **all done**.
 4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. Remaining: §2.5 correlation-aware sizing, §1.7 walk-forward backtest.
-5. ✓ **Sprint 6 shipped:** §2.7 portfolio-aware Q&A, §2.1 performance attribution, §2.5 sector-concentration warning, §2.6 thesis capture, §2.2 dividend forecast + franking credits — **all done**. Remaining: exact correlation sizing, thesis-review-at-exit prompt, §1.1 look-ahead bias, §1.5 survivorship bias.
-6. **Polish:** §3.3 Vitest tests, §4 UX (keyboard shortcuts, compact mode, PWA), §3.7 types/modules.
+5. ✓ **Sprint 6 shipped:** §2.7 portfolio-aware Q&A, §2.1 performance attribution, §2.5 sector-concentration warning, §2.6 thesis capture, §2.2 dividend forecast + franking credits — **all done**.
+6. ✓ **Sprint 7 shipped:** thesis review at exit, prompt-version P&L, target allocations + drift alerts, economic calendar (RBA dates + ex-div + earnings), franking 45-day rule warnings — **all done**. Remaining: exact correlation sizing, §1.1 look-ahead bias, §1.5 survivorship bias.
+7. **Polish:** §3.3 Vitest tests, §4 UX (keyboard shortcuts, compact mode, PWA), §3.7 types/modules.
 
 ---
 

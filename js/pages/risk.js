@@ -401,7 +401,84 @@ function buildRiskPage(merged, riskData) {
         </table>
       </div>
     </div>`;
-  })()}`;
+  })()}
+
+  ${_buildTargetAllocCard(merged)}
+`;
+}
+
+function _buildTargetAllocCard(merged) {
+  const pv = portfolioValue();
+  if (!pv || !merged.length) return '';
+  const targets = state.targetAllocations || {};
+  const hasTargets = Object.keys(targets).some(k => targets[k] > 0);
+
+  const rows = merged.map(h => {
+    const val     = h.shares * (h.currentPrice || h.avgPrice);
+    const actual  = pv > 0 ? (val / pv * 100) : 0;
+    const target  = targets[h.ticker] != null ? Number(targets[h.ticker]) : null;
+    const drift   = target != null ? actual - target : null;
+    const driftAbs = drift != null ? Math.abs(drift) : 0;
+    const driftCol = drift == null ? 'var(--text-muted)'
+      : driftAbs >= 10 ? '#dc2626'
+      : driftAbs >= 5  ? '#d97706'
+      : '#16a34a';
+    const driftStr = drift == null ? '—'
+      : (drift >= 0 ? '+' : '') + drift.toFixed(1) + '%';
+    return `<tr>
+      <td style="padding:6px 8px;font-size:12px;font-weight:600">${h.ticker}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">${actual.toFixed(1)}%</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">
+        <input type="number" value="${target != null ? target : ''}" min="0" max="100" step="0.5"
+          placeholder="—"
+          oninput="setTargetAlloc('${h.ticker}', this.value)"
+          style="width:60px;padding:2px 6px;font-size:12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);text-align:right"
+          title="Target weight % for ${h.ticker}">%
+      </td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right;font-weight:600;color:${driftCol}">${driftStr}</td>
+      <td style="padding:6px 8px;font-size:12px">
+        ${drift == null ? '' : driftAbs >= 5 ? `<span style="background:${driftAbs >= 10 ? '#fee2e2' : '#fef3c7'};color:${driftCol};border-radius:3px;padding:1px 6px;font-size:10px">${driftAbs >= 10 ? '⚠ Rebalance' : '△ Drift'}</span>` : '<span style="color:#16a34a;font-size:10px">✓ On target</span>'}
+      </td>
+    </tr>`;
+  });
+
+  const totalTarget = Object.values(targets).filter(v => v > 0).reduce((s, v) => s + Number(v), 0);
+  const totalActual = 100;
+
+  return `
+    <div class="card" style="margin-top:14px">
+      <div class="flex-between" style="margin-bottom:10px">
+        <div>
+          <div class="card-title" style="margin:0">Target Allocations &amp; Drift</div>
+          <div class="text-xs text-muted" style="margin-top:2px">Set target weights; amber = drift &gt;5%, red = drift &gt;10%</div>
+        </div>
+        ${hasTargets ? `<div class="text-xs text-muted">Target total: <strong style="color:${Math.abs(totalTarget - 100) > 5 ? '#d97706' : 'var(--text-primary)'}">${totalTarget.toFixed(0)}%</strong> <span class="text-muted">(ideal 100%)</span></div>` : ''}
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:left">Ticker</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Actual</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Target</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Drift</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border)">Status</th>
+          </tr></thead>
+          <tbody>${rows.join('')}</tbody>
+        </table>
+      </div>
+      ${!hasTargets ? '<div class="text-xs text-muted" style="margin-top:8px">Enter target weights above to see drift analysis.</div>' : ''}
+    </div>`;
+}
+
+function setTargetAlloc(ticker, value) {
+  if (!state.targetAllocations) state.targetAllocations = {};
+  const v = parseFloat(value);
+  if (isNaN(v) || value === '') {
+    delete state.targetAllocations[ticker];
+  } else {
+    state.targetAllocations[ticker] = v;
+  }
+  scheduleSave();
 }
 
 // ── Sector colour palette ─────────────────────────────────────────────────────

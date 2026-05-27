@@ -264,16 +264,21 @@ function _renderLearningContent(d, brier) {
             <th style="text-align:right;padding:4px 8px">Calls</th>
             <th style="text-align:right;padding:4px 8px">Closed</th>
             <th style="text-align:right;padding:4px 8px">Win Rate</th>
+            <th style="text-align:right;padding:4px 8px">Realised P&amp;L</th>
           </tr>
         </thead>
         <tbody>
-          ${versions.length ? versions.map(v => `
+          ${versions.length ? versions.map(v => {
+            const pnlCol = v.total_pnl == null ? 'var(--text-muted)' : v.total_pnl >= 0 ? '#16a34a' : '#dc2626';
+            const pnlStr = v.total_pnl == null ? '—' : (v.total_pnl >= 0 ? '+' : '') + '$' + fmt(Math.abs(v.total_pnl));
+            return `
             <tr style="border-bottom:1px solid var(--border)">
               <td style="padding:5px 8px;font-family:monospace;font-size:11px">${v.version}</td>
               <td style="padding:5px 8px;text-align:right">${v.total_calls}</td>
               <td style="padding:5px 8px;text-align:right">${v.closed}</td>
               <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(v.win_rate)}">${v.closed < 3 ? '<span title="Limited data" style="color:#d97706">—</span>' : pct(v.win_rate)}</td>
-            </tr>`).join('') : '<tr><td colspan="4" style="padding:8px;color:var(--text-muted)">No prompt version data yet.</td></tr>'}
+              <td style="padding:5px 8px;text-align:right;font-weight:600;color:${pnlCol}">${pnlStr}</td>
+            </tr>`;}).join('') : '<tr><td colspan="5" style="padding:8px;color:var(--text-muted)">No prompt version data yet.</td></tr>'}
         </tbody>
       </table>
     </div>`;

@@ -4,6 +4,82 @@
 
 const _STALE_DAYS = 14;
 
+// RBA Board meeting dates — updated annually. Source: rba.gov.au/monetary-policy/rba-board-meetings/
+const _RBA_MEETINGS_2026 = [
+  '2026-02-18', '2026-04-01', '2026-05-20', '2026-07-08',
+  '2026-08-19', '2026-09-30', '2026-11-04', '2026-12-09',
+];
+const _RBA_MEETINGS_2027 = [
+  '2027-02-03', '2027-03-31', '2027-05-05', '2027-07-07',
+  '2027-08-18', '2027-09-29', '2027-11-03', '2027-12-08',
+];
+
+function _buildEconomicCalendarCard() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const horizon = new Date(today); horizon.setDate(horizon.getDate() + 45);
+
+  const events = [];
+
+  // RBA meetings
+  for (const d of [..._RBA_MEETINGS_2026, ..._RBA_MEETINGS_2027]) {
+    const dt = new Date(d);
+    if (dt >= today && dt <= horizon) {
+      const diffDays = Math.round((dt - today) / 86400000);
+      events.push({ date: dt, label: 'RBA Board Meeting', ticker: null, type: 'rba', days: diffDays });
+    }
+  }
+
+  // Portfolio ex-div dates
+  mergedPortfolio().forEach(h => {
+    const div = state.dividendData[h.ticker];
+    if (!div?.exDividendDate) return;
+    const dt = new Date(div.exDividendDate.slice(0, 10));
+    if (dt >= today && dt <= horizon) {
+      const diffDays = Math.round((dt - today) / 86400000);
+      events.push({ date: dt, label: `${h.ticker} ex-div (~$${div.nextEstAmount != null ? div.nextEstAmount.toFixed(4) : (div.annualDivPerShare / 4).toFixed(4)}/sh)`, ticker: h.ticker, type: 'exdiv', days: diffDays });
+    }
+  });
+
+  // Earnings dates from earningsCalendar
+  Object.entries(state.earningsCalendar || {}).forEach(([ticker, ec]) => {
+    if (!ec?.nextEarningsDate) return;
+    const dt = new Date(ec.nextEarningsDate.slice(0, 10));
+    if (dt >= today && dt <= horizon) {
+      const diffDays = Math.round((dt - today) / 86400000);
+      events.push({ date: dt, label: `${ticker} earnings`, ticker, type: 'earnings', days: diffDays });
+    }
+  });
+
+  if (!events.length) return '';
+  events.sort((a, b) => a.date - b.date);
+
+  const typeStyle = {
+    rba:     { bg: '#ede9fe', fg: '#6d28d9', icon: '🏦' },
+    exdiv:   { bg: '#dcfce7', fg: '#15803d', icon: '💰' },
+    earnings:{ bg: '#fef3c7', fg: '#b45309', icon: '📊' },
+  };
+
+  const rows = events.map(e => {
+    const s = typeStyle[e.type];
+    const urgency = e.days === 0 ? ' Today!' : e.days === 1 ? ' Tomorrow' : ` in ${e.days}d`;
+    return `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:0.5px solid var(--border-light)">
+      <span style="font-size:14px">${s.icon}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:500">${e.label}</div>
+        <div class="text-xs text-muted">${e.date.toLocaleDateString('en-AU',{weekday:'short',day:'numeric',month:'short'})}</div>
+      </div>
+      <span style="background:${s.bg};color:${s.fg};border-radius:3px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap">${urgency}</span>
+    </div>`;
+  });
+
+  return `
+    <div class="card section-gap">
+      <div class="card-title">Upcoming Catalysts (45 days)</div>
+      ${rows.join('')}
+    </div>`;
+}
+
 function _parseDD_MM_YYYY(d) {
   if (!d) return null;
   const p = d.split('-');
@@ -207,6 +283,8 @@ function renderDashboard() {
             </div>
           </div>`}
     </div>
+
+    ${_buildEconomicCalendarCard()}
 
     <div class="card section-gap" id="morning-brief-card">
       <div class="flex-between" style="margin-bottom:4px">

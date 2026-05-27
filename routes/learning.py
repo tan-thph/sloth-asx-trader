@@ -246,7 +246,8 @@ def learning_stats():
             pv_rows = conn.execute("""
                 SELECT pv.version, pv.total_calls,
                        COALESCE(SUM(CASE WHEN e.outcome_status='win' THEN 1 ELSE 0 END), 0) as wins,
-                       COALESCE(SUM(CASE WHEN e.outcome_status IN ('win','loss','breakeven') THEN 1 ELSE 0 END), 0) as closed
+                       COALESCE(SUM(CASE WHEN e.outcome_status IN ('win','loss','breakeven') THEN 1 ELSE 0 END), 0) as closed,
+                       COALESCE(SUM(CASE WHEN e.realized_pnl_aud IS NOT NULL THEN e.realized_pnl_aud ELSE 0 END), 0) as total_pnl
                 FROM prompt_versions pv
                 LEFT JOIN ai_learning_events e ON e.prompt_version = pv.version
                 GROUP BY pv.version ORDER BY pv.created_at DESC
@@ -257,6 +258,7 @@ def learning_stats():
                 "wins":        r['wins'],
                 "closed":      r['closed'],
                 "win_rate":    round(r['wins'] / r['closed'] * 100, 1) if r['closed'] else None,
+                "total_pnl":   round(r['total_pnl'], 2) if r['total_pnl'] else None,
             } for r in pv_rows]
 
             # Avg hold days for closed trades

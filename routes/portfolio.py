@@ -127,7 +127,7 @@ def db_save():
             'analysisConfig', 'macroData', 'macroDate', 'analysisLastSummary',
             'portfolioHistory', 'cgtParcels', 'cgtDisposals', 'cgtMethod', 'activityLog',
             'recommendations', 'priceAlerts', 'dayTrading',
-            'watchlist', 'savedScreeners',
+            'watchlist', 'savedScreeners', 'targetAllocations',
         ]
         for key in BLOB_KEYS:
             if key in data:
@@ -236,6 +236,7 @@ def db_load():
         "priceAlerts":          blobs.get("priceAlerts"),
         "watchlist":            blobs.get("watchlist"),
         "savedScreeners":       blobs.get("savedScreeners"),
+        "targetAllocations":    blobs.get("targetAllocations"),
     })
 
 

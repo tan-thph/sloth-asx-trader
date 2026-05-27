@@ -1396,5 +1396,153 @@ class TestSprint6(unittest.TestCase):
         self.assertIn("_buildDivForecastCard()", src)
 
 
+class TestSprint7(unittest.TestCase):
+    """Sprint 7 — thesis review, prompt P&L, target allocations, economic calendar, franking 45-day."""
+
+    def setUp(self):
+        _install_in_memory_db()
+        self.client = asx_server.app.test_client()
+
+    # ── 1. Thesis review at exit ──────────────────────────────────────────────
+    def test_thesis_review_function_defined(self):
+        """recommendations.js must define _showThesisReview function."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _showThesisReview(", src)
+
+    def test_thesis_review_uses_dialog_element(self):
+        """_showThesisReview must use a <dialog> element for the modal."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("createElement('dialog')", src)
+
+    def test_thesis_review_posts_verdict(self):
+        """_showThesisReview must POST to /api/learning/outcome with thesis verdict."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("/api/learning/outcome", src)
+        self.assertIn("THESIS:", src)
+
+    def test_thesis_review_hooked_into_mark_executed(self):
+        """markExecuted must call _showThesisReview when position fully closes."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_showThesisReview(", src)
+        self.assertIn("positionClosed", src)
+
+    # ── 2. Prompt version P&L ─────────────────────────────────────────────────
+    def test_prompt_version_pnl_in_backend_sql(self):
+        """learning.py version stats must include total_pnl in SQL query."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("total_pnl", src)
+        self.assertIn("realized_pnl_aud", src)
+
+    def test_prompt_version_pnl_in_version_list(self):
+        """learning.py version_list must include total_pnl field in response."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"total_pnl"', src)
+
+    def test_prompt_version_pnl_column_in_ui(self):
+        """learning.js versionsCard must have a Realised P&L column."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("Realised P&amp;L", src)
+        self.assertIn("total_pnl", src)
+
+    # ── 3. Target allocations + drift alerts ─────────────────────────────────
+    def test_target_alloc_card_function(self):
+        """risk.js must define _buildTargetAllocCard function."""
+        with open(os.path.join(ROOT, "js/pages/risk.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _buildTargetAllocCard(", src)
+
+    def test_target_alloc_set_function(self):
+        """risk.js must define setTargetAlloc function for inline input edits."""
+        with open(os.path.join(ROOT, "js/pages/risk.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function setTargetAlloc(", src)
+        self.assertIn("state.targetAllocations", src)
+
+    def test_target_alloc_card_called_in_risk_page(self):
+        """buildRiskPage must call _buildTargetAllocCard."""
+        with open(os.path.join(ROOT, "js/pages/risk.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_buildTargetAllocCard(", src)
+
+    def test_target_alloc_drift_thresholds(self):
+        """Target allocation card must warn amber at 5% drift and red at 10%."""
+        with open(os.path.join(ROOT, "js/pages/risk.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("10", src)
+        self.assertIn("5", src)
+
+    def test_target_alloc_in_config(self):
+        """config.js state must include targetAllocations default."""
+        with open(os.path.join(ROOT, "js/config.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("targetAllocations", src)
+
+    def test_target_alloc_in_api_save(self):
+        """api.js save payload must include targetAllocations."""
+        with open(os.path.join(ROOT, "js/api.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("targetAllocations", src)
+
+    def test_target_alloc_in_blob_keys(self):
+        """portfolio.py BLOB_KEYS must include targetAllocations."""
+        with open(os.path.join(ROOT, "routes/portfolio.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("targetAllocations", src)
+
+    # ── 4. Economic calendar ──────────────────────────────────────────────────
+    def test_economic_calendar_function(self):
+        """dashboard.js must define _buildEconomicCalendarCard function."""
+        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _buildEconomicCalendarCard()", src)
+
+    def test_rba_meeting_dates_hardcoded(self):
+        """dashboard.js must hard-code RBA meeting dates for 2026 and 2027."""
+        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_RBA_MEETINGS_2026", src)
+        self.assertIn("_RBA_MEETINGS_2027", src)
+        self.assertIn("2026-", src)
+
+    def test_economic_calendar_includes_exdiv(self):
+        """Economic calendar must include ex-dividend dates from dividendData."""
+        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("exDividendDate", src)
+
+    def test_economic_calendar_called_in_render(self):
+        """renderDashboard must call _buildEconomicCalendarCard."""
+        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_buildEconomicCalendarCard()", src)
+
+    # ── 5. Franking 45-day rule ───────────────────────────────────────────────
+    def test_franking_45day_function(self):
+        """cgt.js must define _buildFranking45DayCard function."""
+        with open(os.path.join(ROOT, "js/pages/cgt.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _buildFranking45DayCard()", src)
+
+    def test_franking_45day_checks_exdiv(self):
+        """_buildFranking45DayCard must inspect ex-dividend dates."""
+        with open(os.path.join(ROOT, "js/pages/cgt.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("exDividendDate", src)
+        self.assertIn("45", src)
+
+    def test_franking_45day_warns_on_cgt_page(self):
+        """renderCGT must include the franking 45-day card."""
+        with open(os.path.join(ROOT, "js/pages/cgt.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_buildFranking45DayCard()", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
