@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-27 (sprint 2 shipped)
+**Last Updated:** 2026-05-27 (sprints 3–5 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -34,6 +34,22 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **Telegram off-device alerts** | Alerts (§2.3) | `routes/alerts.py` with `POST /api/alerts/telegram` (send), `POST /api/alerts/telegram/save` (persist creds), `GET /api/alerts/config`. Settings page has a Telegram section (bot token + chat ID + Test button). `fireAlert()` in `alerts.js` mirrors to Telegram when `state.settings.telegramEnabled`. |
 | **Drawdown monitor** | Risk (§2.5) | `renderPerformance()` now computes current and max drawdown from `state.portfolioHistory`. Two new metric cards + a red alert banner when drawdown exceeds the configurable threshold (default 10%). Threshold editable inline. |
 | **Broker CSV import (CommSec + SelfWealth)** | Workflow (§2.6) | `routes/import_csv.py` with `POST /api/import/csv` — detects CommSec/SelfWealth/generic format, normalises to `{action, ticker, shares, price, date, brokerage}`. Portfolio page has a "Broker CSV" upload button; `handleBrokerCSV()` applies returned rows to portfolio, CGT parcels, and journal. |
+| **Watchlist page** | Features (§2.1) | `js/pages/watchlist.js` — separate from holdings. `state.watchlist = [{ticker, addedAt, notes}]`. Signal table (RSI, score, BB%B, trend), indicator-alert creation UI, scanner ⭐ button writes to both watchlist and `extraTickers`. Persisted in `blob_store`. |
+| **Benchmark overlay (^AXJO)** | Analytics (§2.1) | `GET /api/benchmark?period=` in `routes/market.py`. `drawHistoryChart()` now async with cached `_benchmarkCache`. ^AXJO normalized to portfolio start value; grey dashed 4th series + legend entry. |
+| **Custom indicator alerts** | Alerts (§2.3) | `checkIndicatorAlerts()` in `alerts.js`; types: `rsi_below`, `rsi_above`, `bb_breakout`, `bb_breakdown`, `volume_spike`; called after `fetchSignals()`. Watchlist page has an indicator-alert creation UI. |
+| **Ex-div & earnings reminders** | Alerts (§2.3) | `checkExDivReminders()` / `checkEarningsReminders()` in `prices.js`; one-shot per event per day. 5-day ex-div window, 3-day earnings window. |
+| **Macro / regime-change alert** | Alerts (§2.3) | `fetchAndClassifyRegime()` fires `fireAlert()` when regime flips to `panic` or `riskOff`. |
+| **Tax-loss harvest planner** | Tax (§2.2) | Card on CGT page: ranks open parcels by unrealised loss, shows max harvestable, net CGT after harvest, EOFY countdown, wash-sale warning (same ticker bought in last 30 days). |
+| **Scenario stress test** | Risk (§2.5) | Card on Risk page: -5/-10/-20/-30% shock presets + custom input. Per-holding impact = `value × beta × shock`. Shocked portfolio summary. `window._stressScenario` persists across renders. |
+| **ATR trailing stops** | Risk (§2.5) | Card on Risk page below stress test: 2×ATR14 stop per holding; one-click "Set Alert" wires into price-alert system. |
+| **Saved screener presets** | Research (§2.4) | `state.savedScreeners = [{name, savedAt, config}]`; ⊕ Save/Load/Delete in scanner config bar. Persisted in `blob_store`. |
+| **Market breadth revival** | Accuracy (§1.8) | Scanner computes `breadth_ratio` (% universe > 20-day SMA) after each scan; `/api/macro` reads it via lazy import as `advance_decline_ratio`; regime breadth vote now fires. |
+| **Postmortem digest** | AI (§2.7) | `GET /api/learning/digest-data` returns structured failure stats. "Generate Digest" button on Learning page calls `callClaude('assistant', …)` with failure patterns to produce actionable lessons. |
+| **Morning briefing auto-generate** | AI (§2.6) | `MORNING_BRIEFING_SYSTEM_PROMPT` + `'briefing'` agent type (600 tokens, no-cache). Dashboard "Generate Brief" button chains macro + regime + holdings into a plain-text session note cached in `window._morningBrief`. |
+| **EOFY tax pack** | Tax (§2.2) | `GET /api/tax/eofy-pack?year=N` returns ZIP: `cgt_disposals_FY{N}.csv` + `trade_fees_FY{N}.csv`. "↓ EOFY Pack" button on CGT page. |
+| **Regime overlay on journal** | Analytics (§2.4) | `_journalRegimeBadge()` helper + `Regime` column per row in Trade Journal; matches via `state.recHistory.find(r => r.id === t.recId)?.regime`. |
+| **Stale-position nudge** | Workflow (§2.3) | `_buildStaleNudgeCard()` on Dashboard: amber card listing holdings with no rec in 14+ days with day counts. |
+| **Persistence bug fix (watchlist/savedScreeners)** | Reliability | `watchlist` and `savedScreeners` were in the save payload but missing from `BLOB_KEYS` in `routes/portfolio.py` and the `db_load` response — silently discarded on every restart. Fixed. |
 
 ---
 
@@ -72,10 +88,9 @@ out-of-sample degradation; prefer fewer robust factors over many fragile ones.
 Vectorised OHLCV replay with rolling train/test split + parameter grid. The honest way to know a
 strategy works, and the foundation for §1.6. (Carried over from deferred.)
 
-### 1.8 Revive market-breadth signal — `M` · ★★
-The regime engine's advance/decline vote is dormant (no valid Yahoo symbol). Compute real breadth
-(advancers vs decliners, or % of universe above 20-day MA) from the scanner's universe download and
-surface it into `/api/macro` so the vote fires again.
+### ✓ 1.8 Revive market-breadth signal — `M` · ★★ **SHIPPED**
+Scanner computes `breadth_ratio` (% of universe above 20-day SMA) after each scan; `/api/macro` reads
+it via lazy import as `advance_decline_ratio`; regime engine breadth vote now fires. See §0.
 
 ### 1.9 Corporate-actions correctness — `M` · ★★
 Splits, special dividends, capital returns, mergers affect holdings, average price, and **CGT
@@ -95,50 +110,50 @@ already exist (quant, regime, learning, dividends, CGT).
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
-| **Watchlist** (separate from holdings) | S | ★★★ | Track tickers you're eyeing but don't own; run signals/alerts on them without polluting the portfolio. The scanner already produces candidates — let you "star" them into a watchlist. |
+| ✓ **Watchlist** (separate from holdings) | S | ★★★ | **SHIPPED** — `js/pages/watchlist.js`, `state.watchlist`, scanner ⭐ integration. See §0. |
 | **Target allocations + drift alerts** | M | ★★ | Set a target weight per holding/sector; flag when drift exceeds a band and suggest a rebalance trade list. |
 | **Multiple portfolios / accounts** | M | ★★ | Separate super vs personal vs trading accounts (still single-user) with combined and per-account views — affects CGT and sizing. |
 | **Cash & term-deposit tracker** | S | ★★ | Track idle cash + TD maturities so the dashboard shows true investable cash and prompts deployment. |
 | **Performance attribution** | M | ★★ | Decompose returns by ticker / sector / regime so you see *what actually drove* the P&L, not just the total. |
-| **Benchmark comparison** | S | ★★ | Plot portfolio equity curve vs ^AXJO (and your sector mix) on the existing Value History canvas. |
+| ✓ **Benchmark comparison** | S | ★★ | **SHIPPED** — ^AXJO overlay on Value History canvas; normalized to portfolio start value. See §0. |
 
 ### 2.2 Tax & income (ASX-specific)
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
 | ✓ **CGT-discount countdown** | S | ★★★ | **SHIPPED** — urgency banner in CGT page + sell warning in checklist. See §0. |
-| **Tax-loss-harvest planner** | M | ★★★ | At EOFY, list unrealised losers that could offset realised gains, with wash-sale timing caveats. A rule module exists — surface it as an actionable EOFY screen. |
+| ✓ **Tax-loss-harvest planner** | M | ★★★ | **SHIPPED** — card on CGT page; ranks losers by unrealised loss; EOFY countdown; wash-sale flag. See §0. |
 | **Dividend income forecast** | M | ★★ | Project forward 12-month dividend income + **franking credits** from current holdings and known ex-div dates; track DRP (dividend reinvestment) parcels. |
 | **Franking-credit optimiser** | M | ★★ | Flag the 45-day holding rule for franking eligibility; estimate grossed-up yield per holding. |
-| **EOFY tax pack** | S | ★★ | One-click bundle: realised CGT (discounted vs not), dividend + franking summary, fee total — beyond the existing per-trade CSV. |
+| ✓ **EOFY tax pack** | S | ★★ | **SHIPPED** — `GET /api/tax/eofy-pack?year=N` ZIP download: CGT disposals CSV + trade fees CSV. See §0. |
 
 ### 2.3 Alerts & monitoring
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
-| **Custom indicator alerts** | M | ★★★ | Beyond stop/target: RSI oversold/overbought, BB breakout, volume spike, 52-week high/low, % daily move, MA cross. Reuse the one-shot `_stopAlertedAt` pattern. |
+| ✓ **Custom indicator alerts** | M | ★★★ | **SHIPPED** — `checkIndicatorAlerts()` in `alerts.js`; RSI, BB, volume-spike types. Watchlist UI. See §0. |
 | ✓ **Off-device alert channels (Telegram)** | M | ★★★ | **SHIPPED** — Telegram bot integration. `routes/alerts.py`, Settings UI, `fireAlert()` hook. See §0. |
-| **Ex-dividend & earnings reminders** | S | ★★ | Notify a few days before ex-div / results for held names (data already fetched for the dividends + earnings-calendar endpoints). |
-| **Macro / regime-change alert** | S | ★★ | Ping when the regime flips (e.g. into `panic` or `riskOff`) so you don't miss a defensive shift. |
-| **Stale-position nudge** | S | ★ | Flag holdings with no thesis review in N days, or that have drifted far from their original rec. |
+| ✓ **Ex-dividend & earnings reminders** | S | ★★ | **SHIPPED** — `checkExDivReminders()` / `checkEarningsReminders()` in `prices.js`. See §0. |
+| ✓ **Macro / regime-change alert** | S | ★★ | **SHIPPED** — `fireAlert()` when regime flips to `panic` or `riskOff`. See §0. |
+| ✓ **Stale-position nudge** | S | ★ | **SHIPPED** — amber card on Dashboard listing holdings with no rec in 14+ days. See §0. |
 
 ### 2.4 Research & analysis
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
 | **Side-by-side ticker compare** | M | ★★ | Compare 2–4 tickers' signals/valuation/RS in one view before choosing. |
-| **Saved screeners** | S | ★★ | Persist scanner criteria as named presets ("oversold large-caps", "breakouts > $1") and re-run with one click. |
+| ✓ **Saved screeners** | S | ★★ | **SHIPPED** — `state.savedScreeners`, ⊕ Save/Load/Delete in scanner config bar. See §0. |
 | **Economic calendar** | M | ★★ | RBA meetings, US Fed, CPI, jobs, ASX reporting season — overlaid on the dashboard so you trade around known catalysts. |
 | **Seasonality view** | M | ★ | ASX/ticker monthly seasonality (e.g. "Santa rally", May weakness) as context, clearly labelled as low-confidence. |
 | **A-VIX / volatility gauge** | S | ★★ | Surface an ASX volatility proxy alongside the US VIX already in macro, for a local fear/greed read. |
-| **Regime overlay on trade history** | S | ★★ | Colour past trades by the regime they were opened in — see whether your edge is regime-dependent. |
+| ✓ **Regime overlay on trade history** | S | ★★ | **SHIPPED** — coloured regime badge per journal row. See §0. |
 
 ### 2.5 Risk management
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
-| **Scenario / stress test** | M | ★★★ | "What if ASX −10% / AUD −5% / your top holding −20%?" Re-price the portfolio using the betas already on the Risk page. |
-| **Trailing & ATR-based stops** | M | ★★★ | Auto-suggest trailing stops (e.g. 2×ATR) and update them as price moves; the alerts engine already watches stops. |
+| ✓ **Scenario / stress test** | M | ★★★ | **SHIPPED** — card on Risk page; shock presets + custom; per-holding beta × shock table. See §0. |
+| ✓ **Trailing & ATR-based stops** | M | ★★★ | **SHIPPED** — 2×ATR14 stops card on Risk page; one-click "Set Alert". See §0. |
 | **Correlation-aware sizing** | M | ★★ | Warn when a new BUY is highly correlated with existing holdings (concentration risk); the Risk page already computes the correlation matrix — feed it into the quant engine. |
 | ✓ **Risk-budget dashboard** | S | ★★ | **SHIPPED** — heat gauge at top of Risk page, configurable % budget. See §0. |
 | ✓ **Drawdown monitor + alert** | S | ★★ | **SHIPPED** — current + max drawdown from portfolio history; alert banner + configurable threshold. See §0. |
@@ -148,17 +163,17 @@ already exist (quant, regime, learning, dividends, CGT).
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
 | ✓ **Pre-trade checklist** | S | ★★★ | **SHIPPED** — 5-item modal gate, requires ≥4 ticks. See §0. |
-| **Thesis capture + review** | M | ★★★ | Record *why* you entered; auto-resurface it at exit / postmortem so the Learning Loop has qualitative context, not just numbers. |
+| **Thesis capture + review** | M | ★★★ | Record *why* you entered; auto-resurface it at exit / postmortem so the Learning Loop has qualitative context, not just numbers. `trade_thesis` DB column already exists — need a review-surfacing flow. |
 | ✓ **Broker CSV import** | M | ★★★ | **SHIPPED** — CommSec/SelfWealth/generic detection; backend parses, normalises, returns rows. See §0. |
 | ✓ **Trade tags & notes** | S | ★★ | **SHIPPED** — `tags`/`trade_thesis` DB columns + inline input on rec cards + stored in learning events. See §0. |
-| **Morning briefing auto-generate** | M | ★★ | One button that runs macro + regime + holdings review and produces a dated note you can read with coffee. The pieces exist (Morning Macro, AI assistant) — chain them. |
+| ✓ **Morning briefing auto-generate** | M | ★★ | **SHIPPED** — `'briefing'` agent type; Dashboard "Generate Brief" button chains macro + regime + holdings. See §0. |
 
 ### 2.7 AI assistant enhancements
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
 | **Portfolio-aware Q&A** | M | ★★ | "Why is my portfolio down today?" / "What's my biggest risk?" — answer using live `state` + signals, not just generic chat. |
-| **Postmortem digest** | S | ★★ | Periodic summary of recent losers' postmortems + the Learning Loop's failure patterns into a few actionable lessons. |
+| ✓ **Postmortem digest** | S | ★★ | **SHIPPED** — `GET /api/learning/digest-data` + "Generate Digest" on Learning page. See §0. |
 | **Local-LLM fallback** | M | ★ | Use the existing Ollama setup for cheap/offline analysis when you don't want to spend on Claude calls (debate engine already uses it). |
 | **Prompt A/B tracking** | M | ★★ | Compare win-rate by `PROMPT_VERSION` so you know whether a prompt change actually helped (table exists; surface it). |
 
@@ -215,11 +230,12 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 
 ## 5. Suggested sequencing
 
-1. ✓ **Trust the numbers first:** §1.3 Wilson CI, §1.4 Brier score — **done**. Remaining: §1.1 look-ahead bias, §1.2 slippage (**done**), §1.5 survivorship bias.
+1. ✓ **Trust the numbers first:** §1.3 Wilson CI, §1.4 Brier score, §1.2 slippage — **done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias.
 2. ✓ **Don't lose data:** §3.2 backups, §3.1 retry + stale-cache — **done**. Remaining: secondary data provider fallback.
-3. ✓ **Highest daily payoff:** pre-trade checklist, CGT countdown, trade tags, heat gauge, drawdown monitor, Telegram alerts, broker CSV import — **all done**. **Remaining:** custom indicator alerts (RSI/BB/volume), tax-loss planner.
-4. **Deepen the edge:** §2.5 stress test / trailing stops / correlation sizing, §1.7 walk-forward backtest, §1.8 breadth signal.
-5. **Polish:** §3.3 Vitest tests, §4 UX (keyboard shortcuts, compact mode, PWA), §3.7 types/modules.
+3. ✓ **Highest daily payoff:** pre-trade checklist, CGT countdown, trade tags, heat gauge, drawdown monitor, Telegram, broker CSV, indicator alerts, tax-loss planner, EOFY pack, watchlist, morning briefing, regime journal, stale nudge — **all done**.
+4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. Remaining: §2.5 correlation-aware sizing, §1.7 walk-forward backtest.
+5. **Next priority:** §2.6 thesis capture + review (M, ★★★), §2.7 portfolio-aware Q&A (M, ★★), §2.1 performance attribution (M, ★★), §2.2 dividend forecast + franking credits (M, ★★).
+6. **Polish:** §3.3 Vitest tests, §4 UX (keyboard shortcuts, compact mode, PWA), §3.7 types/modules.
 
 ---
 
