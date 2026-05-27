@@ -264,21 +264,35 @@ function _renderLearningContent(d, brier) {
             <th style="text-align:right;padding:4px 8px">Calls</th>
             <th style="text-align:right;padding:4px 8px">Closed</th>
             <th style="text-align:right;padding:4px 8px">Win Rate</th>
+            <th style="text-align:right;padding:4px 8px" title="Win-rate delta vs previous version (needs ≥3 closed each)">&#916; vs prev</th>
             <th style="text-align:right;padding:4px 8px">Realised P&amp;L</th>
           </tr>
         </thead>
         <tbody>
-          ${versions.length ? versions.map(v => {
+          ${versions.length ? versions.map((v, idx) => {
             const pnlCol = v.total_pnl == null ? 'var(--text-muted)' : v.total_pnl >= 0 ? '#16a34a' : '#dc2626';
             const pnlStr = v.total_pnl == null ? '—' : (v.total_pnl >= 0 ? '+' : '') + '$' + fmt(Math.abs(v.total_pnl));
+            // Δ vs prev: compare to the entry at idx+1 (versions sorted newest-first)
+            let deltaHtml = '<span style="color:var(--text-muted)">—</span>';
+            const prev = versions[idx + 1];
+            if (prev && v.closed >= 3 && prev.closed >= 3 && v.win_rate != null && prev.win_rate != null) {
+              const delta = (v.win_rate - prev.win_rate) * 100;
+              const deltaCol = delta > 2 ? '#16a34a' : delta < -2 ? '#dc2626' : '#d97706';
+              const arrow    = delta > 2 ? '&#8593;' : delta < -2 ? '&#8595;' : '&#8596;';
+              deltaHtml = `<span style="color:${deltaCol};font-weight:600">${arrow}${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp</span>`;
+            }
+            const isCurrent = typeof PROMPT_VERSION !== 'undefined' && v.version === PROMPT_VERSION;
             return `
-            <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:5px 8px;font-family:monospace;font-size:11px">${v.version}</td>
+            <tr style="border-bottom:1px solid var(--border)${isCurrent ? ';background:rgba(99,102,241,.07)' : ''}">
+              <td style="padding:5px 8px;font-family:monospace;font-size:11px">
+                ${v.version}${isCurrent ? ' <span style="background:#6366f1;color:#fff;border-radius:8px;padding:0 5px;font-size:9px;vertical-align:middle">current</span>' : ''}
+              </td>
               <td style="padding:5px 8px;text-align:right">${v.total_calls}</td>
               <td style="padding:5px 8px;text-align:right">${v.closed}</td>
               <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(v.win_rate)}">${v.closed < 3 ? '<span title="Limited data" style="color:#d97706">—</span>' : pct(v.win_rate)}</td>
+              <td style="padding:5px 8px;text-align:right">${deltaHtml}</td>
               <td style="padding:5px 8px;text-align:right;font-weight:600;color:${pnlCol}">${pnlStr}</td>
-            </tr>`;}).join('') : '<tr><td colspan="5" style="padding:8px;color:var(--text-muted)">No prompt version data yet.</td></tr>'}
+            </tr>`;}).join('') : '<tr><td colspan="6" style="padding:8px;color:var(--text-muted)">No prompt version data yet.</td></tr>'}
         </tbody>
       </table>
     </div>`;

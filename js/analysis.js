@@ -463,15 +463,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 
     console.log(`[Token audit] recHistory sent: ${recentRecs.length} entries (last5=${last5.length} withPnl=${withPnl.length} withFeedback=${withFeedback.length})`);
     console.log(`[Token audit] indicatorCtx chars: ${indicatorCtx.length} | macroCtx chars: ${macroCtx.length} | divCtx chars: ${dividendCtx.length} | earningsCtx chars: ${earningsCtx.length}`);
-
-    // Save raw response to DB for debugging
-    if (text) {
-      fetch(`${API}/api/log/ai_response`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ text })
-      }).catch(() => {});
-    }
+    // Note: prompt+response logging is now handled automatically in callClaude()
 
     // ── Parse with safe parser, fall back to brace-depth recovery on failure ──
     let recs = [], summary = null;

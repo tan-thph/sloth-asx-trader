@@ -56,7 +56,7 @@ function renderPage() {
     d: 'dashboard', p: 'portfolio', m: 'macro',   r: 'recommendations',
     j: 'journal',   f: 'performance', c: 'cgt',   k: 'risk',
     s: 'scanner',   l: 'learning',  n: 'news',    a: 'assistant',
-    t: 'day-trading', w: 'watchlist',
+    t: 'day-trading', w: 'watchlist', x: 'compare',
   };
   let _gPressed = false, _gTimer = null;
 
@@ -131,7 +131,8 @@ function _renderPageUnsafe() {
     case 'announcements':   renderAnnouncementsPage(gen); break;
     case 'scanner':         renderScannerPage(gen); break;
     case 'watchlist':       renderWatchlistPage(gen); break;
+    case 'compare':         renderComparePage(gen); break;
     case 'learning':        renderLearningPage(gen); break;
-    case 'settings':        el.innerHTML = renderSettings(); setTimeout(() => { if(state._renderGen === gen) renderSchedulerLog(); }, 0); break;
+    case 'settings':        el.innerHTML = renderSettings(); setTimeout(() => { if(state._renderGen !== gen) return; renderSchedulerLog(); loadAICallLog(); loadSettingsAppInfo(); }, 0); break;
   }
 }

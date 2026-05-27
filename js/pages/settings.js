@@ -208,6 +208,47 @@ python3 asx_server.py</pre>
         </div>
       </div>
     </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="card-title" style="margin:0">Recent AI Calls</div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="ai-log-filter" onchange="loadAICallLog()" style="font-size:11px;padding:2px 6px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
+            <option value="">All agents</option>
+            <option value="portfolio">portfolio</option>
+            <option value="analyst">analyst</option>
+            <option value="pm">pm</option>
+            <option value="dayTrade">dayTrade</option>
+            <option value="universe">universe</option>
+            <option value="macro">macro</option>
+            <option value="assistant">assistant</option>
+            <option value="briefing">briefing</option>
+          </select>
+          <button class="btn btn-sm" onclick="loadAICallLog()">&#8635; Refresh</button>
+        </div>
+      </div>
+      <div class="text-xs text-muted" style="margin-bottom:8px">
+        Every Claude call is logged here — system prompt, user message, response, tokens, and timing.
+        Calls are stored in <code>ai_call_log</code> and written to <code>ai_responses/</code> files.
+      </div>
+      <div id="ai-call-log-container">
+        <div class="text-xs text-muted" style="padding:10px 0">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">App Info</div>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:12px;align-items:baseline">
+        <span class="text-muted">Prompt version</span>
+        <span style="font-family:monospace;color:var(--accent)">${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : '—'}</span>
+        <span class="text-muted">Claude model</span>
+        <span style="font-family:monospace">${typeof CLAUDE_MODEL !== 'undefined' ? CLAUDE_MODEL : '—'}</span>
+        <span class="text-muted">Server</span>
+        <span id="settings-server-ver" class="text-muted">checking…</span>
+        <span class="text-muted">DB backups</span>
+        <span id="settings-backup-info" class="text-muted">checking…</span>
+      </div>
+    </div>
   `;
 }
 function saveApiKey() {
@@ -295,6 +336,153 @@ async function testTelegramAlert() {
     toast('Could not reach backend', 'error');
     if (statusEl) statusEl.textContent = '✗ Backend unreachable';
   }
+}
+
+// ── AI Call Log ───────────────────────────────────────────────────────────────
+
+async function loadAICallLog() {
+  const container = document.getElementById('ai-call-log-container');
+  if (!container) return;
+
+  const filter = (document.getElementById('ai-log-filter')?.value || '');
+  const url = `${API}/api/log/ai_calls?limit=15${filter ? '&agent_type=' + encodeURIComponent(filter) : ''}`;
+
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (!d.ok || !d.entries || !d.entries.length) {
+      container.innerHTML = '<div class="text-xs text-muted" style="padding:10px 0">No calls logged yet.</div>';
+      return;
+    }
+    container.innerHTML = _renderAICallLogTable(d.entries, d.total);
+  } catch (e) {
+    container.innerHTML = `<div class="text-xs text-danger">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function _renderAICallLogTable(entries, total) {
+  const agentColors = {
+    portfolio: '#6366f1', analyst: '#8b5cf6', pm: '#a78bfa',
+    dayTrade: '#f59e0b',  universe: '#f97316', macro: '#0ea5e9',
+    assistant: '#22c55e', briefing: '#14b8a6',
+  };
+  const rows = entries.map(e => {
+    const col = agentColors[e.agent_type] || 'var(--text-muted)';
+    const tokIn  = e.input_tokens  != null ? e.input_tokens.toLocaleString()  : '—';
+    const tokOut = e.output_tokens != null ? e.output_tokens.toLocaleString() : '—';
+    const cacheR = e.cache_read    > 0    ? `<span style="color:#22c55e"> +${e.cache_read.toLocaleString()}c</span>` : '';
+    const dur    = e.duration_ms   != null ? `${(e.duration_ms/1000).toFixed(1)}s` : '—';
+    const ts     = (e.timestamp || '').replace('T', ' ').slice(0, 16);
+    const sys    = e.sys_snippet  ? escapeHTML(e.sys_snippet.slice(0, 80))  + '…' : '—';
+    const usr    = e.usr_snippet  ? escapeHTML(e.usr_snippet.slice(0, 100)) + '…' : '—';
+    const resp   = e.resp_snippet ? escapeHTML(e.resp_snippet.slice(0, 80)) + '…' : '—';
+
+    return `
+      <tr style="cursor:pointer" onclick="viewAICall(${e.id})" title="Click to view full call">
+        <td style="padding:5px 6px;white-space:nowrap;font-size:11px;color:var(--text-tertiary)">${ts}</td>
+        <td style="padding:5px 6px">
+          <span style="background:${col};color:#fff;border-radius:9px;padding:1px 7px;font-size:10px;white-space:nowrap">${escapeHTML(e.agent_type || '?')}</span>
+        </td>
+        <td style="padding:5px 6px;font-size:11px;white-space:nowrap">${tokIn}→${tokOut}${cacheR}</td>
+        <td style="padding:5px 6px;font-size:11px;color:var(--text-muted);white-space:nowrap">${dur}</td>
+        <td style="padding:5px 6px;font-size:11px;color:var(--text-secondary);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${usr}</td>
+        <td style="padding:5px 6px;font-size:11px;color:var(--text-muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${resp}</td>
+      </tr>`;
+  }).join('');
+
+  const footer = total > entries.length
+    ? `<div class="text-xs text-muted" style="margin-top:6px">Showing latest ${entries.length} of ${total} calls. Filter by agent to narrow.</div>`
+    : `<div class="text-xs text-muted" style="margin-top:6px">${total} call${total !== 1 ? 's' : ''} logged total.</div>`;
+
+  return `
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border-light)">
+            <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Time</th>
+            <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Agent</th>
+            <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Tokens</th>
+            <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Duration</th>
+            <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">User message</th>
+            <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Response</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${footer}`;
+}
+
+async function viewAICall(id) {
+  let d;
+  try {
+    const r = await fetch(`${API}/api/log/ai_call/${id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    d = await r.json();
+  } catch (e) {
+    toast(`Could not load call #${id}: ${e.message}`, 'error');
+    return;
+  }
+
+  const ts  = (d.timestamp || '').replace('T', ' ');
+  const dur = d.duration_ms != null ? `${(d.duration_ms / 1000).toFixed(2)}s` : '—';
+  const tok = `${d.input_tokens ?? '?'} in / ${d.output_tokens ?? '?'} out` +
+              (d.cache_read > 0 ? ` / ${d.cache_read.toLocaleString()} cache-read` : '') +
+              (d.cache_written > 0 ? ` / ${d.cache_written.toLocaleString()} cache-written` : '');
+
+  const section = (label, content) => content
+    ? `<div style="margin-bottom:14px">
+         <div style="font-size:11px;font-weight:600;color:var(--text-muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:4px">${label}</div>
+         <pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;background:var(--bg-secondary);border-radius:6px;padding:10px;max-height:260px;overflow-y:auto;margin:0">${escapeHTML(content)}</pre>
+       </div>`
+    : '';
+
+  const dlg = document.createElement('dialog');
+  dlg.style.cssText = 'border-radius:10px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);padding:0;max-width:820px;width:96%;max-height:90vh';
+  dlg.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--border-light)">
+      <div>
+        <strong style="font-size:14px">AI Call #${d.id}</strong>
+        <span style="font-size:11px;color:var(--text-muted);margin-left:10px">${ts} &bull; ${escapeHTML(d.agent_type || '?')} &bull; ${escapeHTML(d.model || '?')}</span>
+      </div>
+      <button class="btn btn-sm" onclick="this.closest('dialog').close()">&#10005;</button>
+    </div>
+    <div style="padding:16px 18px;overflow-y:auto;max-height:calc(90vh - 120px)">
+      <div style="display:flex;gap:20px;font-size:12px;color:var(--text-muted);margin-bottom:14px;flex-wrap:wrap">
+        <span>&#128200; <strong>${tok}</strong></span>
+        <span>&#9201; <strong>${dur}</strong></span>
+      </div>
+      ${section('System Prompt', d.system_prompt)}
+      ${section('User Message',  d.user_message)}
+      ${section('Response',      d.response_text)}
+    </div>`;
+  dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.appendChild(dlg);
+  dlg.showModal();
+}
+
+// ── App Info helpers (called by navigation.js after settings render) ──────────
+
+async function loadSettingsAppInfo() {
+  // Server version + health
+  try {
+    const r = await fetch(`${API}/health`);
+    const d = await r.json();
+    const el = document.getElementById('settings-server-ver');
+    if (el) el.textContent = d.status === 'ok'
+      ? `✓ ${d.version || 'connected'} (${(d.uptime_s ?? 0 / 60).toFixed(0)}min up)`
+      : '✗ not connected';
+  } catch { /* silent */ }
+
+  // Backup info
+  try {
+    const r = await fetch(`${API}/health`);
+    const d = await r.json();
+    const el = document.getElementById('settings-backup-info');
+    if (el) el.textContent = d.last_backup || 'daily auto-backup enabled';
+  } catch { /* silent */ }
 }
 
 let _customIntervalTimer = null;

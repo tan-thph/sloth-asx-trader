@@ -11,8 +11,10 @@ Endpoints:
   /api/polymarket                  GET     — Manifold market probabilities (30 min cache)
   /api/risk                        GET     — beta, Sharpe, VaR, CVaR per ticker
   /api/portfolio/nav-history       POST    — reconstruct NAV curve vs VAS
-  /api/earnings-calendar           GET     — next earnings + EPS per ticker
-  /api/log/ai_response             POST/GET — store + retrieve raw Claude output
+  /api/earnings-calendar           GET     — next earnings + EPS per ticker (ETFs skipped)
+  /api/log/ai_response             POST/GET — store + retrieve raw Claude output (legacy)
+  /api/log/ai_calls                GET     — browse ai_call_log (limit/offset/agent_type)
+  /api/log/ai_call/<id>            GET     — full detail for one logged call
 """
 
 import json
@@ -38,9 +40,23 @@ bp = Blueprint("market", __name__)
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
+_SERVER_START = datetime.now()
+
 @bp.route("/health")
 def health():
-    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+    uptime_s = int((datetime.now() - _SERVER_START).total_seconds())
+    # Latest backup file (if any)
+    from db import DB_PATH
+    import glob as _glob
+    bak_files = sorted(_glob.glob(str(DB_PATH.parent / f"{DB_PATH.name}.bak-2*")))
+    last_backup = bak_files[-1].split("bak-")[-1] if bak_files else None
+    return jsonify({
+        "status":      "ok",
+        "time":        datetime.now().isoformat(),
+        "version":     "2026-05",
+        "uptime_s":    uptime_s,
+        "last_backup": last_backup,
+    })
 
 
 # ── Per-ticker analysis ──────────────────────────────────────────────────────
@@ -616,7 +632,7 @@ def benchmark_history():
 
 @bp.route("/api/earnings-calendar")
 def earnings_calendar():
-    """Fetch upcoming earnings dates + EPS estimates from yfinance."""
+    """Fetch upcoming earnings dates + EPS estimates from yfinance (ETFs skipped)."""
     tickers_param = request.args.get("tickers", "")
     tickers = [t.strip() for t in tickers_param.split(",") if t.strip()]
     if not tickers:
@@ -628,6 +644,10 @@ def earnings_calendar():
         try:
             stk = yf.Ticker(asx(ticker))
             info = stk.info or {}
+            # Skip ETFs and mutual funds — they have no earnings data and yfinance
+            # logs 404 errors per symbol.  Detect via quoteType from the info dict.
+            if info.get("quoteType", "").upper() in ("ETF", "MUTUALFUND", "MONEYMARKET"):
+                return ticker.upper(), {"nextEarningsDate": None, "skipped": "ETF"}
 
             next_earnings = None
             try:
@@ -682,36 +702,82 @@ def earnings_calendar():
     return jsonify(results)
 
 
-# ── AI response logging ──────────────────────────────────────────────────────
+# ── AI response / call logging ────────────────────────────────────────────────
 
 @bp.route("/api/log/ai_response", methods=["POST"])
 def log_ai_response():
-    """Store the raw AI analysis response for debugging and save a readable copy."""
+    """Store the full AI call (prompt + response) for debugging and audit.
+
+    Required:  text          — the raw AI response text
+    Optional:  system_prompt — system prompt sent to the model
+               user_message  — user message sent to the model
+               agent_type    — e.g. 'portfolio', 'macro', 'dayTrade'
+               model         — model name (e.g. 'claude-sonnet-4-6')
+               usage         — {input_tokens, output_tokens,
+                               cache_read_input_tokens, cache_creation_input_tokens}
+               duration_ms   — wall-clock ms for the API call
+    """
     data = request.get_json() or {}
     text = data.get("text", "")
     if not text:
         return jsonify({"error": "text required"}), 400
 
+    system_prompt = (data.get("system_prompt") or "")[:20000]
+    user_message  = (data.get("user_message")  or "")[:30000]
+    agent_type    = data.get("agent_type", "")
+    model         = data.get("model", "")
+    duration_ms   = data.get("duration_ms")
+    usage         = data.get("usage") or {}
+    input_tokens  = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    cache_read    = usage.get("cache_read_input_tokens", 0) or 0
+    cache_written = usage.get("cache_creation_input_tokens", 0) or 0
+
     with get_db() as conn:
+        # Legacy: keep last_ai_raw_response for backward compat
         conn.execute(
             "INSERT OR REPLACE INTO blob_store (key, value, updated_at) "
             "VALUES (?, ?, datetime('now','localtime'))",
             ("last_ai_raw_response", json.dumps(text))
         )
+        # New: append full call to ai_call_log
+        conn.execute(
+            """INSERT INTO ai_call_log
+               (agent_type, model, system_prompt, user_message, response_text,
+                input_tokens, output_tokens, cache_read, cache_written, duration_ms)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (agent_type, model, system_prompt, user_message, text,
+             input_tokens, output_tokens, cache_read, cache_written, duration_ms)
+        )
 
+    # Write human-readable file with both prompt and response
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filename = LOG_DIR / f"ai_response_{timestamp}.txt"
-    cleaned = text.strip()
-    cleaned = re.sub(r"^\s*```json\s*", "", cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    filename  = LOG_DIR / f"ai_response_{timestamp}.txt"
+    cleaned   = text.strip()
+    cleaned   = re.sub(r"^\s*```json\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned   = re.sub(r"\s*```\s*$", "", cleaned)
+
+    tok_summary = (
+        f"Tokens: in={input_tokens or '?'} out={output_tokens or '?'} | "
+        f"Cache: read={cache_read} written={cache_written} | "
+        f"Duration: {duration_ms or '?'}ms"
+    )
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(cleaned)
+        f.write(f"=== AI CALL LOG ===\n")
+        f.write(f"Agent: {agent_type or '?'} | Model: {model or '?'} | {timestamp}\n")
+        f.write(f"{tok_summary}\n\n")
+        if system_prompt:
+            f.write(f"--- SYSTEM PROMPT ---\n{system_prompt}\n\n")
+        if user_message:
+            f.write(f"--- USER MESSAGE ---\n{user_message}\n\n")
+        f.write(f"--- RESPONSE ---\n{cleaned}\n")
 
     return jsonify({"ok": True, "saved_to": str(filename), "timestamp": timestamp})
 
 
 @bp.route("/api/log/ai_response")
 def get_ai_response():
+    """Legacy: return the most recent raw response text (kept for backward compat)."""
     with get_db() as conn:
         row = conn.execute(
             "SELECT value, updated_at FROM blob_store WHERE key='last_ai_raw_response'"
@@ -719,3 +785,60 @@ def get_ai_response():
     if row:
         return jsonify({"text": json.loads(row["value"]), "savedAt": row["updated_at"]})
     return jsonify({"text": None})
+
+
+@bp.route("/api/log/ai_calls")
+def list_ai_calls():
+    """Browse recent AI call log entries (metadata only, no full text).
+
+    Query params: limit (default 20), offset (default 0), agent_type (optional filter).
+    """
+    limit      = min(int(request.args.get("limit", 20)), 200)
+    offset     = int(request.args.get("offset", 0))
+    agent_filter = request.args.get("agent_type", "")
+
+    with get_db() as conn:
+        if agent_filter:
+            rows = conn.execute(
+                """SELECT id, timestamp, agent_type, model,
+                          input_tokens, output_tokens, cache_read, cache_written,
+                          duration_ms,
+                          substr(system_prompt, 1, 120)  AS sys_snippet,
+                          substr(user_message,  1, 200)  AS usr_snippet,
+                          substr(response_text, 1, 200)  AS resp_snippet
+                   FROM ai_call_log
+                   WHERE agent_type = ?
+                   ORDER BY id DESC LIMIT ? OFFSET ?""",
+                (agent_filter, limit, offset)
+            ).fetchall()
+            total = conn.execute(
+                "SELECT COUNT(*) FROM ai_call_log WHERE agent_type=?", (agent_filter,)
+            ).fetchone()[0]
+        else:
+            rows = conn.execute(
+                """SELECT id, timestamp, agent_type, model,
+                          input_tokens, output_tokens, cache_read, cache_written,
+                          duration_ms,
+                          substr(system_prompt, 1, 120)  AS sys_snippet,
+                          substr(user_message,  1, 200)  AS usr_snippet,
+                          substr(response_text, 1, 200)  AS resp_snippet
+                   FROM ai_call_log
+                   ORDER BY id DESC LIMIT ? OFFSET ?""",
+                (limit, offset)
+            ).fetchall()
+            total = conn.execute("SELECT COUNT(*) FROM ai_call_log").fetchone()[0]
+
+    entries = [dict(r) for r in rows]
+    return jsonify({"ok": True, "total": total, "limit": limit, "offset": offset, "entries": entries})
+
+
+@bp.route("/api/log/ai_call/<int:call_id>")
+def get_ai_call(call_id):
+    """Return the full content of a single logged AI call."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM ai_call_log WHERE id=?", (call_id,)
+        ).fetchone()
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(dict(row))

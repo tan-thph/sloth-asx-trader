@@ -1730,5 +1730,215 @@ class TestSprint8(unittest.TestCase):
         self.assertIn("showModal()", src)
 
 
+class TestAICallLog(unittest.TestCase):
+    """Tests for the prompt+response logging feature (ai_call_log table)."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_ai_call_log_table_in_schema(self):
+        """ai_call_log must be in the DB schema."""
+        import db as db_module
+        self.assertIn("ai_call_log", db_module._SCHEMA)
+
+    def test_log_ai_response_stores_full_context(self):
+        """POST /api/log/ai_response must accept prompt+response and return ok."""
+        payload = {
+            "text":          "test response",
+            "system_prompt": "you are a test assistant",
+            "user_message":  "hello",
+            "agent_type":    "portfolio",
+            "model":         "claude-sonnet-4-6",
+            "usage":         {"input_tokens": 100, "output_tokens": 50,
+                              "cache_read_input_tokens": 80, "cache_creation_input_tokens": 20},
+            "duration_ms":   1234,
+        }
+        resp = self.client.post(
+            "/api/log/ai_response",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+
+    def test_list_ai_calls_returns_entries(self):
+        """GET /api/log/ai_calls must return entries after a log call."""
+        resp = self.client.get("/api/log/ai_calls?limit=5")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+        self.assertIn("entries", body)
+        self.assertIn("total", body)
+
+    def test_list_ai_calls_agent_filter(self):
+        """GET /api/log/ai_calls?agent_type=X must filter correctly."""
+        # Log one more with a distinct agent type
+        self.client.post(
+            "/api/log/ai_response",
+            data=json.dumps({"text": "macro resp", "agent_type": "macro"}),
+            content_type="application/json",
+        )
+        resp = self.client.get("/api/log/ai_calls?agent_type=macro")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        for entry in body["entries"]:
+            self.assertEqual(entry["agent_type"], "macro")
+
+    def test_get_ai_call_detail(self):
+        """GET /api/log/ai_call/<id> must return full content."""
+        # First log a call
+        self.client.post(
+            "/api/log/ai_response",
+            data=json.dumps({"text": "detail test", "agent_type": "analyst",
+                             "system_prompt": "sys", "user_message": "usr"}),
+            content_type="application/json",
+        )
+        # Get the id from the list
+        list_resp = self.client.get("/api/log/ai_calls?agent_type=analyst&limit=1")
+        entries = json.loads(list_resp.data)["entries"]
+        if not entries:
+            self.skipTest("No analyst entries found")
+        call_id = entries[0]["id"]
+        resp = self.client.get(f"/api/log/ai_call/{call_id}")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("response_text", body)
+        self.assertIn("system_prompt", body)
+        self.assertIn("user_message", body)
+
+    def test_get_ai_call_404(self):
+        """GET /api/log/ai_call/99999 must return 404."""
+        resp = self.client.get("/api/log/ai_call/99999")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_callclaude_logs_automatically(self):
+        """claude-client.js must fire the log endpoint after every successful call."""
+        with open(os.path.join(ROOT, "js/claude-client.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("api/log/ai_response", src,
+                      "callClaude must fire /api/log/ai_response after success")
+        self.assertIn("system_prompt", src,
+                      "callClaude log payload must include system_prompt")
+        self.assertIn("user_message", src,
+                      "callClaude log payload must include user_message")
+        self.assertIn("duration_ms", src,
+                      "callClaude log payload must include duration_ms")
+
+    def test_analysis_no_longer_has_redundant_log(self):
+        """analysis.js must not have the old manual log call (now in callClaude)."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        # The old code sent { text } only; the new one in claude-client.js sends more fields.
+        # Check that the old bare { text } post is gone from analysis.js:
+        import re as _re
+        old_pattern = r"body.*JSON\.stringify\(\s*\{\s*text\s*\}\s*\)"
+        self.assertIsNone(
+            _re.search(old_pattern, src),
+            "analysis.js must not have the old bare {text} log call — it moved to callClaude()",
+        )
+
+    def test_health_endpoint_returns_version(self):
+        """GET /health must include version, uptime_s, and last_backup."""
+        resp = self.client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("version", body)
+        self.assertIn("uptime_s", body)
+        self.assertIn("last_backup", body)
+
+
+class TestComparePage(unittest.TestCase):
+    """Tests for the side-by-side compare feature."""
+
+    def test_compare_js_exists(self):
+        """js/pages/compare.js must exist."""
+        self.assertTrue(
+            os.path.isfile(os.path.join(ROOT, "js/pages/compare.js")),
+            "js/pages/compare.js must exist",
+        )
+
+    def test_compare_js_syntax(self):
+        """compare.js must pass node --check."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/pages/compare.js")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, f"compare.js syntax error: {result.stderr}")
+
+    def test_compare_page_in_navigation(self):
+        """navigation.js must include case 'compare' and g+x shortcut."""
+        with open(os.path.join(ROOT, "js/navigation.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("case 'compare'", src)
+        self.assertIn("x: 'compare'", src)
+
+    def test_compare_script_in_html(self):
+        """asx_trading.html must load compare.js."""
+        with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("pages/compare.js", src)
+
+    def test_compare_nav_item_in_html(self):
+        """asx_trading.html must have a Compare nav button."""
+        with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("showPage('compare')", src)
+
+    def test_compare_functions_present(self):
+        """compare.js must expose renderComparePage, runComparison, compareFromOutside."""
+        with open(os.path.join(ROOT, "js/pages/compare.js"), encoding="utf-8") as f:
+            src = f.read()
+        for fn in ["renderComparePage", "runComparison", "compareFromOutside", "clearComparison"]:
+            self.assertIn(fn, src, f"compare.js must define {fn}")
+
+
+class TestETFEarningsFilter(unittest.TestCase):
+    """ETF detection in the earnings calendar endpoint."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_earnings_calendar_skips_etf_via_quotetype(self):
+        """_fetch_earnings must return skipped='ETF' for quoteType=ETF."""
+        import routes.market as _mkt
+        # Simulate a yfinance ticker whose info.quoteType == 'ETF'
+        class _FakeTicker:
+            info = {"quoteType": "ETF"}
+            calendar = None
+        import unittest.mock as _mock
+        with _mock.patch.object(_mkt.yf, "Ticker", return_value=_FakeTicker()):
+            resp = self.client.get("/api/earnings-calendar?tickers=VAS")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("VAS", body)
+        self.assertEqual(body["VAS"].get("skipped"), "ETF")
+
+
+class TestPromptVersionDelta(unittest.TestCase):
+    """Prompt version A/B delta in the Learning Loop UI."""
+
+    def test_delta_column_in_learning_js(self):
+        """learning.js prompt version table must include Δ vs prev column."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("vs prev", src,
+                      "learning.js must have a Δ vs prev column header")
+        self.assertIn("isCurrent", src,
+                      "learning.js must highlight the current prompt version")
+        self.assertIn("PROMPT_VERSION", src,
+                      "learning.js must reference PROMPT_VERSION for current-version badge")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

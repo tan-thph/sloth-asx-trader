@@ -52,6 +52,7 @@ async function callClaude(agentType, userMessage, options = {}) {
   //   • Direct (default): browser → api.anthropic.com using key from localStorage
   //   • Proxy (opt-in via state.settings.useBackendProxy): browser → /api/claude/proxy
   //     → api.anthropic.com using key stored in SQLite settings table
+  const _callStart = Date.now();   // wall-clock start for duration_ms logging
   const useProxy = !!(state.settings && state.settings.useBackendProxy);
   const key = useProxy ? null : getApiKey();
   if (!useProxy && !key) throw new Error('No API key — add one in Settings (or enable backend proxy)');
@@ -138,7 +139,41 @@ async function callClaude(agentType, userMessage, options = {}) {
       console.log(`[${agentType}] cache read=${usage.cache_read_input_tokens ?? 0} written=${usage.cache_creation_input_tokens ?? 0}`);
     }
 
-    return { text: data.content?.[0]?.text ?? '', usage };
+    const responseText = data.content?.[0]?.text ?? '';
+
+    // ── Fire-and-forget: log full call (prompt + response) to backend ──────────
+    // Runs after every successful callClaude — covers all agent types automatically.
+    try {
+      // Extract system prompt text from whatever form it was passed in
+      let _sysText = '';
+      if (options.systemArray && Array.isArray(options.systemArray)) {
+        _sysText = options.systemArray.map(b => b.text || '').join('\n---\n');
+      } else if (system) {
+        _sysText = typeof system === 'string' ? system : (system[0]?.text || '');
+      }
+      // Reconstruct user message for multi-turn (assistant page)
+      let _userText = userMessage || '';
+      if (options.messages && Array.isArray(options.messages)) {
+        _userText = options.messages
+          .map(m => `[${m.role}] ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
+          .join('\n');
+      }
+      fetch(`${API}/api/log/ai_response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text:          responseText,
+          system_prompt: _sysText.slice(0, 8000),
+          user_message:  _userText.slice(0, 30000),
+          agent_type:    agentType,
+          model:         CLAUDE_MODEL,
+          usage,
+          duration_ms:   Date.now() - _callStart,
+        }),
+      }).catch(() => {});  // never let logging break the caller
+    } catch (_logErr) { /* swallow */ }
+
+    return { text: responseText, usage };
   }
 
   throw lastErr ?? new Error(`callClaude(${agentType}) failed after ${RETRY_DELAYS.length} attempts`);

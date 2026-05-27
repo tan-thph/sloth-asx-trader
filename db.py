@@ -177,6 +177,22 @@ _SCHEMA = """
     CREATE INDEX IF NOT EXISTS idx_learning_pv         ON ai_learning_events(prompt_version);
     CREATE INDEX IF NOT EXISTS idx_learning_conf       ON ai_learning_events(ai_confidence);
     CREATE INDEX IF NOT EXISTS idx_failed_ts           ON failed_tickers(timestamp DESC);
+
+    CREATE TABLE IF NOT EXISTS ai_call_log (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp     TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        agent_type    TEXT,
+        model         TEXT,
+        system_prompt TEXT,
+        user_message  TEXT,
+        response_text TEXT,
+        input_tokens  INTEGER,
+        output_tokens INTEGER,
+        cache_read    INTEGER DEFAULT 0,
+        cache_written INTEGER DEFAULT 0,
+        duration_ms   INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_log_ts ON ai_call_log(timestamp DESC);
 """
 
 

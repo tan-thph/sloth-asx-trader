@@ -171,7 +171,8 @@ function _watchlistRow(item) {
       ${sig
         ? `<button class="btn btn-sm" onclick="showPage('signals')" title="View signals">◇</button>`
         : `<button class="btn btn-sm" onclick="watchlistFetchSignal('${item.ticker}')" title="Fetch signals">⟳</button>`}
-      <button class="btn btn-sm btn-danger" onclick="watchlistRemove('${item.ticker}')" title="Remove" style="margin-left:4px">✕</button>
+      <button class="btn btn-sm" onclick="compareFromWatchlist('${item.ticker}')" title="Open in side-by-side Compare" style="margin-left:4px">&#8644;</button>
+      <button class="btn btn-sm btn-danger" onclick="watchlistRemove('${item.ticker}')" title="Remove" style="margin-left:4px">&#10005;</button>
     </td>
   </tr>`;
 }
@@ -220,6 +221,20 @@ async function watchlistFetchSignal(ticker) {
     renderPage();
   } catch (e) {
     toast(`Signal fetch failed: ${e.message}`, 'error');
+  }
+}
+
+// Open this ticker in the Compare page, pre-filling it as Ticker 1
+function compareFromWatchlist(ticker) {
+  if (typeof compareFromOutside === 'function') {
+    // Carry the full watchlist (up to 4) so the user can quickly compare them
+    const others = (state.watchlist || [])
+      .filter(w => w.ticker !== ticker)
+      .map(w => w.ticker)
+      .slice(0, 3);
+    compareFromOutside([ticker, ...others]);
+  } else {
+    showPage('compare');
   }
 }
 
