@@ -70,6 +70,7 @@ const state = {
   watchlist: [],            // [{ticker, addedAt, notes}] — tickers monitored but not held
   savedScreeners: [],       // [{name, savedAt, config:{universe, min_adv_aud, excludeHoldings}}]
   targetAllocations: {},    // ticker → target weight % (e.g. {CBA:15,BHP:10}) — persisted in blob_store
+  digestHistory: [],        // [{date, text}] — saved AI postmortem digests, newest first
   analysisConfig: {
     extraTickers: [],
     marketView: '',

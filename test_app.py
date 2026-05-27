@@ -1544,5 +1544,58 @@ class TestSprint7(unittest.TestCase):
         self.assertIn("_buildFranking45DayCard()", src)
 
 
+class TestDigestHistory(unittest.TestCase):
+    """Digest history — save/load AI postmortem digests across sessions."""
+
+    def setUp(self):
+        _install_in_memory_db()
+        self.client = asx_server.app.test_client()
+
+    def test_digest_history_in_config(self):
+        """config.js state must include digestHistory default."""
+        with open(os.path.join(ROOT, "js/config.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("digestHistory", src)
+
+    def test_digest_saved_after_generation(self):
+        """generatePostmortemDigest must push entry to state.digestHistory and call saveStateToDb."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("state.digestHistory.unshift(", src)
+        self.assertIn("saveStateToDb()", src)
+
+    def test_digest_delete_function(self):
+        """learning.js must define deleteDigest(index) to remove entries."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function deleteDigest(", src)
+        self.assertIn("state.digestHistory.splice(", src)
+
+    def test_digest_history_rendered_in_card(self):
+        """Learning page digest card must render the digestHistory list."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("state.digestHistory", src)
+        self.assertIn("deleteDigest(", src)
+
+    def test_digest_history_in_api_save(self):
+        """api.js save payload must include digestHistory."""
+        with open(os.path.join(ROOT, "js/api.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("digestHistory", src)
+
+    def test_digest_history_in_blob_keys(self):
+        """portfolio.py BLOB_KEYS must include digestHistory."""
+        with open(os.path.join(ROOT, "routes/portfolio.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("digestHistory", src)
+
+    def test_digest_capped_at_50(self):
+        """Digest history must be capped to prevent unbounded growth."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("digestHistory.length > 50", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

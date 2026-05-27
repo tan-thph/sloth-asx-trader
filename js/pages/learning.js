@@ -562,6 +562,21 @@ function _renderLearningContent(d, brier) {
   const debateStatsPlaceholder = `
     <div id="ll-debate-stats-card" class="card section-gap" style="display:none"></div>`;
 
+  const digestHistory = state.digestHistory || [];
+  const digestHistoryHtml = digestHistory.length === 0 ? '' : `
+    <div style="margin-top:14px">
+      <div class="text-xs text-muted" style="font-weight:600;margin-bottom:6px">Saved Digests (${digestHistory.length})</div>
+      ${digestHistory.slice(0, 10).map((d, i) => `
+        <details style="margin-bottom:6px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+          <summary style="padding:6px 10px;cursor:pointer;font-size:12px;font-weight:600;background:var(--bg-secondary);display:flex;justify-content:space-between;align-items:center;list-style:none">
+            <span>📋 ${d.date}</span>
+            <button class="btn btn-sm" style="padding:1px 6px;font-size:11px"
+              onclick="event.preventDefault();deleteDigest(${i})">✕</button>
+          </summary>
+          <div style="padding:10px;font-size:12px;line-height:1.6;white-space:pre-wrap;color:var(--text-primary)">${escapeHTML(d.text)}</div>
+        </details>`).join('')}
+    </div>`;
+
   const digestCard = `
     <div class="card section-gap" id="postmortem-digest-card">
       <div class="flex-between" style="margin-bottom:6px">
@@ -571,9 +586,10 @@ function _renderLearningContent(d, brier) {
       </div>
       <p class="text-xs text-muted">
         Claude analyses your recent losses and failure patterns to extract actionable lessons.
-        Runs once on demand — results are not saved.
+        Each result is saved automatically.
       </p>
       <div id="digest-result" style="display:none;margin-top:10px"></div>
+      ${digestHistoryHtml}
     </div>`;
 
   return summaryCards + calibCard +
@@ -634,20 +650,33 @@ Please write a concise postmortem digest (under 250 words) in plain text. Struct
 Be direct, specific, and actionable. No generic advice.`;
 
     const text = await callClaude('assistant', prompt, { maxTokens: 600, noCache: true });
+    const dateStr = new Date().toLocaleDateString('en-AU');
     out.innerHTML = `
       <div style="border-top:1px solid var(--border);padding-top:10px">
         <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-          <span class="text-xs text-muted" style="font-weight:600">AI Digest — ${new Date().toLocaleDateString('en-AU')}</span>
+          <span class="text-xs text-muted" style="font-weight:600">AI Digest — ${dateStr}</span>
           <button class="btn btn-sm" onclick="document.getElementById('digest-result').style.display='none'">✕</button>
         </div>
         <div style="font-size:13px;line-height:1.6;white-space:pre-wrap;color:var(--text-primary)">${escapeHTML(text)}</div>
       </div>`;
+    if (!Array.isArray(state.digestHistory)) state.digestHistory = [];
+    state.digestHistory.unshift({ date: dateStr, text });
+    if (state.digestHistory.length > 50) state.digestHistory.length = 50;
+    await saveStateToDb();
   } catch (e) {
     out.innerHTML = `<div class="text-sm text-danger" style="padding:8px">${e.message}</div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = 'Generate Digest';
   }
+}
+
+// ── Delete a saved digest entry ───────────────────────────────────────────────
+async function deleteDigest(index) {
+  if (!Array.isArray(state.digestHistory)) return;
+  state.digestHistory.splice(index, 1);
+  await saveStateToDb();
+  renderPage();
 }
 
 // ── Delete a single learning event (optimise calibration dataset) ─────────────
