@@ -110,6 +110,7 @@ function renderPortfolioHistory() {
           <span>─ <span style="color:#3b82f6">Net Worth</span></span>
           <span>─ <span style="color:#22c55e">Portfolio</span></span>
           <span>── <span style="color:#f59e0b">Cash</span></span>
+          <span>── <span style="color:#94a3b8">ASX200</span></span>
           <span style="margin-left:auto">Peak: $${fmt(maxNW)} · Trough: $${fmt(minNW)}</span>
         </div>
         <div style="margin-top:12px">
@@ -172,7 +173,10 @@ function renderPortfolioHistory() {
   `;
 }
 
-function drawHistoryChart() {
+// Benchmark cache: { period, dates: [...ISO], prices: [...number] }
+let _benchmarkCache = null;
+
+async function drawHistoryChart() {
   const canvas = document.getElementById('history-chart');
   if (!canvas) return;
 
@@ -198,7 +202,6 @@ function drawHistoryChart() {
         key = `${s.date.slice(6,10)}-${s.date.slice(3,5)}-01`;
       } else {
         key = `${s.date.slice(6,10)}-01-01`;
-
       }
       grouped[key] = s;
     });
@@ -208,15 +211,54 @@ function drawHistoryChart() {
   const data = getFilteredData(_historyPeriod);
   if (data.length < 2) return;
 
+  // Fetch benchmark (^AXJO) for the current period window
+  const benchPeriodMap = { daily: '3mo', weekly: '6mo', monthly: '2y', yearly: '10y' };
+  const benchPeriod = benchPeriodMap[_historyPeriod] || '2y';
+  if (state.serverOk && (!_benchmarkCache || _benchmarkCache.period !== benchPeriod)) {
+    try {
+      const br = await fetch(`${API}/api/benchmark?period=${benchPeriod}`);
+      if (br.ok) {
+        const bd = await br.json();
+        _benchmarkCache = { period: benchPeriod, dates: bd.dates, prices: bd.prices };
+      }
+    } catch {}
+  }
+
   const ctx = canvas.getContext('2d');
   const w = canvas.offsetWidth || 600;
   const h = 240;
   canvas.width = w; canvas.height = h;
 
-  const nwArr = data.map(d => d.netWorth);
-  const pvArr = data.map(d => d.portfolioValue);
+  const nwArr   = data.map(d => d.netWorth);
+  const pvArr   = data.map(d => d.portfolioValue);
   const cashArr = data.map(d => d.cash);
-  const allVals = [...nwArr, ...pvArr, ...cashArr];
+
+  // Build normalized benchmark series aligned to portfolio dates
+  let benchArr = null;
+  if (_benchmarkCache && _benchmarkCache.dates.length) {
+    const benchMap = {};
+    for (let i = 0; i < _benchmarkCache.dates.length; i++) {
+      benchMap[_benchmarkCache.dates[i]] = _benchmarkCache.prices[i];
+    }
+    // Convert portfolio dates (DD-MM-YYYY) to ISO (YYYY-MM-DD)
+    const isoFn = d => { const [dd, mm, yyyy] = d.date.split('-'); return `${yyyy}-${mm}-${dd}`; };
+    const portfolioDatesISO = data.map(isoFn);
+    // Find first common date to anchor normalization
+    let baseNW = null, baseBench = null;
+    for (let i = 0; i < portfolioDatesISO.length; i++) {
+      const bp = benchMap[portfolioDatesISO[i]];
+      if (bp != null) { baseNW = nwArr[i]; baseBench = bp; break; }
+    }
+    if (baseNW != null && baseBench != null) {
+      const raw = portfolioDatesISO.map(iso => {
+        const bp = benchMap[iso];
+        return bp != null ? (bp / baseBench) * baseNW : null;
+      });
+      if (raw.filter(v => v != null).length >= 2) benchArr = raw;
+    }
+  }
+
+  const allVals = [...nwArr, ...pvArr, ...cashArr, ...(benchArr ? benchArr.filter(Boolean) : [])];
   const minV = Math.min(...allVals) * 0.98;
   const maxV = Math.max(...allVals) * 1.02;
   const range = maxV - minV || 1;
@@ -257,10 +299,15 @@ function drawHistoryChart() {
     ctx.fillText(lbl, py(i), h - pad.b + 14);
   });
 
-  // Draw a line series
+  // Draw a line series (skips null gaps for sparse benchmark data)
   function drawLine(arr, color, dashed) {
     ctx.beginPath();
-    arr.forEach((v, i) => i === 0 ? ctx.moveTo(py(i), px(v)) : ctx.lineTo(py(i), px(v)));
+    let started = false;
+    arr.forEach((v, i) => {
+      if (v == null) { started = false; return; }
+      if (!started) { ctx.moveTo(py(i), px(v)); started = true; }
+      else ctx.lineTo(py(i), px(v));
+    });
     ctx.strokeStyle = color; ctx.lineWidth = 2;
     if (dashed) ctx.setLineDash([4, 3]); else ctx.setLineDash([]);
     ctx.stroke(); ctx.setLineDash([]);
@@ -276,6 +323,7 @@ function drawHistoryChart() {
   ctx.lineTo(py(0), pad.t + ch);
   ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
 
+  if (benchArr) drawLine(benchArr, '#94a3b8', true);
   drawLine(nwArr, '#3b82f6', false);
   drawLine(pvArr, '#22c55e', false);
   drawLine(cashArr, '#f59e0b', true);
@@ -286,6 +334,17 @@ function drawHistoryChart() {
     ctx.beginPath(); ctx.arc(lastX, lastY, 4, 0, Math.PI*2);
     ctx.fillStyle = col; ctx.fill();
   });
+  if (benchArr) {
+    // Find the last non-null position in the sparse benchmark series
+    let lastBenchIdx = -1;
+    for (let i = benchArr.length - 1; i >= 0; i--) {
+      if (benchArr[i] != null) { lastBenchIdx = i; break; }
+    }
+    if (lastBenchIdx >= 0) {
+      ctx.beginPath(); ctx.arc(py(lastBenchIdx), px(benchArr[lastBenchIdx]), 4, 0, Math.PI*2);
+      ctx.fillStyle = '#94a3b8'; ctx.fill();
+    }
+  }
 }
 
 
@@ -308,8 +367,9 @@ async function fetchSignals(tickers, forceRefresh=false) {
       state.lastSignalFetch[t] = now;
     });
   } catch {}
-  // Recompute critical alerts whenever fresh signal data arrives
+  // Recompute critical alerts and indicator alerts whenever fresh signal data arrives
   computeCriticalAlerts();
+  if (typeof checkIndicatorAlerts === 'function') checkIndicatorAlerts();
   return state.liveSignals;
 }
 

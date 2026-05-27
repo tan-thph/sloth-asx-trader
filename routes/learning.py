@@ -28,6 +28,24 @@ _CALIB_TTL = 300
 bp = Blueprint("learning", __name__)
 
 
+def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
+    """Wilson score confidence interval for a proportion.
+
+    Returns (lo, hi) as percentages (0–100), or None if n == 0.
+    z=1.96 → 95% CI.
+    """
+    if n == 0:
+        return None
+    p = successes / n
+    z2 = z * z
+    denom = 1 + z2 / n
+    centre = (p + z2 / (2 * n)) / denom
+    spread = z * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / denom
+    lo = max(0.0, (centre - spread) * 100)
+    hi = min(100.0, (centre + spread) * 100)
+    return round(lo, 1), round(hi, 1)
+
+
 def _expire_old_events(conn) -> None:
     """Auto-expire open events older than 120 days. Called on write paths only (L3)."""
     conn.execute("""
@@ -54,8 +72,9 @@ def learning_log():
                      outcome_status, realized_pnl_aud, realized_pnl_pct, holding_period_days, exit_reason,
                      actual_entry_price, actual_exit_price, sector,
                      skill_score, debate_summary, prompt_hash, error_type_source,
-                     entry_signals_json, debate_synthesis_winner)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     entry_signals_json, debate_synthesis_winner,
+                     tags, trade_thesis)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -86,6 +105,8 @@ def learning_log():
                 data.get("error_type_source"),
                 data.get("entry_signals_json"),
                 data.get("debate_synthesis_winner"),
+                data.get("tags"),
+                data.get("trade_thesis"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -117,7 +138,8 @@ def learning_outcome():
             for col in ("outcome_status", "realized_pnl_pct", "realized_pnl_aud",
                         "holding_period_days", "exit_reason", "error_type", "notes",
                         "actual_entry_price", "actual_exit_price", "sector",
-                        "skill_score", "debate_summary", "prompt_hash"):
+                        "skill_score", "debate_summary", "prompt_hash",
+                        "tags", "trade_thesis"):
                 if col in data:
                     fields.append(f"{col}=?")
                     vals.append(data[col])
@@ -168,7 +190,7 @@ def learning_stats():
                 "SELECT COUNT(*) FROM ai_learning_events WHERE outcome_status='win'"
             ).fetchone()[0]
 
-            # Confidence bands
+            # Confidence bands (with Wilson 95% CI)
             conf_bands = []
             for lo, hi in [(0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]:
                 rows = conn.execute("""
@@ -179,12 +201,19 @@ def learning_stats():
                 """, (lo, hi)).fetchall()
                 band_wins  = sum(r['cnt'] for r in rows if r['outcome_status'] == 'win')
                 band_total = sum(r['cnt'] for r in rows)
+                ci = _wilson_ci(band_wins, band_total)
                 conf_bands.append({
                     "band":     f"{int(lo*100)}-{int(hi*100)}%",
                     "wins":     band_wins,
                     "total":    band_total,
                     "win_rate": round(band_wins / band_total * 100, 1) if band_total else None,
+                    "ci_lo":    ci[0] if ci else None,
+                    "ci_hi":    ci[1] if ci else None,
+                    "low_n":    band_total < 30,
                 })
+
+            # Overall Wilson CI
+            overall_ci = _wilson_ci(wins, closed)
 
             # Regime stats
             regime_rows = conn.execute("""
@@ -200,11 +229,18 @@ def learning_stats():
                 regime_agg[reg]['total'] += r['cnt']
                 if r['outcome_status'] == 'win':
                     regime_agg[reg]['wins'] += r['cnt']
-            regime_list = [
-                {"regime": k, "wins": v['wins'], "total": v['total'],
-                 "win_rate": round(v['wins'] / v['total'] * 100, 1) if v['total'] else None}
-                for k, v in sorted(regime_agg.items())
-            ]
+            regime_list = []
+            for k, v in sorted(regime_agg.items()):
+                ci = _wilson_ci(v['wins'], v['total'])
+                regime_list.append({
+                    "regime":   k,
+                    "wins":     v['wins'],
+                    "total":    v['total'],
+                    "win_rate": round(v['wins'] / v['total'] * 100, 1) if v['total'] else None,
+                    "ci_lo":    ci[0] if ci else None,
+                    "ci_hi":    ci[1] if ci else None,
+                    "low_n":    v['total'] < 30,
+                })
 
             # Prompt version stats
             pv_rows = conn.execute("""
@@ -305,11 +341,15 @@ def learning_stats():
                 "SELECT ticker, error, context, timestamp FROM failed_tickers ORDER BY id DESC LIMIT 20"
             ).fetchall()
 
+        oci = overall_ci
         return jsonify({
             "total":              total,
             "closed":             closed,
             "wins":               wins,
             "overall_win_rate":   round(wins / closed * 100, 1) if closed else None,
+            "overall_ci_lo":      oci[0] if oci else None,
+            "overall_ci_hi":      oci[1] if oci else None,
+            "calibration_active": closed >= 30,  # True when n is large enough to trust CI
             "insufficient_data":  closed < 10,  # flag for UI to soften calibration display
             "conf_bands":         conf_bands,
             "regime_stats":       regime_list,
@@ -407,6 +447,53 @@ def learning_debate_stats():
     })
 
 
+@bp.route("/api/learning/calibration-stats")
+def learning_calibration_stats():
+    """Brier score + reliability-diagram bins.
+
+    Brier score = mean((confidence - outcome)^2); outcome=1 for win, 0 otherwise.
+    Lower is better (perfect model = 0, random = 0.25).
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT ai_confidence, outcome_status
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven')
+                  AND ai_confidence IS NOT NULL
+            """).fetchall()
+
+        n = len(rows)
+        if n == 0:
+            return jsonify({"brier_score": None, "n": 0, "bins": []})
+
+        sq_errors = [
+            (float(r["ai_confidence"]) - (1.0 if r["outcome_status"] == "win" else 0.0)) ** 2
+            for r in rows
+        ]
+        brier = round(sum(sq_errors) / n, 4)
+
+        bins = []
+        for lo, hi in [(0.50, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]:
+            subset = [r for r in rows if lo <= float(r["ai_confidence"]) < hi]
+            if not subset:
+                continue
+            mean_conf = sum(float(r["ai_confidence"]) for r in subset) / len(subset)
+            wins = sum(1 for r in subset if r["outcome_status"] == "win")
+            bins.append({
+                "range":           f"{int(lo*100)}-{int(min(hi, 1.0)*100)}%",
+                "lo":              lo,
+                "hi":              min(hi, 1.0),
+                "n":               len(subset),
+                "mean_confidence": round(mean_conf, 3),
+                "actual_win_rate": round(wins / len(subset), 3),
+            })
+
+        return jsonify({"brier_score": brier, "n": n, "bins": bins})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -> dict:
     """
     Pure calibration computation. Returns a plain dict.
@@ -445,8 +532,14 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                 ORDER BY timestamp DESC LIMIT 300
             """, (cutoff,)).fetchall()
 
-        if len(rows) < 5:
-            return {"available": False, "block": None}
+        # Gate: suppress calibration nudges when sample is too small (n < 30)
+        # to avoid chasing randomness in early-stage data.
+        if len(rows) < 30:
+            return {
+                "available": False,
+                "block": None,
+                "gate_reason": f"Insufficient data — need 30+ closed trades, have {len(rows)}",
+            }
 
         n = len(rows)
         parts = []

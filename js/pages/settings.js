@@ -79,6 +79,35 @@ python3 asx_server.py</pre>
       </div>
     </div>
     <div class="card">
+      <div class="card-title">Telegram Alerts</div>
+      <p class="text-xs text-muted mb-2">
+        Receive price and stop/target alerts on your phone via Telegram.
+        Create a bot at <strong>@BotFather</strong>, then run <code>/start</code> in the chat to get your Chat ID.
+      </p>
+      <div class="grid-2" style="gap:12px">
+        <div class="form-row">
+          <div class="form-label">Bot Token</div>
+          <input type="password" id="tg-token-input" placeholder="1234567890:ABCdef..."
+            value="${state.settings.tgToken || ''}">
+        </div>
+        <div class="form-row">
+          <div class="form-label">Chat ID</div>
+          <input type="text" id="tg-chat-input" placeholder="-100123456789 or @username"
+            value="${state.settings.tgChatId || ''}">
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn btn-sm btn-primary" onclick="saveTelegramConfig()">Save</button>
+        <button class="btn btn-sm" onclick="testTelegramAlert()">Test Alert</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+          <input type="checkbox" ${state.settings.telegramEnabled ? 'checked' : ''}
+            onchange="updateSetting('telegramEnabled', this.checked);scheduleSave()">
+          Enable Telegram alerts
+        </label>
+        <span id="tg-status" class="text-xs text-muted"></span>
+      </div>
+    </div>
+    <div class="card">
       <div class="card-title">Auto-Analysis Scheduler</div>
       <div class="grid-2" style="gap:16px;margin-bottom:1rem">
         <div>
@@ -215,6 +244,57 @@ function applySchedulePreset(startTime, endTime, intervalMins) {
   if (state.page === 'dashboard') renderPage();
   applyScheduler();
   toast(`Applied ${startTime}–${endTime} schedule (${intervalMins}m intervals)`,'success');
+}
+
+async function saveTelegramConfig() {
+  const token   = (document.getElementById('tg-token-input')?.value || '').trim();
+  const chat_id = (document.getElementById('tg-chat-input')?.value  || '').trim();
+  state.settings.tgToken  = token;
+  state.settings.tgChatId = chat_id;
+  scheduleSave();
+  const statusEl = document.getElementById('tg-status');
+  try {
+    const r = await fetch(`${API}/api/alerts/telegram/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, chat_id }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      toast('Telegram credentials saved', 'success');
+      if (statusEl) statusEl.textContent = '✓ Saved';
+    } else {
+      toast(`Save failed: ${d.error}`, 'error');
+    }
+  } catch (e) {
+    toast('Could not reach backend', 'error');
+  }
+}
+
+async function testTelegramAlert() {
+  const token   = (document.getElementById('tg-token-input')?.value || '').trim();
+  const chat_id = (document.getElementById('tg-chat-input')?.value  || '').trim();
+  if (!token || !chat_id) { toast('Enter bot token and chat ID first', 'error'); return; }
+  const statusEl = document.getElementById('tg-status');
+  if (statusEl) statusEl.textContent = 'Sending…';
+  try {
+    const r = await fetch(`${API}/api/alerts/telegram`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: '🦥 Sloth ASX Trader — Telegram alerts are working!', token, chat_id }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      toast('Test message sent — check Telegram', 'success');
+      if (statusEl) statusEl.textContent = '✓ Test sent';
+    } else {
+      toast(`Send failed: ${d.error}`, 'error');
+      if (statusEl) statusEl.textContent = `✗ ${d.error}`;
+    }
+  } catch (e) {
+    toast('Could not reach backend', 'error');
+    if (statusEl) statusEl.textContent = '✗ Backend unreachable';
+  }
 }
 
 let _customIntervalTimer = null;

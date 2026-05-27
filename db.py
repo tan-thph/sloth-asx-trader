@@ -11,7 +11,10 @@ Use:
         conn.execute(...)
 """
 
+import glob
+import shutil
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "asx_trader.db"
@@ -197,6 +200,9 @@ _LE_MIGRATIONS = [
     ("entry_signals_json",      "TEXT"),
     # v5: synthesizer prediction from bull/bear debate ('bull'/'bear'/'neutral')
     ("debate_synthesis_winner", "TEXT"),
+    # sprint-3C: trade tags (comma-separated) and thesis for Learning Loop context
+    ("tags",         "TEXT"),
+    ("trade_thesis", "TEXT"),
 ]
 
 
@@ -220,6 +226,29 @@ def init_db():
         tj_cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_journal)").fetchall()}
         if "close_date" not in tj_cols:
             conn.execute("ALTER TABLE trade_journal ADD COLUMN close_date TEXT")
+
+
+def backup_db(keep: int = 7) -> str | None:
+    """Copy DB to a dated backup file; prune oldest if > keep copies exist.
+
+    Returns the backup path on success, None if the DB doesn't exist yet.
+    Safe to call while the server is running (WAL mode allows concurrent reads).
+    """
+    if not DB_PATH.exists():
+        return None
+    ts = datetime.now().strftime("%Y%m%d")
+    dst = DB_PATH.parent / f"{DB_PATH.name}.bak-{ts}"
+    if not dst.exists():
+        shutil.copy2(DB_PATH, dst)
+    # prune oldest dated backups, keep the most recent `keep` copies
+    pattern = str(DB_PATH.parent / f"{DB_PATH.name}.bak-2*")
+    backups = sorted(glob.glob(pattern))
+    for old in backups[:-keep]:
+        try:
+            Path(old).unlink()
+        except OSError:
+            pass
+    return str(dst)
 
 
 def log_failed_ticker(ticker: str, error: str, context: str = 'scan') -> None:

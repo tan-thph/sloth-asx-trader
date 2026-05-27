@@ -814,11 +814,12 @@ function _stopScanPoller() {
 
 function scannerAddToWatchlist(ticker) {
   const extras = state.analysisConfig?.extraTickers || [];
-  if (extras.includes(ticker)) { toast(`${ticker} already in watchlist`, 'info'); return; }
   if (!state.analysisConfig) state.analysisConfig = {};
-  state.analysisConfig.extraTickers = [...extras, ticker];
+  if (!extras.includes(ticker)) {
+    state.analysisConfig.extraTickers = [...extras, ticker];
+  }
+  watchlistAddTicker(ticker);  // also add to proper watchlist
   saveStateToDb();
-  toast(`${ticker} added to watchlist — will be included in next analysis`, 'success');
   renderPage();
 }
 
@@ -831,6 +832,9 @@ function scannerAddAllToWatchlist(tickers) {
   }
   if (!state.analysisConfig) state.analysisConfig = {};
   state.analysisConfig.extraTickers = [...extras];
+  for (const t of tickers) {
+    if (!portfolio.has(t)) watchlistAddTicker(t, '', true);
+  }
   saveStateToDb();
   toast(`${added} tickers added to watchlist`, added > 0 ? 'success' : 'info');
   renderPage();

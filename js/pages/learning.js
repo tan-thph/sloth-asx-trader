@@ -39,11 +39,16 @@ async function renderLearningPage(gen) {
     </div>`;
 
   let data = null;
+  let brierData = null;
   try {
-    const resp = await fetch(`${API}/api/learning/stats`);
+    const [resp, brierResp] = await Promise.all([
+      fetch(`${API}/api/learning/stats`),
+      fetch(`${API}/api/learning/calibration-stats`).catch(() => null),
+    ]);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     data = await resp.json();
     if (data.error) throw new Error(data.error);
+    if (brierResp && brierResp.ok) brierData = await brierResp.json().catch(() => null);
   } catch (e) {
     if (state._renderGen !== gen) return;
     el.innerHTML = `<div class="card"><div class="text-muted text-sm" style="padding:12px">
@@ -54,7 +59,7 @@ async function renderLearningPage(gen) {
   }
   if (state._renderGen !== gen) return;
 
-  el.innerHTML = _renderLearningContent(data);
+  el.innerHTML = _renderLearningContent(data, brierData);
 
   // Async: load debate engine status without blocking the main render
   if (typeof debateStatus === 'function') {
@@ -64,12 +69,15 @@ async function renderLearningPage(gen) {
   renderDebateStatsCard().catch(() => {});
 }
 
-function _renderLearningContent(d) {
+function _renderLearningContent(d, brier) {
   // Backend fields (flat, win_rate already 0-100)
   const total        = d.total            ?? 0;
   const closed       = d.closed           ?? 0;
   const wins         = d.wins             ?? 0;
   const overallWR    = d.overall_win_rate;                // null or 0-100
+  const overallCiLo  = d.overall_ci_lo;                  // Wilson CI low (%)
+  const overallCiHi  = d.overall_ci_hi;                  // Wilson CI high (%)
+  const calibActive  = d.calibration_active ?? (closed >= 30);
   const confBands       = d.conf_bands        || [];
   const regimes         = d.regime_stats      || [];
   const versions        = d.version_stats     || [];
@@ -113,6 +121,7 @@ function _renderLearningContent(d) {
         <div class="metric-label">Overall Win Rate</div>
         <div class="metric-value ${overallWR != null && overallWR >= 50 ? 'up' : 'down'}">${pct(overallWR)}</div>
         <div class="metric-sub">${wins}W / ${closed - wins}L (${closed} closed)</div>
+        ${overallCiLo != null ? `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">95% CI: ${overallCiLo.toFixed(0)}–${overallCiHi.toFixed(0)}%${!calibActive ? ' · <span style="color:#d97706">n&lt;30, calibration paused</span>' : ''}</div>` : ''}
       </div>
       <div class="metric-card">
         <div class="metric-label">High-Conf Win Rate</div>
@@ -124,6 +133,12 @@ function _renderLearningContent(d) {
         <div class="metric-value" style="font-size:13px">${latestVer || '—'}</div>
         <div class="metric-sub">${latestCalls} calls this version</div>
       </div>
+      ${brier && brier.n > 0 ? `
+      <div class="metric-card">
+        <div class="metric-label">Brier Score</div>
+        <div class="metric-value ${brier.brier_score <= 0.20 ? 'up' : brier.brier_score <= 0.25 ? '' : 'down'}">${brier.brier_score.toFixed(3)}</div>
+        <div class="metric-sub">n=${brier.n} · 0=perfect · 0.25=random</div>
+      </div>` : ''}
     </div>`;
 
   // ── Calibration table ──────────────────────────────────────────────────────
@@ -139,8 +154,8 @@ function _renderLearningContent(d) {
         </div>
       </div>` : ''}
       <p class="text-xs text-muted mb-1">
-        Predicted confidence vs actual win rate per band. ⚠ = fewer than 5 samples — treat cautiously.
-        Calibration notes are injected into Claude when n≥3 and |delta|>5pp.
+        Predicted confidence vs actual win rate per band. 95% CI shown — wide intervals mean small samples.
+        ${calibActive ? 'Calibration notes are injected into Claude prompts.' : '<strong style="color:#d97706">Calibration paused — need 30+ closed trades.</strong>'}
       </p>
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead>
@@ -149,7 +164,8 @@ function _renderLearningContent(d) {
             <th style="text-align:right;padding:4px 8px">Trades</th>
             <th style="text-align:right;padding:4px 8px">Wins</th>
             <th style="text-align:right;padding:4px 8px">Win Rate</th>
-            <th style="text-align:left;padding:4px 8px;width:120px">vs Expected</th>
+            <th style="text-align:left;padding:4px 8px">95% CI</th>
+            <th style="text-align:left;padding:4px 8px;width:100px">vs Expected</th>
           </tr>
         </thead>
         <tbody>
@@ -157,13 +173,17 @@ function _renderLearningContent(d) {
             const midpoint = parseFloat(b.band) + 5;  // e.g. "70-80%" → 75
             const delta = b.win_rate != null ? b.win_rate - midpoint : null;
             const deltaStr = delta != null ? `${delta >= 0 ? '+' : ''}${delta.toFixed(0)}pp` : '';
-            const dimStyle = b.total < 5 ? 'opacity:0.65' : '';
+            const dimStyle = b.low_n ? 'opacity:0.65' : '';
+            const ciStr = b.ci_lo != null
+              ? `<span style="font-size:10px;color:${b.low_n ? '#d97706' : 'var(--text-muted)'}">${b.ci_lo.toFixed(0)}–${b.ci_hi.toFixed(0)}%${b.low_n ? ' ⚠' : ''}</span>`
+              : '<span class="text-muted text-xs">—</span>';
             return `
             <tr style="border-bottom:1px solid var(--border);${dimStyle}">
               <td style="padding:5px 8px">${b.band}${sampleBadge(b.total)}</td>
               <td style="padding:5px 8px;text-align:right">${b.total}</td>
               <td style="padding:5px 8px;text-align:right">${b.wins}</td>
               <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(b.win_rate)}">${pct(b.win_rate)}</td>
+              <td style="padding:5px 8px">${ciStr}</td>
               <td style="padding:5px 8px">
                 <div style="display:flex;align-items:center;gap:6px">
                   <div style="background:var(--bg-secondary);border-radius:3px;height:8px;width:80px;flex-shrink:0">
@@ -173,9 +193,32 @@ function _renderLearningContent(d) {
                 </div>
               </td>
             </tr>`;
-          }).join('') : '<tr><td colspan="5" style="padding:8px;color:var(--text-muted)">No closed events yet.</td></tr>'}
+          }).join('') : '<tr><td colspan="6" style="padding:8px;color:var(--text-muted)">No closed events yet.</td></tr>'}
         </tbody>
       </table>
+      ${brier && brier.bins && brier.bins.length > 0 ? `
+      <div style="margin-top:12px">
+        <div class="text-xs text-muted" style="margin-bottom:6px">Reliability diagram — bar = actual win rate, line = perfect calibration</div>
+        <div style="display:flex;align-items:flex-end;gap:6px;height:80px;padding:4px 0">
+          ${brier.bins.map(b => {
+            const actual = Math.round(b.actual_win_rate * 100);
+            const expected = Math.round(b.mean_confidence * 100);
+            const barH = Math.round(actual * 0.7);  // scale to 70px max
+            const color = actual >= expected ? '#16a34a' : '#ef4444';
+            return `
+            <div style="display:flex;flex-direction:column;align-items:center;flex:1;gap:2px">
+              <span style="font-size:9px;color:var(--text-muted)">${actual}%</span>
+              <div style="width:100%;background:${color}22;border-radius:3px 3px 0 0;position:relative;height:70px;display:flex;align-items:flex-end">
+                <div style="width:100%;height:${barH}px;background:${color};border-radius:3px 3px 0 0;opacity:0.8"></div>
+                <div style="position:absolute;bottom:${Math.round(expected*0.7)}px;left:0;right:0;border-top:2px dashed #6b7280;opacity:0.6"></div>
+              </div>
+              <span style="font-size:9px;color:var(--text-muted)">${b.range}</span>
+              <span style="font-size:9px;color:var(--text-muted)">n=${b.n}</span>
+            </div>`;
+          }).join('')}
+        </div>
+        <div style="font-size:9px;color:var(--text-muted);margin-top:2px">Dashed line = predicted confidence · Bar = actual win rate</div>
+      </div>` : ''}
     </div>`;
 
   // ── Regime performance ─────────────────────────────────────────────────────
@@ -189,16 +232,23 @@ function _renderLearningContent(d) {
             <th style="text-align:right;padding:4px 8px">Trades</th>
             <th style="text-align:right;padding:4px 8px">Wins</th>
             <th style="text-align:right;padding:4px 8px">Win Rate</th>
+            <th style="text-align:left;padding:4px 8px">95% CI</th>
           </tr>
         </thead>
         <tbody>
-          ${regimes.length ? regimes.map(r => `
+          ${regimes.length ? regimes.map(r => {
+            const ciStr = r.ci_lo != null
+              ? `<span style="font-size:10px;color:${r.low_n ? '#d97706' : 'var(--text-muted)'}">${r.ci_lo.toFixed(0)}–${r.ci_hi.toFixed(0)}%${r.low_n ? ' ⚠' : ''}</span>`
+              : '<span class="text-muted text-xs">—</span>';
+            return `
             <tr style="border-bottom:1px solid var(--border);${r.total < 5 ? 'opacity:0.65' : ''}">
               <td style="padding:5px 8px">${r.regime || 'unknown'}${sampleBadge(r.total)}</td>
               <td style="padding:5px 8px;text-align:right">${r.total}</td>
               <td style="padding:5px 8px;text-align:right">${r.wins}</td>
               <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(r.win_rate)}">${pct(r.win_rate)}</td>
-            </tr>`).join('') : '<tr><td colspan="4" style="padding:8px;color:var(--text-muted)">No regime data yet.</td></tr>'}
+              <td style="padding:5px 8px">${ciStr}</td>
+            </tr>`;
+          }).join('') : '<tr><td colspan="5" style="padding:8px;color:var(--text-muted)">No regime data yet.</td></tr>'}
         </tbody>
       </table>
     </div>`;

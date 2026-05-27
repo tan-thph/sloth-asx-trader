@@ -189,8 +189,22 @@ async function fetchAndClassifyRegime() {
     const d = await r.json();
     state.macroData = { ...(state.macroData || {}), ...d };
     const result = classifyRegime(d);
+    const prevRegime = _regimeCache.regime;
     Object.assign(_regimeCache, result, { fetchedAt: Date.now() });
     state.currentRegime = { ..._regimeCache };
+    // Alert when regime flips to panic or riskOff
+    if (prevRegime !== 'unknown' && prevRegime !== result.regime) {
+      if (result.regime === 'panic' || result.regime === 'riskOff') {
+        const label = result.regime === 'panic' ? '🚨 PANIC' : '⚠ Risk-Off';
+        if (typeof fireAlert === 'function') {
+          fireAlert(
+            `${label} Regime Detected`,
+            `Market regime changed: ${prevRegime} → ${result.regime}. Consider reducing exposure.`,
+            'sloth-regime'
+          );
+        }
+      }
+    }
   } catch (e) {
     console.warn('fetchAndClassifyRegime failed:', e.message);
   }

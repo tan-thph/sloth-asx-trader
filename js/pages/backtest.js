@@ -563,9 +563,17 @@ function _renderTechPanel() {
           </select>
         </div>
       </div>
-      <div class="form-row" style="max-width:200px">
-        <div class="form-label">Brokerage per trade ($)</div>
-        <input type="number" value="${state.settings.brokerage}" id="bt-brokerage">
+      <div class="grid-2" style="gap:14px">
+        <div class="form-row">
+          <div class="form-label">Brokerage per trade ($)</div>
+          <input type="number" value="${state.settings.brokerage}" id="bt-brokerage" min="0" step="1">
+        </div>
+        <div class="form-row">
+          <div class="form-label">Slippage (% per fill)</div>
+          <input type="number" value="0.10" id="bt-slippage" min="0" max="2" step="0.01"
+            title="Entry fill cost above mid + exit below mid. 0.10% ≈ typical ASX spread for liquid stocks.">
+          <div class="text-xs text-muted" style="margin-top:2px">0.10% is realistic for liquid ASX stocks; use 0.20–0.40% for small-caps.</div>
+        </div>
       </div>
       <div class="flex-row mt-1">
         <button class="btn btn-primary" id="bt-run-btn" onclick="runBacktest()">▷ Run Backtest</button>
@@ -583,6 +591,7 @@ async function runBacktest() {
   const capital  = Number(document.getElementById('bt-capital').value) || 50000;
   const strategy = document.getElementById('bt-strategy').value;
   const brokerage = Number(document.getElementById('bt-brokerage').value) || state.settings.brokerage;
+  const slippage_pct = Number(document.getElementById('bt-slippage').value ?? 0.10);
 
   if (!tickers.length) { toast('Enter at least one ticker', 'error'); return; }
 
@@ -600,7 +609,7 @@ async function runBacktest() {
     const r = await fetch(`${API}/api/backtest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tickers, period, capital, strategy, brokerage }),
+      body: JSON.stringify({ tickers, period, capital, strategy, brokerage, slippage_pct }),
     });
     if (!r.ok) throw new Error('Server error ' + r.status);
     const res = await r.json();
@@ -690,6 +699,16 @@ async function runBacktest() {
           <div class="metric-sub">${res.totalTrades} trade${res.totalTrades !== 1 ? 's' : ''} · PF: ${res.profitFactor != null ? fmt(res.profitFactor) : '—'}${strategy === 'buy_hold' ? ' · position held open' : ''}</div>
         </div>
       </div>
+
+      <!-- Friction cost breakdown -->
+      ${(res.totalBrokerageCost != null || res.totalSlippageCost != null) ? `
+      <div class="card section-gap" style="padding:10px 14px;display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+        <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Friction costs</div>
+        <div><span class="text-xs text-muted">Slippage (${fmt(res.slippagePct,2)}%):</span> <strong style="font-size:13px">$${fmt(res.totalSlippageCost)}</strong></div>
+        <div><span class="text-xs text-muted">Brokerage:</span> <strong style="font-size:13px">$${fmt(res.totalBrokerageCost)}</strong></div>
+        <div><span class="text-xs text-muted">Total friction:</span> <strong style="font-size:13px;color:#dc2626">−$${fmt((res.totalSlippageCost||0)+(res.totalBrokerageCost||0))}</strong></div>
+        <div class="text-xs text-muted" style="margin-left:auto">These costs are already deducted from P&L above.</div>
+      </div>` : ''}
 
       ${hasEquity ? `
       <div class="card section-gap">

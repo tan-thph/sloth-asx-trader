@@ -28,7 +28,7 @@ import requests
 import yfinance as yf
 from flask import Blueprint, jsonify, request
 
-from core import LOG_DIR, ttl_cache
+from core import LOG_DIR, ttl_cache, fetch_with_retry
 from db import get_db, log_failed_ticker
 from indicators import analyse_ticker, asx, safe_float
 
@@ -85,24 +85,27 @@ def analyse_batch():
 
 @ttl_cache(seconds=45)
 def _quote_cached(ticker: str) -> dict:
-    """yfinance lookup, memoised for 45 s."""
+    """yfinance lookup, memoised for 45 s. Retries 3× with backoff; serves stale on full failure."""
     from indicators import get_sector_for_ticker
     t = asx(ticker)
-    try:
+    def _fetch():
         stk = yf.Ticker(t)
         hist = stk.history(period="2d")
         if hist.empty:
-            return {"error": "No data", "_status": 404}
+            raise ValueError("No data returned")
         cp = hist["Close"].iloc[-1]
         prev = hist["Close"].iloc[-2] if len(hist) >= 2 else cp
         sector = get_sector_for_ticker(ticker)
         return {
-            "ticker": ticker.upper(),
-            "price": round(cp, 3),
-            "change": round(cp - prev, 3),
+            "ticker":     ticker.upper(),
+            "price":      round(cp, 3),
+            "change":     round(cp - prev, 3),
             "change_pct": round((cp / prev - 1) * 100, 2),
-            "sector": sector,
+            "sector":     sector,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
+    try:
+        return fetch_with_retry(_fetch, cache_key=f"quote:{ticker}")
     except Exception as e:
         log_failed_ticker(ticker, str(e), context='quote')
         return {"error": str(e), "_status": 500}
@@ -131,20 +134,22 @@ def _macro_payload() -> dict:
 
     def _fetch_symbol(name_sym):
         name, sym = name_sym
-        try:
+        def _do():
             hist = yf.Ticker(sym).history(period="5d")
             if not hist.empty and len(hist) >= 2:
                 latest = hist["Close"].iloc[-1]
                 prev   = hist["Close"].iloc[-2]
                 pct    = (latest / prev - 1) * 100
-                return name, {
+                return {
                     "value": round(latest, 2),
                     "change_pct": round(pct, 2),
                     "prev_close": round(prev, 2),
                 }
+            raise ValueError("Empty history")
+        try:
+            return name, fetch_with_retry(_do, cache_key=f"macro:{sym}", max_retries=2, backoff=1.5)
         except Exception:
-            pass
-        return name, None
+            return name, None
 
     with ThreadPoolExecutor(max_workers=len(symbols)) as pool:
         for name, result in pool.map(_fetch_symbol, symbols.items()):
@@ -213,18 +218,11 @@ def _macro_payload() -> dict:
         macro_data.setdefault("aud_usd_change_5d", None)
         macro_data.setdefault("iron_ore_change_5d", None)
 
-    try:
-        xjoa = yf.Ticker("^XJOA").history(period="5d")
-        xjo  = yf.Ticker("^AXJO").history(period="5d")
-        if not xjoa.empty and not xjo.empty:
-            adv = float(xjoa["Close"].iloc[-1])
-            idx = float(xjo["Close"].iloc[-1])
-            adv_ratio = round(adv / idx, 4) if idx > 0 else None
-            macro_data["advance_decline_ratio"] = adv_ratio
-        else:
-            macro_data["advance_decline_ratio"] = None
-    except Exception:
-        macro_data["advance_decline_ratio"] = None
+    # Advance/decline breadth: no valid single-symbol source on Yahoo (the old
+    # "^XJOA" symbol 404s and accumulation/price ratio isn't breadth anyway).
+    # Left null until a real breadth source is wired up (e.g. from a universe scan);
+    # regime-engine.js guards `adr != null` so the breadth vote stays dormant.
+    macro_data["advance_decline_ratio"] = None
 
     return macro_data
 
@@ -559,6 +557,31 @@ def portfolio_nav_history():
             "bench_return":  bench_return,
             "period":        period,
         })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+# ── ASX200 benchmark history ────────────────────────────────────────────────
+
+@bp.route("/api/benchmark")
+def benchmark_history():
+    """Return ^AXJO (ASX200) historical closes for benchmark overlay on Value History chart."""
+    period = request.args.get("period", "2y")
+    valid = {"1mo", "3mo", "6mo", "1y", "2y", "5y", "10y"}
+    if period not in valid:
+        period = "2y"
+    try:
+        raw = yf.download("^AXJO", period=period, auto_adjust=True, progress=False)
+        if raw.empty:
+            return jsonify({"error": "No data returned"}), 502
+        if isinstance(raw.columns, pd.MultiIndex):
+            closes = raw["Close"].iloc[:, 0]
+        else:
+            closes = raw["Close"]
+        closes = closes.dropna()
+        dates  = [d.strftime("%Y-%m-%d") for d in closes.index]
+        prices = [round(float(v), 2) for v in closes.values]
+        return jsonify({"dates": dates, "prices": prices, "symbol": "^AXJO"})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 

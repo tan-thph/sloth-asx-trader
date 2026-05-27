@@ -592,9 +592,9 @@ function _newsCard(item, portfolioTickers, watchlistTickers = []) {
 
   // Content preview: prefer LLM summary, else raw content snippet
   const contentHtml = item.summary
-    ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:5px;line-height:1.4">${item.summary}</div>`
+    ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:5px;line-height:1.4">${escapeHTML(item.summary)}</div>`
     : item.content
-      ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:5px;line-height:1.4">${item.content.slice(0, 200)}${item.content.length > 200 ? '…' : ''}</div>`
+      ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:5px;line-height:1.4">${escapeHTML(item.content.slice(0, 200))}${item.content.length > 200 ? '…' : ''}</div>`
       : '';
 
   return `
@@ -605,7 +605,7 @@ function _newsCard(item, portfolioTickers, watchlistTickers = []) {
         </div>
         <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;flex-wrap:wrap">
-            <span style="font-size:13px;font-weight:600;color:var(--text-primary)">${item.title}</span>
+            <span style="font-size:13px;font-weight:600;color:var(--text-primary)">${escapeHTML(item.title)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);flex-wrap:wrap;margin-bottom:5px">
             ${statusDot}

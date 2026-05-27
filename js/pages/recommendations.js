@@ -390,9 +390,9 @@ function renderPendingRecs(recs) {
 
       <!-- Reasoning -->
       <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md);font-size:13px;line-height:1.65;margin-bottom:8px">
-        <strong>Reasoning:</strong> ${r.reasoning}
+        <strong>Reasoning:</strong> ${escapeHTML(r.reasoning)}
       </div>
-      ${r.risks?`<div class="text-xs text-muted mb-1"><strong>Risks:</strong> ${r.risks}</div>`:''}
+      ${r.risks?`<div class="text-xs text-muted mb-1"><strong>Risks:</strong> ${escapeHTML(r.risks)}</div>`:''}
       <div class="flex-row" style="margin-bottom:10px">
         ${(r.signals||[]).map(s=>`<span style="font-size:11px;padding:2px 8px;background:var(--bg-secondary);border-radius:4px;border:0.5px solid var(--border-light)">${s}</span>`).join('')}
       </div>
@@ -444,6 +444,13 @@ function renderPendingRecs(recs) {
       <!-- Position Sizing Calculator (BUY / TOP_UP only) -->
       ${!isReducing ? renderPositionSizer(r) : ''}
 
+      <!-- Tags (for Learning Loop) -->
+      <div style="display:flex;gap:8px;align-items:center;padding-top:6px">
+        <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;flex-shrink:0">Tags:</span>
+        <input type="text" id="tags-${r.id}" placeholder="e.g. breakout, earnings, dip-buy (comma-separated)" value="${r._tags||''}"
+          style="flex:1;padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-light);background:var(--bg-secondary);color:var(--text-primary);font-size:11px;font-family:var(--font)"
+          title="Trade tags for performance filtering">
+      </div>
       <!-- Feedback -->
       <div style="display:flex;gap:8px;align-items:center;padding-top:8px;border-top:0.5px solid var(--border-light)">
         <input type="text" id="feedback-${r.id}" placeholder="Optional feedback for next analysis run (e.g. 'too aggressive', 'ignore WDS for now')" value="${r.feedback||''}"
@@ -768,13 +775,113 @@ function confirmExecute(recId) {
   if (isNaN(qty)   || qty <= 0)  { toast('Enter a valid quantity (shares)', 'error'); qtyEl?.focus(); return; }
   if (isNaN(price) || price <= 0){ toast('Enter a valid execution price', 'error'); priceEl?.focus(); return; }
   if (isNaN(fee)   || fee < 0)   { toast('Enter a valid brokerage fee', 'error'); feeEl?.focus(); return; }
-  markExecuted(recId, price, fee, qty);
+  _showPreTradeChecklist(recId, () => markExecuted(recId, price, fee, qty));
 }
 
-function _detectExitReason(exitPrice, stopLoss, target) {
+function _showPreTradeChecklist(recId, onConfirm) {
+  // Remove any previous dialog
+  document.getElementById('pre-trade-dialog')?.remove();
+
+  const rec = state.recommendations.find(r => r.id === recId);
+  const isReducing = rec && (rec.action === 'SELL' || rec.action === 'TRIM');
+
+  // CGT warning: check if any parcel for this ticker is within 45 days of 12-month mark
+  let cgtWarning = '';
+  if (isReducing && rec) {
+    const today = new Date();
+    const liveParcels = (state.cgtParcels || []).filter(p =>
+      p.ticker === rec.ticker && p.remainingQty > 0
+    );
+    const urgentParcels = liveParcels.filter(p => {
+      if (!p.date) return false;
+      const [dd, mm, yyyy] = p.date.split('-').map(Number);
+      const buyDate = new Date(yyyy, mm - 1, dd);
+      const heldDays = Math.floor((today - buyDate) / 86400000);
+      return heldDays >= 320 && heldDays < 365;
+    });
+    if (urgentParcels.length) {
+      const minDays = urgentParcels.reduce((min, p) => {
+        const [dd, mm, yyyy] = p.date.split('-').map(Number);
+        const buyDate = new Date(yyyy, mm - 1, dd);
+        const held = Math.floor((today - buyDate) / 86400000);
+        return Math.min(min, 365 - held);
+      }, 365);
+      cgtWarning = `<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#92400e">
+        <strong>⚠ CGT Discount Warning</strong><br>
+        Selling ${rec.ticker} now will crystallise full-rate CGT. <strong>${minDays} day(s)</strong> until the 50% discount applies on ${urgentParcels.length} parcel(s).
+      </div>`;
+    }
+  }
+
+  const items = [
+    { id: 'chk-thesis',   label: 'I have a written thesis / reason for this trade' },
+    { id: 'chk-catalyst', label: 'I\'ve identified the catalyst or trigger' },
+    { id: 'chk-stop',     label: 'Stop loss is set and within my risk tolerance' },
+    { id: 'chk-size',     label: 'Position size is within my risk budget' },
+    { id: 'chk-avg',      label: isReducing
+        ? 'I\'m not exiting in panic — the thesis has actually changed'
+        : 'I\'m not averaging into a losing position without a plan' },
+  ];
+
+  const dialog = document.createElement('dialog');
+  dialog.id = 'pre-trade-dialog';
+  dialog.style.cssText = 'padding:0;border:none;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.35);background:var(--bg-primary);color:var(--text-primary);max-width:440px;width:90vw';
+  dialog.innerHTML = `
+    <div style="padding:20px 22px">
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px">Pre-Trade Checklist</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">${rec ? rec.action + ' ' + rec.ticker : ''} — tick at least 4 to proceed</div>
+      ${cgtWarning}
+      <div id="checklist-items" style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
+        ${items.map(it => `
+          <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px">
+            <input type="checkbox" id="${it.id}" onchange="_updateChecklistBtn()" style="margin-top:2px;width:16px;height:16px;flex-shrink:0">
+            <span>${it.label}</span>
+          </label>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button onclick="document.getElementById('pre-trade-dialog').close()" class="btn btn-sm">Cancel</button>
+        <button id="checklist-override-btn" onclick="_checklistProceed('override')" class="btn btn-sm" style="color:var(--text-muted)">Proceed anyway</button>
+        <button id="checklist-confirm-btn" onclick="_checklistProceed('confirm')" class="btn btn-sm btn-success" disabled>✓ Execute Trade</button>
+      </div>
+    </div>`;
+  document.body.appendChild(dialog);
+
+  // Store callback so the close handlers can call it
+  dialog._onConfirm = onConfirm;
+  dialog.showModal();
+}
+
+function _updateChecklistBtn() {
+  const dialog = document.getElementById('pre-trade-dialog');
+  const checked = dialog.querySelectorAll('input[type=checkbox]:checked').length;
+  const total   = dialog.querySelectorAll('input[type=checkbox]').length;
+  const btn = document.getElementById('checklist-confirm-btn');
+  btn.disabled = checked < 4;
+  btn.style.opacity = checked < 4 ? '0.5' : '1';
+}
+
+function _checklistProceed(mode) {
+  const dialog = document.getElementById('pre-trade-dialog');
+  const cb = dialog?._onConfirm;
+  dialog?.close();
+  dialog?.remove();
+  if (cb) cb();
+}
+
+function _detectExitReason(exitPrice, stopLoss, target, action) {
   if (!exitPrice || exitPrice <= 0) return 'manual';
+  // SELL/TRIM recs frame stop ABOVE and target BELOW entry (inverse of BUY/TOP_UP),
+  // so a profitable trim must not be read as 'stop_hit'. Prefer the action; fall back
+  // to stop-vs-target geometry when action is unavailable.
+  const isShort = (action === 'SELL' || action === 'TRIM') ||
+                  (!action && stopLoss && target && stopLoss > target);
+  if (isShort) {
+    if (stopLoss && exitPrice >= stopLoss * 0.995) return 'stop_hit';
+    if (target   && exitPrice <= target   * 1.005) return 'target_hit';
+    return 'manual';
+  }
   if (stopLoss && exitPrice <= stopLoss * 1.005) return 'stop_hit';
-  if (target   && exitPrice >= target  * 0.995)  return 'target_hit';
+  if (target   && exitPrice >= target   * 0.995) return 'target_hit';
   return 'manual';
 }
 
@@ -784,6 +891,10 @@ function markExecuted(id, execPrice, execFee, execQty) {
   const today = todayStr();
   rec.status = 'executed';
   rec.executedAt = time;
+
+  // Capture tags from the inline input field before the DOM changes
+  const tagsVal = (document.getElementById(`tags-${id}`)?.value || '').trim();
+  if (tagsVal) rec._tags = tagsVal;
 
   const qty        = (execQty  !== undefined && !isNaN(execQty)  && execQty  > 0) ? execQty  : (rec.qty || 10);
   const fees       = (execFee  !== undefined && !isNaN(execFee))                  ? execFee  : state.settings.brokerage;
@@ -875,9 +986,10 @@ function markExecuted(id, execPrice, execFee, execQty) {
         actual_entry_price: entryP ?? null,
         actual_exit_price:  exitP  ?? null,
         sector,
+        ...(rec._tags ? { tags: rec._tags } : {}),
       };
       if (outcome) {
-        const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target);
+        const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target, rec.action);
         outcomePayload.outcome_status      = outcome;
         outcomePayload.realized_pnl_aud    = +realizedPnl.toFixed(2);
         outcomePayload.realized_pnl_pct    = pnlPct;
@@ -894,7 +1006,6 @@ function markExecuted(id, execPrice, execFee, execQty) {
         const remaining = getPortfolioHolding(rec.ticker);
         const positionClosed = !remaining || (remaining.shares || 0) <= 0;
         if (positionClosed) {
-          const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target);
           const parentRecs = (state.recHistory || []).filter(r =>
             r.ticker === rec.ticker &&
             r._learningId &&
@@ -915,12 +1026,14 @@ function markExecuted(id, execPrice, execFee, execQty) {
               if (prQty) prPnlAud = +((tradePrice - prEntry) * prQty).toFixed(2);
               prOutcome = tradePrice > prEntry ? 'win' : tradePrice < prEntry ? 'loss' : 'breakeven';
             }
+            // Parent is a BUY/TOP_UP (long): evaluate against its own stop/target.
+            const prExitReason = _detectExitReason(tradePrice, pr.stopLoss, pr.target, pr.action);
             fetch(`${API}/api/learning/outcome`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 id:                  pr._learningId,
                 outcome_status:      prOutcome,
-                exit_reason:         exitReason,
+                exit_reason:         prExitReason,
                 actual_exit_price:   tradePrice,
                 holding_period_days: holdDays,
                 ...(prPnlPct != null ? { realized_pnl_pct: prPnlPct } : {}),
@@ -936,7 +1049,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
       // No prior learning event (manually-imported position).
       const rrRatio = entryP && rec.stopLoss && rec.target && entryP !== rec.stopLoss
         ? +Math.abs((rec.target - entryP) / (entryP - rec.stopLoss)).toFixed(2) : null;
-      const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target);
+      const exitReason = _detectExitReason(exitP || tradePrice, rec.stopLoss, rec.target, rec.action);
       fetch(`${API}/api/learning/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -960,6 +1073,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
           actual_entry_price:  entryP ?? null,
           actual_exit_price:   exitP  ?? null,
           sector,
+          tags:                rec._tags || null,
           notes:               'Manually imported position — no prior BUY event logged',
         }),
       }).then(r => r.json()).then(res => {

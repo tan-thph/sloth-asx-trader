@@ -103,6 +103,30 @@ function renderCGT() {
     tickerMap[p.ticker].push(p);
   });
 
+  // CGT urgency: parcels within 45 days of 12-month mark that are profitable
+  const urgentParcels = parcels.filter(p => {
+    if (p.remainingQty <= 0 || !p.date) return false;
+    const held = daysBetween(p.date, today);
+    if (held < 320 || held >= 365) return false;
+    const holding = getPortfolioHolding(p.ticker);
+    const currentPrice = holding ? holding.currentPrice : 0;
+    return currentPrice > p.costPerShare; // only warn if profitable
+  });
+  const urgentBanner = urgentParcels.length ? `
+    <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:flex-start;gap:10px">
+      <span style="font-size:18px;flex-shrink:0">⏰</span>
+      <div>
+        <div style="font-weight:700;color:#92400e;font-size:13px;margin-bottom:2px">CGT Discount Approaching</div>
+        <div style="font-size:12px;color:#78350f">
+          ${urgentParcels.map(p => {
+            const held = daysBetween(p.date, today);
+            return `<strong>${p.ticker}</strong> — ${365 - held} day(s) until 50% discount (parcel #${p.id}, ${p.remainingQty} shares @ $${fmt(p.costPerShare)})`;
+          }).join('<br>')}
+        </div>
+        <div style="font-size:11px;color:#92400e;margin-top:4px">Consider waiting before selling — early exit forfeits the 50% CGT discount.</div>
+      </div>
+    </div>` : '';
+
   const methodLabels = { fifo:'FIFO', lifo:'LIFO', minimise:'Minimise Tax', maximise:'Maximise Loss' };
   const methodDescs  = {
     fifo:     'First In First Out — oldest lots sold first (ATO default)',
@@ -124,6 +148,7 @@ function renderCGT() {
   const pc = window._cgtCollapsed.parcels;
 
   return `
+    ${urgentBanner}
     <!-- Method selector -->
     <div class="card section-gap">
       <div class="flex-between">
@@ -359,6 +384,110 @@ function renderCGT() {
       }
       html += '</div>';
       return html;
+    })()}
+
+    <!-- ③ TAX-LOSS HARVEST PLANNER -->
+    ${(()=>{
+      const openParcels = parcels.filter(p => p.remainingQty > 0);
+      if (!openParcels.length) return '';
+
+      // Build losers: open parcels where current price < cost/share
+      const losers = [];
+      const holdingsMap = {};
+      for (const h of state.portfolio) holdingsMap[h.ticker] = h.currentPrice;
+
+      for (const p of openParcels) {
+        const cp = holdingsMap[p.ticker];
+        if (!cp) continue;
+        const costBase  = p.remainingQty * p.costPerShare + (p.fees * p.remainingQty / p.qty);
+        const proceeds  = p.remainingQty * cp;
+        const unrLoss   = proceeds - costBase;
+        if (unrLoss >= 0) continue;
+        // Check wash-sale risk: any BUY trade in the last 30 days for same ticker
+        const thirtyAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0,10).replace(/-/g,'-');
+        const recentBuy = (state.tradeJournal || []).some(t => {
+          if (t.ticker !== p.ticker || (t.action||'').toUpperCase() !== 'BUY') return false;
+          return t.date >= thirtyAgo;
+        });
+        losers.push({ ...p, costBase, proceeds, unrLoss, currentPrice: cp, washSaleRisk: recentBuy });
+      }
+
+      losers.sort((a, b) => a.unrLoss - b.unrLoss); // worst loss first
+
+      if (!losers.length) return `
+        <div class="card" style="margin-top:1rem">
+          <div class="card-title">Tax-Loss Harvest Planner</div>
+          <div class="text-xs text-muted">No unrealised losses on open parcels to harvest this FY.</div>
+        </div>`;
+
+      const totalHarvestable = losers.reduce((s, l) => s + l.unrLoss, 0);
+      const netAfterHarvest  = fyGross + totalHarvestable; // fyGross - |loss|
+
+      // EOFY countdown
+      const now2 = new Date();
+      const fyEndYear = now2.getMonth() >= 6 ? now2.getFullYear() + 1 : now2.getFullYear();
+      const fyEnd  = new Date(`${fyEndYear}-06-30`);
+      const daysToEOFY = Math.max(0, Math.ceil((fyEnd - now2) / 86400000));
+
+      return `
+        <div class="card" style="margin-top:1rem">
+          <div class="flex-between" style="margin-bottom:1rem">
+            <div>
+              <div class="card-title" style="margin:0">Tax-Loss Harvest Planner</div>
+              <div class="text-xs text-muted" style="margin-top:3px">Open parcels with unrealised losses you could sell before EOFY to offset capital gains.</div>
+            </div>
+            <div style="text-align:right">
+              <div class="text-xs text-muted">EOFY 30 Jun ${fyEndYear}</div>
+              <div style="font-size:18px;font-weight:700;color:${daysToEOFY <= 30 ? '#dc2626' : 'var(--text-primary)'}">${daysToEOFY}d</div>
+            </div>
+          </div>
+
+          <div class="metrics-grid" style="margin-bottom:1rem">
+            <div class="metric-card">
+              <div class="metric-label">FY Realised Gain (net)</div>
+              <div class="metric-value ${fyNet >= 0 ? 'up' : 'down'}">${fyNet >= 0 ? '+' : ''}$${fmt(Math.abs(fyNet))}</div>
+              <div class="metric-sub">Available to offset</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Max Harvestable Loss</div>
+              <div class="metric-value down">−$${fmt(Math.abs(totalHarvestable))}</div>
+              <div class="metric-sub">${losers.length} parcel${losers.length !== 1 ? 's' : ''} combined</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Net CGT After Harvest</div>
+              <div class="metric-value ${netAfterHarvest >= 0 ? 'up' : 'down'}">${netAfterHarvest >= 0 ? '+' : ''}$${fmt(Math.abs(netAfterHarvest))}</div>
+              <div class="metric-sub">${netAfterHarvest < 0 ? 'Surplus loss carries forward' : 'Remaining taxable gain'}</div>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Ticker</th><th>Parcel</th><th>Qty</th><th>Cost/Share</th><th>Current</th><th>Cost Base</th><th>Proceeds</th><th>Unr. Loss</th><th>Held</th><th>Wash-Sale?</th>
+              </tr></thead>
+              <tbody>
+                ${losers.map(l => {
+                  const held = daysBetween(l.date, today);
+                  return `<tr>
+                    <td><strong>${l.ticker}</strong></td>
+                    <td class="text-xs text-muted">#${l.id} · ${l.date}</td>
+                    <td>${l.remainingQty}</td>
+                    <td>$${fmt(l.costPerShare)}</td>
+                    <td>$${fmt(l.currentPrice)}</td>
+                    <td>$${fmt(l.costBase)}</td>
+                    <td>$${fmt(l.proceeds)}</td>
+                    <td class="text-danger" style="font-weight:600">−$${fmt(Math.abs(l.unrLoss))}</td>
+                    <td class="text-xs">${held}d${held >= 365 ? ' <span class="badge badge-executed">CGT disc.</span>' : ''}</td>
+                    <td>${l.washSaleRisk ? '<span class="badge badge-pending" title="Bought same ticker in last 30 days — may trigger wash-sale rules">⚠ Risk</span>' : '<span class="text-xs text-muted">—</span>'}</td>
+                  </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="text-xs text-muted" style="margin-top:8px">
+            ⚠ Wash-sale warning: selling a parcel at a loss and repurchasing the same ticker within 30 days may disallow the loss deduction. Seek tax advice before acting.
+          </div>
+        </div>`;
     })()}
   `;
 }

@@ -11,8 +11,10 @@ function renderPortfolio() {
         <span class="text-sm text-muted">Market value: <strong>$${fmt(pv)}</strong></span>
       </div>
       <div class="flex-row">
-        <button class="btn btn-sm" onclick="document.getElementById('csvUpload').click()">↑ Import CSV</button>
+        <button class="btn btn-sm" onclick="document.getElementById('csvUpload').click()" title="Import simple CSV (ticker, shares, avg_price, date)">↑ Import CSV</button>
         <input type="file" id="csvUpload" accept=".csv" style="display:none" onchange="handleCSV(event)">
+        <button class="btn btn-sm" onclick="document.getElementById('brokerCsvUpload').click()" title="Import CommSec or SelfWealth trade history CSV">↑ Broker CSV</button>
+        <input type="file" id="brokerCsvUpload" accept=".csv" style="display:none" onchange="handleBrokerCSV(event)">
         <button class="btn btn-sm" onclick="refreshPrices()">⟳ Live Prices</button>
         <button class="btn btn-sm btn-primary" onclick="addHolding()">+ Add Holding</button>
       </div>
@@ -55,6 +57,9 @@ function renderPortfolio() {
               const val = h.shares * h.currentPrice;
               const pl  = (h.currentPrice - h.avgPrice) * h.shares;
               const plp = ((h.currentPrice - h.avgPrice) / h.avgPrice) * 100;
+              const _pts = state.priceTimestamps && state.priceTimestamps[h.ticker];
+              const _stale = _pts && (Date.now() - new Date(_pts).getTime()) > 25 * 60 * 1000;
+              const _staleBadge = _stale ? '<span class="text-xs" style="color:#f59e0b;margin-left:3px" title="Price data older than 25 min">⚠ stale</span>' : '';
               const openParcels = state.cgtParcels.filter(p => p.ticker === h.ticker && p.remainingQty > 0);
               const lots = openParcels.length;
               // Find all state.portfolio entries for this ticker
@@ -82,7 +87,7 @@ function renderPortfolio() {
                   <td class="text-xs text-muted">${lots > 0 ? `${lots} lot${lots!==1?'s':''}` : '—'}</td>
                   <td>${h.shares}</td>
                   <td>$${fmt(h.avgPrice)}</td>
-                  <td>$${fmt(h.currentPrice)}</td>
+                  <td>$${fmt(h.currentPrice)}${_staleBadge}</td>
                   <td>$${fmt(val)}</td>
                   <td class="${pl>=0?'text-success':'text-danger'}">${sign(pl)}$${fmt(Math.abs(pl))}</td>
                   <td class="${plp>=0?'text-success':'text-danger'}">${sign(plp)}${fmt(Math.abs(plp))}%</td>
@@ -546,6 +551,84 @@ function handleCSV(e) {
   };
   reader.readAsText(file);
 }
+async function handleBrokerCSV(e) {
+  const file = e.target.files[0]; if (!file) return;
+  e.target.value = '';
+  if (!state.serverOk) { toast('Backend server required for broker CSV import', 'error'); return; }
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('broker', 'auto');
+
+  toast('Parsing broker CSV…', 'info');
+  let result;
+  try {
+    const r = await fetch(`${API}/api/import/csv`, { method: 'POST', body: formData });
+    result = await r.json();
+  } catch (ex) {
+    toast(`Broker CSV upload failed: ${ex.message}`, 'error');
+    return;
+  }
+
+  if (!result.ok) {
+    toast(`Broker CSV error: ${result.error}`, 'error');
+    return;
+  }
+
+  const rows = result.rows || [];
+  if (rows.length === 0) {
+    const skipMsg = result.skipped && result.skipped.length
+      ? `\n\nSkipped ${result.skipped.length} rows:\n` + result.skipped.slice(0,5).map(s=>`  Row ${s.row}: ${s.reason}`).join('\n')
+      : '';
+    alert(`No importable BUY rows found (detected: ${result.broker}).${skipMsg}`);
+    return;
+  }
+
+  // Sort chronologically — backend already sorts but ensure it
+  rows.sort((a, b) => a.date.localeCompare(b.date));
+
+  let added = 0, updated = 0, parcelsCreated = 0;
+  for (const row of rows) {
+    const { ticker, shares, price, date, brokerage } = row;
+    const dupParcel = state.cgtParcels.find(p =>
+      p.ticker === ticker && p.date === date &&
+      p.qty === shares && Math.abs(p.costPerShare - price) < 0.005
+    );
+    if (dupParcel) continue;
+
+    const existing = state.portfolio.find(h => h.ticker === ticker);
+    if (existing) {
+      const totalCostVal = existing.shares * existing.avgPrice + shares * price;
+      existing.shares += shares;
+      existing.avgPrice = totalCostVal / existing.shares;
+      updated++;
+    } else {
+      state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector: 'Other' });
+      added++;
+    }
+    addParcel(ticker, date, shares, price, brokerage || 0, 'Other');
+    const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
+    parcelsCreated++;
+    state.tradeJournal.push({
+      id: state.tradeJournal.length + 1,
+      date, ticker, action: 'BUY', qty: shares, entryPrice: price,
+      exitPrice: null, fees: brokerage || 0, status: 'open', pnl: null,
+      parcelId: newParcel.id, recId: null, recExecuted: false,
+      timestamp: `${date} (broker import)`, imported: true,
+    });
+  }
+  state.tradeJournal.sort((a, b) => (a.date||'').localeCompare(b.date||''));
+
+  let msg = `Broker CSV (${result.broker}): ${added + updated} holdings · ${parcelsCreated} parcels`;
+  if (result.skipped && result.skipped.length) msg += ` · ${result.skipped.length} rows skipped`;
+  toast(msg, 'success');
+  if (result.skipped && result.skipped.length > 0) {
+    console.warn('[BrokerCSV] Skipped rows:', result.skipped);
+  }
+  scheduleSave();
+  renderPage();
+}
+
 function addHolding() {
   const ticker = prompt('Ticker (e.g. NAB):'); if (!ticker) return;
   const dateRaw = prompt('Buy date (DD-MM-YYYY):');

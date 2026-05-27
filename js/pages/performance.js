@@ -93,6 +93,24 @@ function renderPerformance() {
     else            { curL++; curW=0; if(curL>lossStreak) lossStreak=curL; }
   });
 
+  // ── Drawdown from portfolio history ───────────────────────────────────────
+  const ph = state.portfolioHistory || [];
+  let _ddPeak = 0, _ddMax = 0, _ddCurrent = 0;
+  if (ph.length > 1) {
+    for (const snap of ph) {
+      const nw = Number(snap.netWorth) || 0;
+      if (nw > _ddPeak) _ddPeak = nw;
+      if (_ddPeak > 0) {
+        const dd = (_ddPeak - nw) / _ddPeak * 100;
+        if (dd > _ddMax) _ddMax = dd;
+      }
+    }
+    const lastNw = Number(ph[ph.length - 1].netWorth) || 0;
+    _ddCurrent = _ddPeak > 0 ? Math.max(0, (_ddPeak - lastNw) / _ddPeak * 100) : 0;
+  }
+  const ddAlertPct = Number(state.settings.drawdownAlertPct) || 10;
+  const ddAlertActive = _ddCurrent > 0 && _ddCurrent >= ddAlertPct;
+
   const confBuckets=[0.5,0.6,0.7,0.8,0.9].map(c=>{
     const b=state.recHistory.filter(r=>r.confidence>=c&&r.confidence<c+0.1&&r.outcome!=='open'&&r.outcome!=='skipped');
     const w=b.filter(r=>r.outcome==='win').length;
@@ -113,11 +131,36 @@ function renderPerformance() {
         : ''}
     </div>
 
+    ${ddAlertActive ? `
+    <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:var(--radius-md);padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:18px">⚠️</span>
+      <div>
+        <strong style="color:#dc2626">Drawdown alert: portfolio is down ${_ddCurrent.toFixed(1)}% from peak</strong>
+        <div class="text-xs" style="color:#7f1d1d;margin-top:2px">Alert threshold is ${ddAlertPct}%. Consider reviewing position sizes and stops.</div>
+      </div>
+    </div>` : ''}
+
     <div class="metrics-grid">
       <div class="metric-card"><div class="metric-label">Win Rate</div><div class="metric-value ${winRate>=50?'up':'down'}">${fmt(winRate,0)}%</div><div class="metric-sub">${wins}W / ${losses}L</div></div>
       <div class="metric-card"><div class="metric-label">Execution Rate</div><div class="metric-value">${fmt(execRate,0)}%</div><div class="metric-sub">${execRecs.length} of ${state.recHistory.length} recs</div></div>
       <div class="metric-card"><div class="metric-label">Realised P&L</div><div class="metric-value ${realised>=0?'up':'down'}">${sign(realised)}$${fmt(Math.abs(realised))}</div></div>
       <div class="metric-card"><div class="metric-label">Fees Paid</div><div class="metric-value">$${fmt(totalFees)}</div></div>
+      ${ph.length > 1 ? `
+      <div class="metric-card">
+        <div class="metric-label">Current Drawdown</div>
+        <div class="metric-value ${_ddCurrent > ddAlertPct ? 'down' : _ddCurrent > 5 ? '' : 'up'}">${_ddCurrent > 0 ? '-' : ''}${_ddCurrent.toFixed(1)}%</div>
+        <div class="metric-sub">from peak net worth</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Max Drawdown</div>
+        <div class="metric-value ${_ddMax > 20 ? 'down' : _ddMax > 10 ? '' : 'up'}">${_ddMax > 0 ? '-' : ''}${_ddMax.toFixed(1)}%</div>
+        <div class="metric-sub" style="display:flex;align-items:center;gap:6px">
+          Alert at
+          <input type="number" value="${ddAlertPct}" min="1" max="50" step="1"
+            style="width:44px;padding:1px 4px;font-size:11px;border-radius:3px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary)"
+            onchange="updateSetting('drawdownAlertPct', this.value); renderPage()" title="Alert threshold %">%
+        </div>
+      </div>` : ''}
     </div>
 
     <!-- Total Return card with dividend overlay -->
@@ -499,10 +542,20 @@ function exportTradeJournalCSV() {
 // For each recHistory entry with a _learningId and a reconciled win/loss outcome,
 // call POST /api/learning/outcome. Also handles existing recs without a _learningId
 // by re-logging them as new events with was_executed:true.
-function _detectExitReason(exitPrice, stopLoss, target) {
+function _detectExitReason(exitPrice, stopLoss, target, action) {
   if (!exitPrice || exitPrice <= 0) return 'manual';
+  // SELL/TRIM recs frame stop ABOVE and target BELOW entry (inverse of BUY/TOP_UP),
+  // so a profitable trim must not be read as 'stop_hit'. Prefer the action; fall back
+  // to stop-vs-target geometry when action is unavailable.
+  const isShort = (action === 'SELL' || action === 'TRIM') ||
+                  (!action && stopLoss && target && stopLoss > target);
+  if (isShort) {
+    if (stopLoss && exitPrice >= stopLoss * 0.995) return 'stop_hit';
+    if (target   && exitPrice <= target   * 1.005) return 'target_hit';
+    return 'manual';
+  }
   if (stopLoss && exitPrice <= stopLoss * 1.005) return 'stop_hit';
-  if (target   && exitPrice >= target  * 0.995)  return 'target_hit';
+  if (target   && exitPrice >= target   * 0.995) return 'target_hit';
   return 'manual';
 }
 
@@ -559,7 +612,7 @@ async function syncClosedTradesToLearningLoop() {
           actual_entry_price:  r._entryPrice ?? null,
           actual_exit_price:   r._exitPrice  ?? null,
           sector:              r._sector     ?? null,
-          exit_reason:         _detectExitReason(r._exitPrice, r.stopLoss, r.target),
+          exit_reason:         _detectExitReason(r._exitPrice, r.stopLoss, r.target, r.action),
         }),
       });
       if ((await resp.json()).ok) updated++;
@@ -588,7 +641,7 @@ async function syncClosedTradesToLearningLoop() {
           actual_entry_price:  r._entryPrice ?? null,
           actual_exit_price:   r._exitPrice  ?? null,
           sector:              r._sector     ?? null,
-          exit_reason:         _detectExitReason(r._exitPrice, r.stopLoss, r.target),
+          exit_reason:         _detectExitReason(r._exitPrice, r.stopLoss, r.target, r.action),
         }),
       });
       const res = await resp.json();

@@ -40,6 +40,7 @@ def backtest():
     starting_capital = float(data.get("capital", 50000))
     strategy = data.get("strategy", "rsi_trend")
     brokerage = float(data.get("brokerage", 10))
+    slippage_pct = float(data.get("slippage_pct", 0.10)) / 100  # e.g. 0.10 → 0.001
 
     if not tickers:
         return jsonify({"error": "No tickers provided"}), 400
@@ -142,26 +143,28 @@ def backtest():
                 else:
                     buy_sig = sell_sig = False
 
-                # Execute trades
+                # Execute trades (entry cost includes slippage + brokerage; exit proceeds net both)
                 if buy_sig and position == 0 and cash > brokerage * 2:
-                    qty = int((cash - brokerage) / price)
+                    fill_price = price * (1 + slippage_pct)
+                    qty = int((cash - brokerage) / fill_price)
                     if qty > 0:
-                        cost = qty * price + brokerage
+                        cost = qty * fill_price + brokerage
                         cash -= cost
                         position = qty
-                        entry_price = price
+                        entry_price = fill_price  # record slippage-adjusted entry
                         entry_date = date_str
 
                 elif sell_sig and position > 0:
-                    proceeds = position * price - brokerage
-                    pnl = proceeds - (position * entry_price) - brokerage
+                    fill_price = price * (1 - slippage_pct)
+                    proceeds = position * fill_price - brokerage
+                    pnl = proceeds - (position * entry_price)
                     cash += proceeds
                     trades.append({
                         "ticker": ticker.upper(),
                         "entryDate": entry_date,
                         "exitDate": date_str,
                         "entryPrice": round(entry_price, 3),
-                        "exitPrice": round(price, 3),
+                        "exitPrice": round(fill_price, 3),
                         "qty": position,
                         "pnl": round(pnl, 2),
                         "holdDays": (hist.index[i] - hist.index[
@@ -180,7 +183,7 @@ def backtest():
             # If a position is still open at period end, add it as a synthetic "open" trade
             # so win/loss stats and the trade log are meaningful (especially for Buy & Hold)
             if position > 0 and entry_price and entry_date:
-                open_pnl = round(position * final_price - position * entry_price - brokerage, 2)
+                open_pnl = round(position * final_price * (1 - slippage_pct) - position * entry_price - brokerage, 2)
                 try:
                     entry_idx_found = next(
                         j for j in range(len(hist))
@@ -261,13 +264,14 @@ def backtest():
                     buy_sig = sell_sig = False
 
                 if buy_sig and _pos == 0 and _cash > brokerage * 2:
-                    qty = int((_cash - brokerage) / price)
+                    fp = price * (1 + slippage_pct)
+                    qty = int((_cash - brokerage) / fp)
                     if qty > 0:
-                        _cash -= qty * price + brokerage
+                        _cash -= qty * fp + brokerage
                         _pos = qty
-                        _ep = price
+                        _ep = fp
                 elif sell_sig and _pos > 0:
-                    _cash += _pos * price - brokerage
+                    _cash += _pos * price * (1 - slippage_pct) - brokerage
                     _pos = 0
                     _ep = None
 
@@ -283,6 +287,11 @@ def backtest():
     all_wins = [t for t in all_trades if t["pnl"] > 0]
     all_losses = [t for t in all_trades if t["pnl"] <= 0]
     total_pnl = sum(t["pnl"] for t in all_trades)
+    total_brokerage_cost = brokerage * 2 * len([t for t in all_trades if not t.get("isOpen")])
+    # Slippage cost = round-trip cost per trade: entry_slip + exit_slip per share × qty × price (approx)
+    total_slippage_cost = round(
+        sum(t["qty"] * (t["entryPrice"] + t["exitPrice"]) * slippage_pct for t in all_trades if not t.get("isOpen")), 2
+    )
     total_return = sum(
         v.get("totalReturn", 0) for v in ticker_results.values() if "totalReturn" in v
     ) / max(len([v for v in ticker_results.values() if "totalReturn" in v]), 1)
@@ -326,8 +335,11 @@ def backtest():
         "strategy": strategy,
         "period": period,
         "startingCapital": starting_capital,
+        "slippagePct": round(slippage_pct * 100, 3),
         "totalReturn": round(total_return, 2),
         "totalPnl": round(total_pnl, 2),
+        "totalBrokerageCost": round(total_brokerage_cost, 2),
+        "totalSlippageCost": total_slippage_cost,
         "totalTrades": len(all_trades),
         "winRate": round(len(all_wins) / len(all_trades) * 100, 1) if all_trades else 0,
         "avgWin": round(sum(t["pnl"] for t in all_wins) / len(all_wins), 2) if all_wins else 0,

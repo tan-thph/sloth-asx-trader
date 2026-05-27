@@ -13,6 +13,8 @@ async function refreshPrices(opts = {}) {
       if(!r.ok) continue;
       const d = await r.json();
       if(d.price) {
+        if (!state.priceTimestamps) state.priceTimestamps = {};
+        state.priceTimestamps[ticker] = d.fetched_at || new Date().toISOString();
         state.portfolio.filter(h => h.ticker === ticker).forEach(h => {
           h.currentPrice = d.price;
           if(d.sector && (!h.sector || h.sector === 'Other')) h.sector = d.sector;
@@ -25,6 +27,8 @@ async function refreshPrices(opts = {}) {
   if(!silent) toast(`Updated ${updated} prices from yfinance`,'success');
   checkPriceAlerts();
   if (typeof checkRecStopTargetAlerts === 'function') checkRecStopTargetAlerts();
+  checkExDivReminders();
+  checkEarningsReminders();
   recordPortfolioSnapshot();
   scheduleSave();
   // Skip re-render on silent auto-refresh for async pages (news/announcements) —
@@ -136,6 +140,54 @@ function rearmPriceAlert(id) {
   scheduleSave();
   renderPage();
   toast(`Alert re-armed for ${alert.ticker}`, 'success');
+}
+
+// ============================================================
+// EX-DIVIDEND & EARNINGS REMINDERS (one-shot per event per day)
+// ============================================================
+const _exDivAlerted    = {};  // key: `${ticker}_${exDate}` → ISO date string of when alerted
+const _earningsAlerted = {};  // key: `${ticker}_${earnDate}` → ISO date string
+
+function checkExDivReminders() {
+  if (!state.portfolio || !state.dividendData) return;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const h of state.portfolio) {
+    const div = state.dividendData[h.ticker];
+    if (!div || !div.exDividendDate) continue;
+    const exDate = div.exDividendDate.slice(0, 10);
+    const daysUntil = Math.round((new Date(exDate) - new Date(today)) / 86400000);
+    if (daysUntil < 0 || daysUntil > 5) continue;
+    const key = `${h.ticker}_${exDate}`;
+    if (_exDivAlerted[key] === today) continue;
+    _exDivAlerted[key] = today;
+    const when = daysUntil === 0 ? 'Today' : daysUntil === 1 ? 'Tomorrow' : `In ${daysUntil} days`;
+    const amt  = div.nextEstAmount ? `$${fmt(div.nextEstAmount)} per share` : (div.annualDivPerShare ? `~$${fmt(div.annualDivPerShare / 4)} per share est.` : 'check broker');
+    if (typeof fireAlert === 'function') {
+      fireAlert(`📅 Ex-Div: ${h.ticker}`, `${when} (${exDate}) · ${amt}`, `sloth-exdiv-${h.ticker}-${exDate}`);
+    }
+    toast(`📅 ${h.ticker} ex-dividend ${when.toLowerCase()} (${exDate})`, 'warning');
+  }
+}
+
+function checkEarningsReminders() {
+  if (!state.portfolio || !state.earningsCalendar) return;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const h of state.portfolio) {
+    const ec = state.earningsCalendar[h.ticker];
+    if (!ec || !ec.nextEarningsDate) continue;
+    const earnDate = ec.nextEarningsDate.slice(0, 10);
+    const daysUntil = Math.round((new Date(earnDate) - new Date(today)) / 86400000);
+    if (daysUntil < 0 || daysUntil > 3) continue;
+    const key = `${h.ticker}_${earnDate}`;
+    if (_earningsAlerted[key] === today) continue;
+    _earningsAlerted[key] = today;
+    const when = daysUntil === 0 ? 'Today' : daysUntil === 1 ? 'Tomorrow' : `In ${daysUntil} days`;
+    const target = ec.analystTarget ? ` · Analyst target $${ec.analystTarget}` : '';
+    if (typeof fireAlert === 'function') {
+      fireAlert(`📊 Earnings: ${h.ticker}`, `${when} (${earnDate})${target}`, `sloth-earnings-${h.ticker}-${earnDate}`);
+    }
+    toast(`📊 ${h.ticker} earnings ${when.toLowerCase()} (${earnDate})`, 'warning');
+  }
 }
 
 // ============================================================

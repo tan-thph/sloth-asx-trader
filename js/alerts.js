@@ -14,14 +14,23 @@
 // ── Core fire function ────────────────────────────────────────────────────────
 
 function fireAlert(title, body, tag = 'sloth-alert', iconUrl = null) {
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  try {
-    const opts = { body, tag, requireInteraction: false };
-    if (iconUrl) opts.icon = iconUrl;
-    const n = new Notification(title, opts);
-    n.onclick = () => { window.focus(); n.close(); };
-  } catch (e) {
-    console.warn('[alerts] Notification failed:', e);
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      const opts = { body, tag, requireInteraction: false };
+      if (iconUrl) opts.icon = iconUrl;
+      const n = new Notification(title, opts);
+      n.onclick = () => { window.focus(); n.close(); };
+    } catch (e) {
+      console.warn('[alerts] Notification failed:', e);
+    }
+  }
+  // Mirror to Telegram if credentials are saved
+  if (state.settings && state.settings.telegramEnabled) {
+    fetch(`${API}/api/alerts/telegram`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: `<b>${title}</b>\n${body}` }),
+    }).catch(() => {});
   }
 }
 
@@ -108,4 +117,53 @@ function checkRecStopTargetAlerts() {
     }
   });
   if (anyFired && typeof scheduleSave === 'function') scheduleSave();
+}
+
+// ── Indicator alerts — RSI, Bollinger Bands, volume spike ─────────────────────
+// Called after fetchSignals() so state.liveSignals is fresh.
+// Alert types: 'rsi_below' | 'rsi_above' | 'bb_breakout' | 'bb_breakdown' | 'volume_spike'
+
+function checkIndicatorAlerts() {
+  if (!state.priceAlerts || !state.priceAlerts.length) return;
+  if (!state.liveSignals || !Object.keys(state.liveSignals).length) return;
+
+  const indicatorTypes = new Set(['rsi_below', 'rsi_above', 'bb_breakout', 'bb_breakdown', 'volume_spike']);
+  let anyTriggered = false;
+
+  for (const alert of state.priceAlerts) {
+    if (!alert.active || alert.triggeredAt) continue;
+    if (!indicatorTypes.has(alert.type)) continue;
+    const sig = state.liveSignals[alert.ticker];
+    if (!sig) continue;
+
+    let fired = false;
+    let msg = '';
+
+    if (alert.type === 'rsi_below' && sig.rsi_14 != null && sig.rsi_14 <= alert.value) {
+      fired = true;
+      msg = `📉 ${alert.ticker} RSI ${sig.rsi_14.toFixed(0)} ≤ ${alert.value} (oversold)`;
+    } else if (alert.type === 'rsi_above' && sig.rsi_14 != null && sig.rsi_14 >= alert.value) {
+      fired = true;
+      msg = `📈 ${alert.ticker} RSI ${sig.rsi_14.toFixed(0)} ≥ ${alert.value} (overbought)`;
+    } else if (alert.type === 'bb_breakout' && sig.bb_upper != null && sig.current_price != null && sig.current_price >= sig.bb_upper) {
+      fired = true;
+      msg = `🔔 ${alert.ticker} broke above BB upper ($${fmt(sig.bb_upper)}) at $${fmt(sig.current_price)}`;
+    } else if (alert.type === 'bb_breakdown' && sig.bb_lower != null && sig.current_price != null && sig.current_price <= sig.bb_lower) {
+      fired = true;
+      msg = `🔔 ${alert.ticker} broke below BB lower ($${fmt(sig.bb_lower)}) at $${fmt(sig.current_price)}`;
+    } else if (alert.type === 'volume_spike' && sig.volume_avg_20 != null && sig.volume_today != null && sig.volume_today >= sig.volume_avg_20 * alert.value) {
+      fired = true;
+      const mult = (sig.volume_today / sig.volume_avg_20).toFixed(1);
+      msg = `📊 ${alert.ticker} volume spike: ${mult}× avg (threshold: ${alert.value}×)`;
+    }
+
+    if (fired) {
+      alert.triggeredAt = new Date().toISOString();
+      alert.lastPrice   = sig.current_price;
+      anyTriggered = true;
+      toast(msg, 'warning');
+      fireAlert('ASX Indicator Alert', msg, `sloth-ind-${alert.ticker}-${alert.type}`);
+    }
+  }
+  if (anyTriggered && typeof scheduleSave === 'function') scheduleSave();
 }

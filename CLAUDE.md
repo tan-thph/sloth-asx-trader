@@ -33,7 +33,7 @@ API key options (one of these is required for analysis):
 
 Tests:
 ```bash
-python test_app.py        # all 108 tests, ~6 s
+python test_app.py        # all 109 tests, ~7 s
 ```
 
 ---
@@ -65,13 +65,13 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | File | Lines | Purpose |
 |---|--:|---|
 | `asx_server.py` | ~205 | Flask app + middleware + blueprint registration + `__main__` bootstrap. **Holds no routes itself.** |
-| `core.py` | ~190 | Shared infrastructure: `ttl_cache`, `_HTTP_SESSION`, `log`, `LOG_DIR`, `SECTOR_MAP`, `ASX_UNIVERSE`, `OLLAMA_BASE`. No Flask import. |
-| `db.py` | ~230 | SQLite schema, `get_db()`, `init_db()`, migrations, `log_failed_ticker()`. Single source of truth — never `sqlite3.connect()` directly. |
+| `core.py` | ~230 | Shared infrastructure: `ttl_cache`, `fetch_with_retry` (exponential backoff + `_last_good` stale-cache), `_HTTP_SESSION`, `log`, `LOG_DIR`, `SECTOR_MAP`, `ASX_UNIVERSE`, `OLLAMA_BASE`. No Flask import. |
+| `db.py` | ~260 | SQLite schema, `get_db()`, `init_db()`, migrations, `log_failed_ticker()`, `backup_db(keep=7)`. Single source of truth — never `sqlite3.connect()` directly. |
 | `indicators.py` | ~660 | All technical indicators + `analyse_ticker()` + `_score_ticker()`. Pure compute, no Flask. |
 | `announcement_engine.py` + `announcement_routes.py` | — | ASX announcements scraper, PDF parser, Gemini scorer, blueprint `/api/announcements/*`. |
 | `news_engine.py` | — | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
 | `gunicorn.conf.py` | — | Production WSGI config. 2 workers × 8 threads. |
-| `test_app.py` | ~1085 | 108 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
+| `test_app.py` | ~1130 | 109 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
 
 #### `routes/` — one blueprint per concern
 
@@ -82,12 +82,14 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `routes/market.py`     | ~670 | `/health`, `/api/{analyse,quote,macro,rba-rate,polymarket,risk,portfolio/nav-history,earnings-calendar,log/ai_response}` | All yfinance read-only data + Anthropic response logging. Uses `@ttl_cache`. |
 | `routes/backtest.py`   | ~575 | `/api/backtest`, `/api/backtest/ai-replay`     | Historical strategy backtest + replay scoring of executed AI recs. |
 | `routes/scanner.py`    | ~205 | `/api/market/scan*`                              | Background thread + `_scan_state` dict, sector diversification. |
-| `routes/learning.py`   | ~603 | `/api/learning/*`                                | Log → outcome → stats/calibration analytics. Decay-weighted win rates. `_calib_compute()` is a pure function cached 5 min. |
+| `routes/learning.py`   | ~650 | `/api/learning/*`                                | Log → outcome → stats/calibration analytics. Decay-weighted win rates. `_calib_compute()` is a pure function cached 5 min. Also `GET /api/learning/calibration-stats` (Brier score + reliability-diagram bins). |
 | `routes/debate.py`     | ~1001 | `/api/debate/*`                                  | Local Ollama bull/bear + postmortem + skill scoring. Direction-aware prompts (BUY vs SELL/TRIM). Uses `current_app.logger`. |
 | `routes/news.py`       | ~690 | `/api/news/*`, `/api/groq/models`, `/api/google/models`, `/api/sbc-mode`, `/api/system/gpu`, `/api/ollama/start` | RSS scanner + LLM provider management + SBC toggle. Owns `_NE_OK`. |
 | `routes/claude.py`     | ~85  | `/api/claude/*`                                  | Backend proxy for the Anthropic API (opt-in). |
+| `routes/alerts.py`     | ~100 | `/api/alerts/*`                                  | Telegram off-device alerts. `POST /api/alerts/telegram` (send), `POST /api/alerts/telegram/save` (persist creds to settings table), `GET /api/alerts/config` (has_telegram?). Credentials stored in `settings` table as `tg_token`/`tg_chat_id` — never logged. |
+| `routes/import_csv.py` | ~200 | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. Returns BUY rows only; SELL rows reported as skipped (require manual entry). |
 
-Total: **9 blueprints, 68 routes** (including announcements blueprint).
+Total: **11 blueprints, 73 routes** (including announcements blueprint).
 
 ### Frontend (JS) — load order matters
 
@@ -125,7 +127,8 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 | `js/analysis.js` | Portfolio analysis orchestration — fetches signals, builds prompt, calls Claude, post-processes through quant engine + validator + regime modifiers. |
 | `js/day-trading-analysis.js` | Day-trade portfolio scan + universe scan orchestration. |
 | `js/navigation.js` | `showPage()` + `renderPage()` with error boundary (any page crash falls back to a graceful error card). |
-| `js/alerts.js` | Desktop notifications; `checkRecStopTargetAlerts` tracks `_stopAlertedAt`/`_targetAlertedAt` to prevent spam. |
+| `js/alerts.js` | `fireAlert(title, body, tag)` — desktop notification + optional Telegram mirror when `state.settings.telegramEnabled`. `checkRecStopTargetAlerts` tracks `_stopAlertedAt`/`_targetAlertedAt` to prevent spam. |
+| `js/prices.js` | `refreshPrices()` — fetches live quotes, stores `fetched_at` timestamps per ticker in `state.priceTimestamps`. |
 
 ### Pages
 
@@ -136,18 +139,58 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 ## Key data shapes
 
 ```js
-state.portfolio:       [{ ticker, shares, avgPrice, currentPrice, sector }]
-state.tradeJournal:    [{ id, date, ticker, action, qty, entryPrice, exitPrice, fees, pnl, status, recId, recExecuted, closeDate }]
-state.recHistory:      [{ id, date, ticker, action, confidence, ensembleConfidence, priceRange, target, stopLoss, qty, executed, outcome, actualProfit, regime, _learningId, _stopAlertedAt?, _targetAlertedAt? }]
-state.recommendations: pending recs (same shape as recHistory entries with status='pending')
-state.liveSignals:     { TICKER: { current_price, rsi_14, bb_*, atr_14, adv_20 (AUD), volume_avg_20 (shares), score, ... } }
-state.currentRegime:   { regime, confidence, signals: [...] }
+state.portfolio:          [{ ticker, shares, avgPrice, currentPrice, sector }]
+state.tradeJournal:       [{ id, date, ticker, action, qty, entryPrice, exitPrice, fees, pnl, status, recId, recExecuted, closeDate }]
+state.recHistory:         [{ id, date, ticker, action, confidence, ensembleConfidence, priceRange, target, stopLoss, qty, executed, outcome, actualProfit, regime, _learningId, _stopAlertedAt?, _targetAlertedAt? }]
+state.recommendations:    pending recs (same shape as recHistory entries with status='pending')
+state.liveSignals:        { TICKER: { current_price, rsi_14, bb_*, atr_14, adv_20 (AUD), volume_avg_20 (shares), score, ... } }
+state.currentRegime:      { regime, confidence, signals: [...] }
+state.priceTimestamps:    { TICKER: ISO-string }  — fetched_at from last quote call; used for stale-data badge (>25 min)
+state.portfolioHistory:   [{ date, netWorth, portfolioValue, cash }]  — daily snapshots; used for drawdown monitor
+state.settings.telegramEnabled:   bool — mirrors alerts to Telegram when true
+state.settings.tgToken / tgChatId: stored locally in state but credentials saved server-side via POST /api/alerts/telegram/save
+state.settings.drawdownAlertPct:  number — alert threshold for drawdown monitor (default 10)
 ```
 
 **Critical:**
 - `signals.adv_20` is **dollar turnover** (close × volume average).
 - `signals.volume_avg_20` is **share count**.
 - The quant engine's liquidity cap is in shares — it derives shares from `adv_20 / price` if `volume_avg_20` is unavailable.
+
+---
+
+## Learning Loop internals (the trade-outcome feedback path)
+
+This is the most subtle subsystem. A recommendation's life-cycle spans three files and the backend `ai_learning_events` table.
+
+### Life-cycle of a learning event
+
+```
+analysis.js logRecsToLearningLoop()        → POST /api/learning/log   (event created, was_executed=0)
+   │  (rec gains rec._learningId)
+recommendations.js markExecuted()           → POST /api/learning/outcome (was_executed=1, + outcome if it closed)
+   │  on full-position close, reconciles parent BUY/TOP_UP events too
+performance.js syncClosedTradesToLearningLoop()  → batch backfill for legacy recs lacking a _learningId
+   │
+routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed back into the next prompt
+```
+
+### Key functions
+
+| Function | File | Contract |
+|---|---|---|
+| `markExecuted(id, price, fee, qty)` | `recommendations.js` | Records a fill: updates portfolio/CGT/journal, pushes a `recHistory` entry, then patches the learning event. For SELL/TRIM that **fully closes** a position, it loops the still-open parent BUY/TOP_UP events and stamps each a **per-entry** outcome (`tradePrice` vs that parcel's own `executedPrice`) — never the SELL's blanket outcome. |
+| `_detectExitReason(exitPrice, stopLoss, target, action)` | `recommendations.js` **and** `performance.js` (identical copies) | Classifies the exit as `stop_hit` / `target_hit` / `manual`. **Direction-aware:** BUY/TOP_UP use a long frame (stop below, target above); SELL/TRIM use the inverse (stop above, target below). Pass the rec's `action`; absent that, it infers direction from `stop > target` geometry. |
+| `triggerPostmortem(learningId)` | `debate-client.js` | Fired automatically on `loss`/`breakeven`. Runs the local Ollama bull/bear postmortem. |
+| `fetchSkillScore(learningId)` | `debate-client.js` | Scores the closed trade's process quality 0-10. |
+| `fetchCalibrationBlock(regime, sectors, tickers)` | `learning-loop.js` | Pulls the compact calibration string from `GET /api/learning/calibration`; injected into every Claude user message. |
+| `_calib_compute()` | `routes/learning.py` | Pure function, 5-min TTL cache. Decay-weighted win rate per confidence band; returns the `adj` nudge the prompt applies to confidence. |
+
+### Gotchas specific to the Learning Loop
+
+- **Per-entry outcome, not blanket.** When a position built from several BUY/TOP_UP parcels is closed by one SELL, each parcel's win/loss is judged against **its own** entry price. A TOP_UP bought above the eventual exit is a `loss` even if the overall position was green.
+- **`exit_reason` is direction-aware** (see table). A profitable TRIM must not read as `stop_hit` just because the exit sits numerically below the (above-entry) stop. Backfill historical rows with the corrected logic if you change this function — `asx_trader.db` rows written before the fix are stale.
+- **The helper is duplicated** in `recommendations.js` (loaded first) and `performance.js` (loaded second, so its copy wins at runtime). Keep both byte-identical, or a stale copy silently takes over. `test_detect_exit_reason_direction_aware` evaluates the real function from **both** files against fixed cases.
 
 ---
 
@@ -160,8 +203,8 @@ state.currentRegime:   { regime, confidence, signals: [...] }
 - `POST /api/db/refresh-sectors`
 
 ### Market data (all cached via `ttl_cache`)
-- `GET /api/macro` — ASX200, AUD/USD, gold, iron ore + regime fields. **5 min cache.**
-- `GET /api/quote/<ticker>` — fast price + sector. **45 s cache.**
+- `GET /api/macro` — ASX200, AUD/USD, gold, iron ore + regime fields. **5 min cache.** `advance_decline_ratio` is currently always `null` — there is no valid single-symbol breadth source on Yahoo (the old `^XJOA` symbol 404'd), so the regime engine's breadth vote (`regime-engine.js`, guarded by `adr != null`) stays dormant until a real source (e.g. a universe-scan breadth count) is wired in.
+- `GET /api/quote/<ticker>` — fast price + sector + **`fetched_at` (UTC ISO)**. **45 s cache.** Both `_quote_cached` and `_fetch_symbol` (macro) use `fetch_with_retry` with stale-cache fallback.
 - `GET /api/analyse/<ticker>` / `POST /api/analyse/batch` — full indicator pack. **5 min cache.**
 - `GET /api/risk?tickers=A,B,C&rf=4.35` — beta, Sharpe, VaR, CVaR, correlation matrix.
 - `GET /api/rba-rate` — live scrape → DB cache → fallback.
@@ -176,8 +219,17 @@ state.currentRegime:   { regime, confidence, signals: [...] }
 - `POST /api/learning/log` — log a recommendation event.
 - `POST /api/learning/outcome` — partial-patch an event's outcome.
 - `DELETE /api/learning/event/<id>`
-- `GET /api/learning/stats` — confidence-band win rates, regime stats, prompt-version history, R:R stats, failure patterns, debate insights.
-- `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` — compact calibration block (~30–60 tokens) for prompt injection. Includes per-ticker stats for portfolio holdings. 5-min TTL cache via `_calib_compute()`.
+- `GET /api/learning/stats` — confidence-band win rates + **Wilson 95% CI**, regime stats, prompt-version history, R:R stats, failure patterns, debate insights. Includes `calibration_active` (bool: n≥30) and `overall_ci_lo/hi`.
+- `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` — compact calibration block (~30–60 tokens) for prompt injection. Includes per-ticker stats for portfolio holdings. 5-min TTL cache via `_calib_compute()`. Gated at n<30 — returns `{available:false}` when sample too small.
+- `GET /api/learning/calibration-stats` — Brier score + reliability-diagram bins. Returns `{brier_score, n, bins:[{range,lo,hi,n,mean_confidence,actual_win_rate}]}`. Displayed on Learning page.
+
+### Alerts (Telegram)
+- `GET /api/alerts/config` — `{has_telegram: bool}` — whether credentials are stored.
+- `POST /api/alerts/telegram` — send message. Body: `{message, token?, chat_id?}`. Explicit creds override stored. Used by the Test button.
+- `POST /api/alerts/telegram/save` — persist `{token, chat_id}` to the `settings` table (keys `tg_token`, `tg_chat_id`). Pass empty strings to clear.
+
+### Broker CSV import
+- `POST /api/import/csv` — multipart upload; field `file` = CSV, optional `broker` hint (`commsec`|`selfwealth`|`auto`). Returns `{ok, broker, rows:[{action,ticker,shares,price,date,brokerage}], skipped:[{row,reason}], total}`.
 
 ### Claude proxy (opt-in)
 - `GET /api/claude/settings` → `{has_key: bool}`
@@ -226,6 +278,14 @@ Edit `js/prompts.js`. If it's reused, add the agent type to `_AGENT_MAX_TOKENS` 
 ### Tune Kelly fraction / risk %
 `js/quant-engine.js` → `QUANT_CONFIG`.
 
+### Add a new route blueprint
+1. Create `routes/my_feature.py` with `bp = Blueprint("my_feature", __name__)`.
+2. Import and `register_blueprint` in `asx_server.py`.
+3. Add `"routes.my_feature"` to `_EXTRA_MODULES` in `test_app.py → _install_in_memory_db()` so tests patch its `get_db` binding.
+
+### Configure Telegram alerts
+Settings page → Telegram section. Enter bot token (from `@BotFather`) and chat ID, click Save, then Test. Enable the toggle. `fireAlert()` will mirror all desktop alerts to Telegram when enabled.
+
 ### Run tests
 ```bash
 python test_app.py
@@ -252,13 +312,23 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 
 8. **SQLite uses `synchronous=NORMAL` + WAL.** Fast and crash-safe (loses only uncommitted last-txn, never corrupts). Don't downgrade to `synchronous=FULL` without measuring.
 
-9. **`db.get_db` is the single source of truth.** Don't open `sqlite3.connect()` directly. Every `routes/*.py` does `from db import get_db` at import time — meaning each module has its **own binding** of `get_db`. Tests patch ALL of them via `_install_in_memory_db()` in `test_app.py`. When adding a new route blueprint, add its module name to that helper.
+9. **`db.get_db` is the single source of truth.** Don't open `sqlite3.connect()` directly. Every `routes/*.py` does `from db import get_db` at import time — meaning each module has its **own binding** of `get_db`. Tests patch ALL of them via `_install_in_memory_db()` in `test_app.py`. **When adding a new route blueprint, add its module name (`routes.alerts`, `routes.import_csv`, etc.) to that helper or tests will hit the real DB.**
 
 10. **Render functions must be pure.** `renderPerformance()` previously mutated `state.recHistory` inside render; now reconciliation happens in `reconcileRecOutcomes()` called from `renderPerformancePage()` BEFORE the HTML build. Follow this pattern for new pages.
 
 11. **The error boundary catches render exceptions.** `navigation.js → renderPage()` wraps the actual render in try/catch. If you see "Page crashed" in the UI, the previous page render threw — the stack is in `console.error`.
 
-12. **API key never logged.** `saveStateToDb` explicitly skips `settings.apiKey` (`asx_server.py:1657-ish`). If you add another secret field, do the same.
+12. **API key never logged.** `saveStateToDb` explicitly skips `settings.apiKey` (`asx_server.py:1657-ish`). If you add another secret field, do the same. Telegram `tg_token`/`tg_chat_id` are stored **server-side** in the `settings` table (not in the browser save payload) — don't move them client-side.
+
+13. **`_detectExitReason` is direction-aware.** SELL/TRIM recs frame the stop *above* and target *below* entry (a bearish/exit thesis) — the inverse of BUY/TOP_UP. The comparisons flip on `action`. Always pass the rec's `action`. Forgetting this mislabels profitable trims as `stop_hit` and pollutes `failure_patterns`/`exit_reason_dist`.
+
+14. **Two scripts redefine `_detectExitReason`.** Because plain `<script>` tags share one global scope, `performance.js` (loaded after `recommendations.js`) wins at runtime. Edit **both** copies identically.
+
+15. **`fetch_with_retry` is not the `ttl_cache`.** They're orthogonal: `ttl_cache` serves the cached result within TTL; `fetch_with_retry` retries the live call and falls back to `_last_good` only when the call keeps failing. Both can coexist on the same function — the cache returns early before a retry is needed.
+
+16. **Broker CSV import only imports BUY rows.** SELL rows are returned in `skipped` with a human-readable reason. Matching a SELL to existing CGT parcels requires knowing lot selection (FIFO/LIFO/specific), so SELL fills must be entered via `markExecuted` as usual.
+
+17. **Drawdown monitor needs portfolio history.** `renderPerformance()` computes drawdown from `state.portfolioHistory`. If `portfolioHistory` has <2 entries (e.g. fresh install), no drawdown cards are shown — this is intentional, not a bug.
 
 ---
 
@@ -270,6 +340,13 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 | **FastAPI migration** | Half-day refactor of every route. Current Flask + gthread is fast enough. | Native async, auto-generated OpenAPI docs, faster I/O concurrency. |
 | **Walk-forward backtesting** | Requires vectorised OHLCV replay engine + parameter grid — a mini framework. | Robust strategy parameter tuning. |
 | **Mobile compact mode** | Needs CSS breakpoint pass on every card/table. | Phone-friendly read-only mode during market hours. |
+| **Real advance/decline breadth** | No single Yahoo symbol gives ASX breadth; needs a universe-wide count (advancers vs decliners, or % above 20-day MA). The scanner already downloads the universe — could surface breadth from there. | Re-enables the regime engine's breadth vote (currently dormant). |
+| **Custom indicator alerts** | RSI/BB/volume-spike rules need a rule engine and evaluation loop — a small framework addition. Current alerts only support price thresholds. | Alert when RSI < 30, price crosses a moving average, or volume spikes. |
+| **Tax-loss harvest planner** | Needs EOFY date logic and an unrealised-loss screen. Data is all available. | Actionable EOFY screen showing which losers can offset realised gains. |
+| **Watchlist** | Separate from holdings — needs a new `state.watchlist` array and a simple page/card. Scanner candidates could be starred into it. | Track tickers you're eyeing without polluting the portfolio. |
+| **`pip install feedparser`** | Optional dep; RSS falls back to a built-in XML parser when absent (logs a warning each scan). | More robust news-feed parsing. |
+| **Hoist `_detectExitReason` into `utils.js`** | Currently duplicated in two page files; dedup risks the fragile script order. | Single source of truth for exit classification. |
+| **Filter ETFs from `/api/earnings-calendar`** | ETF symbols (VAS, VHY, IVV…) have no fundamentals; yfinance logs a 404 ERROR per symbol. Harmless (endpoint still 200s) but noisy. | Cleaner logs. |
 
 ---
 

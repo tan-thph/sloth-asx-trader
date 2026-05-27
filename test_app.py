@@ -643,6 +643,51 @@ class TestRegressionBugs(unittest.TestCase):
             src = f.read()
         self.assertIn("key.txt", src, ".gitignore must list key.txt")
 
+    # ── Bug: _detectExitReason ignored trade direction ───────────────────────
+    def test_detect_exit_reason_direction_aware(self):
+        """SELL/TRIM recs frame stop ABOVE and target BELOW entry; _detectExitReason
+        must invert its comparisons so a profitable trim isn't mislabeled stop_hit.
+
+        Evaluates the real function extracted from both JS files against known cases.
+        """
+        node_script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+const start = src.indexOf('function _detectExitReason');
+if (start < 0) { console.error('function not found'); process.exit(2); }
+let i = src.indexOf('{', start), depth = 0, end = -1;
+for (; i < src.length; i++) {
+  if (src[i] === '{') depth++;
+  else if (src[i] === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+}
+eval(src.slice(start, end));
+const cases = [
+  // [exit, stop, target, action, expected]
+  [9.0,  10.0, 15.0,  'BUY',  'stop_hit'],
+  [16.0, 10.0, 15.0,  'BUY',  'target_hit'],
+  [12.0, 10.0, 15.0,  'BUY',  'manual'],
+  [15.0, 14.79, 13.59, 'TRIM', 'stop_hit'],
+  [13.0, 14.79, 13.59, 'TRIM', 'target_hit'],
+  [14.0, 14.79, 13.59, 'TRIM', 'manual'],
+  [55.1, 58.84, 47.54, 'SELL', 'manual'],
+  // geometry fallback when action absent (stop > target => bearish framing)
+  [15.0, 14.79, 13.59, undefined, 'stop_hit'],
+];
+let fail = 0;
+for (const [ex, st, tg, ac, exp] of cases) {
+  const got = _detectExitReason(ex, st, tg, ac);
+  if (got !== exp) { console.error(`FAIL (${ex},${st},${tg},${ac}) expected ${exp} got ${got}`); fail++; }
+}
+process.exit(fail ? 1 : 0);
+"""
+        for fn in ("js/pages/recommendations.js", "js/pages/performance.js"):
+            result = subprocess.run(
+                ["node", "-e", node_script, os.path.join(ROOT, fn)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f"{fn} _detectExitReason direction logic wrong:\n{result.stderr}")
+
 
 class TestInfraImprovements(unittest.TestCase):
     """Tests for the production-grade upgrades."""

@@ -471,7 +471,7 @@ function _renderAnnCard(ann) {
 
   // Summary text
   const summaryHtml = summary
-    ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px">${summary}</div>`
+    ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px">${escapeHTML(summary)}</div>`
     : '';
 
   // Search button
@@ -496,7 +496,7 @@ function _renderAnnCard(ann) {
       <!-- Row 1: ticker, headline, date -->
       <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;flex-wrap:wrap">
         ${tickerBadge}
-        <span style="flex:1;font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.4">${headline}</span>
+        <span style="flex:1;font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.4">${escapeHTML(headline)}</span>
         <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;flex-shrink:0">${_annFmtDate(date)}</span>
       </div>
       <!-- Row 2: type + sentiment + impact + PS badge -->

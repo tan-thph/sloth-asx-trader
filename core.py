@@ -11,6 +11,7 @@ import threading
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any, Callable
 
 import requests
 
@@ -69,6 +70,45 @@ def ttl_cache(seconds: int):
         wrapper.cache_clear = lambda: _cache_store.clear()
         return wrapper
     return deco
+
+
+# ── yfinance retry + stale-cache fallback ────────────────────────────────────
+# Module-level store: last-good result per cache key (string → any).
+# Populated by fetch_with_retry; returned on full failure so callers stay alive.
+_last_good: dict[str, Any] = {}
+
+
+def fetch_with_retry(
+    fn: Callable,
+    *args,
+    cache_key: str = "",
+    max_retries: int = 3,
+    backoff: float = 2.0,
+    **kwargs,
+) -> Any:
+    """Call fn(*args, **kwargs) with exponential-backoff retries.
+
+    On complete failure, returns the last successful result stored under
+    cache_key (or raises the last exception if no prior result exists).
+    Always updates _last_good[cache_key] on success.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            result = fn(*args, **kwargs)
+            if cache_key:
+                _last_good[cache_key] = result
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                time.sleep(backoff ** attempt)
+
+    # All retries exhausted — serve stale data if available
+    if cache_key and cache_key in _last_good:
+        log.warning("fetch_with_retry: all retries failed for %s — serving stale cache. err: %s", cache_key, last_exc)
+        return _last_good[cache_key]
+    raise last_exc  # type: ignore[misc]
 
 
 # ── Shared HTTP session ───────────────────────────────────────────────────────

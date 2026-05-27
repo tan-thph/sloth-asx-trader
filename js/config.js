@@ -66,7 +66,8 @@ const state = {
   dividendData: {},             // ticker -> {dividendYield, annualDivPerShare, exDividendDate, frequencyLabel, nextEstAmount, history[]}
   earningsCalendar: {},         // ticker -> {nextEarningsDate, forwardEps, epsGrowth, revenueGrowth, analystRec, analystTarget}
   journalFilter: {ticker:'',action:'all',status:'all',pnl:'all',dateFrom:'',dateTo:'',sortBy:'date_desc'},
-  priceAlerts: [],          // [{id, ticker, type:'above'|'below'|'pct_drop', value, referencePrice, active, createdAt, triggeredAt, lastPrice}]
+  priceAlerts: [],          // [{id, ticker, type:'above'|'below'|'pct_drop'|'rsi_below'|'rsi_above'|'bb_breakout'|'bb_breakdown'|'volume_spike', value, referencePrice, active, createdAt, triggeredAt, lastPrice}]
+  watchlist: [],            // [{ticker, addedAt, notes}] — tickers monitored but not held
   analysisConfig: {
     extraTickers: [],
     marketView: '',

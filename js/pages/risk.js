@@ -134,7 +134,47 @@ function buildRiskPage(merged, riskData) {
 
   const hasCorrData = Object.keys(riskData.correlation||{}).length >= 2;
 
+  // ── Portfolio Heat (risk to stop per position) ────────────────────────────
+  const maxRiskBudgetPct = parseFloat(state.settings.maxRiskBudgetPct || 5);
+  let totalHeatAud = 0;
+  const heatRows = merged.map(h => {
+    const val = h.shares * h.currentPrice;
+    // Find the most recent pending/executed BUY rec to get a stop price
+    const latestRec = (state.recommendations || []).concat(state.recHistory || [])
+      .filter(r => r.ticker === h.ticker && r.stopLoss && r.stopLoss > 0)
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
+    if (!latestRec) return null;
+    const riskPct = Math.max(0, (h.currentPrice - latestRec.stopLoss) / h.currentPrice);
+    const riskAud = val * riskPct;
+    totalHeatAud += riskAud;
+    return { ticker: h.ticker, val, riskPct: riskPct * 100, riskAud, stop: latestRec.stopLoss };
+  }).filter(Boolean);
+  const maxHeatAud = (nw || pv) * (maxRiskBudgetPct / 100);
+  const heatPct = maxHeatAud > 0 ? Math.min(100, (totalHeatAud / maxHeatAud) * 100) : 0;
+  const heatColor = heatPct < 60 ? '#16a34a' : heatPct < 85 ? '#d97706' : '#dc2626';
+  const heatLabel = heatPct < 60 ? 'Within budget' : heatPct < 85 ? 'Getting warm' : 'Over budget';
+
   return `
+  <!-- Portfolio Heat Gauge -->
+  ${heatRows.length ? `<div class="card section-gap" style="margin-bottom:14px">
+    <div class="flex-between" style="margin-bottom:8px">
+      <div>
+        <div class="card-title" style="margin:0">Portfolio Heat</div>
+        <div class="text-xs text-muted">Total $ at risk to stop vs budget (${fmt(maxRiskBudgetPct,1)}% of portfolio)</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:18px;font-weight:700;color:${heatColor}">$${fmt(totalHeatAud)}</div>
+        <div style="font-size:11px;color:${heatColor}">${heatLabel} · ${fmt(heatPct,1)}% of $${fmt(maxHeatAud)} limit</div>
+      </div>
+    </div>
+    <div style="background:var(--bg-secondary);border-radius:6px;height:10px;overflow:hidden">
+      <div style="height:100%;width:${heatPct}%;background:${heatColor};border-radius:6px;transition:width 0.4s"></div>
+    </div>
+    <div class="text-xs text-muted" style="margin-top:6px">Set budget: <input type="number" value="${maxRiskBudgetPct}" min="0.5" max="20" step="0.5"
+      oninput="state.settings.maxRiskBudgetPct=Number(this.value);scheduleSave();renderPage()"
+      style="width:52px;padding:2px 6px;border-radius:4px;border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:11px">% of portfolio</div>
+  </div>` : ''}
+
   <!-- Composite Risk Score + summary tiles -->
   <div style="display:flex;gap:14px;align-items:stretch;flex-wrap:wrap;margin-bottom:14px">
 

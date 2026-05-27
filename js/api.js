@@ -128,6 +128,7 @@ async function saveStateToDb() {
         analysisLastSummary: state.analysisLastSummary,
         dayTrading: state.dayTrading,
         priceAlerts: state.priceAlerts,
+        watchlist: state.watchlist,
       })
     });
   } catch(e) { /* silent — don't interrupt UX */ }
@@ -205,6 +206,7 @@ async function loadStateFromDb() {
       state.dayTrading.scanProgress = null;
     }
     if (Array.isArray(data.priceAlerts)) state.priceAlerts = data.priceAlerts;
+    if (Array.isArray(data.watchlist)) state.watchlist = data.watchlist;
     return true;
   } catch(e) {
     return false;
