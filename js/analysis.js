@@ -630,6 +630,46 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       summary = (summary ? summary + ' ' : '') + note.trim();
     }
 
+    // ── Correlation-aware size reduction ──────────────────────────────────────
+    // Fetch exact correlation between BUY rec tickers and existing holdings.
+    // Reduces qty when |corr| > 0.7 (−30%) or > 0.85 (−50%) to limit
+    // inadvertent concentration in correlated names.
+    const _buyRecs = recs.filter(r => ['BUY','TOP_UP'].includes((r.action||'').toUpperCase()));
+    if (state.serverOk && portfolioTickers.length && _buyRecs.length) {
+      try {
+        const _corrTickers = [...new Set([...portfolioTickers, ..._buyRecs.map(r => r.ticker)])];
+        if (_corrTickers.length >= 2) {
+          const _corrResp = await fetch(`${API}/api/risk?tickers=${_corrTickers.join(',')}&rf=${state.rbaRate||4.35}`);
+          if (_corrResp.ok) {
+            const _corrData = await _corrResp.json();
+            const _corrMatrix = _corrData.correlation || {};
+            recs = recs.map(r => {
+              if (!['BUY','TOP_UP'].includes((r.action||'').toUpperCase())) return r;
+              const tkrRow = _corrMatrix[r.ticker] || {};
+              let maxCorr = 0, maxCorrTicker = null;
+              for (const h of portfolioTickers) {
+                if (h === r.ticker) continue;
+                const c = Math.abs(tkrRow[h] || 0);
+                if (c > maxCorr) { maxCorr = c; maxCorrTicker = h; }
+              }
+              if (maxCorr > 0.85) {
+                const mult = 0.5;
+                return { ...r, qty: Math.max(1, Math.round(r.qty * mult)),
+                  riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
+                  _corrNote: `corr ${maxCorr.toFixed(2)} with ${maxCorrTicker} — size halved` };
+              } else if (maxCorr > 0.7) {
+                const mult = 0.7;
+                return { ...r, qty: Math.max(1, Math.round(r.qty * mult)),
+                  riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
+                  _corrNote: `corr ${maxCorr.toFixed(2)} with ${maxCorrTicker} — size −30%` };
+              }
+              return r;
+            });
+          }
+        }
+      } catch { /* non-fatal — analysis continues without correlation adjustment */ }
+    }
+
     // FIX #3: conviction is derived client-side — no longer required from the model.
     // Compute it here for any downstream UI that references it.
     recs = recs.map(r => ({

@@ -1597,5 +1597,138 @@ class TestDigestHistory(unittest.TestCase):
         self.assertIn("digestHistory.length > 50", src)
 
 
+class TestSprint8(unittest.TestCase):
+    """Sprint 8 — A-VIX, cash/TD tracker, exact corr sizing, perf/responsiveness, kbd shortcuts."""
+
+    def setUp(self):
+        _install_in_memory_db()
+        self.client = asx_server.app.test_client()
+
+    # ── 1. A-VIX proxy ───────────────────────────────────────────────────────
+    def test_avix_computed_in_macro_payload(self):
+        """market.py _macro_payload must compute asx_vol_20d (realized vol)."""
+        with open(os.path.join(ROOT, "routes/market.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("asx_vol_20d", src)
+        self.assertIn("asx_vol_20d", src)
+        self.assertIn("252 ** 0.5", src)
+
+    def test_avix_in_regime_engine(self):
+        """regime-engine.js must read asx_vol_20d and vote on it."""
+        with open(os.path.join(ROOT, "js/regime-engine.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("asxVol20d", src)
+        self.assertIn("asx_vol_20d", src)
+        self.assertIn("A-VIX", src)
+
+    def test_avix_displayed_on_macro_page(self):
+        """macro.js must display asx_vol_20d in the Market Risk card."""
+        with open(os.path.join(ROOT, "js/pages/macro.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("asx_vol_20d", src)
+        self.assertIn("A-VIX", src)
+
+    # ── 2. Cash & term-deposit tracker ───────────────────────────────────────
+    def test_term_deposits_in_config(self):
+        """config.js state must include termDeposits default."""
+        with open(os.path.join(ROOT, "js/config.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("termDeposits", src)
+
+    def test_cash_tracker_card_function(self):
+        """dashboard.js must define _buildCashTrackerCard function."""
+        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _buildCashTrackerCard()", src)
+        self.assertIn("termDeposits", src)
+        self.assertIn("deployable", src)
+
+    def test_add_remove_td_functions(self):
+        """dashboard.js must define addTD and removeTD functions."""
+        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function addTD()", src)
+        self.assertIn("async function removeTD(", src)
+
+    def test_term_deposits_persisted(self):
+        """termDeposits must be in api.js save payload and portfolio.py BLOB_KEYS."""
+        with open(os.path.join(ROOT, "js/api.js"), encoding="utf-8") as f:
+            api_src = f.read()
+        with open(os.path.join(ROOT, "routes/portfolio.py"), encoding="utf-8") as f:
+            py_src = f.read()
+        self.assertIn("termDeposits", api_src)
+        self.assertIn("termDeposits", py_src)
+
+    # ── 3. Exact correlation-aware sizing ────────────────────────────────────
+    def test_corr_sizing_in_analysis(self):
+        """analysis.js must fetch /api/risk correlation and reduce qty when |corr| > 0.7."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_corrNote", src)
+        self.assertIn("_corrMatrix", src)
+        self.assertIn("maxCorr > 0.85", src)
+        self.assertIn("maxCorr > 0.7", src)
+
+    def test_corr_note_shown_on_rec_card(self):
+        """recommendations.js must show _corrNote badge on BUY rec cards."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_corrNote", src)
+        self.assertIn("Corr", src)
+
+    # ── 4. Performance / responsiveness ──────────────────────────────────────
+    def test_macro_payload_no_serial_fetches(self):
+        """_macro_payload must use parallel fetch for aud_usd and iron_ore history."""
+        with open(os.path.join(ROOT, "routes/market.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Both symbols now in the single parallel symbols dict
+        self.assertIn('"aud_usd":  ("AUDUSD=X", "1mo")', src)
+        self.assertIn('"iron_ore": ("TIO=F",    "1mo")', src)
+        # No second serial re-fetch of AUDUSD=X or TIO=F
+        self.assertNotIn('yf.Ticker("AUDUSD=X").history', src)
+        self.assertNotIn('yf.Ticker("TIO=F").history', src)
+
+    def test_macro_payload_asx200_3mo_parallel(self):
+        """_macro_payload must fetch ASX200 3mo in the parallel block (not separately)."""
+        with open(os.path.join(ROOT, "routes/market.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"asx200":   ("^AXJO",    "3mo")', src)
+        # The old serial re-fetch is gone
+        self.assertNotIn('yf.Ticker("^AXJO").history(period="3mo")', src)
+
+    def test_5d_change_from_cached_history(self):
+        """_macro_payload must compute 5d change from _histories dict, not a separate fetch."""
+        with open(os.path.join(ROOT, "routes/market.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_histories", src)
+        self.assertIn("aud_usd_change_5d", src)
+        self.assertIn("iron_ore_change_5d", src)
+        # Ensure the 5d change comes from _histories, not a new serial Ticker fetch
+        self.assertIn('_histories.get(key)', src)
+
+    # ── 5. Keyboard shortcuts ─────────────────────────────────────────────────
+    def test_keyboard_shortcuts_in_navigation(self):
+        """navigation.js must define keyboard shortcut handler and PAGE_KEYS map."""
+        with open(os.path.join(ROOT, "js/navigation.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("PAGE_KEYS", src)
+        self.assertIn("_showShortcutsHelp", src)
+        self.assertIn("keydown", src)
+
+    def test_shortcuts_cover_main_pages(self):
+        """Shortcut map must include dashboard, portfolio, recommendations, risk, learning."""
+        with open(os.path.join(ROOT, "js/navigation.js"), encoding="utf-8") as f:
+            src = f.read()
+        for page in ["dashboard", "portfolio", "recommendations", "risk", "learning"]:
+            self.assertIn(page, src)
+
+    def test_shortcuts_help_modal_uses_dialog(self):
+        """Shortcuts help must open as a <dialog> element."""
+        with open(os.path.join(ROOT, "js/navigation.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("createElement('dialog')", src)
+        self.assertIn("showModal()", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

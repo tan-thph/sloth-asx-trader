@@ -49,6 +49,64 @@ function renderPage() {
   }
 }
 
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+// g + letter → navigate; ? → toggle help
+(function () {
+  const PAGE_KEYS = {
+    d: 'dashboard', p: 'portfolio', m: 'macro',   r: 'recommendations',
+    j: 'journal',   f: 'performance', c: 'cgt',   k: 'risk',
+    s: 'scanner',   l: 'learning',  n: 'news',    a: 'assistant',
+    t: 'day-trading', w: 'watchlist',
+  };
+  let _gPressed = false, _gTimer = null;
+
+  document.addEventListener('keydown', e => {
+    const tag = e.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const key = e.key.toLowerCase();
+
+    if (_gPressed) {
+      clearTimeout(_gTimer);
+      _gPressed = false;
+      if (PAGE_KEYS[key]) { e.preventDefault(); showPage(PAGE_KEYS[key]); return; }
+    }
+    if (key === 'g') {
+      _gPressed = true;
+      _gTimer = setTimeout(() => { _gPressed = false; }, 1000);
+      return;
+    }
+    if (e.key === '?') _showShortcutsHelp();
+  });
+
+  window._showShortcutsHelp = function () {
+    const existing = document.getElementById('shortcuts-modal');
+    if (existing) { existing.remove(); return; }
+    const d = document.createElement('dialog');
+    d.id = 'shortcuts-modal';
+    d.style.cssText = 'border-radius:8px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);padding:0;max-width:420px;width:95%';
+    const kbd = s => `<kbd style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:11px">${s}</kbd>`;
+    d.innerHTML = `
+      <div style="padding:18px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <strong style="font-size:14px">Keyboard Shortcuts</strong>
+          <button class="btn btn-sm" onclick="document.getElementById('shortcuts-modal').close()">✕</button>
+        </div>
+        <div class="text-xs text-muted" style="margin-bottom:10px">Press ${kbd('g')} then a letter to navigate:</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px">
+          ${Object.entries(PAGE_KEYS).map(([k, pg]) =>
+            `<div style="padding:3px 6px;display:flex;gap:8px;align-items:center">${kbd('g')} ${kbd(k)}<span class="text-muted">${pg.replace('-',' ')}</span></div>`
+          ).join('')}
+        </div>
+        <div style="margin-top:12px;font-size:12px;color:var(--text-muted)">${kbd('?')} toggle this help</div>
+      </div>`;
+    d.addEventListener('click', e => { if (e.target === d) d.close(); });
+    d.addEventListener('close', () => d.remove());
+    document.body.appendChild(d);
+    d.showModal();
+  };
+}());
+
 function _renderPageUnsafe() {
   const el = document.getElementById('main-content');
   const gen = (state._renderGen = (state._renderGen || 0)); // snapshot current gen

@@ -71,6 +71,7 @@ const state = {
   savedScreeners: [],       // [{name, savedAt, config:{universe, min_adv_aud, excludeHoldings}}]
   targetAllocations: {},    // ticker → target weight % (e.g. {CBA:15,BHP:10}) — persisted in blob_store
   digestHistory: [],        // [{date, text}] — saved AI postmortem digests, newest first
+  termDeposits: [],         // [{id, label, amount, rate, maturityDate, notes}] — idle cash + TDs
   analysisConfig: {
     extraTickers: [],
     marketView: '',

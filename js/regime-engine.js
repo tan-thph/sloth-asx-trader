@@ -34,6 +34,7 @@ function classifyRegime(macroData) {
   const adr       = macroData.advance_decline_ratio;
   const audChg5d  = macroData.aud_usd_change_5d;
   const ironChg5d = macroData.iron_ore_change_5d;
+  const asxVol20d = macroData.asx_vol_20d;
 
   const signals = [];
   const votes = { riskOn: 0, riskOff: 0, panic: 0, highVol: 0, trend: 0, sideways: 0 };
@@ -54,6 +55,15 @@ function classifyRegime(macroData) {
       vote('highVol', 2, `VIX ${vix.toFixed(1)} > ${REGIME_THRESHOLDS.vixHighVol} → elevated volatility`);
     } else if (vix < 16) {
       vote('riskOn', 1, `VIX ${vix.toFixed(1)} < 16 → complacency / risk-on`);
+    }
+  }
+
+  // ── A-VIX: ASX 20-day realized volatility ────────────────────────────────
+  if (asxVol20d != null) {
+    if (asxVol20d > 25) {
+      vote('highVol', 2, `A-VIX ${asxVol20d.toFixed(1)}% > 25 → elevated ASX realised vol`);
+    } else if (asxVol20d < 12) {
+      vote('riskOn', 1, `A-VIX ${asxVol20d.toFixed(1)}% < 12 → low ASX vol / risk-on`);
     }
   }
 

@@ -201,13 +201,17 @@ function renderMacro() {
       </div>
       <div class="card">
         <div class="card-title">Market Risk</div>
-        ${[['ASX 200','asx200'],['VIX','vix'],['US 10Y Yield','us10y']].map(([n,k])=>{
+        ${[['ASX 200','asx200'],['VIX (US)','vix'],['US 10Y Yield','us10y']].map(([n,k])=>{
           const v=m[k]; const pct=v?.change_pct;
           const isRisk=(k==='vix');
           return `<div class="signal-row"><span>${n}</span><div>
             ${v?`<span class="${isRisk?((pct||0)>0?'text-danger':'text-success'):((pct||0)>=0?'text-success':'text-danger')}">${fmtp(pct)} </span><span class="text-xs text-muted">${fmt(v.value,2)}</span>`:'<span class="text-xs text-muted">—</span>'}
           </div></div>`;
         }).join('')}
+        ${m.asx_vol_20d!=null?`<div class="signal-row"><span title="ASX 200 20-day realized annualized volatility (local fear gauge)">A-VIX (ASX 20d)</span><div>
+          <span class="${m.asx_vol_20d>25?'text-danger':m.asx_vol_20d<12?'text-success':'text-muted'}">${m.asx_vol_20d.toFixed(1)}%</span>
+          <span class="text-xs text-muted" style="margin-left:4px">${m.asx_vol_20d>25?'elevated':m.asx_vol_20d<12?'low':'normal'}</span>
+        </div></div>`:''}
         ${m._source==='ai'?`<div class="signal-row"><span>Sentiment</span><span style="color:${m.sentiment==='risk-on'?'#16a34a':'#dc2626'};font-weight:700">${m.sentiment==='risk-on'?'RISK ON':'RISK OFF'}</span></div>`:''}
       </div>
     </div>

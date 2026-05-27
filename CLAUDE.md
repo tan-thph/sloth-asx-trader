@@ -33,7 +33,7 @@ API key options (one of these is required for analysis):
 
 Tests:
 ```bash
-python test_app.py        # all 156 tests, ~10 s
+python test_app.py        # all 178 tests, ~10 s
 ```
 
 ---
@@ -71,7 +71,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `announcement_engine.py` + `announcement_routes.py` | — | ASX announcements scraper, PDF parser, Gemini scorer, blueprint `/api/announcements/*`. |
 | `news_engine.py` | — | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
 | `gunicorn.conf.py` | — | Production WSGI config. 2 workers × 8 threads. |
-| `test_app.py` | ~1600 | 156 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
+| `test_app.py` | ~1700 | 178 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
 
 #### `routes/` — one blueprint per concern
 
@@ -154,6 +154,7 @@ state.settings.telegramEnabled:   bool — mirrors alerts to Telegram when true
 state.settings.tgToken / tgChatId: stored locally in state but credentials saved server-side via POST /api/alerts/telegram/save
 state.settings.drawdownAlertPct:  number — alert threshold for drawdown monitor (default 10)
 state.targetAllocations:  { TICKER: number }  — ticker → target weight %; persisted in blob_store; used by Risk page drift card
+state.termDeposits:       [{ id, label, amount, rate, maturityDate, notes }]  — idle cash + TDs; persisted in blob_store; Dashboard cash tracker
 window._morningBrief:     { text, date } | undefined — last generated morning briefing note; lives on window so it survives renderPage() calls but clears on full page reload
 ```
 

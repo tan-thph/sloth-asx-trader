@@ -123,42 +123,60 @@ def quick_quote(ticker):
 
 @ttl_cache(seconds=300)
 def _macro_payload() -> dict:
-    """Build the macro payload. Cached 5 min."""
+    """Build the macro payload. Cached 5 min.
+
+    Perf note: all yfinance fetches run in one parallel pool. Symbols that
+    need wider history (ASX200 → extended stats + A-VIX; AUD/USD + iron ore
+    → 5d change) use longer periods so no second serial fetch pass is needed.
+    """
+    # period "3mo" for ASX200 (extended regime stats + A-VIX);
+    # period "1mo" for AUD/USD and iron ore (need 6+ bars for 5d change).
     symbols = {
-        "sp500":   "^GSPC", "nasdaq": "^IXIC", "dow":    "^DJI",
-        "asx200":  "^AXJO", "gold":   "GC=F",  "oil":    "CL=F",
-        "aud_usd": "AUDUSD=X", "vix":  "^VIX", "us10y":  "^TNX",
-        "iron_ore": "TIO=F", "copper": "HG=F",
+        "sp500":    ("^GSPC",    "5d"),
+        "nasdaq":   ("^IXIC",    "5d"),
+        "dow":      ("^DJI",     "5d"),
+        "asx200":   ("^AXJO",    "3mo"),
+        "gold":     ("GC=F",     "5d"),
+        "oil":      ("CL=F",     "5d"),
+        "aud_usd":  ("AUDUSD=X", "1mo"),
+        "vix":      ("^VIX",     "5d"),
+        "us10y":    ("^TNX",     "5d"),
+        "iron_ore": ("TIO=F",    "1mo"),
+        "copper":   ("HG=F",     "5d"),
     }
     macro_data = {}
+    _histories: dict = {}
 
-    def _fetch_symbol(name_sym):
-        name, sym = name_sym
+    def _fetch_symbol(item):
+        name, (sym, period) = item
         def _do():
-            hist = yf.Ticker(sym).history(period="5d")
-            if not hist.empty and len(hist) >= 2:
-                latest = hist["Close"].iloc[-1]
-                prev   = hist["Close"].iloc[-2]
-                pct    = (latest / prev - 1) * 100
-                return {
-                    "value": round(latest, 2),
-                    "change_pct": round(pct, 2),
-                    "prev_close": round(prev, 2),
-                }
+            h = yf.Ticker(sym).history(period=period)
+            if not h.empty and len(h) >= 2:
+                return h  # full DataFrame; summary computed below
             raise ValueError("Empty history")
         try:
-            return name, fetch_with_retry(_do, cache_key=f"macro:{sym}", max_retries=2, backoff=1.5)
+            hist = fetch_with_retry(_do, cache_key=f"macro:{sym}:hist", max_retries=2, backoff=1.5)
+            latest = float(hist["Close"].iloc[-1])
+            prev   = float(hist["Close"].iloc[-2])
+            summary = {
+                "value":       round(latest, 2),
+                "change_pct":  round((latest / prev - 1) * 100, 2),
+                "prev_close":  round(prev, 2),
+            }
+            return name, hist, summary
         except Exception:
-            return name, None
+            return name, None, None
 
     with ThreadPoolExecutor(max_workers=len(symbols)) as pool:
-        for name, result in pool.map(_fetch_symbol, symbols.items()):
-            macro_data[name] = result
+        for name, hist, summary in pool.map(_fetch_symbol, symbols.items()):
+            macro_data[name] = summary
+            if hist is not None:
+                _histories[name] = hist
 
-    # ── Regime detection fields — extended ASX200 stats ──────────────────────
-    try:
-        asx_hist = yf.Ticker("^AXJO").history(period="3mo")
-        if not asx_hist.empty and len(asx_hist) >= 22:
+    # ── Extended ASX200 stats + A-VIX (realized 20d vol) ─────────────────────
+    asx_hist = _histories.get("asx200")
+    if asx_hist is not None and len(asx_hist) >= 22:
+        try:
             close = asx_hist["Close"]
             high  = asx_hist["High"]
             low   = asx_hist["Low"]
@@ -166,6 +184,13 @@ def _macro_payload() -> dict:
             latest_price = float(close.iloc[-1])
             ret5d  = float((close.iloc[-1] / close.iloc[-6]  - 1) * 100) if len(close) >= 6  else None
             ret20d = float((close.iloc[-1] / close.iloc[-21] - 1) * 100) if len(close) >= 21 else None
+
+            # A-VIX: realized 20-day annualized volatility (ASX local volatility gauge)
+            if len(close) >= 21:
+                daily_rets = close.pct_change().dropna().iloc[-20:]
+                asx_vol_20d = round(float(daily_rets.std() * (252 ** 0.5) * 100), 1)
+            else:
+                asx_vol_20d = None
 
             tr_list = []
             for i in range(1, min(15, len(close))):
@@ -175,7 +200,7 @@ def _macro_payload() -> dict:
                     abs(float(low.iloc[-i])  - float(close.iloc[-i-1])),
                 )
                 tr_list.append(tr)
-            atr14 = float(np.mean(tr_list)) if tr_list else None
+            atr14   = float(np.mean(tr_list)) if tr_list else None
             atr_pct = float(atr14 / latest_price * 100) if atr14 and latest_price else None
 
             adx_val = None
@@ -204,19 +229,17 @@ def _macro_payload() -> dict:
             macro_data["asx200_20d_return"] = round(ret20d, 2) if ret20d is not None else None
             macro_data["asx200_atr_pct"]    = round(atr_pct, 3) if atr_pct is not None else None
             macro_data["asx200_adx"]        = adx_val
-    except Exception:
-        pass
+            macro_data["asx_vol_20d"]       = asx_vol_20d
+        except Exception:
+            pass
 
-    try:
-        for field, sym in [("aud_usd_change_5d", "AUDUSD=X"), ("iron_ore_change_5d", "TIO=F")]:
-            h = yf.Ticker(sym).history(period="10d")
-            if h is not None and not h.empty and len(h) >= 6:
-                macro_data[field] = round(float((h["Close"].iloc[-1] / h["Close"].iloc[-6] - 1) * 100), 2)
-            else:
-                macro_data[field] = None
-    except Exception:
-        macro_data.setdefault("aud_usd_change_5d", None)
-        macro_data.setdefault("iron_ore_change_5d", None)
+    # ── 5d changes for AUD/USD and iron ore (reuse already-fetched history) ──
+    for field, key in [("aud_usd_change_5d", "aud_usd"), ("iron_ore_change_5d", "iron_ore")]:
+        h = _histories.get(key)
+        if h is not None and len(h) >= 6:
+            macro_data[field] = round(float((h["Close"].iloc[-1] / h["Close"].iloc[-6] - 1) * 100), 2)
+        else:
+            macro_data[field] = None
 
     # Advance/decline breadth: populated from the most recent market scan's
     # universe breadth (% of ASX tickers above 20-day SMA). Falls back to None

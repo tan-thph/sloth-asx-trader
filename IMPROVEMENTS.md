@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-27 (sprints 3–7 shipped)
+**Last Updated:** 2026-05-27 (sprints 3–8 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -60,6 +60,11 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **Target allocations + drift alerts** | Risk (§2.5) | `state.targetAllocations = {}` (ticker → target weight %); `_buildTargetAllocCard()` on Risk page shows Actual% vs Target% with inline edit inputs; amber when |drift| ≥5%, red when ≥10%. Persisted in `blob_store` via `targetAllocations` in `BLOB_KEYS`. |
 | **Economic calendar** | Workflow (§2.6) | `_buildEconomicCalendarCard()` on Dashboard: 45-day forward window with hard-coded RBA meeting dates (2026–2027), ex-div dates from `state.dividendData`, and earnings dates from `state.earningsCalendar`. |
 | **Franking 45-day rule** | Tax (§2.2) | `_buildFranking45DayCard()` on CGT page: iterates open parcels, checks each against its ex-div date; warns when the 45-day continuous-holding requirement around the ex-div date is at risk of not being met. |
+| **A-VIX proxy** | Analytics (§2.4) | `asx_vol_20d` (20-day realized annualized vol of ^AXJO) added to `/api/macro` payload; displayed as "A-VIX (ASX 20d)" in the Macro page Market Risk card; feeds two new votes into `regime-engine.js` (>25% → highVol, <12% → riskOn). |
+| **Cash & term-deposit tracker** | Workflow (§2.6) | `state.termDeposits = []` persisted in `blob_store`; `_buildCashTrackerCard()` on Dashboard shows idle cash + each TD with maturity countdown; computes "Deployable ≤30d" total; `addTD()` / `removeTD()` helpers. |
+| **Exact correlation-aware sizing** | Risk (§2.5) | After Claude generates BUY recs, `analysis.js` fetches `/api/risk` with portfolio + rec tickers; reduces `qty`/`riskAUD` by 30% when |corr| > 0.7 or 50% when > 0.85 with any existing holding; annotates rec with `_corrNote`; shown as ⚡ Corr badge on rec cards. |
+| **Macro endpoint perf** | Reliability (§3.4) | `_macro_payload()` refactored: `^AXJO` fetched once at `period="3mo"` in the parallel block (previously fetched separately at 5d + 3mo = 2 serial calls); `AUDUSD=X` and `TIO=F` fetched at `period="1mo"` so 5d-change is computed from cached history (eliminates 2 more serial calls). Net: 3 serial yfinance fetches removed. |
+| **Keyboard shortcuts** | UX (§4) | `g`+letter page navigation added to `navigation.js` (IIFE); covers 14 pages. `?` toggles a `<dialog>` shortcut help panel. Shortcuts are suppressed when focus is in an input/textarea. |
 
 ---
 
@@ -247,8 +252,9 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 3. ✓ **Highest daily payoff:** pre-trade checklist, CGT countdown, trade tags, heat gauge, drawdown monitor, Telegram, broker CSV, indicator alerts, tax-loss planner, EOFY pack, watchlist, morning briefing, regime journal, stale nudge — **all done**.
 4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. Remaining: §2.5 correlation-aware sizing, §1.7 walk-forward backtest.
 5. ✓ **Sprint 6 shipped:** §2.7 portfolio-aware Q&A, §2.1 performance attribution, §2.5 sector-concentration warning, §2.6 thesis capture, §2.2 dividend forecast + franking credits — **all done**.
-6. ✓ **Sprint 7 shipped:** thesis review at exit, prompt-version P&L, target allocations + drift alerts, economic calendar (RBA dates + ex-div + earnings), franking 45-day rule warnings — **all done**. Remaining: exact correlation sizing, §1.1 look-ahead bias, §1.5 survivorship bias.
-7. **Polish:** §3.3 Vitest tests, §4 UX (keyboard shortcuts, compact mode, PWA), §3.7 types/modules.
+6. ✓ **Sprint 7 shipped:** thesis review at exit, prompt-version P&L, target allocations + drift alerts, economic calendar (RBA dates + ex-div + earnings), franking 45-day rule warnings — **all done**.
+7. ✓ **Sprint 8 shipped:** A-VIX (ASX realized vol), cash/TD tracker, exact correlation-aware sizing, macro endpoint perf (3 serial fetches eliminated), keyboard shortcuts (`g`+letter + `?`) — **all done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias, §3.3 Vitest tests.
+8. **Polish:** §3.3 Vitest tests, §4 UX (compact mode, PWA), §3.7 types/modules.
 
 ---
 

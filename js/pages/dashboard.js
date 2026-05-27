@@ -136,6 +136,89 @@ function _buildStaleNudgeCard() {
     </div>`;
 }
 
+function _buildCashTrackerCard() {
+  const tds = state.termDeposits || [];
+  const today = new Date(); today.setHours(0,0,0,0);
+  const fmtAmt = v => '$' + Number(v || 0).toLocaleString('en-AU', { minimumFractionDigits: 0 });
+  const deployable = tds.reduce((sum, td) => {
+    if (!td.maturityDate) return sum;
+    const mat = new Date(td.maturityDate);
+    const days = Math.round((mat - today) / 86400000);
+    return days <= 30 && days >= 0 ? sum + Number(td.amount || 0) : sum;
+  }, state.cash || 0);
+
+  const tdRows = tds.map((td, i) => {
+    const mat = td.maturityDate ? new Date(td.maturityDate) : null;
+    const days = mat ? Math.round((mat - today) / 86400000) : null;
+    const daysLabel = days == null ? '—' : days < 0 ? '<span class="text-danger">Matured</span>' :
+      days === 0 ? '<span class="text-success">Today</span>' :
+      `<span class="${days<=30?'text-warning':'text-muted'}">${days}d</span>`;
+    const interest = (td.rate && td.amount) ? fmtAmt(td.amount * td.rate / 100) + '/yr' : '';
+    return `<tr>
+      <td style="padding:4px 6px">${escapeHTML(td.label||'TD')}</td>
+      <td style="padding:4px 6px;text-align:right">${fmtAmt(td.amount)}</td>
+      <td style="padding:4px 6px;text-align:right">${td.rate?td.rate+'%':'—'} <span class="text-xs text-muted">${interest}</span></td>
+      <td style="padding:4px 6px;text-align:center">${daysLabel}</td>
+      <td style="padding:4px 6px;text-align:right">
+        <button class="btn btn-sm" style="padding:1px 6px;font-size:11px" onclick="removeTD(${i})">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  return `
+    <div class="card section-gap">
+      <div class="flex-between" style="margin-bottom:8px">
+        <div class="card-title" style="margin:0">Cash & Term Deposits</div>
+        <span class="text-xs text-muted">Deployable ≤30d: <strong style="color:var(--text-primary)">${fmtAmt(deployable)}</strong></span>
+      </div>
+      <div class="signal-row" style="margin-bottom:8px">
+        <span>Idle cash</span>
+        <strong>${fmtAmt(state.cash)}</strong>
+      </div>
+      ${tds.length ? `<table style="width:100%;font-size:12px;border-collapse:collapse">
+        <thead><tr style="color:var(--text-muted);font-size:11px">
+          <th style="text-align:left;padding:3px 6px">Label</th>
+          <th style="text-align:right;padding:3px 6px">Amount</th>
+          <th style="text-align:right;padding:3px 6px">Rate</th>
+          <th style="text-align:center;padding:3px 6px">Matures</th>
+          <th></th>
+        </tr></thead>
+        <tbody>${tdRows}</tbody>
+      </table>` : '<p class="text-xs text-muted" style="margin:0">No term deposits recorded.</p>'}
+      <details style="margin-top:10px">
+        <summary class="text-xs text-muted" style="cursor:pointer">+ Add term deposit</summary>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;font-size:12px">
+          <input id="td-label" placeholder="Label (e.g. CBA 6mo)" class="input-sm" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary)">
+          <input id="td-amount" type="number" placeholder="Amount ($)" class="input-sm" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary)">
+          <input id="td-rate" type="number" step="0.01" placeholder="Rate % p.a." class="input-sm" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary)">
+          <input id="td-maturity" type="date" class="input-sm" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary)">
+          <input id="td-notes" placeholder="Notes (optional)" class="input-sm" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary);grid-column:span 2">
+          <button class="btn btn-sm btn-primary" style="grid-column:span 2" onclick="addTD()">Add</button>
+        </div>
+      </details>
+    </div>`;
+}
+
+async function addTD() {
+  const label = (document.getElementById('td-label')?.value || '').trim();
+  const amount = parseFloat(document.getElementById('td-amount')?.value || '0');
+  const rate = parseFloat(document.getElementById('td-rate')?.value || '0') || null;
+  const maturityDate = document.getElementById('td-maturity')?.value || '';
+  const notes = (document.getElementById('td-notes')?.value || '').trim();
+  if (!label || !amount) { toast('Label and amount are required', 'error'); return; }
+  if (!Array.isArray(state.termDeposits)) state.termDeposits = [];
+  state.termDeposits.push({ id: Date.now(), label, amount, rate, maturityDate, notes });
+  await saveStateToDb();
+  renderPage();
+}
+
+async function removeTD(index) {
+  if (!Array.isArray(state.termDeposits)) return;
+  state.termDeposits.splice(index, 1);
+  await saveStateToDb();
+  renderPage();
+}
+
 function renderDashboard() {
   const pv=portfolioValue(), nw=totalNetWorth(), gain=totalGain(), gainPct=(gain/totalCost())*100;
   const pending=state.recommendations.filter(r=>r.status==='pending').length;
@@ -285,6 +368,7 @@ function renderDashboard() {
     </div>
 
     ${_buildEconomicCalendarCard()}
+    ${_buildCashTrackerCard()}
 
     <div class="card section-gap" id="morning-brief-card">
       <div class="flex-between" style="margin-bottom:4px">
