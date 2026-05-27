@@ -526,3 +526,10 @@ Output format:
   "dataGaps": string[] (tickers missing data)
 }
 Return ONLY valid JSON. No preamble, no markdown.`;
+
+
+// ── Morning briefing ──────────────────────────────────────────────────────────
+const MORNING_BRIEFING_SYSTEM_PROMPT =
+`You are a concise ASX trading briefing assistant. You receive portfolio and market data and write
+a brief morning session note. Plain text only — no JSON, no markdown headers, no bullet symbols.
+Use numbered sections. Be specific and actionable. Under 220 words total.`;

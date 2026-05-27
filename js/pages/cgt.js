@@ -28,6 +28,29 @@ function setCgtParcelFilter(key, value) {
   renderPage();
 }
 
+async function downloadEofyPack() {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  const now = new Date();
+  const year = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+  const yearInput = prompt(`Download EOFY tax pack for which financial year? (e.g. ${year} = FY${year}–${year+1})`, year);
+  if (!yearInput) return;
+  const fy = parseInt(yearInput, 10);
+  if (isNaN(fy) || fy < 2000 || fy > 2100) { toast('Invalid year', 'error'); return; }
+  try {
+    toast(`Building EOFY pack for FY${fy}–${fy+1}…`);
+    const resp = await fetch(`${API}/api/tax/eofy-pack?year=${fy}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `eofy_tax_pack_FY${fy}-${fy+1}.zip`;
+    a.click();
+    toast(`EOFY pack downloaded: FY${fy}–${fy+1}`, 'success');
+  } catch (e) {
+    toast('EOFY pack failed: ' + e.message, 'error');
+  }
+}
+
 function exportDisposalCSV() {
   if (!state.cgtDisposals.length) { toast('No disposals to export', 'error'); return; }
   // Apply current filter
@@ -225,6 +248,7 @@ function renderCGT() {
       + '</div>'
       + '<div class="flex-row" style="gap:6px" onclick="event.stopPropagation()">'
       + '<button class="btn btn-sm btn-primary" onclick="exportDisposalCSV()">↓ Export CSV</button>'
+      + '<button class="btn btn-sm" onclick="downloadEofyPack()" title="Download EOFY tax pack (CGT disposals + fees) as ZIP">↓ EOFY Pack</button>'
       + '<span class="btn btn-sm">' + (dc?'Expand':'Collapse') + '</span>'
       + '</div>'
       + '</div>'

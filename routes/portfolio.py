@@ -9,10 +9,13 @@ Endpoints:
   /api/db/status        GET    — row counts
 """
 
+import csv
+import io
 import json
+import zipfile
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 from db import DB_PATH, get_db
 from indicators import get_sector_for_ticker
@@ -124,6 +127,7 @@ def db_save():
             'analysisConfig', 'macroData', 'macroDate', 'analysisLastSummary',
             'portfolioHistory', 'cgtParcels', 'cgtDisposals', 'cgtMethod', 'activityLog',
             'recommendations', 'priceAlerts', 'dayTrading',
+            'watchlist', 'savedScreeners',
         ]
         for key in BLOB_KEYS:
             if key in data:
@@ -230,6 +234,8 @@ def db_load():
         "recommendations":      blobs.get("recommendations"),
         "dayTrading":           blobs.get("dayTrading"),
         "priceAlerts":          blobs.get("priceAlerts"),
+        "watchlist":            blobs.get("watchlist"),
+        "savedScreeners":       blobs.get("savedScreeners"),
     })
 
 
@@ -252,6 +258,120 @@ def refresh_portfolio_sectors():
         "updated": updated_count,
         "message": f"Updated sectors for {updated_count} holdings"
     })
+
+
+@bp.route("/api/tax/eofy-pack")
+def eofy_tax_pack():
+    """Download EOFY tax pack as a ZIP containing two CSVs.
+
+    Query param: ?year=2025  (FY ending June 2025 = 2024-07-01 to 2025-06-30).
+    Defaults to the current financial year.
+    """
+    now = datetime.now()
+    default_year = now.year if now.month >= 7 else now.year - 1
+    try:
+        year = int(request.args.get("year", default_year))
+    except (TypeError, ValueError):
+        year = default_year
+
+    fy_start = f"{year}-07-01"
+    fy_end   = f"{year + 1}-06-30"
+
+    with get_db() as conn:
+        # CGT disposals from blob_store
+        cgt_blob = conn.execute(
+            "SELECT value FROM blob_store WHERE key='cgtDisposals'"
+        ).fetchone()
+        disposals = json.loads(cgt_blob["value"]) if cgt_blob else []
+
+        # Trade journal fees for the FY
+        fee_rows = conn.execute("""
+            SELECT date, ticker, action, qty, entry_price, exit_price, fees, pnl, status
+            FROM trade_journal
+            ORDER BY date ASC
+        """).fetchall()
+
+    # Filter disposals by FY sale date
+    fy_disposals = [
+        d for d in disposals
+        if isinstance(d, dict) and fy_start <= (d.get("saleDate") or "") <= fy_end
+    ]
+
+    # Filter trades by FY date (DD-MM-YYYY → compare as YYYY-MM-DD)
+    def _dd_mm_to_iso(d):
+        parts = (d or "").split("-")
+        if len(parts) == 3 and len(parts[2]) == 4:
+            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+        return d or ""
+
+    fy_trades = [
+        r for r in fee_rows
+        if fy_start <= _dd_mm_to_iso(r["date"]) <= fy_end
+    ]
+
+    # ── CGT disposals CSV ──────────────────────────────────────────────────────
+    cgt_buf = io.StringIO()
+    w = csv.writer(cgt_buf)
+    w.writerow([
+        "SaleDate", "Ticker", "SalePrice", "SaleQty", "Proceeds",
+        "ParcelDate", "CostPerShare", "CostBase", "SaleFee",
+        "GrossGain", "CGTDiscount", "NetGain", "HeldDays", "50pct_Eligible"
+    ])
+    gross_gain_total = 0.0
+    for d in fy_disposals:
+        w.writerow([
+            d.get("saleDate", ""),
+            d.get("ticker", ""),
+            round(d.get("salePrice", 0), 4),
+            d.get("saleQty", 0),
+            round(d.get("proceeds", 0), 2),
+            d.get("parcelDate", ""),
+            round(d.get("parcelCostPerShare", 0), 4),
+            round(d.get("costBase", 0), 2),
+            round(d.get("saleFee", 0), 2),
+            round(d.get("grossGain", 0), 2),
+            round(d.get("discount", 0), 2),
+            round(d.get("netGain", 0), 2),
+            d.get("heldDays", ""),
+            "Yes" if d.get("eligible50") else "No",
+        ])
+        gross_gain_total += float(d.get("grossGain", 0) or 0)
+    w.writerow([])
+    w.writerow(["", "", "", "", "", "", "", "", "Total gross gain:", round(gross_gain_total, 2)])
+
+    # ── Trade fees CSV ─────────────────────────────────────────────────────────
+    fees_buf = io.StringIO()
+    w2 = csv.writer(fees_buf)
+    w2.writerow(["Date", "Ticker", "Action", "Qty", "EntryPrice", "ExitPrice", "Fee", "PnL", "Status"])
+    total_fees = 0.0
+    total_pnl  = 0.0
+    for r in fy_trades:
+        w2.writerow([
+            r["date"], r["ticker"], r["action"],
+            r["qty"], r["entry_price"], r["exit_price"] or "",
+            round(float(r["fees"] or 0), 2),
+            round(float(r["pnl"] or 0), 2) if r["pnl"] is not None else "",
+            r["status"],
+        ])
+        total_fees += float(r["fees"] or 0)
+        if r["pnl"] is not None:
+            total_pnl += float(r["pnl"])
+    w2.writerow([])
+    w2.writerow(["", "", "", "", "", "Total fees:", round(total_fees, 2)])
+    w2.writerow(["", "", "", "", "", "Total realised P&L:", round(total_pnl, 2)])
+
+    # ── Bundle into ZIP ────────────────────────────────────────────────────────
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"cgt_disposals_FY{year}-{year+1}.csv", cgt_buf.getvalue())
+        zf.writestr(f"trade_fees_FY{year}-{year+1}.csv",    fees_buf.getvalue())
+
+    zip_buf.seek(0)
+    return Response(
+        zip_buf.read(),
+        mimetype="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=eofy_tax_pack_FY{year}-{year+1}.zip"},
+    )
 
 
 @bp.route("/api/db/status")

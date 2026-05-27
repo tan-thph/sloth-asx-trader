@@ -557,10 +557,92 @@ function _renderLearningContent(d, brier) {
   const debateStatsPlaceholder = `
     <div id="ll-debate-stats-card" class="card section-gap" style="display:none"></div>`;
 
+  const digestCard = `
+    <div class="card section-gap" id="postmortem-digest-card">
+      <div class="flex-between" style="margin-bottom:6px">
+        <div class="card-title" style="margin:0">AI Postmortem Digest</div>
+        <button class="btn btn-sm btn-primary" onclick="generatePostmortemDigest()"
+          id="digest-btn">Generate Digest</button>
+      </div>
+      <p class="text-xs text-muted">
+        Claude analyses your recent losses and failure patterns to extract actionable lessons.
+        Runs once on demand — results are not saved.
+      </p>
+      <div id="digest-result" style="display:none;margin-top:10px"></div>
+    </div>`;
+
   return summaryCards + calibCard +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + recentCard + failedCard + debateInsightsCard +
-    debateStatsPlaceholder + debateCardPlaceholder;
+    digestCard + debateStatsPlaceholder + debateCardPlaceholder;
+}
+
+// ── Postmortem digest — AI summary of recent failure patterns ─────────────────
+async function generatePostmortemDigest() {
+  const btn = document.getElementById('digest-btn');
+  const out = document.getElementById('digest-result');
+  if (!btn || !out) return;
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  out.style.display = 'block';
+  out.innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div>';
+
+  try {
+    const r = await fetch(`${API}/api/learning/digest-data`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+
+    const failures = d.recent_failures || [];
+    const wr = d.overall_total > 0 ? Math.round(d.overall_wins / d.overall_total * 100) : null;
+    const errorParts = (d.error_dist || []).map(e => `${e.error_type}: ${e.n}`).join(', ');
+    const exitParts  = (d.exit_dist  || []).map(e => `${e.exit_reason}: ${e.n}`).join(', ');
+    const regimeParts = (d.regime_stats || [])
+      .map(r => `${r.regime} ${r.win_rate != null ? r.win_rate + '% win' : ''}/${r.total} trades`)
+      .join('; ');
+
+    const failureSummary = failures.slice(0, 10).map(f =>
+      `- ${f.ticker} (${f.recommendation}, ${f.regime||'?'} regime, conf ${f.ai_confidence != null ? Math.round(f.ai_confidence*100)+'%' : '?'}): ` +
+      `${f.outcome_status}, exit=${f.exit_reason||'?'}, PnL=${f.realized_pnl_pct != null ? f.realized_pnl_pct.toFixed(1)+'%' : '?'}` +
+      (f.error_type ? `, tags=${f.error_type}` : '') +
+      (f.trade_thesis ? `, thesis="${f.trade_thesis.slice(0, 60)}"` : '')
+    ).join('\n');
+
+    const prompt =
+`You are reviewing my ASX trading learning loop. Here is a summary of my recent performance:
+
+Overall win rate: ${wr != null ? wr + '%' : 'unknown'} (${d.overall_total} closed trades)
+Error type distribution: ${errorParts || 'none tagged'}
+Exit reason distribution: ${exitParts || 'none recorded'}
+Regime performance: ${regimeParts || 'no data'}
+
+Recent losses/breakevens (up to 10):
+${failureSummary || 'No recent failures to analyse.'}
+
+Please write a concise postmortem digest (under 250 words) in plain text. Structure it as:
+1. The 1-2 most recurring failure patterns you see
+2. One or two specific adjustments I should make (rules, filters, or process changes)
+3. The regime(s) where performance is weakest and what that suggests
+
+Be direct, specific, and actionable. No generic advice.`;
+
+    const text = await callClaude('assistant', prompt, { maxTokens: 600, noCache: true });
+    out.innerHTML = `
+      <div style="border-top:1px solid var(--border);padding-top:10px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span class="text-xs text-muted" style="font-weight:600">AI Digest — ${new Date().toLocaleDateString('en-AU')}</span>
+          <button class="btn btn-sm" onclick="document.getElementById('digest-result').style.display='none'">✕</button>
+        </div>
+        <div style="font-size:13px;line-height:1.6;white-space:pre-wrap;color:var(--text-primary)">${escapeHTML(text)}</div>
+      </div>`;
+  } catch (e) {
+    out.innerHTML = `<div class="text-sm text-danger" style="padding:8px">${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate Digest';
+  }
 }
 
 // ── Delete a single learning event (optimise calibration dataset) ─────────────

@@ -1,6 +1,23 @@
 // ============================================================
 // JOURNAL
 // ============================================================
+
+const _REGIME_BADGE_COLORS = {
+  riskOn:    { bg: '#dcfce7', fg: '#15803d' },
+  riskOff:   { bg: '#fef3c7', fg: '#b45309' },
+  panic:     { bg: '#fee2e2', fg: '#b91c1c' },
+  highVol:   { bg: '#fef3c7', fg: '#d97706' },
+  trend:     { bg: '#dbeafe', fg: '#1d4ed8' },
+  sideways:  { bg: '#f1f5f9', fg: '#475569' },
+  unknown:   { bg: '#f1f5f9', fg: '#6b7280' },
+};
+
+function _journalRegimeBadge(regime) {
+  if (!regime) return '<span class="text-xs text-muted">—</span>';
+  const c = _REGIME_BADGE_COLORS[regime] || _REGIME_BADGE_COLORS.unknown;
+  return `<span style="background:${c.bg};color:${c.fg};border-radius:3px;padding:1px 5px;font-size:10px;font-weight:600;white-space:nowrap">${regime}</span>`;
+}
+
 function renderJournal() {
   // ── Initialise filter state (matches recHistoryFilter shape) ──────────────
   // Migrate old shape {type,value} or missing fields to current shape
@@ -195,7 +212,7 @@ function renderJournal() {
           <thead><tr>
             <th>Date</th><th>Time</th><th>Ticker</th><th>Action</th>
             <th>Qty</th><th>Entry</th><th>Exit</th><th>Fees</th>
-            <th>Gross P&L</th><th>Status</th><th>Parcel</th><th>From Rec?</th><th></th>
+            <th>Gross P&L</th><th>Status</th><th>Parcel</th><th>From Rec?</th><th>Regime</th><th></th>
           </tr></thead>
           <tbody>
             ${filtered.map(t => {
@@ -210,6 +227,7 @@ function renderJournal() {
                 : (t.parcelId
                     ? `<span class="badge badge-executed" title="Parcel #${t.parcelId}">P#${t.parcelId}</span>`
                     : `<span class="badge badge-pending" title="Click ⟳ Reconcile to fix">Missing</span>`);
+              const matchedRec = t.recId ? state.recHistory.find(r => r.id === t.recId) : null;
               return `<tr>
                 <td class="text-xs">${t.date}</td>
                 <td class="text-xs text-muted">${t.timestamp||'&mdash;'}</td>
@@ -223,6 +241,7 @@ function renderJournal() {
                 <td><span class="badge ${t.status==='open'?'badge-open':'badge-closed'}">${t.status}</span></td>
                 <td>${parcelBadge}</td>
                 <td><span class="badge ${t.recId&&t.recExecuted?'badge-executed':'badge-skipped'}">${t.recId?(t.recExecuted?'Rec: Yes':'Rec: No'):'Manual'}</span></td>
+                <td>${_journalRegimeBadge(matchedRec?.regime)}</td>
                 <td><button class="btn btn-sm btn-danger" onclick="removeJournalTrade(${realIdx})" title="Remove trade">✕</button></td>
               </tr>`;
             }).join('')}

@@ -1,6 +1,65 @@
 // ============================================================
 // DASHBOARD
 // ============================================================
+
+const _STALE_DAYS = 14;
+
+function _parseDD_MM_YYYY(d) {
+  if (!d) return null;
+  const p = d.split('-');
+  if (p.length !== 3) return null;
+  return new Date(+p[2], +p[1] - 1, +p[0]);
+}
+
+function _buildStaleNudgeCard() {
+  const holdings = mergedPortfolio();
+  if (!holdings.length) return '';
+
+  const stale = [];
+  for (const h of holdings) {
+    const recsForTicker  = state.recHistory.filter(r => r.ticker === h.ticker);
+    const lastRec        = recsForTicker.sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
+    const tradesForTicker = state.tradeJournal.filter(t => t.ticker === h.ticker);
+    const lastTrade      = tradesForTicker.sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
+
+    let latestDate = null;
+    const recDate   = _parseDD_MM_YYYY(lastRec?.date);
+    const tradeDate = _parseDD_MM_YYYY(lastTrade?.date);
+    if (recDate && tradeDate) latestDate = recDate > tradeDate ? recDate : tradeDate;
+    else latestDate = recDate || tradeDate;
+
+    const daysSince = latestDate
+      ? Math.floor((Date.now() - latestDate.getTime()) / 86400000)
+      : null;
+
+    if (daysSince === null || daysSince >= _STALE_DAYS) {
+      stale.push({ ticker: h.ticker, sector: h.sector, daysSince });
+    }
+  }
+
+  if (!stale.length) return '';
+
+  return `
+    <div class="card section-gap" style="border-left:3px solid #d97706">
+      <div class="flex-between" style="margin-bottom:6px">
+        <div class="card-title" style="margin:0;color:#b45309">Positions needing attention (${stale.length})</div>
+        <span class="text-xs text-muted">No recommendation in ${_STALE_DAYS}+ days</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${stale.map(s => `
+          <button class="btn btn-sm" onclick="showPage('signals')"
+            style="border:1px solid #fde68a;background:#fef3c7;color:#92400e;font-size:11px"
+            title="${s.daysSince !== null ? s.daysSince + ' days since last rec' : 'Never analysed'}">
+            ${s.ticker}
+            <span style="opacity:0.7;font-size:10px;margin-left:3px">${s.daysSince !== null ? s.daysSince + 'd' : 'new'}</span>
+          </button>`).join('')}
+      </div>
+      <div class="text-xs text-muted" style="margin-top:6px">
+        Run an analysis or go to <button class="btn btn-sm" style="font-size:11px" onclick="showPage('signals')">Live Signals</button> to refresh.
+      </div>
+    </div>`;
+}
+
 function renderDashboard() {
   const pv=portfolioValue(), nw=totalNetWorth(), gain=totalGain(), gainPct=(gain/totalCost())*100;
   const pending=state.recommendations.filter(r=>r.status==='pending').length;
@@ -109,6 +168,8 @@ function renderDashboard() {
       </div>
     </div>
 
+    ${_buildStaleNudgeCard()}
+
     <div class="card section-gap">
       <div class="flex-between" style="margin-bottom:8px">
         <div class="card-title" style="margin:0">Today's Analysis Schedule (Sydney)</div>
@@ -146,5 +207,92 @@ function renderDashboard() {
             </div>
           </div>`}
     </div>
+
+    <div class="card section-gap" id="morning-brief-card">
+      <div class="flex-between" style="margin-bottom:4px">
+        <div class="card-title" style="margin:0">Morning Brief</div>
+        <div class="flex-row" style="gap:8px">
+          ${window._morningBrief ? `<span class="text-xs text-muted">${window._morningBrief.date}</span>` : ''}
+          <button class="btn btn-sm btn-primary" onclick="generateMorningBrief()" id="brief-btn">
+            ${window._morningBrief ? '⟳ Refresh' : 'Generate Brief'}
+          </button>
+        </div>
+      </div>
+      ${window._morningBrief
+        ? `<div style="font-size:13px;line-height:1.65;white-space:pre-wrap;color:var(--text-primary);margin-top:6px">${escapeHTML(window._morningBrief.text)}</div>`
+        : `<p class="text-xs text-muted">Chain macro + regime + holdings into a concise session note. Requires an API key.</p>`}
+      <div id="brief-loading" style="display:none;padding:8px 0">
+        <div class="loading-dots"><span></span><span></span><span></span></div>
+      </div>
+    </div>
   `;
+}
+
+let _morningBriefRunning = false;
+
+async function generateMorningBrief() {
+  if (_morningBriefRunning) return;
+  const btn = document.getElementById('brief-btn');
+  const loading = document.getElementById('brief-loading');
+  if (!btn) return;
+
+  _morningBriefRunning = true;
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  if (loading) loading.style.display = 'block';
+
+  try {
+    const pv = portfolioValue(), nw = totalNetWorth();
+    const merged = mergedPortfolio();
+    const regime = state.currentRegime;
+
+    const holdingLines = merged.map(h => {
+      const sig = state.liveSignals[h.ticker];
+      const pl = ((h.currentPrice - h.avgPrice) / h.avgPrice * 100).toFixed(1);
+      return `  ${h.ticker} (${h.sector}): $${(h.shares * h.currentPrice).toFixed(0)}, P&L ${pl}%` +
+        (sig ? `, RSI ${sig.rsi_14 != null ? sig.rsi_14.toFixed(0) : '?'}, score ${sig.score != null ? sig.score : '?'}` : '');
+    }).join('\n');
+
+    const macro = state.macroData;
+    const macroLine = macro
+      ? `ASX200: ${macro.asx200 != null ? macro.asx200.toFixed(0) : '?'}, AUD/USD: ${macro.audusd != null ? macro.audusd.toFixed(4) : '?'}, sentiment: ${macro.sentiment || '?'} (${macro.bullish != null ? macro.bullish + '% bullish' : '?'})`
+      : 'No macro data — run Morning Macro first.';
+
+    const regimeLine = regime
+      ? `Regime: ${regime.regime} (${Math.round((regime.confidence || 0) * 100)}% confidence)`
+      : 'Regime: unknown';
+
+    const pendingCount = state.recommendations.filter(r => r.status === 'pending').length;
+    const rbaLine = `RBA cash rate: ${state.rbaRate}%`;
+
+    const prompt =
+`Date: ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+${macroLine}
+${regimeLine}
+${rbaLine}
+Portfolio: $${pv.toFixed(0)} holdings + $${state.cash.toFixed(0)} cash = $${nw.toFixed(0)} net worth
+Pending recs: ${pendingCount}
+
+Holdings:
+${holdingLines || '  (none)'}
+
+Write a morning briefing covering:
+1. Market regime and macro context (1-2 sentences)
+2. Key risks or events to watch today (1-2 sentences)
+3. Any holdings that stand out based on their signals or recent price action (1-2 sentences)
+4. One suggested focus for the session (1 sentence)`;
+
+    const text = await callClaude('briefing', prompt);
+    window._morningBrief = {
+      text,
+      date: new Date().toLocaleDateString('en-AU', { weekday: 'short', month: 'short', day: 'numeric' }),
+    };
+    renderPage();
+  } catch (e) {
+    toast('Brief failed: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Generate Brief'; }
+    if (loading) loading.style.display = 'none';
+  } finally {
+    _morningBriefRunning = false;
+  }
 }

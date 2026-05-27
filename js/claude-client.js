@@ -21,11 +21,13 @@ const _AGENT_MAX_TOKENS = {
   universe:  4000,
   macro:     1000,
   assistant: 2000,
+  briefing:  600,
 };
 
 const _AGENT_NO_CACHE = {
   macro:     true,
   assistant: true,
+  briefing:  true,
 };
 
 // Returns the system prompt string for a given agent type.
@@ -40,6 +42,7 @@ function _resolveSystemPrompt(agentType) {
     case 'dayTrade':  return typeof getDayTradeSystemPrompt  === 'function'  ? getDayTradeSystemPrompt()  : '';
     case 'universe':  return typeof getDayTradeUniverseScanPrompt === 'function' ? getDayTradeUniverseScanPrompt() : '';
     case 'assistant': return typeof ASSISTANT_SYSTEM_PROMPT !== 'undefined' ? ASSISTANT_SYSTEM_PROMPT : '';
+    case 'briefing':  return typeof MORNING_BRIEFING_SYSTEM_PROMPT !== 'undefined' ? MORNING_BRIEFING_SYSTEM_PROMPT : '';
     default:          return '';
   }
 }

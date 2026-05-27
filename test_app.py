@@ -1127,5 +1127,163 @@ class TestLearningImprovements(unittest.TestCase):
         self.assertIn("_debate?.synthesis?.winner", src)
 
 
+class TestSprint5(unittest.TestCase):
+    """Tests for Sprint 5 features: postmortem digest, EOFY tax pack, persistence fixes."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_learning_digest_data_empty(self):
+        """GET /api/learning/digest-data returns valid shape on empty DB."""
+        resp = self.client.get("/api/learning/digest-data")
+        self.assertEqual(resp.status_code, 200)
+        d = json.loads(resp.data)
+        self.assertIn("recent_failures", d)
+        self.assertIn("regime_stats", d)
+        self.assertIn("error_dist", d)
+        self.assertIn("exit_dist", d)
+        self.assertIsInstance(d["recent_failures"], list)
+
+    def test_learning_digest_data_with_losses(self):
+        """GET /api/learning/digest-data includes recent loss events."""
+        # Seed a loss event
+        self.client.post(
+            "/api/learning/log",
+            data=json.dumps({"ticker": "TLS.AX", "event_type": "recommendation",
+                             "recommendation": "BUY", "ai_confidence": 0.70}),
+            content_type="application/json",
+        )
+        row = _get_shared_conn().execute(
+            "SELECT id FROM ai_learning_events WHERE ticker='TLS.AX'"
+        ).fetchone()
+        if row:
+            self.client.post(
+                "/api/learning/outcome",
+                data=json.dumps({"id": row["id"], "outcome_status": "loss",
+                                 "was_executed": 1, "realized_pnl_pct": -5.2,
+                                 "exit_reason": "stop_hit"}),
+                content_type="application/json",
+            )
+        resp = self.client.get("/api/learning/digest-data")
+        self.assertEqual(resp.status_code, 200)
+        d = json.loads(resp.data)
+        tickers = [f["ticker"] for f in d["recent_failures"]]
+        self.assertIn("TLS.AX", tickers)
+
+    def test_eofy_pack_returns_zip(self):
+        """GET /api/tax/eofy-pack returns a zip file."""
+        resp = self.client.get("/api/tax/eofy-pack?year=2024")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content_type, "application/zip")
+        import zipfile, io
+        with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+            names = zf.namelist()
+        self.assertTrue(any("cgt_disposals" in n for n in names))
+        self.assertTrue(any("trade_fees" in n for n in names))
+
+    def test_eofy_pack_with_disposals(self):
+        """EOFY pack includes CGT disposals when present in blob_store."""
+        sample = json.dumps([{
+            "saleDate": "2025-03-15", "ticker": "CBA",
+            "salePrice": 130.0, "saleQty": 10, "proceeds": 1300.0,
+            "parcelDate": "2024-01-10", "parcelCostPerShare": 100.0,
+            "costBase": 1000.0, "saleFee": 10.0,
+            "grossGain": 290.0, "discount": 145.0, "netGain": 145.0,
+            "heldDays": 429, "eligible50": True,
+        }])
+        _get_shared_conn().execute(
+            "INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES ('cgtDisposals', ?, datetime('now'))",
+            (sample,)
+        )
+        _get_shared_conn().commit()
+
+        resp = self.client.get("/api/tax/eofy-pack?year=2024")
+        self.assertEqual(resp.status_code, 200)
+        import zipfile, io
+        with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+            cgt_csv = zf.read([n for n in zf.namelist() if "cgt" in n][0]).decode()
+        self.assertIn("CBA", cgt_csv)
+        self.assertIn("290.0", cgt_csv)
+
+    def test_db_save_persists_watchlist(self):
+        """POST /api/db/save stores watchlist in blob_store."""
+        payload = {
+            "watchlist": [{"ticker": "WDS", "addedAt": "2025-05-01", "notes": "test"}],
+            "savedScreeners": [],
+        }
+        resp = self.client.post(
+            "/api/db/save",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        row = _get_shared_conn().execute(
+            "SELECT value FROM blob_store WHERE key='watchlist'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        stored = json.loads(row["value"])
+        self.assertEqual(stored[0]["ticker"], "WDS")
+
+    def test_db_load_returns_watchlist(self):
+        """GET /api/db/load returns watchlist from blob_store."""
+        _get_shared_conn().execute(
+            "INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES ('watchlist', ?, datetime('now'))",
+            (json.dumps([{"ticker": "GMG", "addedAt": "2025-05-01", "notes": ""}]),)
+        )
+        _get_shared_conn().commit()
+        resp = self.client.get("/api/db/load")
+        self.assertEqual(resp.status_code, 200)
+        d = json.loads(resp.data)
+        self.assertIn("watchlist", d)
+        tickers = [x["ticker"] for x in (d["watchlist"] or [])]
+        self.assertIn("GMG", tickers)
+
+    def test_morning_brief_prompt_defined(self):
+        """MORNING_BRIEFING_SYSTEM_PROMPT must be defined in prompts.js."""
+        with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("MORNING_BRIEFING_SYSTEM_PROMPT", src)
+        self.assertIn("morning session note", src.lower())
+
+    def test_journal_regime_badge_function(self):
+        """journal.js must define _journalRegimeBadge helper."""
+        with open(os.path.join(ROOT, "js/pages/journal.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_journalRegimeBadge", src)
+        self.assertIn("matchedRec", src)
+
+    def test_generate_morning_brief_function(self):
+        """dashboard.js must define generateMorningBrief and use briefing agent type."""
+        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function generateMorningBrief()", src)
+        self.assertIn("callClaude('briefing'", src)
+
+    def test_generate_postmortem_digest_function(self):
+        """learning.js must define generatePostmortemDigest async function."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function generatePostmortemDigest()", src)
+        self.assertIn("/api/learning/digest-data", src)
+
+    def test_download_eofy_pack_function(self):
+        """cgt.js must define downloadEofyPack async function."""
+        with open(os.path.join(ROOT, "js/pages/cgt.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function downloadEofyPack()", src)
+        self.assertIn("/api/tax/eofy-pack", src)
+
+    def test_stale_nudge_function(self):
+        """dashboard.js must define _buildStaleNudgeCard helper."""
+        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _buildStaleNudgeCard()", src)
+        self.assertIn("_STALE_DAYS", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

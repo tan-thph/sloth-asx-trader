@@ -447,6 +447,82 @@ def learning_debate_stats():
     })
 
 
+@bp.route("/api/learning/digest-data")
+def learning_digest_data():
+    """Structured data for the postmortem digest AI prompt.
+
+    Returns recent closed losses + breakevens, failure pattern counts,
+    and regime win-rate breakdown so the frontend can build a Claude prompt.
+    """
+    try:
+        with get_db() as conn:
+            failures = conn.execute("""
+                SELECT ticker, regime, ai_confidence, recommendation,
+                       outcome_status, realized_pnl_pct, exit_reason,
+                       error_type, trade_thesis, timestamp, debate_summary, tags
+                FROM ai_learning_events
+                WHERE outcome_status IN ('loss', 'breakeven')
+                  AND was_executed = 1
+                ORDER BY timestamp DESC
+                LIMIT 20
+            """).fetchall()
+
+            regime_rows = conn.execute("""
+                SELECT regime,
+                       SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) as wins,
+                       COUNT(*) as total
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven') AND was_executed=1
+                GROUP BY regime
+            """).fetchall()
+
+            overall = conn.execute("""
+                SELECT SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) as wins,
+                       COUNT(*) as total
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven') AND was_executed=1
+            """).fetchone()
+
+            error_dist = conn.execute("""
+                SELECT error_type, COUNT(*) as n
+                FROM ai_learning_events
+                WHERE outcome_status IN ('loss','breakeven') AND was_executed=1
+                  AND error_type IS NOT NULL AND error_type != ''
+                GROUP BY error_type
+                ORDER BY n DESC
+            """).fetchall()
+
+            exit_dist = conn.execute("""
+                SELECT exit_reason, COUNT(*) as n
+                FROM ai_learning_events
+                WHERE outcome_status IN ('loss','breakeven') AND was_executed=1
+                  AND exit_reason IS NOT NULL AND exit_reason != ''
+                GROUP BY exit_reason
+                ORDER BY n DESC
+            """).fetchall()
+
+        regime_stats = [
+            {
+                "regime": r["regime"] or "unknown",
+                "wins": r["wins"],
+                "total": r["total"],
+                "win_rate": round(r["wins"] / r["total"] * 100, 1) if r["total"] else None,
+            }
+            for r in regime_rows
+        ]
+
+        return jsonify({
+            "recent_failures": [dict(r) for r in failures],
+            "regime_stats": regime_stats,
+            "overall_wins": overall["wins"] if overall else 0,
+            "overall_total": overall["total"] if overall else 0,
+            "error_dist": [dict(r) for r in error_dist],
+            "exit_dist": [dict(r) for r in exit_dist],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/api/learning/calibration-stats")
 def learning_calibration_stats():
     """Brier score + reliability-diagram bins.
