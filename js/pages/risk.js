@@ -291,7 +291,117 @@ function buildRiskPage(merged, riskData) {
       Beta &amp; volatility sourced from 90-day daily returns via yfinance. Benchmark: VAS.AX (ASX 300).
       Sharpe uses RBA cash rate ${(state.rbaRate||4.35).toFixed(2)}% as risk-free rate.
     </p>
-  </div>`;
+  </div>
+
+  <!-- Scenario Stress Test -->
+  ${(() => {
+    if (!window._stressScenario) window._stressScenario = { shock: -10 };
+    const shock = window._stressScenario.shock;
+    const presets = [-5, -10, -20, -30];
+
+    // Compute impact: each holding's price shock = beta × market_shock
+    const shockRows = merged.map(h => {
+      const m = metrics[h.ticker];
+      const beta = m ? m.beta : 1.0;
+      const val = h.shares * h.currentPrice;
+      const holdingShock = shock * beta;
+      const impact = val * holdingShock / 100;
+      return { ticker: h.ticker, sector: h.sector||'—', val, beta: m?.beta, holdingShock, impact };
+    });
+    const totalImpact = shockRows.reduce((s, r) => s + r.impact, 0);
+    const shockedPV   = pv + totalImpact;
+    const shockedNW   = nw + totalImpact;
+
+    return `<div class="card" style="margin-top:14px">
+      <div class="flex-between" style="margin-bottom:12px">
+        <div>
+          <div class="card-title" style="margin:0">Scenario Stress Test</div>
+          <div class="text-xs text-muted" style="margin-top:3px">What-if: ASX drops by <strong>${Math.abs(shock)}%</strong> — impact estimated via per-holding beta (CAPM).</div>
+        </div>
+        <div class="flex-row" style="gap:6px">
+          ${presets.map(p => `<button class="btn btn-sm${shock===p?' btn-primary':''}" onclick="window._stressScenario={shock:${p}};renderRiskPage(state._renderGen)">${p}%</button>`).join('')}
+          <input type="number" value="${shock}" min="-60" max="-1" step="1"
+            style="width:60px;padding:3px 6px;border-radius:var(--radius-sm);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:12px;text-align:center"
+            oninput="window._stressScenario={shock:parseFloat(this.value)||0};renderRiskPage(state._renderGen)">%
+        </div>
+      </div>
+      <div class="metrics-grid" style="margin-bottom:12px">
+        <div class="metric-card">
+          <div class="metric-label">Portfolio Impact</div>
+          <div class="metric-value down">${totalImpact>=0?'+':''}$${fmt(Math.abs(totalImpact))}</div>
+          <div class="metric-sub">on a ${Math.abs(shock)}% market fall</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Shocked Portfolio Value</div>
+          <div class="metric-value">${shockedPV>=0?'$'+fmt(shockedPV):'−$'+fmt(Math.abs(shockedPV))}</div>
+          <div class="metric-sub">vs current $${fmt(pv)}</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Shocked Net Worth</div>
+          <div class="metric-value">${shockedNW>=0?'$'+fmt(shockedNW):'−$'+fmt(Math.abs(shockedNW))}</div>
+          <div class="metric-sub">incl. $${fmt(state.cash)} cash (unchanged)</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Ticker</th><th>Sector</th><th>Value</th><th>Beta</th><th>Price Shock</th><th>$ Impact</th>
+          </tr></thead>
+          <tbody>
+            ${shockRows.sort((a,b)=>a.impact-b.impact).map(r => `<tr>
+              <td><strong>${r.ticker}</strong></td>
+              <td class="text-xs">${r.sector}</td>
+              <td>$${fmt(r.val)}</td>
+              <td>${r.beta != null ? `<span style="color:${r.beta<0.8?'#16a34a':r.beta<1.2?'#d97706':'#dc2626'}">${fmt(r.beta,2)}</span>` : '<span class="text-muted">—</span>'}</td>
+              <td class="text-danger">${fmt(r.holdingShock,1)}%</td>
+              <td class="text-danger" style="font-weight:600">$${fmt(r.impact)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="text-xs text-muted" style="margin-top:6px">Impact = holding value × beta × market shock. Cash is unaffected. Beta sourced from 90-day returns.</div>
+    </div>`;
+  })()}
+
+  <!-- ATR Trailing Stops -->
+  ${(() => {
+    const atrRows = merged.map(h => {
+      const sig = state.liveSignals && state.liveSignals[h.ticker];
+      if (!sig || !sig.atr_14) return null;
+      const atrStop  = Math.max(0, h.currentPrice - 2 * sig.atr_14);
+      const stopPct  = h.currentPrice > 0 ? (h.currentPrice - atrStop) / h.currentPrice * 100 : 0;
+      const existing = (state.priceAlerts||[]).find(a => a.ticker === h.ticker && a.type === 'below' && !a.triggeredAt);
+      return { ticker: h.ticker, currentPrice: h.currentPrice, atr: sig.atr_14, atrStop, stopPct, hasAlert: !!existing };
+    }).filter(Boolean);
+
+    if (!atrRows.length) return '';
+
+    return `<div class="card" style="margin-top:14px">
+      <div class="card-title">ATR Trailing Stop Suggestions</div>
+      <div class="text-xs text-muted" style="margin-bottom:10px">Suggested stops at 2× ATR below current price. Requires live signals (refresh prices or fetch signals first).</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Ticker</th><th>Price</th><th>ATR 14</th><th>2× ATR Stop</th><th>Distance</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${atrRows.map(r => `<tr>
+              <td><strong>${r.ticker}</strong></td>
+              <td>$${fmt(r.currentPrice)}</td>
+              <td>$${fmt(r.atr)}</td>
+              <td style="font-weight:600">$${fmt(r.atrStop)}</td>
+              <td class="text-danger">${fmt(r.stopPct,1)}% below</td>
+              <td>
+                ${r.hasAlert
+                  ? '<span class="badge badge-pending text-xs">Alert set</span>'
+                  : `<button class="btn btn-sm" onclick="addPriceAlert('${r.ticker}','below',${r.atrStop.toFixed(3)})" title="Set a price alert at this ATR stop level">Set Alert</button>`}
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  })()}`;
 }
 
 // ── Sector colour palette ─────────────────────────────────────────────────────

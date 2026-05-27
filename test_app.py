@@ -74,7 +74,8 @@ def _install_in_memory_db():
     import importlib
     for name in ("routes.portfolio", "routes.dividends", "routes.market",
                  "routes.backtest", "routes.scanner", "routes.learning",
-                 "routes.debate", "routes.news", "routes.claude"):
+                 "routes.debate", "routes.news", "routes.claude",
+                 "routes.alerts", "routes.import_csv"):
         try:
             mod = importlib.import_module(name)
             if hasattr(mod, "get_db"):

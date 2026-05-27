@@ -112,6 +112,10 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
+        # Market breadth: fraction of scored tickers trading above their 20-day SMA
+        above_sma20 = sum(1 for r in results if r["current_price"] > r["sma20"])
+        breadth_ratio = round(above_sma20 / len(results), 3) if results else None
+
         # Sector aggregates from ALL liquidity-passing tickers (not just top-N)
         sector_agg: dict = {}
         for r in results:
@@ -160,6 +164,7 @@ def _run_market_scan(universe: str, exclude: list, min_adv_aud: float, max_resul
                 "sector_stats":   sector_stats,
                 "filtered_count": len(results),
                 "scanned_at":     datetime.now().strftime("%H:%M"),
+                "breadth_ratio":  breadth_ratio,  # fraction of universe above 20d SMA (0–1)
             })
 
     except Exception as exc:

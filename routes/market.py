@@ -218,11 +218,14 @@ def _macro_payload() -> dict:
         macro_data.setdefault("aud_usd_change_5d", None)
         macro_data.setdefault("iron_ore_change_5d", None)
 
-    # Advance/decline breadth: no valid single-symbol source on Yahoo (the old
-    # "^XJOA" symbol 404s and accumulation/price ratio isn't breadth anyway).
-    # Left null until a real breadth source is wired up (e.g. from a universe scan);
-    # regime-engine.js guards `adr != null` so the breadth vote stays dormant.
-    macro_data["advance_decline_ratio"] = None
+    # Advance/decline breadth: populated from the most recent market scan's
+    # universe breadth (% of ASX tickers above 20-day SMA). Falls back to None
+    # before the first scan runs; regime-engine.js guards `adr != null`.
+    try:
+        from routes.scanner import _scan_state as _scanner_state  # lazy import avoids circular dep
+        macro_data["advance_decline_ratio"] = _scanner_state.get("breadth_ratio")
+    except Exception:
+        macro_data["advance_decline_ratio"] = None
 
     return macro_data
 

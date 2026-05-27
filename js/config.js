@@ -68,6 +68,7 @@ const state = {
   journalFilter: {ticker:'',action:'all',status:'all',pnl:'all',dateFrom:'',dateTo:'',sortBy:'date_desc'},
   priceAlerts: [],          // [{id, ticker, type:'above'|'below'|'pct_drop'|'rsi_below'|'rsi_above'|'bb_breakout'|'bb_breakdown'|'volume_spike', value, referencePrice, active, createdAt, triggeredAt, lastPrice}]
   watchlist: [],            // [{ticker, addedAt, notes}] — tickers monitored but not held
+  savedScreeners: [],       // [{name, savedAt, config:{universe, min_adv_aud, excludeHoldings}}]
   analysisConfig: {
     extraTickers: [],
     marketView: '',

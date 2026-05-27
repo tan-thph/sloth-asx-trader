@@ -81,12 +81,21 @@ function _buildScannerHTML(s) {
         <input type="checkbox" id="scanner-exclude" checked> Exclude my holdings
       </label>
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
-        ${s.scanned_at ? `<span style="font-size:11px;color:var(--text-muted)">Last scan: ${s.scanned_at} · ${s.filtered_count||0} passed filter</span>` : ''}
+        ${s.scanned_at ? `<span style="font-size:11px;color:var(--text-muted)">Last scan: ${s.scanned_at} · ${s.filtered_count||0} passed filter${s.breadth_ratio != null ? ` · ${Math.round(s.breadth_ratio*100)}% above SMA20` : ''}</span>` : ''}
+        <button class="btn btn-sm" onclick="scannerSavePreset()" title="Save current settings as a preset">⊕ Save</button>
         ${running
           ? `<button class="btn btn-sm btn-danger" onclick="stopMarketScan()">■ Stop</button>`
           : `<button class="btn btn-primary" onclick="startMarketScan()" id="scan-btn">▶ Run Scan</button>`}
       </div>
     </div>
+    ${(state.savedScreeners||[]).length ? `
+    <div style="display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:wrap">
+      <span style="font-size:11px;color:var(--text-muted)">Presets:</span>
+      ${(state.savedScreeners||[]).map(p => `
+        <button class="btn btn-sm" onclick="scannerLoadPreset(${JSON.stringify(p.name)})" title="${p.config.universe} · $${(p.config.min_adv_aud/1e6).toFixed(0)}M">${p.name}</button>
+        <button class="btn btn-sm" onclick="scannerDeletePreset(${JSON.stringify(p.name)})" style="padding:2px 5px;font-size:10px" title="Delete preset">✕</button>
+      `).join('')}
+    </div>` : ''}
 
     ${running ? `
     <div style="margin-top:10px">
@@ -721,6 +730,50 @@ function scannerSetUniverse(u) {
   _scannerUniverse = u;
   _scannerSector   = null;   // reset sector filter when universe changes
   renderPage();
+}
+
+// ── Saved screener presets ────────────────────────────────────────────────────
+
+function scannerSavePreset() {
+  const name = prompt('Preset name (e.g. "Oversold large-caps"):');
+  if (!name || !name.trim()) return;
+  const adv = parseFloat(document.getElementById('scanner-adv')?.value || 2000000);
+  const excludeHoldings = document.getElementById('scanner-exclude')?.checked ?? true;
+  const config = { universe: _scannerUniverse, min_adv_aud: adv, excludeHoldings };
+  if (!state.savedScreeners) state.savedScreeners = [];
+  const existing = state.savedScreeners.findIndex(p => p.name === name.trim());
+  if (existing >= 0) {
+    state.savedScreeners[existing] = { name: name.trim(), savedAt: new Date().toISOString(), config };
+    toast(`Preset "${name.trim()}" updated`, 'success');
+  } else {
+    state.savedScreeners.push({ name: name.trim(), savedAt: new Date().toISOString(), config });
+    toast(`Preset "${name.trim()}" saved`, 'success');
+  }
+  scheduleSave();
+  renderPage();
+}
+
+function scannerLoadPreset(name) {
+  const preset = (state.savedScreeners||[]).find(p => p.name === name);
+  if (!preset) return;
+  _scannerUniverse = preset.config.universe || 'asx200';
+  _scannerSector = null;
+  renderPage();
+  // Apply DOM values after render
+  setTimeout(() => {
+    const advEl = document.getElementById('scanner-adv');
+    if (advEl) advEl.value = String(preset.config.min_adv_aud || 2000000);
+    const exclEl = document.getElementById('scanner-exclude');
+    if (exclEl) exclEl.checked = preset.config.excludeHoldings !== false;
+  }, 50);
+  toast(`Loaded preset "${name}"`, 'info');
+}
+
+function scannerDeletePreset(name) {
+  state.savedScreeners = (state.savedScreeners||[]).filter(p => p.name !== name);
+  scheduleSave();
+  renderPage();
+  toast(`Preset "${name}" deleted`, 'info');
 }
 
 function scannerSetSector(sector) {
