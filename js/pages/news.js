@@ -407,14 +407,7 @@ function _newsPageHTML(status, sentiment) {
         ${provider === 'groq' ? `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             ${groqStatusHtml}
-          </div>
-          <div class="form-row" style="margin-bottom:8px">
-            <div class="form-label" style="font-size:11px">Groq API Key</div>
-            <div style="display:flex;gap:4px">
-              <input type="password" id="groq-key-input" value="${cfg.groq_api_key || ''}" placeholder="gsk_…"
-                style="flex:1;font-size:12px;padding:3px 7px;border:1px solid var(--border-light);border-radius:var(--radius-sm);background:var(--bg-secondary);color:var(--text-primary)">
-              <button class="btn btn-sm btn-primary" onclick="newsSaveGroqKey()" style="font-size:11px">Save</button>
-            </div>
+            <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent)">Settings</a></span>
           </div>
           <div class="form-row" style="margin-bottom:8px">
             <div class="form-label" style="font-size:11px">Groq Model</div>
@@ -426,14 +419,7 @@ function _newsPageHTML(status, sentiment) {
         ` : provider === 'google' ? `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             ${googleStatusHtml}
-          </div>
-          <div class="form-row" style="margin-bottom:8px">
-            <div class="form-label" style="font-size:11px">Google API Key</div>
-            <div style="display:flex;gap:4px">
-              <input type="password" id="google-key-input" value="${cfg.google_api_key || ''}" placeholder="AIza…"
-                style="flex:1;font-size:12px;padding:3px 7px;border:1px solid var(--border-light);border-radius:var(--radius-sm);background:var(--bg-secondary);color:var(--text-primary)">
-              <button class="btn btn-sm btn-primary" onclick="newsSaveGoogleKey()" style="font-size:11px">Save</button>
-            </div>
+            <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent)">Settings</a></span>
           </div>
           <div class="form-row" style="margin-bottom:8px">
             <div class="form-label" style="font-size:11px">Gemini Model</div>
@@ -442,7 +428,6 @@ function _newsPageHTML(status, sentiment) {
               <option value="${cfg.google_model || 'gemini-2.0-flash'}" selected>${cfg.google_model || 'gemini-2.0-flash'}</option>
             </select>
           </div>
-          <div style="font-size:11px;color:var(--text-muted)">Get a free API key at <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#4285f4">aistudio.google.com</a></div>
         ` : `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             ${ollamaStatusHtml}
@@ -873,15 +858,6 @@ async function newsSetProvider(provider) {
   renderPage();
 }
 
-async function newsSaveGroqKey() {
-  const input = document.getElementById('groq-key-input');
-  const key   = input?.value?.trim() || '';
-  state.news.settings.groq_api_key = key;
-  await _saveNewsSettings();
-  toast(key ? 'Groq API key saved' : 'Groq API key cleared', 'success');
-  renderPage();
-}
-
 async function newsSetGroqModel(model) {
   state.news.settings.groq_model = model;
   await _saveNewsSettings();
@@ -903,16 +879,6 @@ async function _loadGroqModels(selectId, savedModel) {
   } catch {
     el.innerHTML = `<option value="${savedModel || 'llama-3.1-8b-instant'}" selected>${savedModel || 'llama-3.1-8b-instant'}</option>`;
   }
-}
-
-async function newsSaveGoogleKey() {
-  const input = document.getElementById('google-key-input');
-  const key   = input?.value?.trim() || '';
-  state.news.settings.google_api_key = key;
-  await _saveNewsSettings();
-  toast(key ? 'Google API key saved' : 'Google API key cleared', 'success');
-  if (key) _loadGoogleModels('news-google-model-select', state.news.settings.google_model || 'gemini-2.0-flash');
-  renderPage();
 }
 
 async function newsSetGoogleModel(model) {

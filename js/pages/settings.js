@@ -13,6 +13,34 @@ function renderSettings() {
           <div class="text-xs text-muted mt-1">Required for AI analysis. Stored in localStorage only (never sent to server).</div>
         </div>
         <button class="btn btn-primary btn-sm" onclick="saveApiKey()">Save Anthropic Key</button>
+
+        <div style="margin-top:14px;padding-top:12px;border-top:0.5px solid var(--border-light)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <div class="form-label" style="margin:0">Groq API Key</div>
+            ${state.news.settings.groq_api_key
+              ? '<span style="font-size:10px;background:#dcfce7;color:#16a34a;padding:1px 7px;border-radius:9px">&#10003; Key saved</span>'
+              : '<span style="font-size:10px;background:#fef9c3;color:#92400e;padding:1px 7px;border-radius:9px">No key set</span>'}
+          </div>
+          <div style="display:flex;gap:6px">
+            <input type="password" id="settings-groq-key" value="${state.news.settings.groq_api_key || ''}" placeholder="gsk_…" style="flex:1">
+            <button class="btn btn-sm btn-primary" onclick="settingsSaveGroqKey()">Save</button>
+          </div>
+          <div class="text-xs text-muted mt-1">Used by News Scanner and Learning Loop debate. Free tier at <strong>console.groq.com</strong></div>
+        </div>
+
+        <div style="margin-top:12px;padding-top:12px;border-top:0.5px solid var(--border-light)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <div class="form-label" style="margin:0">Google Gemini API Key</div>
+            ${state.news.settings.google_api_key
+              ? '<span style="font-size:10px;background:#dcfce7;color:#16a34a;padding:1px 7px;border-radius:9px">&#10003; Key saved</span>'
+              : '<span style="font-size:10px;background:#fef9c3;color:#92400e;padding:1px 7px;border-radius:9px">No key set</span>'}
+          </div>
+          <div style="display:flex;gap:6px">
+            <input type="password" id="settings-google-key" value="${state.news.settings.google_api_key || ''}" placeholder="AIza…" style="flex:1">
+            <button class="btn btn-sm btn-primary" onclick="settingsSaveGoogleKey()">Save</button>
+          </div>
+          <div class="text-xs text-muted mt-1">Used by News Scanner and Learning Loop debate. Free at <strong>aistudio.google.com/apikey</strong></div>
+        </div>
       </div>
       <div class="card">
         <div class="card-title">Trading Parameters</div>
@@ -271,6 +299,22 @@ function saveApiKey() {
   state.settings.apiKey=val;
   localStorage.setItem('asx_api_key',val);
   toast('API key saved','success');
+}
+
+async function settingsSaveGroqKey() {
+  const key = (document.getElementById('settings-groq-key')?.value || '').trim();
+  state.news.settings.groq_api_key = key;
+  await _saveNewsSettings();
+  toast(key ? 'Groq API key saved' : 'Groq API key cleared', 'success');
+  renderPage();
+}
+
+async function settingsSaveGoogleKey() {
+  const key = (document.getElementById('settings-google-key')?.value || '').trim();
+  state.news.settings.google_api_key = key;
+  await _saveNewsSettings();
+  toast(key ? 'Google API key saved' : 'Google API key cleared', 'success');
+  renderPage();
 }
 
 
