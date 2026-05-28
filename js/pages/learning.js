@@ -1150,9 +1150,8 @@ function showPostmortemDebateModal(result, eventId) {
     'debated-singleton': result.verdict === 'SINGLETON_A'
       ? `Only ${result.model_a} produced parseable output`
       : `Only ${result.model_b} produced parseable output`,
-    'debated':           p3?.maintains
-      ? `${result.model_a} held its ground in challenge round`
-      : `${result.model_a} conceded to ${result.model_b}`,
+    'debated-synthesis': `Neutral synthesis by ${result.model_a} reconciled divergent positions`,
+    'debated':           `Phase 3 synthesis fallback (synthesis parse failed)`,
     'adjudicated':       'Cloud adjudicator decided (see Phase 4 below)',
   }[result.error_type_source] || '';
 
@@ -1256,24 +1255,23 @@ function showPostmortemDebateModal(result, eventId) {
       </div>`;
   })() : '';
 
-  // Fix #3: show raw Phase 3 response so user can see whether the challenger
-  // actually rebutted with numbers or just restated. Also flag auto-concede
-  // (triggered when maintain=true but the rebuttal contains no digits).
+  // Phase 3 — neutral synthesis (replaces old challenge-and-defend round).
+  // Shows the synthesis model, its final tags + reasoning, and the raw output.
   const phase3Html = p3 ? `
     <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
-      <div style="font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.5px;margin-bottom:6px">
-        PHASE 3 — CHALLENGE ROUND (${result.model_a})
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <div style="font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.5px">
+          PHASE 3 — NEUTRAL SYNTHESIS
+        </div>
+        <span style="font-size:10px;color:var(--text-muted);background:var(--bg-secondary);border:1px solid var(--border);padding:1px 6px;border-radius:3px">${p3.synthesis_model || result.model_a}</span>
       </div>
       <div style="font-size:12px;line-height:1.5;color:var(--text-primary);margin-bottom:6px">
-        ${p3.maintains
-          ? `<span style="color:#16a34a;font-weight:600">Maintained</span> → final: <strong>${p3.final_tags || result.error_type}</strong>`
-          : `<span style="color:#dc2626;font-weight:600">Conceded</span> to ${result.model_b} → final: <strong>${p3.final_tags || result.error_type}</strong>`
-        }
-        ${p3.auto_concede_reason ? `<span style="font-size:10px;margin-left:8px;color:#d97706;background:#fef3c7;border:1px solid #fde68a;padding:1px 6px;border-radius:3px" title="The maintain response contained no numeric rebuttal — auto-concede was applied">auto-concede: ${p3.auto_concede_reason}</span>` : ''}
+        Final tags: <strong>${p3.final_tags || result.error_type || '—'}</strong>
       </div>
+      ${p3.reason ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px">${p3.reason}</div>` : ''}
       ${p3.raw ? `
         <details style="margin-top:6px">
-          <summary style="font-size:11px;color:var(--text-muted);cursor:pointer">Raw rebuttal text</summary>
+          <summary style="font-size:11px;color:var(--text-muted);cursor:pointer">Raw synthesis output</summary>
           <pre style="margin-top:4px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;padding:8px;white-space:pre-wrap;word-break:break-word;color:var(--text-primary);max-height:200px;overflow-y:auto">${(p3.raw || '').replace(/</g,'&lt;')}</pre>
         </details>` : ''}
     </div>` : '';

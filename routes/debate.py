@@ -426,6 +426,12 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "  thesis_broken   - thesis was invalidated by new information that emerged after entry\n"
         "  none            - ONLY if the loss was genuinely unforeseeable with the available data\n"
         "\n"
+        "Tag guidance — prefer the ROOT CAUSE, not its downstream consequence:\n"
+        "  If stop_too_tight explains poor_rr (tight stop forced a bad R:R setup), "
+        "use stop_too_tight only.\n"
+        "  overconfident and poor_rr are independent — both can apply together.\n"
+        "  Use none ONLY if no systematic error is identifiable; do not use it alongside other tags.\n"
+        "\n"
         'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence citing specific numbers"}\n'
         "No markdown, no explanation outside JSON."
     )
@@ -948,91 +954,67 @@ def debate_postmortem_debate():
         final_source = "debated-merged"
 
     else:
-        # ── Phase 3: Challenge round (full divergence only) ───────────────────
+        # ── Phase 3: Neutral synthesis (full divergence only) ─────────────────
+        # Both models disagreed entirely. Rather than having one model defend
+        # its position (which biases toward whichever model is the "challenger"),
+        # we run a neutral reconciliation pass: present both positions and ask
+        # for the single best classification, explaining why it was chosen over
+        # the alternative.
         verdict = "DIVERGED"
         t2 = time.time()
         current_app.logger.info(
-            f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 3 — "
-            f"challenging {model_a}: {tags_a_str or 'none'} vs {model_b}: {tags_b_str or 'none'}"
+            f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 3 synthesis — "
+            f"{model_a}: {tags_a_str or 'none'} vs {model_b}: {tags_b_str or 'none'}"
         )
-        challenge_prompt = (
-            f"You previously classified this trade as: {tags_a_str or 'none'}\n"
-            f"Your reason: {reason_a}\n\n"
-            f"Another model ({model_b}) classified it as: {tags_b_str or 'none'}\n"
-            f"Their reason: {reason_b}\n\n"
-            "Trade summary for reference:\n"
-            f"{summary}\n\n"
-            "RULES for your response:\n"
-            "  1. You MUST engage with the other model's specific claims — do not "
-            "just restate your earlier reasoning.\n"
-            "  2. To MAINTAIN your tags, cite specific numbers (P&L %, R:R ratio, "
-            "stop distance, entry/target prices) showing why their interpretation "
-            "is factually wrong.\n"
-            "  3. To CONCEDE, explain which of their points convinced you.\n"
-            "  4. If you cannot rebut their points with numbers, you must concede.\n"
-            "  5. A response that simply repeats your prior reason without "
-            "addressing theirs is treated as a CONCEDE.\n"
+
+        valid_tags_list = ", ".join(sorted(VALID_PM_TYPES - {"none"}))
+        synthesis_prompt = (
+            f"Two models independently classified a closed ASX trade and disagreed.\n\n"
+            f"TRADE: {summary}\n\n"
+            f"--- {model_a} ---\n"
+            f"Tags: {tags_a_str or 'none'}\n"
+            f"Reason: {reason_a}\n\n"
+            f"--- {model_b} ---\n"
+            f"Tags: {tags_b_str or 'none'}\n"
+            f"Reason: {reason_b}\n\n"
+            f"Your task: produce the SINGLE BEST error classification by reconciling "
+            f"both assessments. Consider each model's reasoning on its merits — do not "
+            f"default to either model's answer without justification.\n\n"
+            f"Valid tags: {valid_tags_list}\n"
+            "Root-cause rule: if stop_too_tight explains poor_rr, use stop_too_tight only.\n"
             "\n"
-            'Respond with JSON only: {"maintain":true,"final_tags":"TAG1,TAG2","reason":"specific rebuttal citing numbers from the trade summary"}\n'
-            'To concede: {"maintain":false,"final_tags":"TAG1,TAG2","reason":"which of their points convinced you"}\n'
+            'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"why you chose these tags over the alternative, citing specific numbers"}\n'
             "No markdown, no explanation outside JSON."
         )
-        res_ch = _call_model_any(model_a, challenge_prompt, timeout=tout)
-        current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 3 done ({int((time.time()-t2)*1000)}ms)")
+
+        res_synth = _call_model_any(model_a, synthesis_prompt, timeout=tout)
+        current_app.logger.info(
+            f"[PostMortemDebate] event#{ev_id} Phase 3 done ({int((time.time()-t2)*1000)}ms)"
+        )
 
         transcript["phase_3"] = {
-            "challenger": model_a,
-            # 600 chars — enough to show whether the rebuttal engaged with
-            # specific numbers (fix #3: surface raw response in modal)
-            "raw": (res_ch.get("text", "")[:600] if res_ch["ok"] else res_ch["error"]),
+            "synthesis_model": model_a,
+            "raw": (res_synth.get("text", "")[:600] if res_synth["ok"] else res_synth.get("error", "")),
         }
 
-        # Default if challenge call fails or parse fails — A keeps its tags
-        final_tags   = tags_a_str
-        final_reason = reason_a
+        # Default fallback — use whichever Phase 1 result is non-empty
+        final_tags   = tags_a_str or tags_b_str
+        final_reason = reason_a or reason_b
         final_source = "debated"
 
-        if res_ch["ok"]:
-            ch_raw = res_ch["text"].strip()
-            ch_raw = _strip_think_tags(ch_raw)
-            ch_raw = re.sub(r"^```[a-z]*\n?", "", ch_raw)
-            ch_raw = re.sub(r"\n?```$",       "", ch_raw)
-            try:
-                ch = json.loads(ch_raw)
-                maintains = bool(ch.get("maintain", True))
-                ch_tags   = ch.get("final_tags", "")
-                ch_reason = ch.get("reason", "")
-            except Exception:
-                m_m       = re.search(r'"maintain"\s*:\s*(true|false)', ch_raw, re.I)
-                maintains = (m_m.group(1).lower() == "true") if m_m else True
-                m_t       = re.search(r'"final_tags"\s*:\s*"([^"]+)"', ch_raw)
-                ch_tags   = m_t.group(1) if m_t else tags_a_str
-                m_r       = re.search(r'"reason"\s*:\s*"([^"]+)"', ch_raw)
-                ch_reason = m_r.group(1) if m_r else ""
+        if res_synth["ok"]:
+            synth_raw = res_synth["text"].strip()
+            synth_raw = _strip_think_tags(synth_raw)
+            synth_raw = re.sub(r"^```[a-z]*\n?", "", synth_raw)
+            synth_raw = re.sub(r"\n?```$",       "", synth_raw)
+            synth_tags, synth_reason = _pm_parse(synth_raw, ev_id, model_a, label="/synthesis")
+            if synth_tags:
+                final_tags   = synth_tags
+                final_reason = synth_reason
+                final_source = "debated-synthesis"
 
-            # Enforce challenge rule #5: a "maintain" must cite numbers.
-            # If the rebuttal has zero digits, the model isn't engaging with
-            # specifics — auto-concede so the incumbent can't win by silence.
-            if maintains and not re.search(r"\d", ch_reason or ""):
-                current_app.logger.info(
-                    f"[PostMortemDebate] event#{ev_id} — Phase 3 maintain has no "
-                    f"numeric rebuttal, auto-concede applied"
-                )
-                maintains = False
-                transcript["phase_3"]["auto_concede_reason"] = "no numeric rebuttal"
-
-            transcript["phase_3"]["maintains"]  = maintains
-            transcript["phase_3"]["final_tags"] = ch_tags
-
-            if maintains:
-                # Validate A's possibly-refined final tags directly (no JSON roundtrip)
-                clean_tags  = _pm_validate_tags(ch_tags or tags_a_str, ev_id, model_a, label="/challenge")
-                final_tags   = clean_tags or tags_a_str
-                final_reason = ch_reason or reason_a
-            else:
-                # A conceded — use B's tags
-                final_tags   = tags_b_str
-                final_reason = f"Conceded to {model_b}: {ch_reason or reason_b}"
+            transcript["phase_3"]["final_tags"] = final_tags
+            transcript["phase_3"]["reason"]     = final_reason
 
     # Logical-consistency check — strip tags that contradict trade numbers
     # (e.g. 'stop_too_tight' on a 43%-distance stop). Applied AFTER all phases
