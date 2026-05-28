@@ -10,7 +10,7 @@ Routes:
 """
 
 import math
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FutureTimeout
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -251,20 +251,31 @@ def intraday_scan():
 
     Body: {"tickers": ["CBA", "BHP", ...]}
     Returns: {TICKER: {score, passes, current_price, vwap, ...}, ...}
+
+    Uses as_completed so one slow / delisted ticker doesn't block the whole scan.
+    Per-ticker timeout: 8 s — delisted tickers that hang Yahoo Finance are skipped.
     """
     body    = request.get_json(silent=True) or {}
     tickers = [t.upper() for t in body.get("tickers", []) if t]
     if not tickers:
         return jsonify({}), 200
 
+    _PER_TICKER_TIMEOUT = 8   # seconds; delisted/slow tickers skipped after this
+
     results: dict = {}
+    n_workers = min(len(tickers), 15)
 
-    def _one(t: str):
-        return t, _intraday_cached(t)
-
-    n_workers = min(len(tickers), 8)
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        for ticker, result in pool.map(_one, tickers):
-            results[ticker] = result
+        future_to_ticker = {pool.submit(_intraday_cached, t): t for t in tickers}
+        for future in as_completed(future_to_ticker, timeout=120):
+            t = future_to_ticker[future]
+            try:
+                results[t] = future.result(timeout=_PER_TICKER_TIMEOUT)
+            except _FutureTimeout:
+                log.warning("intraday: per-ticker timeout (%ds) for %s — skipping", _PER_TICKER_TIMEOUT, t)
+                results[t] = {"error": "timeout", "ticker": t}
+            except Exception as exc:
+                log.warning("intraday: error for %s: %s", t, exc)
+                results[t] = {"error": str(exc), "ticker": t}
 
     return jsonify(results)

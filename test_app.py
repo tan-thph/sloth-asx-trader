@@ -2385,6 +2385,45 @@ class TestIntradayStrategy(unittest.TestCase):
         self.assertLess(idx_intraday, idx_dt_analysis,
                         "intraday-strategy.js must load before day-trading-analysis.js")
 
+    def test_intraday_universe_key_in_config(self):
+        """config.js state.intraday.params must include universeKey default."""
+        with open(os.path.join(ROOT, "js/config.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("universeKey", src)
+        self.assertIn("asx100", src)
+
+    def test_intraday_universe_selector_in_day_trading(self):
+        """day-trading.js Intraday tab must render a universe selector."""
+        with open(os.path.join(ROOT, "js/pages/day-trading.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("universeKey", src)
+        self.assertIn("asx20", src)
+        self.assertIn("asx200", src)
+
+    def test_run_intraday_scan_uses_universe_key(self):
+        """intraday-strategy.js must read universeKey from state.intraday.params."""
+        with open(os.path.join(ROOT, "js/intraday-strategy.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("universeKey", src)
+        self.assertIn("getUniverseTickers", src)
+
+    def test_ipl_removed_from_universe(self):
+        """IPL.AX (delisted 2023) must not appear in the _ASX_UNIVERSES data in asx-universe.js."""
+        with open(os.path.join(ROOT, "js/asx-universe.js"), encoding="utf-8") as f:
+            src = f.read()
+        # Strip comment lines before checking — the ticker may appear in a comment note
+        data_lines = [l for l in src.splitlines() if not l.strip().startswith("//")]
+        data_src = "\n".join(data_lines)
+        self.assertNotIn("'IPL.AX'", data_src,
+                         "IPL.AX is delisted and must be removed from universe arrays")
+
+    def test_intraday_scan_uses_as_completed(self):
+        """routes/intraday.py must use as_completed for non-blocking batch scan."""
+        with open(os.path.join(ROOT, "routes/intraday.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("as_completed", src)
+        self.assertIn("_PER_TICKER_TIMEOUT", src)
+
     def test_day_trading_js_syntax(self):
         """day-trading.js must pass node --check after intraday additions."""
         import subprocess

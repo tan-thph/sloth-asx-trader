@@ -1,7 +1,8 @@
 // ============================================================
 // ASX INDEX UNIVERSE LISTS
-// Approximate constituents as of 2025 — rebalanced quarterly.
+// Approximate constituents as of 2026 — rebalanced quarterly.
 // Delisted or absent tickers are silently skipped by the scanner.
+// 2026-05: removed IPL.AX (Incitec Pivot — delisted after 2023 demerger).
 // ============================================================
 
 const _ASX_UNIVERSES = {
@@ -23,7 +24,7 @@ const _ASX_UNIVERSES = {
     'XRO.AX','CPU.AX','APA.AX','AGL.AX','ORI.AX',
     'BXB.AX','SCG.AX','GPT.AX','VCX.AX','DXS.AX',
     'LLC.AX','QAN.AX','NXT.AX','ASX.AX','ILU.AX',
-    'SHL.AX','WOR.AX','IPL.AX','SOL.AX','ORG.AX',
+    'SHL.AX','WOR.AX','SOL.AX','ORG.AX','WGX.AX',
     'AMP.AX','SGP.AX','NST.AX','EVN.AX','AMC.AX',
   ],
 
@@ -37,7 +38,7 @@ const _ASX_UNIVERSES = {
     'XRO.AX','CPU.AX','APA.AX','AGL.AX','ORI.AX',
     'BXB.AX','SCG.AX','GPT.AX','VCX.AX','DXS.AX',
     'LLC.AX','QAN.AX','NXT.AX','ASX.AX','ILU.AX',
-    'SHL.AX','WOR.AX','IPL.AX','SOL.AX','ORG.AX',
+    'SHL.AX','WOR.AX','SOL.AX','ORG.AX','WGX.AX',
     'AMP.AX','SGP.AX','NST.AX','EVN.AX','AMC.AX',
     // ASX 51–100
     'ALX.AX','JBH.AX','TWE.AX','HVN.AX','BSL.AX',
@@ -62,7 +63,7 @@ const _ASX_UNIVERSES = {
     'XRO.AX','CPU.AX','APA.AX','AGL.AX','ORI.AX',
     'BXB.AX','SCG.AX','GPT.AX','VCX.AX','DXS.AX',
     'LLC.AX','QAN.AX','NXT.AX','ASX.AX','ILU.AX',
-    'SHL.AX','WOR.AX','IPL.AX','SOL.AX','ORG.AX',
+    'SHL.AX','WOR.AX','SOL.AX','ORG.AX','WGX.AX',
     'AMP.AX','SGP.AX','NST.AX','EVN.AX','AMC.AX',
     'ALX.AX','JBH.AX','TWE.AX','HVN.AX','BSL.AX',
     'JHX.AX','CHC.AX','WTC.AX','PLS.AX','RHC.AX',

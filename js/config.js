@@ -189,11 +189,12 @@ const state = {
     autoRefresh:     false, // 2-min poller toggle
     allocatedCash:   null,  // null = auto (allocPct% of state.cash)
     params: {
-      targetPct:    3.5,   // exit target %
-      stopPct:      1.5,   // stop loss %
-      maxPositions: 2,     // max concurrent intraday trades
-      minScore:     40,    // minimum setup score (0–100)
-      allocPct:     20,    // % of state.cash allocated to intraday
+      targetPct:    3.5,      // exit target %
+      stopPct:      1.5,      // stop loss %
+      maxPositions: 2,        // max concurrent intraday trades
+      minScore:     40,       // minimum setup score (0–100)
+      allocPct:     20,       // % of state.cash allocated to intraday
+      universeKey:  'asx100', // which index universe to scan
     },
   },
 };

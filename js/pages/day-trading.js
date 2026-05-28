@@ -515,10 +515,10 @@ function _renderDtIntradayTab() {
     recommendations: [], openPositions: [], todayPnl: 0,
     lastScan: null, scanRunning: false, autoRefresh: false,
     allocatedCash: null,
-    params: { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20 },
+    params: { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100' },
   };
   const id = state.intraday;
-  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
+  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100',
                ...(id.params || {}) };
   const allocated = id.allocatedCash != null
     ? id.allocatedCash
@@ -567,14 +567,36 @@ function _renderDtIntradayTab() {
           <div class="text-xs text-muted mt-1">= $${fmt(allocated, 0)} of $${fmt(state.cash, 0)}</div>
         </div>
       </div>
-      <div style="margin-top:12px;padding-top:10px;border-top:0.5px solid var(--border-light);font-size:11px;color:var(--text-muted)">
+
+      <!-- Universe selector -->
+      <div style="margin-top:12px;padding-top:10px;border-top:0.5px solid var(--border-light)">
+        <div class="form-label" style="margin-bottom:7px">Scan universe</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${['asx20','asx50','asx100','asx200'].map(k => {
+            const meta = (typeof ASX_UNIVERSE_META !== 'undefined' && ASX_UNIVERSE_META[k]) || { label: k.toUpperCase() };
+            const count = (typeof getUniverseTickers !== 'undefined') ? getUniverseTickers(k).length : '?';
+            const active = ip.universeKey === k;
+            return `<button class="btn btn-sm"
+              onclick="updateIntradayParam('universeKey','${k}')"
+              style="font-size:11px;font-weight:${active ? '700' : '400'};background:${active ? '#10b981' : 'var(--bg-secondary)'};color:${active ? '#fff' : 'var(--text-secondary)'};border-color:${active ? '#10b981' : 'var(--border-medium)'}">
+              ${meta.label} <span style="opacity:.7">(${count})</span>
+            </button>`;
+          }).join('')}
+        </div>
+        <div class="text-xs text-muted mt-1">Larger universes find more setups but take longer to scan</div>
+      </div>
+
+      <div style="margin-top:10px;padding-top:8px;border-top:0.5px solid var(--border-light);font-size:11px;color:var(--text-muted)">
         ⏰ Entry window: 10:45–15:00 AEST only · ⚠️ yfinance 5m data has ~5–15 min latency — prices are indicative
       </div>
     </div>`;
 
   // ── Action bar ────────────────────────────────────────────────────────────
+  const universeLabel = scanInfo && scanInfo.universeLabel
+    ? scanInfo.universeLabel
+    : (ASX_UNIVERSE_META && ASX_UNIVERSE_META[ip.universeKey] ? ASX_UNIVERSE_META[ip.universeKey].label : ip.universeKey.toUpperCase());
   const scanStatus = scanInfo
-    ? `Last scan: ${scanInfo.date} ${scanInfo.time} · ${scanInfo.passed}/${scanInfo.total} passed · ${scanInfo.count} setup${scanInfo.count !== 1 ? 's' : ''}`
+    ? `Last scan: ${scanInfo.date} ${scanInfo.time} · ${scanInfo.universeLabel || universeLabel} · ${scanInfo.passed}/${scanInfo.total} passed · ${scanInfo.count} setup${scanInfo.count !== 1 ? 's' : ''}`
     : 'No scan run yet.';
   const actionBar = `
     <div class="card" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
@@ -593,7 +615,7 @@ function _renderDtIntradayTab() {
           style="background:#10b981;border-color:#10b981;display:flex;align-items:center;gap:6px">
           ${id.scanRunning
             ? '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Scanning…'
-            : '⚡ Scan Now'}
+            : `⚡ Scan ${universeLabel}`}
         </button>
       </div>
     </div>`;

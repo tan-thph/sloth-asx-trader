@@ -118,12 +118,16 @@ async function runIntradayScan() {
   if (state.intraday.scanRunning) return;
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
 
+  const universeKey = (state.intraday.params && state.intraday.params.universeKey) || 'asx100';
+  const universeMeta = (typeof ASX_UNIVERSE_META !== 'undefined' && ASX_UNIVERSE_META[universeKey])
+    || { label: universeKey.toUpperCase() };
+
   state.intraday.scanRunning = true;
   renderPage();
-  toast('Scanning ASX100 for intraday setups…', 'info');
+  toast(`Scanning ${universeMeta.label} for intraday setups…`, 'info');
 
   // Strip .AX suffix — backend's asx() helper re-appends it
-  const tickers = getUniverseTickers('asx100').map(t => t.replace('.AX', ''));
+  const tickers = getUniverseTickers(universeKey).map(t => t.replace('.AX', ''));
 
   try {
     const r = await fetch(`${API}/api/intraday/scan`, {
@@ -137,11 +141,13 @@ async function runIntradayScan() {
     state.intraday.recommendations = _buildIntradayRecs(data);
     const passed = Object.values(data).filter(d => d.passes).length;
     state.intraday.lastScan = {
-      date:   todayStr(),
-      time:   nowSydney(),
-      total:  tickers.length,
+      date:        todayStr(),
+      time:        nowSydney(),
+      universeKey,
+      universeLabel: universeMeta.label,
+      total:       tickers.length,
       passed,
-      count:  state.intraday.recommendations.length,
+      count:       state.intraday.recommendations.length,
     };
     const count = state.intraday.recommendations.length;
     toast(
