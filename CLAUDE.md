@@ -77,10 +77,10 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 
 | File | Lines | URL prefix(es) | Notes |
 |---|--:|---|---|
-| `routes/portfolio.py`  | ~380 | `/api/cash`, `/api/db/*`, `/api/tax/eofy-pack` | Bulk state save/load, cash balance, EOFY tax pack ZIP download. |
+| `routes/portfolio.py`  | ~410 | `/api/cash`, `/api/db/*`, `/api/tax/eofy-pack`, `/api/portfolio/splits-check` | Bulk state save/load, cash balance, EOFY tax pack ZIP download. `GET /api/portfolio/splits-check?tickers=...` — uses `yf.Ticker.splits` to detect splits in the last 90 days; returns `{TICKER:[{date,ratio}]}`. |
 | `routes/dividends.py`  | ~395 | `/api/dividends/*`                              | yfinance + ASX scrape, 12 h cache, `_FRANKING_MAP` fallback. |
 | `routes/market.py`     | ~750 | `/health` (+ version/uptime/last_backup), `/api/{analyse,quote,macro,rba-rate,polymarket,risk,portfolio/nav-history,earnings-calendar,log/ai_response,log/ai_calls,log/ai_call/<id>}` | All yfinance read-only data + full prompt+response logging. ETFs skipped in `/api/earnings-calendar` via quoteType check. Uses `@ttl_cache`. |
-| `routes/backtest.py`   | ~575 | `/api/backtest`, `/api/backtest/ai-replay`     | Historical strategy backtest + replay scoring of executed AI recs. |
+| `routes/backtest.py`   | ~610 | `/api/backtest`, `/api/backtest/ai-replay`     | Historical strategy backtest + replay scoring of executed AI recs. Supports `slippage_mode: 'flat'|'liquidity'`; liquidity mode applies ADV-tiered rates via `_adv_slippage(adv_aud)`. |
 | `routes/scanner.py`    | ~210 | `/api/market/scan*`                              | Background thread + `_scan_state` dict, sector diversification. Computes `breadth_ratio` (% of universe above 20-day SMA) after each scan; consumed by `/api/macro` via lazy import. |
 | `routes/learning.py`   | ~730 | `/api/learning/*`                                | Log → outcome → stats/calibration analytics. Decay-weighted win rates. `_calib_compute()` is a pure function cached 5 min. `GET /api/learning/calibration-stats` (Brier score + reliability-diagram bins). `GET /api/learning/digest-data` (structured failure data for postmortem digest AI prompt). |
 | `routes/debate.py`     | ~1001 | `/api/debate/*`                                  | Local Ollama bull/bear + postmortem + skill scoring. Direction-aware prompts (BUY vs SELL/TRIM). Uses `current_app.logger`. |
@@ -90,7 +90,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `routes/import_csv.py` | ~200 | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. Returns BUY rows only; SELL rows reported as skipped (require manual entry). |
 | `routes/intraday.py`   | ~270 | `/api/intraday/<ticker>`, `/api/intraday/scan`  | ASX100 intraday day-trade strategy. `GET /api/intraday/<ticker>` — single ticker 5m analysis (2-min TTL). `POST /api/intraday/scan` — batch scan up to 100 tickers with 8-thread pool. Returns VWAP, intraday RSI, volume acceleration, setup score 0–100, `passes` bool (entry window + VWAP + RSI + score gates). |
 
-Total: **12 blueprints, 80 routes** (including announcements blueprint). Sprint 11 added `GET /api/intraday/<ticker>` and `POST /api/intraday/scan`.
+Total: **12 blueprints, 81 routes** (including announcements blueprint). Sprint 11 added `GET /api/intraday/<ticker>` and `POST /api/intraday/scan`. Sprint 13 added `GET /api/portfolio/splits-check`.
 
 ### Frontend (JS) — load order matters
 
@@ -154,6 +154,8 @@ state.priceAlerts:        [{ id, ticker, type, value, ... }]  — types include 
 state.settings.telegramEnabled:   bool — mirrors alerts to Telegram when true
 state.settings.tgToken / tgChatId: stored locally in state but credentials saved server-side via POST /api/alerts/telegram/save
 state.settings.drawdownAlertPct:  number — alert threshold for drawdown monitor (default 10)
+state.settings.compactMode:       bool — applies `.compact` CSS body class on startup; reduces card padding, row heights, button sizes (default false)
+state._splitWarnings:             undefined | {} | { TICKER: [{date, ratio}] } — undefined = not yet checked, {} = checked (no splits), populated = splits found; cached per Portfolio page load
 state.targetAllocations:  { TICKER: number }  — ticker → target weight %; persisted in blob_store; used by Risk page drift card
 state.termDeposits:       [{ id, label, amount, rate, maturityDate, notes }]  — idle cash + TDs; persisted in blob_store; Dashboard cash tracker
 window._morningBrief:     { text, date } | undefined — last generated morning briefing note; lives on window so it survives renderPage() calls but clears on full page reload
@@ -209,6 +211,7 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 - `GET /api/cash` / `POST /api/cash`
 - `POST /api/db/refresh-sectors`
 - `GET /api/tax/eofy-pack?year=N` — downloads a ZIP with `cgt_disposals_FY{N}-{N+1}.csv` and `trade_fees_FY{N}-{N+1}.csv`. Reads `cgtDisposals` from blob_store + trade fees from `trade_journal`. `year` defaults to current FY (Jul–Jun). Button on CGT page.
+- `GET /api/portfolio/splits-check?tickers=BHP.AX,CBA.AX` — returns any stock splits in the last 90 days for the given tickers. Response: `{TICKER:[{date,ratio}]}`. Capped at 50 tickers. Portfolio page calls this once per load (cached in `state._splitWarnings`); shows amber warning card if splits found.
 
 ### Market data (all cached via `ttl_cache`)
 - `GET /api/macro` — ASX200, AUD/USD, gold, iron ore + regime fields. **5 min cache.** `advance_decline_ratio` is now populated from the last scanner run: `routes/market.py` lazy-imports `_scan_state["breadth_ratio"]` from `routes/scanner.py` (computed as % of universe above 20-day SMA after each scan). Will be `null` until the first scan completes.
@@ -351,7 +354,9 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 
 20. **Stop-proximity alert is direction-aware.** `checkStopProximityAlerts()` checks `(price − stop) / price` for BUY/TOP_UP recs (stop below entry), and `(stop − price) / price` for SELL/TRIM recs (stop above entry). Threshold is `state.settings.stopProximityPct` (default 3 %). Set to 0 to disable. One-shot via `r._proximityAlertedAt`; re-arms when price retreats to 2× the threshold.
 
-21. **Intraday strategy is same-day only — no overnight hold.** `routes/intraday.py` fetches 5m bars (`period="2d", interval="5m"`). Entry window gate (`_in_entry_window()`) ensures `passes=False` outside 10:45–15:00 AEST — scanner still shows data but won't mark setups as actionable outside that window. `checkIntradayCloseouts()` fires a time-stop alert at 15:00 AEST for any open intraday position. yfinance 5m data has ~5–15 min latency; prices are indicative only. `state.intraday.openPositions` and `todayPnl` are stored in state (persisted to DB); the allocatedCash draws from `state.cash` and is tracked separately from `state.dayTrading.allocatedCash`. The ⚡ Intraday tab has a universe selector (asx20/asx50/asx100/asx200) stored in `state.intraday.params.universeKey`. The scan endpoint uses `as_completed` with 8s per-ticker timeout and 15 workers to avoid slow/delisted tickers blocking the batch. `IPL.AX` was removed from all universe lists (delisted 2025).
+21. **`trend_signals` values must be cast to Python `bool`.** Pandas comparisons (`cp > sma_20.iloc[-1]`) return `numpy.bool_`, which Flask's JSON encoder rejects with `TypeError: Object of type bool is not JSON serializable`. The fix is in `indicators.py`: `"trend_signals": {k: (bool(v) if v is not None else None) for k, v in trend_signals.items()}`. Any new dict returned by `analyse_ticker()` that contains numpy scalars must go through `safe_float()`, `int()`, `bool()`, or a similar cast — never raw numpy.
+
+22. **Intraday strategy is same-day only — no overnight hold.** `routes/intraday.py` fetches 5m bars (`period="2d", interval="5m"`). Entry window gate (`_in_entry_window()`) ensures `passes=False` outside 10:45–15:00 AEST — scanner still shows data but won't mark setups as actionable outside that window. `checkIntradayCloseouts()` fires a time-stop alert at 15:00 AEST for any open intraday position. yfinance 5m data has ~5–15 min latency; prices are indicative only. `state.intraday.openPositions` and `todayPnl` are stored in state (persisted to DB); the allocatedCash draws from `state.cash` and is tracked separately from `state.dayTrading.allocatedCash`. The ⚡ Intraday tab has a universe selector (asx20/asx50/asx100/asx200) stored in `state.intraday.params.universeKey`. The scan endpoint uses `as_completed` with 8s per-ticker timeout and 15 workers to avoid slow/delisted tickers blocking the batch. `IPL.AX` was removed from all universe lists (delisted 2025).
 
 ---
 
@@ -362,7 +367,7 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 | **Full ES-modules migration** | Touching 27 JS files with no dev-server verification = high regression risk. Better to do under a feature branch + visual smoke test. | Safe dependency order, dead-code elimination, single bundled HTTP request. |
 | **FastAPI migration** | Half-day refactor of every route. Current Flask + gthread is fast enough. | Native async, auto-generated OpenAPI docs, faster I/O concurrency. |
 | **Walk-forward backtesting** | Requires vectorised OHLCV replay engine + parameter grid — a mini framework. | Robust strategy parameter tuning. |
-| **Mobile compact mode** | Needs CSS breakpoint pass on every card/table. | Phone-friendly read-only mode during market hours. |
+| **Mobile / responsive layout** | Needs CSS breakpoint pass on every card/table — compact mode toggle (shipped Sprint 13) helps on small screens but doesn't reflow columns. | Phone-friendly read-only mode during market hours. |
 | **DRP parcel tracking** | Dividend income forecast assumes no DRP (dividend reinvestment); DRP parcels need their own CGT lot management. | Accurate CGT cost-base for DRP investors. |
 | **Vitest frontend tests** | JS test infrastructure needs setting up (jsdom, mocking globals). | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
 | **Hoist `_detectExitReason` into `utils.js`** | Currently duplicated in two page files; dedup risks the fragile script order. | Single source of truth for exit classification. |

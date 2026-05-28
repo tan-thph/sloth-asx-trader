@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-28 (sprints 3–14 shipped)
+**Last Updated:** 2026-05-28 (sprints 3–14 shipped + Learning Loop UX fixes)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -90,7 +90,8 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **Liquidity-scaled slippage** | Accuracy (§1.2) | Backtest now supports `slippage_mode: 'liquidity'` in addition to `'flat'`. ADV-tiered rates: >$10M ADV→0.05%, $2–10M→0.10%, $0.5–2M→0.20%, <$0.5M→0.35%. Per-ticker `effectiveSlippagePct` returned in `ticker_results`. UI: radio buttons "Flat / Auto (ADV-tiered)"; hides flat slider when auto selected; per-ticker slip% column in results table. |
 | **Signals page: full candlestick chart** | UX | Upgraded per-ticker sparkline → full OHLCV candlestick chart reusing `drawCandleChart` from `charts.js`. Candle/Line mode toggle + BB and SMA50 overlays, stored per-ticker in `_sigChartOpts`. Canvas height 180→280px for volume strip and labels. |
 | **Journal: monthly P&L bar chart** | Analytics | `_buildMonthlyPnlCard()` draws a canvas bar chart of monthly realised P&L (last 18 months). Green/red bars on a zero baseline with Y-axis grid. Summary stats: winning/losing months, best/worst month. Shown above the filter bar when ≥2 months of data exist. |
-| **Portfolio: allocation donut chart** | Analytics | `_buildPortfolioDonut()` renders a canvas donut (inner ring shows holdings by weight, centre shows count). Legend panel shows per-holding weight% + P&L% and a sector bar chart. Displayed below the metrics grid. |
+| **Portfolio: sector sidebar** | Analytics | Replaced canvas donut with `_buildSectorSidebar()` — CSS grid (`1fr 220px`) places a sector + per-holding sidebar to the right of the Holdings table. Sector bars width-scaled to the largest sector; per-holding bars show weight %. Pure CSS, no canvas. |
+| **Learning Loop table alignment** | UX | Fixed actions column misalignment: `_slot(w, html)` helper creates fixed-width `inline-flex` containers for every button position (skill badge 28px, skill btn 26px, PM/vs/Tr/AI each 26px, delete 20px). All rows identical width regardless of which buttons are conditionally absent. `🔬 Sk` header given phantom 28px spacer to align over button slot. `_iconBtn` sub-labels use `color:var(--text-secondary)` — were invisible (black) in dark theme. |
 
 ---
 
@@ -105,10 +106,10 @@ Strategy Backtest keeps `auto_adjust=True` (total-return basis; scale-invariant 
 with a UI disclosure banner and "(adj.)" column labels. `indicators.py` documents why
 `auto_adjust=True` is correct for live analysis. See §0.
 
-### 1.2 Transaction-cost & slippage modelling — `M` · ★★★
-Backtest/quant sizing uses a flat brokerage. Real ASX fills incur **spread + slippage + market
-impact**, worst for the small/mid-caps the scanner favours (low `adv_20`). Add liquidity-scaled
-slippage so a backtested edge isn't just an artefact of frictionless fills.
+### ✓ 1.2 Transaction-cost & slippage modelling — `M` · ★★★ **SHIPPED**
+Backtest supports `slippage_mode: 'liquidity'` with ADV-tiered rates (>$10M→0.05%, $2-10M→0.10%,
+$0.5-2M→0.20%, <$0.5M→0.35%). Per-ticker `effectiveSlippagePct` in results. UI has Flat / Auto radio
+buttons with conditional flat slider. See §0.
 
 ### ✓ 1.3 Statistical rigour on the Learning Loop — `M` · ★★★ **SHIPPED**
 Wilson 95% CI now appears on all win-rate cells; calibration gated at n<30. See §0.
@@ -282,7 +283,9 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 7. ✓ **Sprint 8 shipped:** A-VIX (ASX realized vol), cash/TD tracker, exact correlation-aware sizing, macro endpoint perf (3 serial fetches eliminated), keyboard shortcuts (`g`+letter + `?`) — **all done**.
 8. ✓ **Sprint 9 shipped:** Prompt+response logging (ai_call_log, full prompt in every call), side-by-side compare page, prompt version A/B delta, ETF earnings filter, App Info card — **all done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias, §3.3 Vitest tests.
 9. ✓ **Sprint 12 shipped:** §1.1 look-ahead bias (AI Replay fixed to nominal prices; strategy backtest disclosed as total-return), TRIM/SELL ATR stop floor, intraday Extreme Mode, intraday dynamic UI updates, Groq/Gemini key consolidation, neutral debate synthesis — **all done**.
-10. **Polish:** §3.3 Vitest tests, §4 UX (compact mode, PWA), §3.7 types/modules.
+10. ✓ **Sprint 13 shipped:** compact/density mode, in-app changelog, macro loading state, corporate-actions split detection, liquidity-scaled slippage — **all done**.
+11. ✓ **Sprint 14 shipped:** signals page candlestick chart, journal monthly P&L bar chart, portfolio sector sidebar (replaced canvas donut), numpy.bool_ JSON serialization fix, Learning Loop table alignment + dark-theme button colors — **all done**.
+12. **Polish:** §3.3 Vitest tests, §3.4 performance, §4 UX (mobile/PWA), §3.7 types/modules.
 
 ---
 
