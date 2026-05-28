@@ -1,7 +1,8 @@
 // ============================================================
 // pages/compare.js — Side-by-side ticker comparison
 // Up to 4 ASX tickers. Uses /api/analyse/batch for signals.
-// Navigation: Settings → "Compare" or keyboard g+x
+// Navigation: Market Scanner → ↔ Compare tab, or keyboard g+x
+// compareFromOutside(tickerList) pre-loads tickers from other pages.
 // ============================================================
 
 // ── Module state ──────────────────────────────────────────────────────────────
@@ -110,10 +111,10 @@ function clearComparison() {
   document.getElementById('compare-results').innerHTML = '';
 }
 
-// Pre-load tickers from another page and navigate to compare
+// Pre-load tickers from another page and navigate to the Compare tab in Market Scanner
 function compareFromOutside(tickerList) {
   _compareTickers = tickerList.slice(0, 4).concat(['','','','']).slice(0, 4);
-  showPage('compare');
+  showPage('compare');   // showPage redirects 'compare' → scanner with compare tab selected
 }
 
 // ── Table rendering ───────────────────────────────────────────────────────────

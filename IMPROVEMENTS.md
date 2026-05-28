@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-28 (sprints 3–11 shipped)
+**Last Updated:** 2026-05-28 (sprints 3–11 + intraday enhancements + compare-in-scanner shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -75,6 +75,8 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **Stop-proximity pre-warning** | Alerts (§2.3) | `checkStopProximityAlerts()` in `alerts.js` fires a `fireAlert()` + `toast()` when price is within `state.settings.stopProximityPct` % (default 3 %) of a stop, BEFORE the stop is breached. Direction-aware: BUY checks `(price − stop) / price`; SELL/TRIM inverts. One-shot via `_proximityAlertedAt`; re-arms when price retreats to 2× threshold. Called from `prices.js` after every price refresh. Configurable in Settings (0 = disable). |
 | **Position age + unrealised P&L enrichment** | AI accuracy | `_daysHeld(ticker)` helper in `analysis.js` queries `state.tradeJournal` for the earliest open BUY/TOP_UP. Both `daysHeld` and `unrealisedPnlPct` now included in `portfolioJson` sent to Claude — enabling time-aware recommendations ("held 60 days at −8%"). |
 | **ASX100 intraday same-day strategy** | Features | New `routes/intraday.py` + `js/intraday-strategy.js`. Scans ASX100 5m intraday bars for VWAP-discounted, RSI-oversold setups; composite score 0–100; hard gate 10:45–15:00 AEST only. New ⚡ Intraday tab in Day Trading page with configurable target % (default 3.5%), stop % (1.5%), max 2 positions. Open positions tracker with live P&L. `checkIntradayCloseouts()` fires time-stop alert at 15:00 AEST. `POST /api/intraday/scan` (batch, 8 threads, 2-min TTL); `GET /api/intraday/<ticker>` (single). |
+| **Intraday universe selector + scan hardening** | Features / Reliability | Intraday tab now has universe switcher buttons (ASX20 / ASX50 / ASX100 / ASX200) stored as `state.intraday.params.universeKey`. Removed delisted `IPL.AX` from all universe lists; replaced with `WGX.AX`. Scan switched from `pool.map` to `as_completed` with 8s per-ticker timeout and 15 workers — stale/slow tickers no longer block the entire batch. |
+| **Compare tab moved into Market Scanner** | UX | ↔ Compare is now the third tab inside Market Scanner (alongside Opportunities and Screener) rather than a standalone sidebar page. `showPage('compare')` in `navigation.js` transparently redirects to the Scanner and sets `_scannerTab='compare'`; keyboard shortcut g+x unchanged. `compareFromOutside()` still works from Watchlist and other pages. |
 
 ---
 

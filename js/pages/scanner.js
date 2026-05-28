@@ -6,7 +6,7 @@ let _scanPollTimer    = null;
 let _scannerSort      = { col: 'score', dir: 'desc' };
 let _scannerUniverse  = 'asx200';
 let _scannerSector    = null;   // null = all sectors; string = filter to one sector
-let _scannerTab       = 'opportunities';   // 'opportunities' | 'screener'
+let _scannerTab       = 'opportunities';   // 'opportunities' | 'screener' | 'compare'
 
 // Technical Screener Sandbox state
 let _screenerData     = null;   // last fetched analyse result
@@ -33,6 +33,9 @@ async function renderScannerPage(gen) {
 
   el.innerHTML = _buildScannerHTML(scanState);
 
+  // Post-render init for the Compare tab (fill inputs + run if tickers set)
+  if (_scannerTab === 'compare') _initCompareTab();
+
   // Resume polling if a scan is running
   if (scanState.running) _startScanPoller(gen);
 }
@@ -46,7 +49,7 @@ function _buildScannerHTML(s) {
   // Tab nav
   const tabNav = `
   <div style="display:flex;gap:2px;margin-bottom:14px;border-bottom:1px solid var(--border-light);padding-bottom:0">
-    ${[['opportunities','◈ Opportunities'],['screener','⊙ Technical Screener']].map(([id,label]) => `
+    ${[['opportunities','◈ Opportunities'],['screener','⊙ Technical Screener'],['compare','↔ Compare']].map(([id,label]) => `
       <button onclick="scannerSetTab('${id}')" style="padding:7px 16px;font-size:13px;font-weight:600;border:none;
         border-bottom:2px solid ${_scannerTab===id?'var(--accent-primary)':'transparent'};
         background:transparent;cursor:pointer;
@@ -55,6 +58,7 @@ function _buildScannerHTML(s) {
   </div>`;
 
   if (_scannerTab === 'screener') return tabNav + _buildScreenerHTML();
+  if (_scannerTab === 'compare')  return tabNav + _buildCompareShell();
 
   return tabNav + `
   <!-- Config bar -->
@@ -610,6 +614,19 @@ function _buildScreenerHTML() {
 function scannerSetTab(tab) {
   _scannerTab = tab;
   renderPage();
+}
+
+// Post-render init for the Compare tab embedded in the scanner
+// Mirrors what renderComparePage() does as a standalone page.
+function _initCompareTab() {
+  if (typeof _compareTickers === 'undefined') return;
+  _compareTickers.forEach((t, i) => {
+    const inp = document.getElementById(`cmp-tick-${i}`);
+    if (inp && t) inp.value = t;
+  });
+  if (_compareTickers.some(t => t) && typeof runComparison === 'function') {
+    runComparison();
+  }
 }
 
 function screenerSetChartMode(mode) {

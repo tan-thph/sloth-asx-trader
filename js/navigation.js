@@ -2,6 +2,12 @@
 // NAVIGATION
 // ============================================================
 function showPage(page) {
+  // Compare is now a tab inside Market Scanner — redirect transparently
+  if (page === 'compare') {
+    if (typeof _scannerTab !== 'undefined') _scannerTab = 'compare';
+    page = 'scanner';
+  }
+
   // Stop page-specific pollers when navigating away
   if (state.page === 'announcements' && page !== 'announcements') {
     if (typeof _stopAnnSyncPoller    === 'function') _stopAnnSyncPoller();
@@ -20,7 +26,7 @@ function showPage(page) {
   state._renderGen = (state._renderGen || 0) + 1; // invalidate any in-flight async renders
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(el => { if(el.getAttribute('onclick')?.includes("'"+page+"'")) el.classList.add('active'); });
-  const titles = {dashboard:'Dashboard',portfolio:'Portfolio',macro:'Morning Macro',recommendations:'Trade Recommendations','day-trading':'Day Trading',signals:'Live Signals (yfinance)',journal:'Trade Journal',performance:'Performance Analytics',history:'Portfolio Value History',cgt:'CGT Parcel Tracker',backtest:'Backtesting',assistant:'AI Assistant',news:'News Scanner',announcements:'ASX Announcements',risk:'Portfolio Risk',scanner:'Market Scanner',watchlist:'Watchlist',learning:'Learning Loop',settings:'Settings'};
+  const titles = {dashboard:'Dashboard',portfolio:'Portfolio',macro:'Morning Macro',recommendations:'Trade Recommendations','day-trading':'Day Trading',signals:'Live Signals (yfinance)',journal:'Trade Journal',performance:'Performance Analytics',history:'Portfolio Value History',cgt:'CGT Parcel Tracker',backtest:'Backtesting',assistant:'AI Assistant',news:'News Scanner',announcements:'ASX Announcements',risk:'Portfolio Risk',scanner:'Market Scanner',watchlist:'Watchlist',learning:'Learning Loop',settings:'Settings',compare:'Market Scanner'};
   document.getElementById('page-title').textContent = titles[page] || page;
   renderPage();
 }
@@ -131,7 +137,7 @@ function _renderPageUnsafe() {
     case 'announcements':   renderAnnouncementsPage(gen); break;
     case 'scanner':         renderScannerPage(gen); break;
     case 'watchlist':       renderWatchlistPage(gen); break;
-    case 'compare':         renderComparePage(gen); break;
+    case 'compare':         if (typeof _scannerTab !== 'undefined') _scannerTab = 'compare'; renderScannerPage(gen); break;
     case 'learning':        renderLearningPage(gen); break;
     case 'settings':        el.innerHTML = renderSettings(); setTimeout(() => { if(state._renderGen !== gen) return; renderSchedulerLog(); loadAICallLog(); loadSettingsAppInfo(); }, 0); break;
   }

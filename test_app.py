@@ -1873,11 +1873,14 @@ class TestComparePage(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"compare.js syntax error: {result.stderr}")
 
     def test_compare_page_in_navigation(self):
-        """navigation.js must include case 'compare' and g+x shortcut."""
+        """navigation.js must redirect 'compare' to scanner and have g+x shortcut."""
         with open(os.path.join(ROOT, "js/navigation.js"), encoding="utf-8") as f:
             src = f.read()
+        # Redirect: showPage('compare') sets _scannerTab and switches to scanner
         self.assertIn("case 'compare'", src)
         self.assertIn("x: 'compare'", src)
+        # Redirection logic must be present
+        self.assertIn("_scannerTab = 'compare'", src)
 
     def test_compare_script_in_html(self):
         """asx_trading.html must load compare.js."""
@@ -1885,11 +1888,21 @@ class TestComparePage(unittest.TestCase):
             src = f.read()
         self.assertIn("pages/compare.js", src)
 
-    def test_compare_nav_item_in_html(self):
-        """asx_trading.html must have a Compare nav button."""
+    def test_compare_no_standalone_nav_item(self):
+        """Compare is now a tab in Market Scanner — no standalone nav button needed."""
         with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("showPage('compare')", src)
+        # The sidebar should NOT have a dedicated Compare nav button
+        self.assertNotIn('<button class="nav-item" onclick="showPage(\'compare\')', src,
+                         "Compare must be a scanner tab, not a standalone nav item")
+
+    def test_compare_tab_in_scanner(self):
+        """scanner.js must include a Compare tab button."""
+        with open(os.path.join(ROOT, "js/pages/scanner.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("'compare'", src)
+        self.assertIn("↔ Compare", src)
+        self.assertIn("_initCompareTab", src)
 
     def test_compare_functions_present(self):
         """compare.js must expose renderComparePage, runComparison, compareFromOutside."""
