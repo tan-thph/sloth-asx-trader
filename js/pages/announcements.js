@@ -531,9 +531,7 @@ function _annSettingsPanelHTML(status) {
   const provider = cfg.ann_llm_provider || 'ollama';
   const model    = cfg.ann_llm_model    || 'qwen2.5:1.5b';
   const url      = cfg.ollama_url       || 'http://localhost:11434';
-  const groqKey   = cfg.groq_api_key    || '';
   const groqModel = cfg.ann_groq_model  || 'llama-3.1-8b-instant';
-  const gemKey    = cfg.gemini_api_key  || '';
   const gemModel  = cfg.gemini_model   || 'gemini-3.5-flash';
 
   const inSt  = 'width:100%;box-sizing:border-box;font-size:13px;padding:5px 9px;border:1px solid var(--border-medium);border-radius:var(--radius-md);background:var(--bg-primary);color:var(--text-primary)';
@@ -612,11 +610,11 @@ function _annSettingsPanelHTML(status) {
 
       <!-- Groq fields -->
       <div id="ann-groq-fields" style="display:${provider === 'groq' ? 'flex' : 'none'};flex-direction:column;gap:8px">
-        <div>
-          <label style="${lblSt}">Groq API Key
-            <a href="https://console.groq.com/keys" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a>
-          </label>
-          <input type="password" id="ann-groq-key" value="${groqKey}" placeholder="gsk_…" style="${inSt}">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          ${(state.news.settings.groq_api_key)
+            ? '<span style="font-size:11px;background:#dcfce7;color:#16a34a;padding:1px 7px;border-radius:9px">&#10003; Key saved</span>'
+            : '<span style="font-size:11px;background:#fef9c3;color:#92400e;padding:1px 7px;border-radius:9px">No key set</span>'}
+          <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent)">Settings</a></span>
         </div>
         <div>
           <label style="${lblSt}">Groq Model</label>
@@ -628,11 +626,11 @@ function _annSettingsPanelHTML(status) {
 
       <!-- Gemini fields -->
       <div id="ann-gemini-fields" style="display:${provider === 'gemini' ? 'flex' : 'none'};flex-direction:column;gap:8px">
-        <div>
-          <label style="${lblSt}">Gemini API Key
-            <a href="https://aistudio.google.com/apikey" target="_blank" style="font-size:11px;color:var(--accent)">Get free key ↗</a>
-          </label>
-          <input type="password" id="ann-gemini-key" value="${gemKey}" placeholder="AIza…" style="${inSt}">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          ${(state.news.settings.google_api_key)
+            ? '<span style="font-size:11px;background:#dcfce7;color:#16a34a;padding:1px 7px;border-radius:9px">&#10003; Key saved</span>'
+            : '<span style="font-size:11px;background:#fef9c3;color:#92400e;padding:1px 7px;border-radius:9px">No key set</span>'}
+          <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent)">Settings</a></span>
         </div>
         <div>
           <label style="${lblSt}">Model
@@ -914,9 +912,9 @@ async function saveAnnSettings() {
     ? (customInput?.value?.trim() || 'qwen2.5:1.5b')
     : (modelSelect?.value || 'qwen2.5:1.5b');
   const ollamaUrl   = document.getElementById('ann-ollama-url')?.value?.trim()   || 'http://localhost:11434';
-  const groqKey     = document.getElementById('ann-groq-key')?.value?.trim()     || '';
+  const groqKey     = state.news.settings.groq_api_key   || '';
   const groqModel   = document.getElementById('ann-groq-model')?.value?.trim()   || 'llama-3.1-8b-instant';
-  const geminiKey   = document.getElementById('ann-gemini-key')?.value?.trim()   || '';
+  const geminiKey   = state.news.settings.google_api_key || '';
   const geminiModel = document.getElementById('ann-gemini-model')?.value?.trim() || 'gemini-3.5-flash';
 
   // Use the SAME key names as state.announcements.settings and the backend DEFAULT_SETTINGS
