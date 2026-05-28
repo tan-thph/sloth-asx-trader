@@ -41,7 +41,26 @@ function renderPortfolio() {
       })()}
     </div>
 
-    <div class="card mb-2">
+    ${(()=>{
+      const warnings = state._splitWarnings;
+      if (!warnings) return '';
+      const splits = Object.entries(warnings).filter(([, v]) => v && v.length > 0);
+      if (!splits.length) return '';
+      const items = splits.map(([t, events]) =>
+        events.map(e => `<strong>${t}</strong>: ${e.ratio}:1 split on ${e.date}`).join(', ')
+      ).join('; ');
+      return `
+      <div class="critical-alert-banner" style="border-color:#f59e0b;background:#fffbeb;color:#92400e;margin-bottom:12px">
+        <span style="font-size:16px">⚠️</span>
+        <div>
+          <div style="font-weight:600;margin-bottom:2px">Recent stock split detected — verify your cost base</div>
+          <div style="font-size:12px">${items}. Please check your avg cost and CGT parcels are up to date.</div>
+        </div>
+      </div>`;
+    })()}
+
+    <div style="display:grid;grid-template-columns:1fr 220px;gap:12px;align-items:start;margin-bottom:12px">
+    <div class="card">
       <div class="flex-between" style="margin-bottom:10px">
         <div class="card-title" style="margin:0">Holdings</div>
         <div class="flex-row" style="gap:8px">
@@ -142,6 +161,8 @@ function renderPortfolio() {
           </tbody>
         </table>
       </div>
+    </div>
+    ${_buildSectorSidebar(merged, pv)}
     </div>
 
     ${(()=>{
@@ -679,4 +700,75 @@ function addHolding() {
 function removeHolding(i) {
   if(!confirm(`Remove ${state.portfolio[i].ticker}?`)) return;
   state.portfolio.splice(i,1); scheduleSave(); renderPage();
+}
+
+// ── Portfolio sector sidebar ───────────────────────────────────────────────────
+
+const _DONUT_COLORS = [
+  '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6',
+  '#06b6d4','#84cc16','#f97316','#ec4899','#64748b',
+  '#14b8a6','#a855f7','#eab308','#6366f1','#22c55e',
+];
+
+function _buildSectorSidebar(merged, totalValue) {
+  if (!merged || !merged.length || !totalValue) return '';
+
+  // Bucket by sector
+  const sectorMap = {};
+  merged.forEach(h => {
+    const val = h.shares * h.currentPrice;
+    sectorMap[h.sector || 'Other'] = (sectorMap[h.sector || 'Other'] || 0) + val;
+  });
+  const sectors = Object.entries(sectorMap).sort((a, b) => b[1] - a[1]);
+  const maxSec = sectors[0]?.[1] || 1;
+
+  return `
+  <div class="card" style="min-width:0">
+    <div class="card-title" style="margin-bottom:12px">Sectors</div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${sectors.map(([sec, val]) => {
+        const w = totalValue > 0 ? (val / totalValue * 100) : 0;
+        const barPct = (val / maxSec * 100).toFixed(1);
+        return `<div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px">
+            <span style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px" title="${sec}">${sec}</span>
+            <span class="text-muted">${fmt(w, 1)}%</span>
+          </div>
+          <div style="background:var(--bg-secondary);border-radius:3px;height:7px;overflow:hidden">
+            <div style="width:${barPct}%;height:100%;background:var(--accent);border-radius:3px;transition:width 0.3s"></div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <div style="margin-top:16px;padding-top:12px;border-top:0.5px solid var(--border-light)">
+      <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Weights</div>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        ${merged.map((h, i) => {
+          const w = totalValue > 0 ? (h.shares * h.currentPrice / totalValue * 100) : 0;
+          const pl = h.avgPrice > 0 ? ((h.currentPrice - h.avgPrice) / h.avgPrice * 100) : 0;
+          return `<div style="display:flex;align-items:center;gap:6px;font-size:11px">
+            <span style="width:7px;height:7px;border-radius:2px;flex-shrink:0;background:${_DONUT_COLORS[i % _DONUT_COLORS.length]}"></span>
+            <span style="font-weight:600;flex:0 0 38px">${h.ticker}</span>
+            <div style="flex:1;background:var(--bg-secondary);border-radius:2px;height:5px;overflow:hidden">
+              <div style="width:${Math.min(w,100)}%;height:100%;background:${_DONUT_COLORS[i % _DONUT_COLORS.length]};opacity:0.7"></div>
+            </div>
+            <span class="text-muted" style="flex:0 0 30px;text-align:right">${fmt(w,1)}%</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function checkPortfolioSplits() {
+  if (!state.serverOk || !state.portfolio.length) return;
+  const tickers = [...new Set(state.portfolio.map(h => h.ticker))].join(',');
+  try {
+    const r = await fetch(`${API}/api/portfolio/splits-check?tickers=${encodeURIComponent(tickers)}`);
+    if (!r.ok) return;
+    state._splitWarnings = await r.json();
+    const hasSplits = Object.values(state._splitWarnings).some(v => v && v.length > 0);
+    if (hasSplits) renderPage();
+  } catch {}
 }

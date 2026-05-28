@@ -279,6 +279,23 @@ python3 asx_server.py</pre>
     </div>
 
     <div class="card">
+      <div class="card-title">Display</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0">
+        <div>
+          <div style="font-size:13px;font-weight:600">Compact mode</div>
+          <div class="text-xs text-muted">Reduces card padding and table row heights for more content on screen</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" ${state.settings.compactMode ? 'checked' : ''}
+            onchange="settingsToggleCompact(this.checked)">
+          <span style="font-size:12px;color:${state.settings.compactMode ? 'var(--accent)' : 'var(--text-muted)'}">
+            ${state.settings.compactMode ? 'On' : 'Off'}
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-title">App Info</div>
       <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:12px;align-items:baseline">
         <span class="text-muted">Prompt version</span>
@@ -290,6 +307,61 @@ python3 asx_server.py</pre>
         <span class="text-muted">DB backups</span>
         <span id="settings-backup-info" class="text-muted">checking…</span>
       </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">What's New</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Release history — most recent first</div>
+
+      <details open style="margin-bottom:8px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:6px">
+          <span style="color:var(--accent)">▸</span> Sprint 13 — Polish &amp; UX (2026-05)
+        </summary>
+        <ul style="font-size:12px;color:var(--text-secondary);margin:6px 0 4px 16px;line-height:1.8">
+          <li>Compact/density mode — Settings toggle reduces padding &amp; table rows</li>
+          <li>In-app changelog — this panel</li>
+          <li>Macro page loading state — spinner while fetching live data</li>
+          <li>Corporate-actions split detection — portfolio warning on recent splits</li>
+          <li>Liquidity-scaled slippage — ADV-tiered per-ticker slippage in backtest</li>
+        </ul>
+      </details>
+
+      <details style="margin-bottom:8px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:6px">
+          <span style="color:var(--accent)">▸</span> Sprint 12 — Look-ahead bias fix (2026-05)
+        </summary>
+        <ul style="font-size:12px;color:var(--text-secondary);margin:6px 0 4px 16px;line-height:1.8">
+          <li>AI Replay switched to nominal prices (auto_adjust=False) — matches executed prices</li>
+          <li>Strategy backtest: total-return basis disclosed in UI banner</li>
+          <li>ATR-based stop floor for SELL/TRIM recs (prevents near-zero R:R)</li>
+          <li>Intraday Extreme Mode — bypasses entry-window &amp; VWAP gates</li>
+          <li>ASX Intraday Scanner rename + universe buttons fix</li>
+        </ul>
+      </details>
+
+      <details style="margin-bottom:8px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:6px">
+          <span style="color:var(--accent)">▸</span> Sprint 10–11 — Intraday &amp; universe (2026-04)
+        </summary>
+        <ul style="font-size:12px;color:var(--text-secondary);margin:6px 0 4px 16px;line-height:1.8">
+          <li>⚡ Intraday Day-Trade tab — ASX20/50/100/200 universe selector, 5m scanner</li>
+          <li>Forming-bar guard — drops incomplete intraday candle before 07:00 UTC</li>
+          <li>Stooq fallback data provider — free alternative when yfinance returns empty</li>
+          <li>Stop-proximity alerts — direction-aware, fires once per approach</li>
+          <li>Scan timeout &amp; delisted-ticker fixes (IPL.AX removed)</li>
+        </ul>
+      </details>
+
+      <details style="margin-bottom:8px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:6px">
+          <span style="color:var(--accent)">▸</span> Sprint 9 — Logging &amp; compare (2026-03)
+        </summary>
+        <ul style="font-size:12px;color:var(--text-secondary);margin:6px 0 4px 16px;line-height:1.8">
+          <li>Full prompt+response logging — every Claude call stored in ai_call_log</li>
+          <li>Side-by-side ticker compare (Market Scanner → Compare tab)</li>
+          <li>Prompt A/B delta — track which prompt version drove each rec</li>
+        </ul>
+      </details>
     </div>
   `;
 }
@@ -322,6 +394,12 @@ function updateSetting(key,value) {
   state.settings[key]=isNaN(Number(value))?value:Number(value);
   scheduleSave();
   toast('Setting updated','success');
+}
+function settingsToggleCompact(val) {
+  state.settings.compactMode = !!val;
+  document.body.classList.toggle('compact', !!val);
+  scheduleSave();
+  renderPage();
 }
 function updateSchedSetting(key,value) {
   state.settings[key]=value;

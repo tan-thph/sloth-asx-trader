@@ -41,6 +41,7 @@ async function initApp() {
     // API cost is viewed directly via Anthropic Console link
   }
   renderPage();
+  if (state.settings.compactMode) document.body.classList.add('compact');
 }
 
 // Init

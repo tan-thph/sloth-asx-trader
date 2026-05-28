@@ -56,6 +56,7 @@ const state = {
     scheduleRunOnOpen: true,
     sbcMode: false,
     stopProximityPct: 3,
+    compactMode: false,
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary

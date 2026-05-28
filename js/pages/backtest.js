@@ -102,7 +102,7 @@ function _renderAiPanel() {
         </div>
         <div class="flex-row">
           <button class="btn btn-primary" id="bt-ai-run-btn" onclick="runAiReplay()">▷ Run Analysis</button>
-          ${!state.serverOk ? '<span class="text-xs text-danger">⚠ Backend required (yfinance prices)</span>' : '<span class="text-xs text-muted">Fetches forward prices via yfinance</span>'}
+          ${!state.serverOk ? '<span class="text-xs text-danger">⚠ Backend required (yfinance prices)</span>' : '<span class="text-xs text-muted">Fetches nominal forward prices via yfinance (same basis as executed prices)</span>'}
         </div>
       `}
     </div>
@@ -401,7 +401,8 @@ function _renderAiResults(res, horizon, horizonLabel) {
         </table>
       </div>
       <p class="text-xs text-muted mt-1">
-        ✓ = AI was correct direction · ✗ = AI was wrong · Exit price = close at ${horizonLabel} from entry (or latest available).
+        ✓ = AI was correct direction · ✗ = AI was wrong · Exit price = nominal close at ${horizonLabel} from entry (or latest available).
+        <br>Entry prices are actual executed prices from your trade journal (nominal). Exit prices are nominal closes — ex-dividend gaps during the measurement window appear as price drops, consistent with real mark-to-market P&L.
         <br>⚠ Past performance does not guarantee future results.
       </p>
     </div>` : ''}
@@ -569,10 +570,25 @@ function _renderTechPanel() {
           <input type="number" value="${state.settings.brokerage}" id="bt-brokerage" min="0" step="1">
         </div>
         <div class="form-row">
-          <div class="form-label">Slippage (% per fill)</div>
-          <input type="number" value="0.10" id="bt-slippage" min="0" max="2" step="0.01"
-            title="Entry fill cost above mid + exit below mid. 0.10% ≈ typical ASX spread for liquid stocks.">
-          <div class="text-xs text-muted" style="margin-top:2px">0.10% is realistic for liquid ASX stocks; use 0.20–0.40% for small-caps.</div>
+          <div class="form-label">Slippage mode</div>
+          <div style="display:flex;gap:12px;margin-bottom:6px">
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px">
+              <input type="radio" name="bt-slip-mode" value="flat" id="bt-slip-flat" checked
+                onchange="document.getElementById('bt-slippage-flat-row').style.display=this.checked?'':'none'">
+              Flat (manual)
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px">
+              <input type="radio" name="bt-slip-mode" value="liquidity" id="bt-slip-liq"
+                onchange="document.getElementById('bt-slippage-flat-row').style.display=this.checked?'none':''">
+              Auto (ADV-tiered)
+            </label>
+          </div>
+          <div id="bt-slippage-flat-row">
+            <input type="number" value="0.10" id="bt-slippage" min="0" max="2" step="0.01"
+              title="Entry fill cost above mid + exit below mid. 0.10% ≈ typical ASX spread for liquid stocks.">
+            <div class="text-xs text-muted" style="margin-top:2px">0.10% is realistic for liquid ASX stocks; use 0.20–0.40% for small-caps.</div>
+          </div>
+          <div class="text-xs text-muted" style="margin-top:4px">Auto: &gt;$10M ADV→0.05% · $2–10M→0.10% · $0.5–2M→0.20% · &lt;$0.5M→0.35%</div>
         </div>
       </div>
       <div class="flex-row mt-1">
@@ -591,7 +607,8 @@ async function runBacktest() {
   const capital  = Number(document.getElementById('bt-capital').value) || 50000;
   const strategy = document.getElementById('bt-strategy').value;
   const brokerage = Number(document.getElementById('bt-brokerage').value) || state.settings.brokerage;
-  const slippage_pct = Number(document.getElementById('bt-slippage').value ?? 0.10);
+  const slippage_mode = document.getElementById('bt-slip-liq')?.checked ? 'liquidity' : 'flat';
+  const slippage_pct = slippage_mode === 'liquidity' ? 0.10 : Number(document.getElementById('bt-slippage').value ?? 0.10);
 
   if (!tickers.length) { toast('Enter at least one ticker', 'error'); return; }
 
@@ -609,7 +626,7 @@ async function runBacktest() {
     const r = await fetch(`${API}/api/backtest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tickers, period, capital, strategy, brokerage, slippage_pct }),
+      body: JSON.stringify({ tickers, period, capital, strategy, brokerage, slippage_pct, slippage_mode }),
     });
     if (!r.ok) throw new Error('Server error ' + r.status);
     const res = await r.json();
@@ -623,8 +640,9 @@ async function runBacktest() {
       buy_hold:     'Buy & Hold',
     };
 
+    const isLiqMode = res.slippageMode === 'liquidity';
     const tickerRows = Object.entries(res.tickers).map(([t, v]) => {
-      if (v.error) return `<tr><td><strong>${t}</strong></td><td colspan="7" class="text-danger text-xs">${v.error}</td></tr>`;
+      if (v.error) return `<tr><td><strong>${t}</strong></td><td colspan="${isLiqMode ? 8 : 7}" class="text-danger text-xs">${v.error}</td></tr>`;
       const retColor = v.totalReturn >= 0 ? 'text-success' : 'text-danger';
       // Show "1 (open)" for buy-and-hold style where the only "trade" is still open
       const closedCount = v.closedTrades != null ? v.closedTrades : v.totalTrades;
@@ -634,6 +652,7 @@ async function runBacktest() {
       const winRateLabel = closedCount > 0 ? `${fmt(v.winRate, 0)}%` : '<span class="text-muted text-xs">—</span>';
       const avgWinLabel  = v.avgWin  ? `+$${fmt(v.avgWin)}`  : '<span class="text-muted">—</span>';
       const avgLossLabel = v.avgLoss ? `$${fmt(v.avgLoss)}`  : '<span class="text-muted">—</span>';
+      const slipCell = isLiqMode ? `<td class="text-muted text-xs">${v.effectiveSlippagePct != null ? v.effectiveSlippagePct + '%' : '—'}</td>` : '';
       return `<tr>
         <td><strong>${t}</strong></td>
         <td class="${retColor}">${v.totalReturn >= 0 ? '+' : ''}${fmt(v.totalReturn)}%</td>
@@ -642,6 +661,7 @@ async function runBacktest() {
         <td class="text-success">${avgWinLabel}</td>
         <td class="text-danger">${avgLossLabel}</td>
         <td class="${v.totalPnl >= 0 ? 'text-success' : 'text-danger'}">${v.totalPnl >= 0 ? '+' : ''}$${fmt(Math.abs(v.totalPnl))}</td>
+        ${slipCell}
       </tr>`;
     }).join('');
 
@@ -678,6 +698,22 @@ async function runBacktest() {
     const hasEquity = res.equityCurve && res.equityCurve.length > 0;
 
     document.getElementById('backtest-results').innerHTML = `
+
+      <!-- Price basis disclosure -->
+      <div style="background:rgba(99,102,241,.07);border:0.5px solid rgba(99,102,241,.25);border-radius:6px;padding:9px 14px;margin-bottom:12px;font-size:12px;display:flex;gap:10px;align-items:flex-start">
+        <span style="font-size:14px;flex-shrink:0;opacity:.7">ℹ</span>
+        <div style="color:var(--text-secondary)">
+          <strong style="color:var(--text-primary)">Total-return price basis.</strong>
+          Prices are dividend-adjusted — dividends are notionally reinvested, so returns reflect
+          <em>total return</em> (capital gains + income), not pure price appreciation.
+          P&amp;L is therefore overstated vs a pure capital-gains view by roughly
+          <em>annual dividend yield × years</em> (e.g. ~5% for a 5%-yielder over 1 year).
+          Signal timing (RSI, MACD, BB, ADX) is <strong>unaffected</strong> — all are
+          scale-invariant. Entry/exit prices in the trade log are adjusted and will be
+          lower than the nominal price visible on a chart on that date.
+        </div>
+      </div>
+
       <div class="metrics-grid">
         <div class="metric-card">
           <div class="metric-label">Avg Return (${period})</div>
@@ -704,7 +740,7 @@ async function runBacktest() {
       ${(res.totalBrokerageCost != null || res.totalSlippageCost != null) ? `
       <div class="card section-gap" style="padding:10px 14px;display:flex;align-items:center;gap:20px;flex-wrap:wrap">
         <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Friction costs</div>
-        <div><span class="text-xs text-muted">Slippage (${fmt(res.slippagePct,2)}%):</span> <strong style="font-size:13px">$${fmt(res.totalSlippageCost)}</strong></div>
+        <div><span class="text-xs text-muted">Slippage (${isLiqMode ? 'ADV-tiered' : fmt(res.slippagePct,2)+'%'}):</span> <strong style="font-size:13px">$${fmt(res.totalSlippageCost)}</strong></div>
         <div><span class="text-xs text-muted">Brokerage:</span> <strong style="font-size:13px">$${fmt(res.totalBrokerageCost)}</strong></div>
         <div><span class="text-xs text-muted">Total friction:</span> <strong style="font-size:13px;color:#dc2626">−$${fmt((res.totalSlippageCost||0)+(res.totalBrokerageCost||0))}</strong></div>
         <div class="text-xs text-muted" style="margin-left:auto">These costs are already deducted from P&L above.</div>
@@ -721,7 +757,7 @@ async function runBacktest() {
         <div class="card-title">Per-Ticker Results</div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Ticker</th><th>Return</th><th>Trades</th><th>Win %</th><th>Avg Win</th><th>Avg Loss</th><th>Net P&L</th></tr></thead>
+            <thead><tr><th>Ticker</th><th>Return</th><th>Trades</th><th>Win %</th><th>Avg Win</th><th>Avg Loss</th><th>Net P&L</th>${isLiqMode ? '<th title="ADV-derived slippage rate for this ticker">Slip%</th>' : ''}</tr></thead>
             <tbody>${tickerRows}</tbody>
           </table>
         </div>
@@ -732,11 +768,11 @@ async function runBacktest() {
         <div class="card-title">Recent Trade Log (last 15)</div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Ticker</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Entry $</th><th>Exit $</th><th>Held</th><th>P&L</th></tr></thead>
+            <thead><tr><th>Ticker</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Entry&nbsp;$ <span style="font-weight:400;opacity:.6;font-size:10px">(adj.)</span></th><th>Exit&nbsp;$ <span style="font-weight:400;opacity:.6;font-size:10px">(adj.)</span></th><th>Held</th><th>P&L</th></tr></thead>
             <tbody>${tradeRows}</tbody>
           </table>
         </div>
-        <p class="text-xs text-muted mt-1">⚠ Past performance does not guarantee future results. Signal generation uses EOD prices.</p>
+        <p class="text-xs text-muted mt-1">⚠ Past performance does not guarantee future results. Prices are dividend-adjusted (total-return basis) — see disclosure above.</p>
       </div>` : ''}
     `;
 

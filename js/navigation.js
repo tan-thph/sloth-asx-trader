@@ -118,7 +118,10 @@ function _renderPageUnsafe() {
   const gen = (state._renderGen = (state._renderGen || 0)); // snapshot current gen
   switch(state.page) {
     case 'dashboard':       el.innerHTML = renderDashboard(); break;
-    case 'portfolio':       el.innerHTML = renderPortfolio(); break;
+    case 'portfolio':
+      el.innerHTML = renderPortfolio();
+      if (state._splitWarnings === undefined) checkPortfolioSplits();
+      break;
     case 'macro':           el.innerHTML = renderMacro(); break;
     case 'recommendations':
       el.innerHTML = renderRecommendations();

@@ -66,6 +66,12 @@ def _fetch_stooq_history(ticker: str, period: str = "6mo") -> pd.DataFrame:
     ASX tickers are converted: BHP.AX → bhp.au  (Stooq's Australian market).
     Returns a DataFrame matching yfinance's auto_adjust=True schema (Open, High,
     Low, Close, Volume with a DatetimeIndex), or an empty DataFrame on failure.
+
+    Price basis: Stooq returns nominal (unadjusted) prices — no dividend or split
+    adjustment is applied. For signal generation (RSI, MACD, SMA crossovers) this
+    makes no meaningful difference because those indicators are scale-invariant.
+    Ex-dividend gaps may appear as drops in the Stooq series where the yfinance
+    path would show a smooth adjusted close; this is an acceptable fallback trade-off.
     """
     _period_days = {"1mo": 35, "2mo": 65, "3mo": 95, "6mo": 185,
                     "1y": 370, "2y": 740, "5y": 1830}
@@ -439,6 +445,12 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     # ── Primary: yfinance ────────────────────────────────────────────────────
     stk = yf.Ticker(t)
     try:
+        # auto_adjust=True: correct for live signal generation.
+        # The current (last) bar's close is the actual market price — no future dividends
+        # exist yet to adjust it. Historical bars are adjusted for splits/dividends paid
+        # before today, giving a continuous price series so RSI, MACD, SMA crossovers
+        # and Bollinger Bands are internally consistent across ex-dividend gaps.
+        # This is NOT look-ahead bias for live analysis: current price = nominal market price.
         hist = stk.history(period=period, auto_adjust=True)
     except Exception as e:
         hist = pd.DataFrame()
@@ -734,7 +746,7 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "target":           target,
         "stop_loss":        stop_loss,
         "entry_range":      [entry_low, entry_high],
-        "trend_signals":    trend_signals,
+        "trend_signals":    {k: (bool(v) if v is not None else None) for k, v in trend_signals.items()},
 
         # Composite score (0-100) from _score_ticker
         "score": (_score_ticker(close.values, volume.values) or {}).get("score"),

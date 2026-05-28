@@ -518,7 +518,7 @@ function _renderDtIntradayTab() {
     params: { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100' },
   };
   const id = state.intraday;
-  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100',
+  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100', extremeMode: false,
                ...(id.params || {}) };
   const allocated = id.allocatedCash != null
     ? id.allocatedCash
@@ -534,6 +534,7 @@ function _renderDtIntradayTab() {
       <div class="card-title" style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
         <span style="background:#10b981;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;letter-spacing:.5px">INTRADAY</span>
         Configuration
+        ${ip.extremeMode ? '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px">⚠️ EXTREME MODE</span>' : ''}
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px">
         <div>
@@ -586,6 +587,19 @@ function _renderDtIntradayTab() {
         <div class="text-xs text-muted mt-1">Larger universes find more setups but take longer to scan</div>
       </div>
 
+      <!-- Extreme mode toggle -->
+      <div style="margin-top:10px;padding:8px 10px;background:${ip.extremeMode ? 'rgba(239,68,68,.08)' : 'var(--bg-secondary)'};border:0.5px solid ${ip.extremeMode ? 'rgba(239,68,68,.4)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div>
+          <div style="font-size:12px;font-weight:600;color:${ip.extremeMode ? '#ef4444' : 'var(--text-secondary)'}">⚠️ Extreme Mode</div>
+          <div class="text-xs text-muted">Bypasses entry window, VWAP and RSI gates — shows all setups above min score. For testing only.</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap">
+          <input type="checkbox" ${ip.extremeMode ? 'checked' : ''}
+            onchange="updateIntradayParam('extremeMode', this.checked)">
+          ${ip.extremeMode ? '<span style="color:#ef4444;font-weight:600">On</span>' : 'Off'}
+        </label>
+      </div>
+
       <div style="margin-top:10px;padding-top:8px;border-top:0.5px solid var(--border-light);font-size:11px;color:var(--text-muted)">
         ⏰ Entry window: 10:45–15:00 AEST only · ⚠️ yfinance 5m data has ~5–15 min latency — prices are indicative
       </div>
@@ -601,7 +615,7 @@ function _renderDtIntradayTab() {
   const actionBar = `
     <div class="card" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
       <div>
-        <div style="font-size:13px;font-weight:600">ASX100 Intraday Scanner</div>
+        <div style="font-size:13px;font-weight:600">ASX Intraday Scanner</div>
         <div class="text-xs text-muted">${scanStatus}</div>
       </div>
       <div class="flex-row" style="gap:8px;flex-wrap:wrap;align-items:center">
@@ -615,7 +629,7 @@ function _renderDtIntradayTab() {
           style="background:#10b981;border-color:#10b981;display:flex;align-items:center;gap:6px">
           ${id.scanRunning
             ? '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Scanning…'
-            : `⚡ Scan ${universeLabel}`}
+            : '⚡ Scan ASX'}
         </button>
       </div>
     </div>`;
@@ -836,4 +850,5 @@ function updateIntradayParam(key, val) {
     state.intraday.params[key] = val;
   }
   scheduleSave();
+  renderPage();
 }

@@ -206,6 +206,7 @@
   #toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
   .toast { padding: 10px 14px; background: var(--bg-primary); border: 0.5px solid var(--border-medium); border-radius: var(--radius-md); font-size: 13px; pointer-events: all; animation: slideIn 0.2s ease; max-width: 300px; }
   @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
   /* Rec card */
   .rec-card { background: var(--bg-primary); border: 0.5px solid var(--border-light); border-radius: var(--radius-lg); padding: 1rem 1.25rem; margin-bottom: 10px; }
@@ -259,3 +260,15 @@
   @media (prefers-color-scheme: dark) { .info-banner { background: #451a03; color: #fde68a; border-color: #92400e; } }
 
   .progress-ring { display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 56px; border-radius: 50%; border: 3px solid var(--border-light); position: relative; font-size: 13px; font-weight: 700; }
+
+  /* ── Compact / density mode ── */
+  body.compact .card { padding: 0.75rem; }
+  body.compact .metric-card { padding: 0.6rem 0.75rem; }
+  body.compact .rec-card { padding: 0.6rem 0.875rem; margin-bottom: 6px; }
+  body.compact th { padding: 5px 10px; font-size: 10px; }
+  body.compact td { padding: 5px 10px; font-size: 12px; }
+  body.compact .card-title { font-size: 11px; margin-bottom: 8px; }
+  body.compact .section-gap { margin-bottom: 8px; }
+  body.compact .btn { padding: 5px 10px; font-size: 12px; }
+  body.compact .ind-row { padding: 3px 0; font-size: 11px; }
+  body.compact .signal-row { padding: 4px 0; font-size: 12px; }

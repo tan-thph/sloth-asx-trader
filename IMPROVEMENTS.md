@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-28 (sprints 3–11 + intraday enhancements + compare-in-scanner shipped)
+**Last Updated:** 2026-05-28 (sprints 3–14 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -11,7 +11,7 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 
 ---
 
-## 0. Shipped — 2026-05 sprints (through Sprint 11)
+## 0. Shipped — 2026-05 sprints (through Sprint 14)
 
 | Fix / Feature | Area | Detail |
 |---|---|---|
@@ -77,6 +77,20 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **ASX100 intraday same-day strategy** | Features | New `routes/intraday.py` + `js/intraday-strategy.js`. Scans ASX100 5m intraday bars for VWAP-discounted, RSI-oversold setups; composite score 0–100; hard gate 10:45–15:00 AEST only. New ⚡ Intraday tab in Day Trading page with configurable target % (default 3.5%), stop % (1.5%), max 2 positions. Open positions tracker with live P&L. `checkIntradayCloseouts()` fires time-stop alert at 15:00 AEST. `POST /api/intraday/scan` (batch, 8 threads, 2-min TTL); `GET /api/intraday/<ticker>` (single). |
 | **Intraday universe selector + scan hardening** | Features / Reliability | Intraday tab now has universe switcher buttons (ASX20 / ASX50 / ASX100 / ASX200) stored as `state.intraday.params.universeKey`. Removed delisted `IPL.AX` from all universe lists; replaced with `WGX.AX`. Scan switched from `pool.map` to `as_completed` with 8s per-ticker timeout and 15 workers — stale/slow tickers no longer block the entire batch. |
 | **Compare tab moved into Market Scanner** | UX | ↔ Compare is now the third tab inside Market Scanner (alongside Opportunities and Screener) rather than a standalone sidebar page. `showPage('compare')` in `navigation.js` transparently redirects to the Scanner and sets `_scannerTab='compare'`; keyboard shortcut g+x unchanged. `compareFromOutside()` still works from Watchlist and other pages. |
+| **Groq/Gemini API keys consolidated to Settings** | UX | Moved Groq and Google Gemini API key inputs from News Scanner LLM card and Announcements LLM Settings panel into Settings → API Keys section. News/Announcements show status badge + "Manage key in Settings" link. `_saveNewsSettings()` used cross-page (script load order safe). |
+| **Debate Phase 3: neutral synthesis** | AI Quality | Replaced one-sided challenge round (Model A defending its own tags against Model B's critique) with a neutral synthesis pass: a single call presenting both models' tags and reasons equally, asking for the best reconciliation. `source` label changed to `debated-synthesis`. Root-cause tag guidance added to `_pm_build_prompt()`. Learning page Phase 3 display updated. |
+| **TRIM/SELL ATR stop floor** | Accuracy | `analysis.js` post-processes SELL/TRIM recs after the quant engine: if `stopLoss − entry < 1.5 × ATR_14`, auto-repairs to `entry + 2.5 × ATR`. Prevents near-zero stop distances (e.g. +0.2% = 60:1 R:R) from the AI. Rec flagged with `_stopRepaired: true`. |
+| **Intraday Extreme Mode** | Features | New toggle in ⚡ Intraday config card bypasses entry-window (10:45–15:00 AEST), VWAP and RSI gates for testing outside market hours. Only `minScore` threshold still applied (configurable). Stored as `state.intraday.params.extremeMode`. |
+| **Intraday universe buttons + params render dynamically** | UX | `updateIntradayParam()` now calls `renderPage()` after saving, so clicking universe buttons (ASX20/50/100/200), changing config inputs, and toggling Auto-refresh visually update immediately without a full page reload. |
+| **§1.1 Look-ahead bias: AI Replay fixed, backtest documented** | Accuracy (§1.1) | **AI Replay** (`/api/backtest/ai-replay`): switched from `auto_adjust=True` to `auto_adjust=False` — forward exit prices are now nominal (unadjusted), matching the basis of actual executed entry prices. Previously, dividend-adjusted exit prices vs nominal entry prices understated BUY returns by ~div_yield per period and overstated SELL/TRIM returns. **Strategy Backtest**: signal timing (RSI, MACD, BB, ADX) is NOT affected (all are scale-invariant); P&L reflects total return (capital gains + notional dividend reinvestment). Both endpoints now emit `priceBasis` + `priceBasisNote` metadata. Backtest UI shows a disclosure banner explaining total-return basis; trade log price columns labelled "(adj.)". `indicators.py` `analyse_ticker` and `_fetch_stooq_history` document why `auto_adjust=True` is correct for live signal generation. |
+| **Compact/density mode** | UX | `.compact` CSS body class reduces card padding, table row heights, and button sizes. Toggle in Settings → Display. Applied on startup from `state.settings.compactMode`. |
+| **In-app changelog** | UX | Settings → "What's New" panel shows collapsible sprint history (Sprints 9–13, most recent open by default) without leaving the app. |
+| **Macro page loading state** | UX | `fetchRealMacro()` sets `window._macroFetching=true` and calls `renderPage()` before the fetch — button goes disabled + "fetching…" and a spinning skeleton card appears. `finally` block clears flag and re-renders. |
+| **Corporate-actions split detection** | Data quality | New `GET /api/portfolio/splits-check?tickers=...` endpoint in `routes/portfolio.py` — uses `yf.Ticker.splits` to find any split in the last 90 days. Portfolio page shows an amber warning card listing affected tickers when splits are found. `checkPortfolioSplits()` fires once per page load (cached in `state._splitWarnings`). |
+| **Liquidity-scaled slippage** | Accuracy (§1.2) | Backtest now supports `slippage_mode: 'liquidity'` in addition to `'flat'`. ADV-tiered rates: >$10M ADV→0.05%, $2–10M→0.10%, $0.5–2M→0.20%, <$0.5M→0.35%. Per-ticker `effectiveSlippagePct` returned in `ticker_results`. UI: radio buttons "Flat / Auto (ADV-tiered)"; hides flat slider when auto selected; per-ticker slip% column in results table. |
+| **Signals page: full candlestick chart** | UX | Upgraded per-ticker sparkline → full OHLCV candlestick chart reusing `drawCandleChart` from `charts.js`. Candle/Line mode toggle + BB and SMA50 overlays, stored per-ticker in `_sigChartOpts`. Canvas height 180→280px for volume strip and labels. |
+| **Journal: monthly P&L bar chart** | Analytics | `_buildMonthlyPnlCard()` draws a canvas bar chart of monthly realised P&L (last 18 months). Green/red bars on a zero baseline with Y-axis grid. Summary stats: winning/losing months, best/worst month. Shown above the filter bar when ≥2 months of data exist. |
+| **Portfolio: allocation donut chart** | Analytics | `_buildPortfolioDonut()` renders a canvas donut (inner ring shows holdings by weight, centre shows count). Legend panel shows per-holding weight% + P&L% and a sector bar chart. Displayed below the metrics grid. |
 
 ---
 
@@ -85,11 +99,11 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 Make the signal itself trustworthy. These guard against the classic ways a backtest or a
 self-tuning loop quietly flatters itself — which for a personal tool means *not fooling yourself*.
 
-### 1.1 Eliminate look-ahead bias — `M` · ★★★
-yfinance `auto_adjust=True` returns split/dividend-**adjusted** history; adjusted closes embed future
-dividend info into past bars — a subtle look-ahead in indicators and backtests. Pick an adjustment
-policy and apply it identically to live vs historical paths. Verify indicators never read the
-*forming* (incomplete) intraday bar as a closed one.
+### ✓ 1.1 Eliminate look-ahead bias — `M` · ★★★ **SHIPPED**
+AI Replay now uses `auto_adjust=False` (nominal prices, matching actual executed prices).
+Strategy Backtest keeps `auto_adjust=True` (total-return basis; scale-invariant indicators unaffected)
+with a UI disclosure banner and "(adj.)" column labels. `indicators.py` documents why
+`auto_adjust=True` is correct for live analysis. See §0.
 
 ### 1.2 Transaction-cost & slippage modelling — `M` · ★★★
 Backtest/quant sizing uses a flat brokerage. Real ASX fills incur **spread + slippage + market
@@ -267,7 +281,8 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 6. ✓ **Sprint 7 shipped:** thesis review at exit, prompt-version P&L, target allocations + drift alerts, economic calendar (RBA dates + ex-div + earnings), franking 45-day rule warnings — **all done**.
 7. ✓ **Sprint 8 shipped:** A-VIX (ASX realized vol), cash/TD tracker, exact correlation-aware sizing, macro endpoint perf (3 serial fetches eliminated), keyboard shortcuts (`g`+letter + `?`) — **all done**.
 8. ✓ **Sprint 9 shipped:** Prompt+response logging (ai_call_log, full prompt in every call), side-by-side compare page, prompt version A/B delta, ETF earnings filter, App Info card — **all done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias, §3.3 Vitest tests.
-9. **Polish:** §3.3 Vitest tests, §4 UX (compact mode, PWA), §3.7 types/modules.
+9. ✓ **Sprint 12 shipped:** §1.1 look-ahead bias (AI Replay fixed to nominal prices; strategy backtest disclosed as total-return), TRIM/SELL ATR stop floor, intraday Extreme Mode, intraday dynamic UI updates, Groq/Gemini key consolidation, neutral debate synthesis — **all done**.
+10. **Polish:** §3.3 Vitest tests, §4 UX (compact mode, PWA), §3.7 types/modules.
 
 ---
 

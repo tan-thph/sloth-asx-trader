@@ -103,9 +103,22 @@ async function renderSignalsPage(gen) {
           <button class="btn btn-sm" onclick="document.getElementById('detail-${t}').style.display='none'">✕ Close</button>
         </div>
 
-        <!-- Price chart placeholder -->
+        <!-- Price chart -->
         <div class="mb-2" style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:12px">
-          <canvas id="chart-${t}" style="width:100%;height:180px"></canvas>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+            <div style="display:flex;gap:2px;background:var(--bg-primary);border-radius:var(--radius-md);padding:2px">
+              <button class="btn btn-sm" style="padding:3px 9px;font-size:11px;${(_sigChartOpts[t]||{}).mode!=='line'?'background:var(--accent);color:#fff;border-color:var(--accent)':''}" onclick="_sigChartSet('${t}','mode','candle')">Candle</button>
+              <button class="btn btn-sm" style="padding:3px 9px;font-size:11px;${(_sigChartOpts[t]||{}).mode==='line'?'background:var(--accent);color:#fff;border-color:var(--accent)':''}" onclick="_sigChartSet('${t}','mode','line')">Line</button>
+            </div>
+            <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">
+              <input type="checkbox" ${(_sigChartOpts[t]||{}).showBB!==false?'checked':''} onchange="_sigChartSet('${t}','showBB',this.checked)"> BB
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">
+              <input type="checkbox" ${(_sigChartOpts[t]||{}).showSMA50!==false?'checked':''} onchange="_sigChartSet('${t}','showSMA50',this.checked)"> SMA50
+            </label>
+            <span class="text-xs text-muted" style="margin-left:auto">Last 90 trading days</span>
+          </div>
+          <canvas id="chart-${t}" style="width:100%;height:280px"></canvas>
         </div>
 
         <div class="grid-4" style="margin-bottom:1rem">
@@ -240,11 +253,14 @@ async function renderSignalsPage(gen) {
 
   el.innerHTML=html;
 
-  // Draw sparkline charts for each ticker with data — guard gen again in case of slow draws
+  // Draw candle charts for any expanded ticker rows — guard gen
   tickers.forEach(t=>{
     const s=signals[t];
     if(s&&!s.error&&s.chart_data?.length) {
-      setTimeout(()=>{ if(state._renderGen===gen) drawSparklineFromData(t, s); }, 50);
+      const detail=document.getElementById(`detail-${t}`);
+      if(detail&&detail.style.display!=='none') {
+        setTimeout(()=>{ if(state._renderGen===gen) _sigChartDraw(t); }, 50);
+      }
     }
   });
 }
@@ -310,10 +326,31 @@ function drawSparklineFromData(ticker, s) {
   leg.forEach(([l,c],i)=>{ ctx.fillStyle=c; ctx.fillText(l,10+i*85,14); });
 }
 
+// ── Signal chart helpers ───────────────────────────────────────────────────────
+if (!window._sigChartOpts) window._sigChartOpts = {};
+
+function _sigChartDraw(ticker) {
+  const s = state.liveSignals && state.liveSignals[ticker];
+  if (!s || !s.chart_data || !s.chart_data.length) return;
+  const opts = window._sigChartOpts[ticker] || {};
+  drawCandleChart(`chart-${ticker}`, s.chart_data, {
+    mode:      opts.mode || 'candle',
+    showBB:    opts.showBB !== false,
+    showSMA50: opts.showSMA50 !== false,
+    height:    280,
+  });
+}
+
+function _sigChartSet(ticker, key, val) {
+  if (!window._sigChartOpts[ticker]) window._sigChartOpts[ticker] = {};
+  window._sigChartOpts[ticker][key] = val;
+  _sigChartDraw(ticker);
+}
+
 function showTickerDetail(ticker) {
   document.querySelectorAll('[id^="detail-"]').forEach(el=>el.style.display='none');
   const el=document.getElementById(`detail-${ticker}`);
-  if(el) { el.style.display='block'; el.scrollIntoView({behavior:'smooth',block:'start'}); setTimeout(()=>{ const s=state.liveSignals[ticker]; if(s&&!s.error&&s.chart_data) drawSparklineFromData(ticker, s); },100); }
+  if(el) { el.style.display='block'; el.scrollIntoView({behavior:'smooth',block:'start'}); setTimeout(()=>_sigChartDraw(ticker), 100); }
 }
 
 async function refreshSignals() {

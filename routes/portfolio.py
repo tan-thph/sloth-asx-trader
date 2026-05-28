@@ -387,3 +387,38 @@ def db_status():
             "journal_rows":   conn.execute("SELECT COUNT(*) FROM trade_journal").fetchone()[0],
             "rec_rows":       conn.execute("SELECT COUNT(*) FROM rec_history").fetchone()[0],
         })
+
+
+@bp.route("/api/portfolio/splits-check")
+def splits_check():
+    """Check for corporate-action stock splits in the last 90 days.
+
+    Query param: tickers (comma-separated, e.g. CBA.AX,BHP.AX)
+    Returns: {TICKER: [{date, ratio}]} — empty list when no recent splits.
+    """
+    import yfinance as yf
+    from datetime import timedelta
+
+    raw = request.args.get("tickers", "")
+    tickers = [t.strip().upper() for t in raw.split(",") if t.strip()]
+    if not tickers:
+        return jsonify({"error": "tickers required"}), 400
+
+    cutoff = datetime.utcnow() - timedelta(days=90)
+    result = {}
+    for ticker in tickers[:50]:  # cap to avoid abuse
+        try:
+            sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+            splits = yf.Ticker(sym).splits
+            if splits is None or splits.empty:
+                result[ticker] = []
+                continue
+            recent = [
+                {"date": str(idx.date()), "ratio": float(val)}
+                for idx, val in splits.items()
+                if idx.to_pydatetime().replace(tzinfo=None) >= cutoff and float(val) != 1.0
+            ]
+            result[ticker] = recent
+        except Exception:
+            result[ticker] = []
+    return jsonify(result)

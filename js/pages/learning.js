@@ -407,8 +407,13 @@ function _renderLearningContent(d, brier) {
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
                 <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
-                <th style="text-align:center;padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. Sk = trigger Ollama scoring">🔬 Sk</th>
-                <th style="padding:4px 6px;width:28px"></th>
+                <th style="padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. Sk = trigger Ollama scoring">
+                  <div style="display:inline-flex;align-items:center;gap:2px">
+                    <span style="width:28px;flex-shrink:0"></span>
+                    <span style="width:26px;text-align:center">🔬 Sk</span>
+                  </div>
+                </th>
+                <th style="padding:4px 6px"></th>
               </tr>
             </thead>
             <tbody>
@@ -436,26 +441,26 @@ function _renderLearningContent(d, brier) {
                   ? 'Re-run auto-tag (will overwrite existing tag)'
                   : 'Auto-tag with local model (Ollama)';
                 // 🔬 skill score — badge (if scored) + button always shown for closed trades
-                // Badge and button are separate elements so the button survives after scoring.
                 const skillScore = ev.skill_score;
-                const skillBadgeEl = skillScore != null
+                const skillBadgeContent = skillScore != null
                   ? `<span id="skill-badge-${ev.id}"
-                       title="Skill score: ${skillScore}/10 — how much outcome reflects analysis quality vs luck"
-                       style="font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600;
+                       title="Skill score: ${skillScore}/10"
+                       style="font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600;white-space:nowrap;
                               background:${skillScore>=7?'#dcfce7':skillScore>=4?'#fef3c7':'#fee2e2'};
                               color:${skillScore>=7?'#15803d':skillScore>=4?'#92400e':'#991b1b'}"
                      >${skillScore.toFixed(1)}</span>`
                   : `<span id="skill-badge-${ev.id}"></span>`;
-                const skillBtnEl = isClosed
-                  ? `<button id="skill-btn-${ev.id}"
-                       onclick="triggerSkillScore(${ev.id})"
-                       title="${skillScore != null ? 'Re-score outcome quality' : 'Score outcome quality (skill vs luck)'}"
-                       style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2;color:var(--text-muted)"
-                       onmouseover="this.style.background='var(--bg-secondary)'"
-                       onmouseout="this.style.background='none'"
-                     >🔬<span style="font-size:8px;display:block;line-height:1;text-align:center">Sk</span></button>`
-                  : '';
-                const skillBadge = skillBadgeEl + skillBtnEl;
+
+                // Fixed-slot button helpers — each slot is a flex cell of constant width
+                const _slot = (w, html) =>
+                  `<span style="width:${w}px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">${html}</span>`;
+                const _iconBtn = (id, onclick, title, icon, label, extraStyle='') =>
+                  `<button id="${id}" onclick="${onclick}" title="${title}"
+                     style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2;color:var(--text-secondary)${extraStyle}"
+                     onmouseover="this.style.background='var(--bg-secondary)'"
+                     onmouseout="this.style.background='none'"
+                   >${icon}<span style="font-size:8px;display:block;line-height:1;text-align:center;color:var(--text-muted)">${label}</span></button>`;
+
                 return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
                   <td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
                   <td style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
@@ -465,43 +470,37 @@ function _renderLearningContent(d, brier) {
                   <td style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
                   <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
-                  <td style="padding:3px 6px;text-align:center">${skillBadge}</td>
-                  <td style="padding:3px 6px;text-align:center;white-space:nowrap">
-                    ${showPm ? `<button id="pm-btn-${ev.id}"
-                      onclick="triggerDebatePostmortem(${ev.id})"
-                      title="${pmTitle}"
-                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
-                      onmouseover="this.style.background='var(--bg-secondary)'"
-                      onmouseout="this.style.background='none'"
-                    >🤖<span style="font-size:8px;display:block;line-height:1;text-align:center">PM</span></button>` : ''}
-                    ${showPm ? `<button id="adv-btn-${ev.id}"
-                      onclick="triggerAdversarialPostmortem(${ev.id})"
-                      title="${ev.postmortem_debate ? 'Re-run adversarial debate (will overwrite stored transcript)' : 'Adversarial debate: two models classify independently, then argue to a conclusion'}"
-                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
-                      onmouseover="this.style.background='var(--bg-secondary)'"
-                      onmouseout="this.style.background='none'"
-                    >&#9876;<span style="font-size:8px;display:block;line-height:1;text-align:center">vs</span></button>` : ''}
-                    ${ev.postmortem_debate ? `<button
-                      onclick="viewStoredDebate(${ev.id})"
-                      title="View stored debate transcript (no model call)"
-                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
-                      onmouseover="this.style.background='var(--bg-secondary)'"
-                      onmouseout="this.style.background='none'"
-                    >&#128220;<span style="font-size:8px;display:block;line-height:1;text-align:center">Tr</span></button>` : ''}
-                    ${ev.postmortem_debate ? `<button id="adj-btn-${ev.id}"
-                      onclick="triggerAdjudication(${ev.id})"
-                      title="Cloud adjudicator — score both models 0-10 and pick a winner (uses configured Gemini/Groq key)"
-                      style="background:none;border:none;cursor:pointer;font-size:11px;padding:2px 3px;border-radius:3px;line-height:1.2"
-                      onmouseover="this.style.background='var(--bg-secondary)'"
-                      onmouseout="this.style.background='none'"
-                    >&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span></button>` : ''}
-                    <button
-                      onclick="deleteLearningEvent(${ev.id})"
-                      title="Remove event"
-                      style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:12px;padding:2px;border-radius:3px;line-height:1"
-                      onmouseover="this.style.color='#dc2626'"
-                      onmouseout="this.style.color='var(--text-muted)'"
-                    >✕</button>
+                  <td style="padding:3px 6px;white-space:nowrap">
+                    <div style="display:inline-flex;align-items:center;gap:2px">
+                      ${_slot(28, skillBadgeContent)}
+                      ${_slot(26, isClosed
+                        ? _iconBtn(`skill-btn-${ev.id}`, `triggerSkillScore(${ev.id})`,
+                            skillScore != null ? 'Re-score outcome quality' : 'Score outcome quality (skill vs luck)',
+                            '🔬', 'Sk')
+                        : '')}
+                    </div>
+                  </td>
+                  <td style="padding:3px 6px;white-space:nowrap">
+                    <div style="display:inline-flex;align-items:center;gap:1px">
+                      ${_slot(26, showPm
+                        ? _iconBtn(`pm-btn-${ev.id}`, `triggerDebatePostmortem(${ev.id})`, pmTitle, '🤖', 'PM')
+                        : '')}
+                      ${_slot(26, showPm
+                        ? _iconBtn(`adv-btn-${ev.id}`, `triggerAdversarialPostmortem(${ev.id})`,
+                            ev.postmortem_debate ? 'Re-run adversarial debate' : 'Adversarial debate',
+                            '&#9876;', 'vs')
+                        : '')}
+                      ${_slot(26, ev.postmortem_debate
+                        ? _iconBtn(``, `viewStoredDebate(${ev.id})`, 'View stored debate transcript', '&#128220;', 'Tr')
+                        : '')}
+                      ${_slot(26, ev.postmortem_debate
+                        ? _iconBtn(`adj-btn-${ev.id}`, `triggerAdjudication(${ev.id})`,
+                            'Cloud adjudicator — score both models 0-10', '&#9878;', 'AI')
+                        : '')}
+                      ${_slot(20, `<button onclick="deleteLearningEvent(${ev.id})" title="Remove event"
+                        style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:12px;padding:2px;border-radius:3px;line-height:1"
+                        onmouseover="this.style.color='#dc2626'" onmouseout="this.style.color='var(--text-muted)'">✕</button>`)}
+                    </div>
                   </td>
                 </tr>`;
               }).join('')}

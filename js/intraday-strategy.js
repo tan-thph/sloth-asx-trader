@@ -15,6 +15,7 @@ const INTRADAY_DEFAULTS = {
   maxPositions: 2,     // max concurrent intraday trades
   minScore:     40,    // minimum setup score (0–100)
   allocPct:     20,    // % of state.cash allocated to intraday
+  extremeMode:  false, // bypass entry-window, VWAP and RSI gates when true
 };
 
 // ── Build recs from scan results ──────────────────────────────────────────────
@@ -33,7 +34,9 @@ function _buildIntradayRecs(scanData) {
   entries.sort((a, b) => (b[1].score || 0) - (a[1].score || 0));
 
   for (const [ticker, d] of entries) {
-    if (d.error || !d.passes || d.score < ip.minScore) continue;
+    if (d.error) continue;
+    if (!ip.extremeMode && !d.passes) continue;
+    if (d.score < ip.minScore) continue;
     if (openCount + recs.length >= ip.maxPositions) break;
 
     const entry  = d.current_price;

@@ -145,7 +145,9 @@ function renderMacro() {
         ${macroRanToday ? `<span style="font-size:11px;color:#16a34a;font-weight:600">✓ Updated today</span>` : `<span style="font-size:11px;color:var(--text-tertiary)">Not yet run today</span>`}
       </div>
       <div class="flex-row">
-        <button class="btn" onclick="fetchRealMacro()">⟳ Live Macro Data</button>
+        <button class="btn" onclick="fetchRealMacro()" ${window._macroFetching ? 'disabled style="opacity:0.6"' : ''}>
+          ${window._macroFetching ? '⟳ fetching…' : '⟳ Live Macro Data'}
+        </button>
         <button class="btn btn-sm" onclick="fetchEarningsCalendar()" title="Refresh earnings dates">⟳ Earnings</button>
         ${macroRanToday
           ? `<button class="btn" onclick="runMacroAnalysis(true)" title="Already ran today — click to force refresh">↺ Refresh Brief</button>`
@@ -153,6 +155,11 @@ function renderMacro() {
         }
       </div>
     </div>
+
+    ${window._macroFetching ? `
+    <div class="card" style="margin-bottom:12px;padding:12px 1.25rem;display:flex;align-items:center;gap:10px;color:var(--text-muted);font-size:13px">
+      <span style="animation:spin 1s linear infinite;display:inline-block">⟳</span> Fetching live macro data…
+    </div>` : ''}
 
     <!-- RBA Rate Banner -->
     <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
@@ -299,15 +306,20 @@ function renderMacro() {
 
 async function fetchRealMacro() {
   if(!state.serverOk) { toast('Backend server not running','error'); return; }
-  toast('Fetching live macro data...','info');
+  if(window._macroFetching) return;
+  window._macroFetching = true;
+  renderPage();
   try {
     const r = await fetch(`${API}/api/macro`);
     if(!r.ok) throw new Error('Server error');
     const data = await r.json();
     state.macroData = {...data, _source:'live'};
-    toast('Live macro data loaded','success'); renderPage();
+    toast('Live macro data loaded','success');
   } catch(e) {
     toast('Macro fetch error: '+e.message,'error');
+  } finally {
+    window._macroFetching = false;
+    renderPage();
   }
 }
 

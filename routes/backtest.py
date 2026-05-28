@@ -41,6 +41,14 @@ def backtest():
     strategy = data.get("strategy", "rsi_trend")
     brokerage = float(data.get("brokerage", 10))
     slippage_pct = float(data.get("slippage_pct", 0.10)) / 100  # e.g. 0.10 → 0.001
+    slippage_mode = data.get("slippage_mode", "flat")  # 'flat' | 'liquidity'
+
+    def _adv_slippage(adv_aud):
+        """ADV-tiered slippage rate. adv_aud = mean(close × volume) over 20d."""
+        if adv_aud >= 10_000_000:   return 0.0005  # 0.05%
+        if adv_aud >= 2_000_000:    return 0.001   # 0.10%
+        if adv_aud >= 500_000:      return 0.002   # 0.20%
+        return 0.0035                               # 0.35%
 
     if not tickers:
         return jsonify({"error": "No tickers provided"}), 400
@@ -66,6 +74,12 @@ def backtest():
             high = hist["High"]
             low = hist["Low"]
             volume = hist["Volume"]
+
+            # ── Per-ticker slippage (overrides flat rate when mode=liquidity) ──
+            ticker_slip = slippage_pct  # default: use flat rate from request
+            if slippage_mode == "liquidity":
+                adv = float((close * volume).rolling(20).mean().iloc[-1])
+                ticker_slip = _adv_slippage(adv)
 
             # ── Compute indicators for signal generation ──────────────────────
             rsi = compute_rsi(close, 14)
@@ -145,7 +159,7 @@ def backtest():
 
                 # Execute trades (entry cost includes slippage + brokerage; exit proceeds net both)
                 if buy_sig and position == 0 and cash > brokerage * 2:
-                    fill_price = price * (1 + slippage_pct)
+                    fill_price = price * (1 + ticker_slip)
                     qty = int((cash - brokerage) / fill_price)
                     if qty > 0:
                         cost = qty * fill_price + brokerage
@@ -155,7 +169,7 @@ def backtest():
                         entry_date = date_str
 
                 elif sell_sig and position > 0:
-                    fill_price = price * (1 - slippage_pct)
+                    fill_price = price * (1 - ticker_slip)
                     proceeds = position * fill_price - brokerage
                     pnl = proceeds - (position * entry_price)
                     cash += proceeds
@@ -183,7 +197,7 @@ def backtest():
             # If a position is still open at period end, add it as a synthetic "open" trade
             # so win/loss stats and the trade log are meaningful (especially for Buy & Hold)
             if position > 0 and entry_price and entry_date:
-                open_pnl = round(position * final_price * (1 - slippage_pct) - position * entry_price - brokerage, 2)
+                open_pnl = round(position * final_price * (1 - ticker_slip) - position * entry_price - brokerage, 2)
                 try:
                     entry_idx_found = next(
                         j for j in range(len(hist))
@@ -222,6 +236,7 @@ def backtest():
                 "avgLoss": round(sum(t["pnl"] for t in losses) / len(losses), 2) if losses else 0,
                 "openPosition": position,
                 "openValue": round(open_value, 2),
+                "effectiveSlippagePct": round(ticker_slip * 100, 3),
                 "trades": trades[-20:],  # last 20 trades for display
             }
             all_trades.extend(trades)
@@ -264,14 +279,14 @@ def backtest():
                     buy_sig = sell_sig = False
 
                 if buy_sig and _pos == 0 and _cash > brokerage * 2:
-                    fp = price * (1 + slippage_pct)
+                    fp = price * (1 + ticker_slip)
                     qty = int((_cash - brokerage) / fp)
                     if qty > 0:
                         _cash -= qty * fp + brokerage
                         _pos = qty
                         _ep = fp
                 elif sell_sig and _pos > 0:
-                    _cash += _pos * price * (1 - slippage_pct) - brokerage
+                    _cash += _pos * price * (1 - ticker_slip) - brokerage
                     _pos = 0
                     _ep = None
 
@@ -288,9 +303,17 @@ def backtest():
     all_losses = [t for t in all_trades if t["pnl"] <= 0]
     total_pnl = sum(t["pnl"] for t in all_trades)
     total_brokerage_cost = brokerage * 2 * len([t for t in all_trades if not t.get("isOpen")])
-    # Slippage cost = round-trip cost per trade: entry_slip + exit_slip per share × qty × price (approx)
+    # Slippage cost: use effective slippage from each ticker's result (fallback to flat rate)
+    _slip_map = {
+        k: v.get("effectiveSlippagePct", slippage_pct * 100) / 100
+        for k, v in ticker_results.items() if isinstance(v, dict) and "effectiveSlippagePct" in v
+    }
     total_slippage_cost = round(
-        sum(t["qty"] * (t["entryPrice"] + t["exitPrice"]) * slippage_pct for t in all_trades if not t.get("isOpen")), 2
+        sum(
+            t["qty"] * (t["entryPrice"] + t["exitPrice"])
+            * _slip_map.get(t["ticker"], slippage_pct)
+            for t in all_trades if not t.get("isOpen")
+        ), 2
     )
     total_return = sum(
         v.get("totalReturn", 0) for v in ticker_results.values() if "totalReturn" in v
@@ -336,6 +359,7 @@ def backtest():
         "period": period,
         "startingCapital": starting_capital,
         "slippagePct": round(slippage_pct * 100, 3),
+        "slippageMode": slippage_mode,
         "totalReturn": round(total_return, 2),
         "totalPnl": round(total_pnl, 2),
         "totalBrokerageCost": round(total_brokerage_cost, 2),
@@ -350,6 +374,16 @@ def backtest():
         "maxDrawdown": max_dd,
         "tickers": ticker_results,
         "equityCurve": equity_curve,
+        # Price-basis metadata — displayed in the UI to avoid misinterpretation
+        "priceBasis": "total_return_adjusted",
+        "priceBasisNote": (
+            "Prices use yfinance's dividend-adjusted (total-return) series. "
+            "Dividends are notionally reinvested into the price, so returns reflect "
+            "total return (capital gains + income), not pure price appreciation. "
+            "Signal timing (RSI, MACD, BB, ADX) is unaffected — all are scale-invariant. "
+            "Price levels in the trade log are adjusted and will be lower than the nominal "
+            "price visible on a chart on that date."
+        ),
     })
 
 
@@ -409,7 +443,12 @@ def backtest_ai_replay():
             stk  = yf.Ticker(t_sym)
             start = (entry_date - _dt.timedelta(days=5)).strftime("%Y-%m-%d")
             end   = (entry_date + _dt.timedelta(days=days + 15)).strftime("%Y-%m-%d")
-            hist  = stk.history(start=start, end=end, auto_adjust=True)
+            # auto_adjust=False: nominal (unadjusted) prices so the forward exit price
+            # is on the same basis as the actual executedPrice captured at trade time.
+            # auto_adjust=True would adjust historical closes for dividends paid AFTER
+            # each bar's date, creating a mixed basis (nominal entry vs adjusted exit)
+            # that understates BUY returns by ~div_yield and overstates SELL returns.
+            hist  = stk.history(start=start, end=end, auto_adjust=False)
             if hist.empty:
                 results.append({"ticker": ticker, "action": action, "entryDate": date_str,
                                 "note": "no price data", "isHit": None})
@@ -584,4 +623,11 @@ def backtest_ai_replay():
         "equityCurve":     dollar_curve,
         "horizon":         horizon,
         "horizonDays":     days,
+        # Price-basis metadata
+        "priceBasis":      "nominal_unadjusted",
+        "priceBasisNote":  (
+            "Forward exit prices are nominal (unadjusted) closes, matching the basis of "
+            "your actual executedPrice. Ex-dividend gaps during the measurement window "
+            "appear as price drops, consistent with real mark-to-market P&L."
+        ),
     })
