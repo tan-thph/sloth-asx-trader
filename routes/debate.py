@@ -686,6 +686,123 @@ def _pm_parse(raw: str, ev_id: int, model: str, label: str = ""):
     return error_type, reason
 
 
+# ── Win-tagging endpoint (Phase 1B) ──────────────────────────────────────────
+
+VALID_WIN_TAGS = frozenset({
+    "catalyst_capture",   # trade captured a planned earnings/news event
+    "regime_aligned",     # entry timing was perfectly matched to macro regime
+    "confluence_entry",   # multiple indicators aligned at entry (high-quality setup)
+    "disciplined_hold",   # held through normal drawdown; thesis validated by outcome
+    "good_sizing",        # position size was appropriate for the conviction and risk
+    "none",               # win was luck-driven / unforeseeable upside
+})
+
+
+def _win_build_prompt(summary: str, rationale: str) -> str:
+    """Prompt that asks the model to identify *why* a trade succeeded."""
+    return (
+        f"Analyse this closed ASX win and identify the PRIMARY reason it succeeded.\n\n"
+        f"TRADE: {summary}\n"
+        + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "")
+        + "\n"
+        "Select 1-2 success tags that best describe what went right:\n"
+        "  catalyst_capture  - trade captured a planned earnings/news/dividend event\n"
+        "  regime_aligned    - entry timing was well-matched to the active macro regime\n"
+        "  confluence_entry  - multiple independent indicators aligned cleanly at entry\n"
+        "  disciplined_hold  - held through normal volatility; original thesis validated\n"
+        "  good_sizing       - position size was appropriate for conviction and risk level\n"
+        "  none              - ONLY if the win appears primarily luck-driven or unforeseeable\n"
+        "\n"
+        'Reply with JSON only: {"success_tags":"TAG1,TAG2","reason":"one clear sentence"}\n'
+        "No markdown, no explanation outside JSON."
+    )
+
+
+def _win_parse(raw: str, ev_id: int, model: str):
+    """Parse win-tag model output → (success_tags, reason). Returns ('','') on failure."""
+    raw = _strip_think_tags(raw)
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$",       "", raw)
+    try:
+        parsed = json.loads(raw)
+        tags_raw = parsed.get("success_tags", "")
+        reason   = parsed.get("reason", "")
+    except Exception:
+        m = re.search(r'"success_tags"\s*:\s*"([^"]+)"', raw)
+        tags_raw = m.group(1) if m else ""
+        m2 = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
+        reason = m2.group(1) if m2 else raw[:120]
+
+    # Validate tags
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+    valid = [t for t in tags if t in VALID_WIN_TAGS]
+    # none is mutually exclusive with real tags
+    real = [t for t in valid if t != "none"]
+    final = ",".join(real if real else (["none"] if "none" in valid else []))
+    return final, reason
+
+
+@bp.route("/api/debate/tag-win", methods=["POST"])
+def debate_tag_win():
+    """
+    Auto-tag a closed WIN with success tags using a local or cloud model.
+
+    Request body:  { "id": 123, "model": "qwen3:9b", "timeout": 45 }
+    Response:      { "ok": true, "id": 123, "success_tags": "regime_aligned,confluence_entry", "reason": "..." }
+    """
+    data  = request.get_json() or {}
+    ev_id = data.get("id")
+    model = data.get("model") or "qwen3:9b"
+    tout  = min(int(data.get("timeout", 60)), 120)
+
+    if not ev_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT * FROM ai_learning_events WHERE id=?", (ev_id,)
+            ).fetchone()
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+    if not row:
+        return jsonify({"ok": False, "error": "event not found"}), 404
+    if row["outcome_status"] != "win":
+        return jsonify({"ok": False, "error": f"tag-win only runs on wins, got '{row['outcome_status']}'"}), 400
+
+    summary   = _pm_build_summary(row)
+    rationale = (row["rationale_summary"] or "").strip()[:250]
+    prompt    = _win_build_prompt(summary, rationale)
+
+    result = _call_model_any(model, prompt, timeout=tout)
+    if not result["ok"]:
+        return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
+
+    success_tags, reason = _win_parse(result["text"].strip(), ev_id, model)
+
+    if success_tags:
+        try:
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE ai_learning_events SET success_tags=? WHERE id=?",
+                    (success_tags, ev_id)
+                )
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 500
+        current_app.logger.info(
+            f"[TagWin] event#{ev_id} ({row['ticker']}) → {success_tags} via {model}"
+        )
+
+    return jsonify({
+        "ok":          True,
+        "id":          ev_id,
+        "success_tags": success_tags or "none",
+        "reason":      reason,
+        "model":       model,
+    })
+
+
 # ── Single-model postmortem endpoint ──────────────────────────────────────────
 
 @bp.route("/api/debate/postmortem", methods=["POST"])
@@ -1247,6 +1364,43 @@ def debate_adjudicate():
         f"A={score_a} B={score_b} tags={final_tags or 'none'} in {elapsed_ms}ms"
     )
 
+    # ── Auto-generate a 1-sentence lesson and store in trading_lessons ───────────
+    lesson_text = None
+    if final_tags and final_tags != "none" and reason:
+        lesson_prompt = (
+            f"A trade was closed with the following outcome and analysis:\n"
+            f"Trade: {_pm_build_summary(row)}\n"
+            f"Root-cause tags: {final_tags}\n"
+            f"Analysis: {reason}\n\n"
+            "Write ONE concise, actionable trading lesson (max 25 words) that captures the "
+            "key learning from this trade. Start with an imperative verb (Avoid, Check, Require, etc.).\n"
+            "Reply with the lesson sentence only — no JSON, no markdown, no preamble."
+        )
+        lesson_res = _call_cloud_adjudicator(
+            cfg["provider"], cfg["api_key"], cfg["model"], lesson_prompt, timeout=20
+        )
+        if lesson_res["ok"]:
+            raw_lesson = (lesson_res.get("text") or "").strip()
+            raw_lesson = re.sub(r"^```[a-z]*\n?", "", raw_lesson)
+            raw_lesson = re.sub(r"\n?```$",       "", raw_lesson).strip()
+            # Limit to 200 chars; discard if it looks like JSON
+            if raw_lesson and not raw_lesson.startswith("{") and len(raw_lesson) <= 200:
+                lesson_text = raw_lesson
+                try:
+                    with get_db() as conn:
+                        conn.execute(
+                            """INSERT INTO trading_lessons
+                                   (learning_event_id, ticker, sector, regime, lesson_text, source)
+                               VALUES (?,?,?,?,?,?)""",
+                            (ev_id, row["ticker"], row["sector"], row["regime"],
+                             lesson_text, "adjudicated")
+                        )
+                    current_app.logger.info(
+                        f"[Adjudicate] auto-lesson saved for event#{ev_id}: {lesson_text[:60]}"
+                    )
+                except Exception as ex:
+                    current_app.logger.warning(f"[Adjudicate] lesson insert failed: {ex}")
+
     return jsonify({
         "ok":                True,
         "id":                ev_id,
@@ -1257,6 +1411,7 @@ def debate_adjudicate():
         "score_b":           score_b,
         "final_tags":        final_tags,
         "reason":            reason,
+        "lesson":            lesson_text,
         "error_type":        final_tags or "none",
         "error_type_source": "adjudicated" if update_error_type else (row["error_type_source"] or "debated"),
         "elapsed_ms":        elapsed_ms,

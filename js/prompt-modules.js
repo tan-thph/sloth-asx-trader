@@ -136,6 +136,21 @@ function buildSystemArray(context = {}) {
   return system;
 }
 
+// buildLessonsBlock — format fetched trading lessons into a prompt block.
+// lessons: array from GET /api/learning/lessons
+// Returns a non-empty string only when there are ≥1 lessons.
+function buildLessonsBlock(lessons) {
+  if (!lessons || !lessons.length) return '';
+  const lines = lessons.map(l => {
+    const scope = [l.ticker, l.sector, l.regime].filter(Boolean).join('/') || 'general';
+    return `* [${scope}] ${l.lesson_text}`;
+  });
+  return `\n\n=== HISTORICAL LESSONS FOR THIS SETUP ===
+Review these lessons before making recommendations. If your current thesis conflicts with a lesson,
+explicitly state why this trade is different — or downgrade your conviction score.
+${lines.join('\n')}`;
+}
+
 // buildDtSystemArray — same approach for day trade prompts
 function buildDtSystemArray(context = {}) {
   const core = typeof getDayTradeSystemPrompt === 'function' ? getDayTradeSystemPrompt() : '';

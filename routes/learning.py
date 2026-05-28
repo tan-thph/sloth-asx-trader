@@ -139,7 +139,8 @@ def learning_outcome():
                         "holding_period_days", "exit_reason", "error_type", "notes",
                         "actual_entry_price", "actual_exit_price", "sector",
                         "skill_score", "debate_summary", "prompt_hash",
-                        "tags", "trade_thesis"):
+                        "tags", "trade_thesis",
+                        "success_tags", "checklist_bypasses"):
                 if col in data:
                     fields.append(f"{col}=?")
                     vals.append(data[col])
@@ -303,7 +304,7 @@ def learning_stats():
                        was_executed, suggested_stop, suggested_target, rr_ratio,
                        holding_period_days, exit_reason, rationale_summary,
                        error_type, error_type_source, debate_summary, skill_score,
-                       postmortem_debate
+                       postmortem_debate, success_tags, checklist_bypasses
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
 
@@ -589,9 +590,20 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         except Exception:
             return 1.0
 
+    def _weight(r, half_life=45):
+        """Skill-weighted time-decay: weight = time_decay × skill_factor.
+        Skill factor = max(0.2, skill_score/10) when scored, else 1.0.
+        High-skill trades (8-10) count up to 4× more than unscored baseline;
+        luck-driven lucky trades (score 2) count 0.2×.
+        """
+        td = _decay(r["timestamp"], half_life)
+        sk = r["skill_score"]
+        sf = max(0.2, float(sk) / 10.0) if sk is not None else 1.0
+        return td * sf
+
     def _wwr(subset):
-        w_wins  = sum(_decay(r["timestamp"]) for r in subset if r["outcome_status"] == "win")
-        w_total = sum(_decay(r["timestamp"]) for r in subset)
+        w_wins  = sum(_weight(r) for r in subset if r["outcome_status"] == "win")
+        w_total = sum(_weight(r) for r in subset)
         return w_wins / w_total if w_total > 0 else 0.0
 
     def _is_shock(r):
@@ -604,7 +616,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
                        realized_pnl_pct, rr_ratio, timestamp,
-                       error_type, exit_reason
+                       error_type, exit_reason, skill_score
                 FROM ai_learning_events
                 WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
                 ORDER BY timestamp DESC LIMIT 300
@@ -772,3 +784,91 @@ def learning_calibration():
     if "error" in result:
         return jsonify(result), 500
     return jsonify(result)
+
+
+# ── Trading Lessons endpoints ─────────────────────────────────────────────────
+
+@bp.route("/api/learning/lessons", methods=["GET"])
+def lessons_list():
+    """Fetch lessons, optionally filtered by ticker/sector/regime.
+
+    Query params: ticker, sector, regime, limit (default 20).
+    Used by analysis.js to inject contextual lessons into Claude's prompt.
+    """
+    ticker = request.args.get("ticker", "")
+    sector = request.args.get("sector", "")
+    regime = request.args.get("regime", "")
+    limit  = min(int(request.args.get("limit", 20)), 100)
+
+    clauses, vals = [], []
+    if ticker:
+        clauses.append("(ticker=? OR ticker IS NULL)")
+        vals.append(ticker)
+    if sector:
+        clauses.append("(sector=? OR sector IS NULL)")
+        vals.append(sector)
+    if regime:
+        clauses.append("(regime=? OR regime IS NULL)")
+        vals.append(regime)
+
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                f"""SELECT id, learning_event_id, ticker, sector, regime,
+                           setup_type, lesson_text, source, created_at
+                    FROM trading_lessons {where}
+                    ORDER BY created_at DESC LIMIT ?""",
+                vals + [limit],
+            ).fetchall()
+        return jsonify({"ok": True, "lessons": [dict(r) for r in rows]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/lessons", methods=["POST"])
+def lessons_create():
+    """Create a new trading lesson.
+
+    Body: { lesson_text, ticker?, sector?, regime?, setup_type?,
+             learning_event_id?, source? }
+    """
+    data = request.get_json() or {}
+    lesson_text = (data.get("lesson_text") or "").strip()
+    if not lesson_text:
+        return jsonify({"ok": False, "error": "lesson_text required"}), 400
+    try:
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO trading_lessons
+                       (learning_event_id, ticker, sector, regime, setup_type, lesson_text, source)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    data.get("learning_event_id"),
+                    data.get("ticker"),
+                    data.get("sector"),
+                    data.get("regime"),
+                    data.get("setup_type"),
+                    lesson_text,
+                    data.get("source", "manual"),
+                )
+            )
+            row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return jsonify({"ok": True, "id": row_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/lesson/<int:lesson_id>", methods=["DELETE"])
+def lessons_delete(lesson_id):
+    """Hard-delete a single lesson."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "DELETE FROM trading_lessons WHERE id=?", (lesson_id,)
+            ).rowcount
+        if rows == 0:
+            return jsonify({"ok": False, "error": "Lesson not found"}), 404
+        return jsonify({"ok": True, "deleted": lesson_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500

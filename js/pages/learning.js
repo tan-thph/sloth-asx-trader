@@ -67,6 +67,8 @@ async function renderLearningPage(gen) {
   }
   // Async: load debate stats card (per-pairing agreement breakdown)
   renderDebateStatsCard().catch(() => {});
+  // Async: load trading lessons card
+  renderLessonsCard().catch(() => {});
 }
 
 function _renderLearningContent(d, brier) {
@@ -435,6 +437,19 @@ function _renderLearningContent(d, brier) {
                          onmouseover="this.style.color='#15803d'" onmouseout="this.style.color='var(--text-muted)'"
                        >🛡<span style="font-size:8px;vertical-align:middle">?</span></button>`
                     : '';
+                // 🏆 success tags — show chips for wins; show Tag Win button when untagged
+                const successTags = (ev.success_tags || '').split(',').map(t=>t.trim()).filter(Boolean);
+                const WIN_TAG_COLORS = {
+                  catalyst_capture: '#3b82f6', regime_aligned: '#8b5cf6',
+                  confluence_entry: '#0891b2', disciplined_hold: '#059669',
+                  good_sizing: '#d97706', none: '#6b7280',
+                };
+                const successTagsEl = ev.outcome_status === 'win'
+                  ? (successTags.length && successTags[0] !== 'none'
+                      ? successTags.map(t => `<span title="${t}" style="font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600;background:${(WIN_TAG_COLORS[t]||'#3b82f6')}22;color:${WIN_TAG_COLORS[t]||'#3b82f6'};margin-right:2px">${t.replace(/_/g,' ')}</span>`).join('')
+                      : '')
+                  : '';
+
                 // 🤖 post-mortem — always show for loss/breakeven so re-runs are possible
                 const showPm = TAG_STATUSES.has(ev.outcome_status);
                 const pmTitle = ev.error_type
@@ -469,7 +484,9 @@ function _renderLearningContent(d, brier) {
                   <td style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
                   <td style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
-                  <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
+                  <td style="padding:3px 6px">${ev.outcome_status === 'win' && successTagsEl
+                    ? successTagsEl
+                    : tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
                   <td style="padding:3px 6px;white-space:nowrap">
                     <div style="display:inline-flex;align-items:center;gap:2px">
                       ${_slot(28, skillBadgeContent)}
@@ -482,9 +499,13 @@ function _renderLearningContent(d, brier) {
                   </td>
                   <td style="padding:3px 6px;white-space:nowrap">
                     <div style="display:inline-flex;align-items:center;gap:1px">
-                      ${_slot(26, showPm
-                        ? _iconBtn(`pm-btn-${ev.id}`, `triggerDebatePostmortem(${ev.id})`, pmTitle, '🤖', 'PM')
-                        : '')}
+                      ${_slot(26, ev.outcome_status === 'win'
+                        ? _iconBtn(`tagwin-btn-${ev.id}`, `triggerTagWin(${ev.id})`,
+                            ev.success_tags ? 'Re-tag winning trade' : 'Tag win: identify why this trade succeeded',
+                            '&#127942;', 'Tag', ';color:var(--text-secondary)')
+                        : (showPm
+                            ? _iconBtn(`pm-btn-${ev.id}`, `triggerDebatePostmortem(${ev.id})`, pmTitle, '🤖', 'PM')
+                            : ''))}
                       ${_slot(26, showPm
                         ? _iconBtn(`adv-btn-${ev.id}`, `triggerAdversarialPostmortem(${ev.id})`,
                             ev.postmortem_debate ? 'Re-run adversarial debate' : 'Adversarial debate',
@@ -605,10 +626,13 @@ function _renderLearningContent(d, brier) {
       ${digestHistoryHtml}
     </div>`;
 
+  // ── Trading Lessons card (async — filled by renderLessonsCard()) ─────────────
+  const lessonsPlaceholder = `<div id="ll-lessons-card" class="card section-gap" style="min-height:60px"></div>`;
+
   return summaryCards + calibCard +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + recentCard + failedCard + debateInsightsCard +
-    digestCard + debateStatsPlaceholder + debateCardPlaceholder;
+    digestCard + lessonsPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
 }
 
 // ── Postmortem digest — AI summary of recent failure patterns ─────────────────
@@ -1046,6 +1070,47 @@ async function triggerSkillScore(eventId) {
   } catch (e) {
     toast('Skill score error: ' + e.message, 'error');
     if (btn) { btn.disabled = false; btn.textContent = '🔬'; btn.title = 'Score outcome quality with local model'; }
+  }
+}
+
+// ── Win success tagger ────────────────────────────────────────────────────────
+// Triggered by the 🏆 Tag button on WIN rows. Asks local Ollama to classify
+// why the trade succeeded using the VALID_WIN_TAGS taxonomy.
+async function triggerTagWin(eventId) {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  const btn = document.getElementById(`tagwin-btn-${eventId}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+
+  try {
+    const status = await debateStatus();
+    if (!status.available) {
+      toast('Ollama is not running — start it first', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🏆'; }
+      return;
+    }
+    const model = typeof preferredDebateModel === 'function'
+      ? preferredDebateModel(status.models) : 'qwen3:9b';
+
+    toast(`🏆 Asking ${model} to tag win #${eventId}…`, 'info');
+    const r = await fetch(`${API}/api/debate/tag-win`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: eventId, model }),
+    });
+    const result = await r.json();
+
+    if (result?.ok) {
+      const tags = result.success_tags || 'none';
+      toast(`🏆 Win tagged: ${tags} — ${(result.reason||'').slice(0,60)}`, 'success');
+      // Refresh the row so chips appear without a full re-render
+      renderPage();
+    } else {
+      toast(`Tag-win failed: ${result?.error || 'no response'}`, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🏆'; }
+    }
+  } catch (e) {
+    toast('Tag-win error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '🏆'; }
   }
 }
 
@@ -1518,6 +1583,135 @@ async function renderDebateStatsCard() {
       </table>
     </div>
     ${data.skipped ? `<p class="text-xs text-muted" style="margin-top:6px">⚠ ${data.skipped} transcript${data.skipped !== 1 ? 's' : ''} could not be parsed (skipped from stats)</p>` : ''}`;
+}
+
+// ── Trading Lessons card ──────────────────────────────────────────────────────
+// Shows all stored lessons with filter inputs. Lessons are distilled from
+// adjudicated postmortems (auto) or added manually.
+async function renderLessonsCard() {
+  const el = document.getElementById('ll-lessons-card');
+  if (!el || !state.serverOk) return;
+
+  let data;
+  try {
+    const r = await fetch(`${API}/api/learning/lessons?limit=50`);
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  const lessons = data.lessons || [];
+
+  const WIN_TAG_COLORS = {
+    catalyst_capture: '#3b82f6', regime_aligned: '#8b5cf6',
+    confluence_entry: '#0891b2', disciplined_hold: '#059669',
+    good_sizing: '#d97706',
+  };
+  const SOURCE_COLORS = { adjudicated: '#6d28d9', manual: '#0891b2' };
+
+  const rows = lessons.map(l => {
+    const scope = [l.ticker, l.sector, l.regime].filter(Boolean).join(' / ') || 'General';
+    const srcColor = SOURCE_COLORS[l.source] || '#6b7280';
+    return `<tr style="border-bottom:1px solid var(--border);font-size:12px">
+      <td style="padding:5px 8px;color:var(--text-muted)">${(l.created_at||'').slice(0,10)}</td>
+      <td style="padding:5px 8px;font-weight:600">${escapeHTML(scope)}</td>
+      <td style="padding:5px 8px;line-height:1.4">${escapeHTML(l.lesson_text)}</td>
+      <td style="padding:5px 8px">
+        <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${srcColor}22;color:${srcColor}">${l.source}</span>
+      </td>
+      <td style="padding:5px 8px">
+        <button onclick="deleteLesson(${l.id})" title="Delete lesson"
+          style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:12px;padding:2px;border-radius:3px"
+          onmouseover="this.style.color='#dc2626'" onmouseout="this.style.color='var(--text-muted)'">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="flex-between" style="margin-bottom:8px">
+      <div class="card-title" style="margin:0">📚 Trading Lessons (${lessons.length})</div>
+      <button class="btn btn-sm btn-primary" onclick="showAddLessonModal()">+ Add Lesson</button>
+    </div>
+    <p class="text-xs text-muted" style="margin-bottom:10px">
+      Distilled rules from adjudicated postmortems (auto) and manual entries.
+      Injected into every Claude analysis prompt when ticker/sector/regime matches.
+    </p>
+    ${lessons.length === 0
+      ? '<p class="text-xs text-muted">No lessons yet. Run the cloud adjudicator (⚖AI) on a closed trade to auto-generate one, or add manually.</p>'
+      : `<div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse">
+            <thead>
+              <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
+                <th style="text-align:left;padding:4px 8px">Date</th>
+                <th style="text-align:left;padding:4px 8px">Scope</th>
+                <th style="text-align:left;padding:4px 8px">Lesson</th>
+                <th style="text-align:left;padding:4px 8px">Source</th>
+                <th style="padding:4px 8px"></th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`}
+    <div id="ll-add-lesson-form" style="display:none;margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary)">
+      <div class="text-xs text-muted" style="font-weight:700;margin-bottom:8px">Add Manual Lesson</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <textarea id="ll-lesson-text" rows="2" placeholder="Lesson text (required)…"
+          style="padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);font-size:12px;resize:vertical"></textarea>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <input id="ll-lesson-ticker" placeholder="Ticker (opt.)" maxlength="6"
+            style="width:90px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);font-size:12px">
+          <input id="ll-lesson-sector" placeholder="Sector (opt.)"
+            style="flex:1;min-width:100px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);font-size:12px">
+          <input id="ll-lesson-regime" placeholder="Regime (opt.)"
+            style="flex:1;min-width:100px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);font-size:12px">
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-sm btn-primary" onclick="submitManualLesson()">Save</button>
+          <button class="btn btn-sm" onclick="document.getElementById('ll-add-lesson-form').style.display='none'">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function showAddLessonModal() {
+  const f = document.getElementById('ll-add-lesson-form');
+  if (f) f.style.display = f.style.display === 'none' ? '' : 'none';
+}
+
+async function submitManualLesson() {
+  const text   = (document.getElementById('ll-lesson-text')?.value || '').trim();
+  const ticker = (document.getElementById('ll-lesson-ticker')?.value || '').trim().toUpperCase() || null;
+  const sector = (document.getElementById('ll-lesson-sector')?.value || '').trim() || null;
+  const regime = (document.getElementById('ll-lesson-regime')?.value || '').trim() || null;
+  if (!text) { toast('Lesson text is required', 'error'); return; }
+  try {
+    const r = await fetch(`${API}/api/learning/lessons`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lesson_text: text, ticker, sector, regime, source: 'manual' }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      toast('Lesson saved', 'success');
+      await renderLessonsCard();
+    } else {
+      toast('Save failed: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteLesson(id) {
+  if (!confirm('Delete this lesson?')) return;
+  try {
+    const r = await fetch(`${API}/api/learning/lesson/${id}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) {
+      toast('Lesson deleted', 'success');
+      await renderLessonsCard();
+    } else {
+      toast('Delete failed: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
 }
 
 // ── Toggle a single tag on/off within the multi-tag set ───────────────────────

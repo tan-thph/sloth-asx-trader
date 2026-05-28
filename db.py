@@ -193,6 +193,22 @@ _SCHEMA = """
         duration_ms   INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_call_log_ts ON ai_call_log(timestamp DESC);
+
+    CREATE TABLE IF NOT EXISTS trading_lessons (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        learning_event_id INTEGER,
+        ticker            TEXT,
+        sector            TEXT,
+        regime            TEXT,
+        setup_type        TEXT,
+        lesson_text       TEXT NOT NULL,
+        source            TEXT DEFAULT 'manual',
+        created_at        TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (learning_event_id) REFERENCES ai_learning_events(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_lessons_ticker  ON trading_lessons(ticker);
+    CREATE INDEX IF NOT EXISTS idx_lessons_sector  ON trading_lessons(sector);
+    CREATE INDEX IF NOT EXISTS idx_lessons_regime  ON trading_lessons(regime);
 """
 
 
@@ -217,8 +233,11 @@ _LE_MIGRATIONS = [
     # v5: synthesizer prediction from bull/bear debate ('bull'/'bear'/'neutral')
     ("debate_synthesis_winner", "TEXT"),
     # sprint-3C: trade tags (comma-separated) and thesis for Learning Loop context
-    ("tags",         "TEXT"),
-    ("trade_thesis", "TEXT"),
+    ("tags",               "TEXT"),
+    ("trade_thesis",       "TEXT"),
+    # Sprint 15: Learning Loop Intelligence
+    ("success_tags",       "TEXT"),   # comma-sep win tags: catalyst_capture,regime_aligned,confluence_entry,disciplined_hold
+    ("checklist_bypasses", "TEXT"),   # comma-sep pre-trade checklist items bypassed at execution
 ]
 
 

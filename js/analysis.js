@@ -412,6 +412,28 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     ? await fetchCalibrationBlock(_activeRegime, _portfolioSectors, _portfolioTickers)
     : '';
 
+  // ── Historical lessons — contextual rules distilled from past adjudications ──
+  // Fetches lessons matching any combo of (portfolio tickers, sectors, active regime).
+  // Silently skipped when server is down or table is empty.
+  let _lessonsBlock = '';
+  if (state.serverOk) {
+    try {
+      const _lParams = new URLSearchParams();
+      if (_activeRegime && _activeRegime !== 'unknown') _lParams.set('regime', _activeRegime);
+      if (_portfolioTickers.length) _lParams.set('ticker', _portfolioTickers.slice(0, 5).join(','));
+      if (_portfolioSectors.length) _lParams.set('sector', _portfolioSectors[0]);
+      _lParams.set('limit', '10');
+      const _lr = await fetch(`${API}/api/learning/lessons?${_lParams}`);
+      if (_lr.ok) {
+        const _ld = await _lr.json();
+        if (_ld.lessons && _ld.lessons.length) {
+          _lessonsBlock = typeof buildLessonsBlock === 'function'
+            ? buildLessonsBlock(_ld.lessons) : '';
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
   // ── Internal Debate (optional — Ollama local model) ─────────────────────────
   // Respects state.debate.aggression: 'none' skips, 'light' = 3 tickers, 'full' = 8.
   // Results go into user message (not system prompt) to preserve prompt-cache hits.
@@ -472,7 +494,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     : '';
 
   const fullUserMessage = userMessage
-    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote) + regimeCtx + _debatePreamble;
+    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote + _lessonsBlock) + regimeCtx + _debatePreamble;
 
   try {
     const { text, usage: _usage } = await callClaude('portfolio', fullUserMessage, {
