@@ -734,6 +734,10 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "target":           target,
         "stop_loss":        stop_loss,
         "entry_range":      [entry_low, entry_high],
+        "trend_signals":    trend_signals,
+
+        # Composite score (0-100) from _score_ticker
+        "score": (_score_ticker(close.values, volume.values) or {}).get("score"),
 
         # Fundamentals
         "fundamentals": fundamentals,

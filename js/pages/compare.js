@@ -201,15 +201,15 @@ function _compareRows(tickers) {
     { label: 'BB %B',          key: null,               fmt: 'bbpb'   },
     { label: 'ATR14 (%)',      key: null,               fmt: 'atr'    },
     { label: 'Stoch %K',       key: 'stoch_k',          fmt: 'stoch'  },
-    { label: 'CCI',            key: 'cci_14',           fmt: 'cci'    },
+    { label: 'CCI',            key: 'cci',              fmt: 'cci'    },
     // ── Strength ────────────────────────────────────────────────────────
     { label: 'ADX',            key: 'adx',              fmt: 'adx'    },
-    { label: 'MFI',            key: 'mfi_14',           fmt: 'mfi'    },
+    { label: 'MFI',            key: 'mfi',              fmt: 'mfi'    },
     { label: 'OBV Trend',      key: null,               fmt: 'obv'    },
     // ── Returns ──────────────────────────────────────────────────────────
-    { label: '1-week return',  key: null,               fmt: 'ret1w'  },
-    { label: '1-month return', key: null,               fmt: 'ret1m'  },
-    { label: '3-month return', key: null,               fmt: 'ret3m'  },
+    { label: '1-week return',  key: 'return_5d',        fmt: 'ret1w'  },
+    { label: '1-month return', key: 'return_20d',       fmt: 'ret1m'  },
+    { label: '3-month return', key: 'return_60d',       fmt: 'ret3m'  },
     // ── Score ────────────────────────────────────────────────────────────
     { label: 'Composite Score',key: 'score',            fmt: 'score'  },
     { label: 'Buy signals',    key: null,               fmt: 'bsig'   },
@@ -256,8 +256,10 @@ function _formatCell(key, d, fmt) {
            + (label ? `<br><span style="font-size:9px;color:${col}">${label}</span>` : '');
     }
     case 'macd': {
-      const bullish = d.trend_signals?.macd_bullish;
-      const rising  = d.trend_signals?.macd_hist_positive;
+      const bullish = (d.trend_signals != null) ? d.trend_signals.macd_bullish
+                    : (d.macd_line != null && d.macd_signal != null) ? d.macd_line > d.macd_signal : null;
+      const rising  = (d.trend_signals != null) ? d.trend_signals.macd_hist_positive
+                    : (d.macd_hist != null) ? d.macd_hist > 0 : null;
       if (bullish == null) return '—';
       return dot(bullish) + ' '
            + (bullish ? bullPill('bullish') : bearPill('bearish'))
@@ -306,7 +308,7 @@ function _formatCell(key, d, fmt) {
       return `<span style="color:${col}">${v.toFixed(0)}</span>`;
     }
     case 'cci': {
-      const v = d.cci_14;
+      const v = d.cci != null ? d.cci : d.cci_14;
       if (v == null) return '—';
       const col = v > 100 ? '#ef4444' : v < -100 ? '#22c55e' : '#6b7280';
       return `<span style="color:${col}">${v.toFixed(0)}</span>`;
@@ -320,30 +322,30 @@ function _formatCell(key, d, fmt) {
            + ` <span style="font-size:9px;color:${col}">${label}</span>`;
     }
     case 'mfi': {
-      const v = d.mfi_14;
+      const v = d.mfi != null ? d.mfi : d.mfi_14;
       if (v == null) return '—';
       const col = v > 80 ? '#ef4444' : v < 20 ? '#22c55e' : '#6b7280';
       return `<span style="color:${col}">${v.toFixed(0)}</span>`;
     }
     case 'obv': {
-      const v = d.obv_signal;
+      const v = d.obv_trend ?? d.obv_signal;
       if (v == null) return '—';
       return v === 'rising' ? bullPill('&#8593; rising') : bearPill('&#8595; falling');
     }
     case 'ret1w': {
-      const v = d.return_1w;
+      const v = d.return_5d ?? d.return_1w;
       if (v == null) return '—';
       const col = v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#6b7280';
       return `<span style="color:${col};font-weight:600">${pct(v)}</span>`;
     }
     case 'ret1m': {
-      const v = d.return_1m;
+      const v = d.return_20d ?? d.return_1m;
       if (v == null) return '—';
       const col = v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#6b7280';
       return `<span style="color:${col};font-weight:600">${pct(v)}</span>`;
     }
     case 'ret3m': {
-      const v = d.return_3m;
+      const v = d.return_60d ?? d.return_3m;
       if (v == null) return '—';
       const col = v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#6b7280';
       return `<span style="color:${col};font-weight:600">${pct(v)}</span>`;
