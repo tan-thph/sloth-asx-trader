@@ -33,7 +33,7 @@ API key options (one of these is required for analysis):
 
 Tests:
 ```bash
-python test_app.py        # all 178 tests, ~10 s
+python test_app.py        # all 215 tests, ~10 s
 ```
 
 ---
@@ -67,11 +67,11 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `asx_server.py` | ~205 | Flask app + middleware + blueprint registration + `__main__` bootstrap. **Holds no routes itself.** |
 | `core.py` | ~230 | Shared infrastructure: `ttl_cache`, `fetch_with_retry` (exponential backoff + `_last_good` stale-cache), `_HTTP_SESSION`, `log`, `LOG_DIR`, `SECTOR_MAP`, `ASX_UNIVERSE`, `OLLAMA_BASE`. No Flask import. |
 | `db.py` | ~260 | SQLite schema, `get_db()`, `init_db()`, migrations, `log_failed_ticker()`, `backup_db(keep=7)`. Single source of truth — never `sqlite3.connect()` directly. |
-| `indicators.py` | ~660 | All technical indicators + `analyse_ticker()` + `_score_ticker()`. Pure compute, no Flask. |
+| `indicators.py` | ~750 | All technical indicators + `analyse_ticker()` + `_score_ticker()`. Pure compute, no Flask. `_drop_forming_bar(hist)` drops the current-day candle before 07:00 UTC to avoid incomplete intraday bars. `_fetch_stooq_history(ticker, period)` is a free fallback provider (stooq.com, no API key) used when yfinance returns empty. |
 | `announcement_engine.py` + `announcement_routes.py` | — | ASX announcements scraper, PDF parser, Gemini scorer, blueprint `/api/announcements/*`. |
 | `news_engine.py` | — | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
 | `gunicorn.conf.py` | — | Production WSGI config. 2 workers × 8 threads. |
-| `test_app.py` | ~1950 | 195 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
+| `test_app.py` | ~2300 | 238 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
 
 #### `routes/` — one blueprint per concern
 
@@ -88,8 +88,9 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `routes/claude.py`     | ~85  | `/api/claude/*`                                  | Backend proxy for the Anthropic API (opt-in). |
 | `routes/alerts.py`     | ~100 | `/api/alerts/*`                                  | Telegram off-device alerts. `POST /api/alerts/telegram` (send), `POST /api/alerts/telegram/save` (persist creds to settings table), `GET /api/alerts/config` (has_telegram?). Credentials stored in `settings` table as `tg_token`/`tg_chat_id` — never logged. |
 | `routes/import_csv.py` | ~200 | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. Returns BUY rows only; SELL rows reported as skipped (require manual entry). |
+| `routes/intraday.py`   | ~270 | `/api/intraday/<ticker>`, `/api/intraday/scan`  | ASX100 intraday day-trade strategy. `GET /api/intraday/<ticker>` — single ticker 5m analysis (2-min TTL). `POST /api/intraday/scan` — batch scan up to 100 tickers with 8-thread pool. Returns VWAP, intraday RSI, volume acceleration, setup score 0–100, `passes` bool (entry window + VWAP + RSI + score gates). |
 
-Total: **11 blueprints, 78 routes** (including announcements blueprint). Three new routes in Sprint 9: `GET /api/log/ai_calls`, `GET /api/log/ai_call/<id>` (AI call log browse), plus `GET /health` enriched with version/uptime/last_backup.
+Total: **12 blueprints, 80 routes** (including announcements blueprint). Sprint 11 added `GET /api/intraday/<ticker>` and `POST /api/intraday/scan`.
 
 ### Frontend (JS) — load order matters
 
@@ -103,7 +104,7 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 → pages/backtest.js → pages/risk.js → pages/assistant.js
 → prompts.js → prompt-modules.js → claude-client.js → debate-client.js
 → response-validator.js → analysis.js
-→ asx-universe.js → strategy.js → day-trading-analysis.js → pages/day-trading.js
+→ asx-universe.js → strategy.js → intraday-strategy.js → day-trading-analysis.js → pages/day-trading.js
 → pages/news.js → pages/announcements.js → pages/scanner.js → pages/watchlist.js → pages/compare.js → pages/learning.js
 → pages/settings.js → alerts.js → navigation.js → init.js
 ```
@@ -344,6 +345,14 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 
 17. **Drawdown monitor needs portfolio history.** `renderPerformance()` computes drawdown from `state.portfolioHistory`. If `portfolioHistory` has <2 entries (e.g. fresh install), no drawdown cards are shown — this is intentional, not a bug.
 
+18. **Forming-bar guard drops today's ASX candle before 07:00 UTC.** `_drop_forming_bar(hist)` in `indicators.py` removes the last daily bar when `now_utc.hour < 7` AND the bar date matches today (UTC or AEST = UTC+10). This prevents incomplete intraday candles from inflating RSI/MACD during market hours. Called unconditionally in `analyse_ticker()` after every yfinance/Stooq fetch. Safe for historical dates (bar from yesterday or earlier is never dropped).
+
+19. **Stooq fallback ticker format.** `_fetch_stooq_history` converts `BHP.AX` → `bhp.au` (strip `.AX`, lowercase, add `.au`). Do not pass the full Yahoo `.AX` symbol to Stooq — it will return an empty CSV silently. The function imports `_HTTP_SESSION` lazily from `core` to avoid circular-import issues at module load time.
+
+20. **Stop-proximity alert is direction-aware.** `checkStopProximityAlerts()` checks `(price − stop) / price` for BUY/TOP_UP recs (stop below entry), and `(stop − price) / price` for SELL/TRIM recs (stop above entry). Threshold is `state.settings.stopProximityPct` (default 3 %). Set to 0 to disable. One-shot via `r._proximityAlertedAt`; re-arms when price retreats to 2× the threshold.
+
+21. **Intraday strategy is same-day only — no overnight hold.** `routes/intraday.py` fetches 5m bars (`period="2d", interval="5m"`). Entry window gate (`_in_entry_window()`) ensures `passes=False` outside 10:45–15:00 AEST — scanner still shows data but won't mark setups as actionable outside that window. `checkIntradayCloseouts()` fires a time-stop alert at 15:00 AEST for any open intraday position. yfinance 5m data has ~5–15 min latency; prices are indicative only. `state.intraday.openPositions` and `todayPnl` are stored in state (persisted to DB); the allocatedCash draws from `state.cash` and is tracked separately from `state.dayTrading.allocatedCash`.
+
 ---
 
 ## Deferred work (not done yet, noted for the next pass)
@@ -354,11 +363,11 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 | **FastAPI migration** | Half-day refactor of every route. Current Flask + gthread is fast enough. | Native async, auto-generated OpenAPI docs, faster I/O concurrency. |
 | **Walk-forward backtesting** | Requires vectorised OHLCV replay engine + parameter grid — a mini framework. | Robust strategy parameter tuning. |
 | **Mobile compact mode** | Needs CSS breakpoint pass on every card/table. | Phone-friendly read-only mode during market hours. |
-| **Correlation-aware sizing (exact)** | Current impl warns by sector weight; actual correlation matrix (from `/api/risk`) not yet injected into quant sizing step. | Reduce size automatically when |corr| > 0.7 with existing holding. |
 | **DRP parcel tracking** | Dividend income forecast assumes no DRP (dividend reinvestment); DRP parcels need their own CGT lot management. | Accurate CGT cost-base for DRP investors. |
 | **Vitest frontend tests** | JS test infrastructure needs setting up (jsdom, mocking globals). | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
 | **Hoist `_detectExitReason` into `utils.js`** | Currently duplicated in two page files; dedup risks the fragile script order. | Single source of truth for exit classification. |
 | **`pip install feedparser`** | Optional dep; RSS falls back to a built-in XML parser when absent (logs a warning each scan). | More robust news-feed parsing. |
+| **Stooq rate-limiting** | Stooq.com has undocumented rate limits (typically 1 req/sec). Under parallel batch requests the fallback may 429 silently (returns empty CSV). A per-domain semaphore or retry delay would prevent silent fallback failures. | Reliable Stooq fallback under load. |
 
 ---
 

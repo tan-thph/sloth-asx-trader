@@ -106,6 +106,20 @@ python3 asx_server.py</pre>
         </label>
         <span id="tg-status" class="text-xs text-muted"></span>
       </div>
+      <div style="margin-top:14px;padding-top:12px;border-top:0.5px solid var(--border-light)">
+        <div class="form-label" style="margin-bottom:6px">Stop proximity pre-warning (%)</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="number" min="0" max="20" step="0.5"
+            value="${state.settings.stopProximityPct ?? 3}"
+            onchange="updateSetting('stopProximityPct', parseFloat(this.value))"
+            style="width:80px;padding:5px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:13px">
+          <span class="text-xs text-muted">% from stop · 0 = disabled</span>
+        </div>
+        <div class="text-xs text-muted mt-1">
+          Fires an alert when a held position's price comes within this % of its stop loss —
+          giving you time to act before the stop is breached. Direction-aware (BUY and SELL recs).
+        </div>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Auto-Analysis Scheduler</div>

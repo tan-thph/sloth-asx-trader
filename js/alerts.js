@@ -119,6 +119,62 @@ function checkRecStopTargetAlerts() {
   if (anyFired && typeof scheduleSave === 'function') scheduleSave();
 }
 
+// ── Stop-proximity pre-warning ────────────────────────────────────────────────
+// Fires BEFORE a stop is breached — gives time to act.
+// Threshold: state.settings.stopProximityPct (default 3 %, 0 = disabled).
+// Direction-aware: BUY/TOP_UP stops are below price; SELL/TRIM stops above.
+// One-shot per approach via r._proximityAlertedAt; re-arms after price retreats.
+
+function checkStopProximityAlerts() {
+  const pct = (state.settings && state.settings.stopProximityPct != null)
+    ? Number(state.settings.stopProximityPct) : 3;
+  if (!pct || pct <= 0) return;   // 0 = user disabled
+
+  const priceMap = {};
+  for (const h of (state.portfolio || [])) {
+    if (h.ticker && h.currentPrice) priceMap[h.ticker] = h.currentPrice;
+  }
+
+  const openRecs = (state.recHistory || []).filter(r =>
+    r.executed && r.stopLoss && (r.outcome === 'open' || !r.outcome)
+  );
+
+  let anyFired = false;
+  openRecs.forEach(r => {
+    const price = priceMap[r.ticker] ?? priceMap[r.ticker + '.AX'];
+    if (price == null) return;
+    if (r._stopAlertedAt) return;   // stop already breached — skip
+
+    const isBuy = !r.action || r.action === 'BUY' || r.action === 'TOP_UP';
+    let distPct;
+    if (isBuy) {
+      if (price <= r.stopLoss) return;   // already through stop — handled elsewhere
+      distPct = (price - r.stopLoss) / price * 100;
+    } else {
+      // SELL/TRIM: stop is above current price; alert when price rises close to it
+      if (price >= r.stopLoss) return;
+      distPct = (r.stopLoss - price) / price * 100;
+    }
+
+    if (distPct <= pct) {
+      if (r._proximityAlertedAt) return;  // already warned this approach
+      const dir = isBuy ? '↓ approaching stop' : '↑ approaching stop';
+      fireAlert(
+        `⚠️ Stop proximity: ${r.ticker}`,
+        `$${price.toFixed(2)} is ${distPct.toFixed(1)}% from stop $${r.stopLoss.toFixed(2)} — ${dir}. Consider action.`,
+        `sloth-prox-${r.ticker}`
+      );
+      toast(`⚠️ ${r.ticker} ${distPct.toFixed(1)}% from stop`, 'warning');
+      r._proximityAlertedAt = new Date().toISOString();
+      anyFired = true;
+    } else if (r._proximityAlertedAt && distPct > pct * 2) {
+      // Price retreated well past threshold — re-arm for next approach
+      r._proximityAlertedAt = null;
+    }
+  });
+  if (anyFired && typeof scheduleSave === 'function') scheduleSave();
+}
+
 // ── Indicator alerts — RSI, Bollinger Bands, volume spike ─────────────────────
 // Called after fetchSignals() so state.liveSignals is fresh.
 // Alert types: 'rsi_below' | 'rsi_above' | 'bb_breakout' | 'bb_breakdown' | 'volume_spike'
@@ -166,4 +222,32 @@ function checkIndicatorAlerts() {
     }
   }
   if (anyTriggered && typeof scheduleSave === 'function') scheduleSave();
+}
+
+// ── Intraday 15:00 AEST hard time-stop ───────────────────────────────────────
+// Called after every price refresh. Fires once per position at 15:00 AEST
+// to remind the trader to close before end-of-session liquidity thins out.
+
+const _intradayClosedAlertedAt = {};  // posId → ISO timestamp (session-scoped)
+
+function checkIntradayCloseouts() {
+  if (!state.intraday || !(state.intraday.openPositions || []).length) return;
+
+  // Determine current AEST time in minutes since midnight (UTC+10 approx)
+  const now  = new Date();
+  const aest = new Date(now.getTime() + 10 * 3_600_000);
+  const hhmm = aest.getUTCHours() * 60 + aest.getUTCMinutes();
+  if (hhmm < 900) return;   // before 15:00 AEST — nothing to do yet
+
+  for (const pos of state.intraday.openPositions) {
+    if (_intradayClosedAlertedAt[pos.id]) continue;   // already alerted this position
+    _intradayClosedAlertedAt[pos.id] = new Date().toISOString();
+    fireAlert(
+      `⏰ Intraday time-stop: ${pos.ticker}`,
+      `15:00 AEST reached — close your intraday position before market gets illiquid. ` +
+      `${pos.qty} shares @ entry $${pos.entryPrice.toFixed(3)}.`,
+      `sloth-intraday-close-${pos.id}`
+    );
+    toast(`⏰ ${pos.ticker} intraday position must be closed now (15:00 AEST)`, 'warning');
+  }
 }

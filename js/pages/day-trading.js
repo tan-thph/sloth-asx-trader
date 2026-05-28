@@ -18,11 +18,12 @@ function _renderDayTrading() {
   const activeTab = dt.activeTab || 'setups';
   return `
     <div class="tabs" style="margin-bottom:14px">
-      <button class="tab ${activeTab === 'setups' ? 'active' : ''}" id="dt-tab-setups" onclick="switchDtTab('setups')">Setups</button>
-      <button class="tab ${activeTab === 'rules'  ? 'active' : ''}" id="dt-tab-rules"  onclick="switchDtTab('rules')">⚙ Rules</button>
+      <button class="tab ${activeTab === 'setups'   ? 'active' : ''}" id="dt-tab-setups"   onclick="switchDtTab('setups')">Setups</button>
+      <button class="tab ${activeTab === 'intraday' ? 'active' : ''}" id="dt-tab-intraday" onclick="switchDtTab('intraday')">⚡ Intraday</button>
+      <button class="tab ${activeTab === 'rules'    ? 'active' : ''}" id="dt-tab-rules"    onclick="switchDtTab('rules')">⚙ Rules</button>
     </div>
     <div id="dt-tab-content">
-      ${activeTab === 'setups' ? _renderDtSetupsTab() : _renderDtRulesTab()}
+      ${activeTab === 'setups' ? _renderDtSetupsTab() : activeTab === 'intraday' ? _renderDtIntradayTab() : _renderDtRulesTab()}
     </div>
   `;
 }
@@ -37,6 +38,8 @@ function switchDtTab(tab) {
   if (tab === 'setups') {
     el.innerHTML = _renderDtSetupsTab();
     _renderDtExtraChips();
+  } else if (tab === 'intraday') {
+    el.innerHTML = _renderDtIntradayTab();
   } else {
     el.innerHTML = _renderDtRulesTab();
   }
@@ -503,4 +506,312 @@ function _toggleDtDismissed(btn) {
   el.style.display = shown ? 'none' : 'flex';
   const count = (state.dayTrading.recommendations || []).filter(r => r.status === 'dismissed').length;
   btn.textContent = shown ? `Show dismissed (${count})` : `Hide dismissed`;
+}
+
+// ── ⚡ Intraday tab ───────────────────────────────────────────────────────────
+
+function _renderDtIntradayTab() {
+  if (!state.intraday) state.intraday = {
+    recommendations: [], openPositions: [], todayPnl: 0,
+    lastScan: null, scanRunning: false, autoRefresh: false,
+    allocatedCash: null,
+    params: { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20 },
+  };
+  const id = state.intraday;
+  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
+               ...(id.params || {}) };
+  const allocated = id.allocatedCash != null
+    ? id.allocatedCash
+    : Math.round(state.cash * ip.allocPct / 100);
+  const openPositions = id.openPositions || [];
+  const recs = id.recommendations || [];
+  const pending = recs.filter(r => r.status === 'pending');
+  const scanInfo = id.lastScan;
+
+  // ── Config card ──────────────────────────────────────────────────────────
+  const configCard = `
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-title" style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="background:#10b981;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;letter-spacing:.5px">INTRADAY</span>
+        Configuration
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px">
+        <div>
+          <div class="form-label">Target exit (%)</div>
+          <input type="number" min="1" max="10" step="0.5" value="${ip.targetPct}"
+            style="width:100%" onchange="updateIntradayParam('targetPct', parseFloat(this.value))">
+          <div class="text-xs text-muted mt-1">Sell when price rises this %</div>
+        </div>
+        <div>
+          <div class="form-label">Stop loss (%)</div>
+          <input type="number" min="0.5" max="5" step="0.5" value="${ip.stopPct}"
+            style="width:100%" onchange="updateIntradayParam('stopPct', parseFloat(this.value))">
+          <div class="text-xs text-muted mt-1">Exit if price falls this %</div>
+        </div>
+        <div>
+          <div class="form-label">Max positions</div>
+          <input type="number" min="1" max="5" step="1" value="${ip.maxPositions}"
+            style="width:100%" onchange="updateIntradayParam('maxPositions', parseInt(this.value))">
+          <div class="text-xs text-muted mt-1">Concurrent intraday trades</div>
+        </div>
+        <div>
+          <div class="form-label">Min score (0–100)</div>
+          <input type="number" min="20" max="90" step="5" value="${ip.minScore}"
+            style="width:100%" onchange="updateIntradayParam('minScore', parseInt(this.value))">
+          <div class="text-xs text-muted mt-1">Setup quality threshold</div>
+        </div>
+        <div>
+          <div class="form-label">Capital allocation (%)</div>
+          <input type="number" min="5" max="50" step="5" value="${ip.allocPct}"
+            style="width:100%" onchange="updateIntradayParam('allocPct', parseFloat(this.value))">
+          <div class="text-xs text-muted mt-1">= $${fmt(allocated, 0)} of $${fmt(state.cash, 0)}</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;padding-top:10px;border-top:0.5px solid var(--border-light);font-size:11px;color:var(--text-muted)">
+        ⏰ Entry window: 10:45–15:00 AEST only · ⚠️ yfinance 5m data has ~5–15 min latency — prices are indicative
+      </div>
+    </div>`;
+
+  // ── Action bar ────────────────────────────────────────────────────────────
+  const scanStatus = scanInfo
+    ? `Last scan: ${scanInfo.date} ${scanInfo.time} · ${scanInfo.passed}/${scanInfo.total} passed · ${scanInfo.count} setup${scanInfo.count !== 1 ? 's' : ''}`
+    : 'No scan run yet.';
+  const actionBar = `
+    <div class="card" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div>
+        <div style="font-size:13px;font-weight:600">ASX100 Intraday Scanner</div>
+        <div class="text-xs text-muted">${scanStatus}</div>
+      </div>
+      <div class="flex-row" style="gap:8px;flex-wrap:wrap;align-items:center">
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
+          <input type="checkbox" ${id.autoRefresh ? 'checked' : ''}
+            onchange="updateIntradayParam('autoRefresh', this.checked)">
+          Auto-refresh (2 min)
+        </label>
+        <button class="btn btn-primary btn-sm" ${id.scanRunning ? 'disabled' : ''}
+          onclick="runIntradayScan()"
+          style="background:#10b981;border-color:#10b981;display:flex;align-items:center;gap:6px">
+          ${id.scanRunning
+            ? '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Scanning…'
+            : '⚡ Scan Now'}
+        </button>
+      </div>
+    </div>`;
+
+  // ── Open Positions ────────────────────────────────────────────────────────
+  const todayPnl = id.todayPnl || 0;
+  const pnlColor = todayPnl >= 0 ? '#10b981' : '#ef4444';
+  const openPosHtml = openPositions.length === 0
+    ? '<div class="text-xs text-muted" style="padding:8px 0">No open intraday positions.</div>'
+    : openPositions.map(pos => {
+        // Try to get live price from portfolio or liveSignals
+        let livePrice = null;
+        const ph = (state.portfolio || []).find(h => h.ticker === pos.ticker);
+        if (ph && ph.currentPrice) livePrice = ph.currentPrice;
+        else if (state.liveSignals && state.liveSignals[pos.ticker]) {
+          livePrice = state.liveSignals[pos.ticker].current_price;
+        }
+        const unrlPnl = livePrice != null
+          ? (livePrice - pos.entryPrice) * pos.qty
+          : null;
+        const unrlPct = livePrice != null
+          ? (livePrice - pos.entryPrice) / pos.entryPrice * 100
+          : null;
+        const unrlColor = unrlPnl != null ? (unrlPnl >= 0 ? '#10b981' : '#ef4444') : 'var(--text-muted)';
+        return `
+          <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:8px 0;border-bottom:0.5px solid var(--border-light)">
+            <div style="min-width:80px">
+              <div style="font-size:14px;font-weight:700">${pos.ticker}</div>
+              <div class="text-xs text-muted">${pos.qty} shares · entered ${pos.enteredAt}</div>
+            </div>
+            <div style="display:flex;gap:14px;flex:1;flex-wrap:wrap">
+              <div><div class="text-xs text-muted">Entry</div><div style="font-size:13px">$${pos.entryPrice.toFixed(3)}</div></div>
+              <div><div class="text-xs text-muted">Target</div><div style="font-size:13px;color:#10b981">$${pos.target.toFixed(3)}</div></div>
+              <div><div class="text-xs text-muted">Stop</div><div style="font-size:13px;color:#ef4444">$${pos.stop.toFixed(3)}</div></div>
+              ${livePrice != null ? `
+              <div><div class="text-xs text-muted">Live</div><div style="font-size:13px">$${livePrice.toFixed(3)}</div></div>
+              <div><div class="text-xs text-muted">P&L</div>
+                <div style="font-size:13px;color:${unrlColor}">${unrlPnl >= 0 ? '+' : ''}$${(unrlPnl||0).toFixed(2)} (${(unrlPct||0) >= 0 ? '+' : ''}${(unrlPct||0).toFixed(2)}%)</div>
+              </div>` : ''}
+            </div>
+            <div class="flex-row" style="gap:6px">
+              ${livePrice != null
+                ? `<button class="btn btn-sm btn-primary" style="font-size:11px"
+                    onclick="closeIntradayPosition('${pos.id}', ${livePrice.toFixed(3)})">
+                    Close @ $${livePrice.toFixed(3)}</button>`
+                : `<button class="btn btn-sm" style="font-size:11px"
+                    onclick="prompt('Close price for ${pos.ticker}?') && closeIntradayPosition('${pos.id}', parseFloat(prompt('Close price for ${pos.ticker}?')))">
+                    Close</button>`}
+            </div>
+          </div>`;
+      }).join('');
+
+  const positionsCard = `
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="card-title" style="margin:0">Open Positions (${openPositions.length}/${ip.maxPositions})</div>
+        <div style="font-size:13px;font-weight:600;color:${pnlColor}">
+          Today P&L: ${todayPnl >= 0 ? '+' : ''}$${todayPnl.toFixed(2)}
+        </div>
+      </div>
+      ${openPosHtml}
+    </div>`;
+
+  // ── Setup candidates ──────────────────────────────────────────────────────
+  const slotsLeft = ip.maxPositions - openPositions.length;
+  const setupsHtml = pending.length === 0
+    ? `<div class="card" style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px">
+         ${id.scanRunning ? 'Scanning…' : id.lastScan ? 'No qualifying setups found. Run scan again during entry window (10:45–15:00 AEST).' : 'Run a scan to discover intraday setups.'}
+       </div>`
+    : pending.map(r => {
+        const scoreColor = r.intradayScore >= 70 ? '#10b981' : r.intradayScore >= 50 ? '#f59e0b' : '#6b7280';
+        const canExecute = slotsLeft > 0 && r.status === 'pending';
+        return `
+          <div class="card" style="border-left:3px solid #10b981;padding:12px 14px;margin-bottom:10px">
+            <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">
+              <div style="min-width:200px;flex:1">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+                  <span style="font-size:16px;font-weight:700">${r.ticker}</span>
+                  <span style="background:#10b981;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px">INTRADAY BUY</span>
+                  <span style="background:${scoreColor};color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px">Score ${r.intradayScore}</span>
+                </div>
+                <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
+                  ${(r.signals || []).map(s => `<span style="font-size:10px;padding:2px 8px;border-radius:10px;font-weight:600;background:#d1fae5;color:#065f46">${s}</span>`).join('')}
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);display:flex;gap:10px;flex-wrap:wrap">
+                  <span>VWAP: $${r.vwap != null ? r.vwap.toFixed(3) : '—'} (${r.pctFromVwap != null ? r.pctFromVwap.toFixed(2) : '—'}%)</span>
+                  ${r.intradayRsi != null ? `<span>RSI: ${r.intradayRsi}</span>` : ''}
+                  <span>R:R ${r.rrRatio}:1</span>
+                  <span class="text-xs text-muted">Gen: ${r.generatedAt}</span>
+                </div>
+              </div>
+              <div style="min-width:220px">
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px">
+                  <div style="text-align:center;padding:6px;background:var(--bg-secondary);border-radius:6px">
+                    <div style="font-size:10px;color:var(--text-muted)">Entry</div>
+                    <div style="font-size:13px;font-weight:600">$${r.priceRange[0].toFixed(3)}</div>
+                  </div>
+                  <div style="text-align:center;padding:6px;background:rgba(16,185,129,.08);border-radius:6px;border:0.5px solid rgba(16,185,129,.3)">
+                    <div style="font-size:10px;color:var(--text-muted)">Target</div>
+                    <div style="font-size:13px;font-weight:600;color:#10b981">$${r.target.toFixed(3)}</div>
+                  </div>
+                  <div style="text-align:center;padding:6px;background:rgba(239,68,68,.08);border-radius:6px;border:0.5px solid rgba(239,68,68,.3)">
+                    <div style="font-size:10px;color:var(--text-muted)">Stop</div>
+                    <div style="font-size:13px;font-weight:600;color:#ef4444">$${r.stopLoss.toFixed(3)}</div>
+                  </div>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:10px">
+                  <span>Qty: <b>${r.qty != null ? r.qty + ' shares' : '?'}</b></span>
+                  <span>Conf: <b>${Math.round((r.confidence || 0) * 100)}%</b></span>
+                </div>
+                <button class="btn btn-primary btn-sm" style="width:100%;background:#10b981;border-color:#10b981"
+                  ${canExecute ? '' : 'disabled'}
+                  onclick="executeIntradayTrade('${r.id}')">
+                  ${canExecute ? '⚡ Execute' : slotsLeft <= 0 ? 'Max positions' : 'Executed'}
+                </button>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+
+  return `
+    ${configCard}
+    ${actionBar}
+    ${positionsCard}
+    <div style="margin-bottom:6px;font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">
+      Intraday Setups (${pending.length})
+    </div>
+    ${setupsHtml}
+  `;
+}
+
+// ── Execute an intraday trade ─────────────────────────────────────────────────
+
+function executeIntradayTrade(recId) {
+  if (!state.intraday) return;
+  const rec = (state.intraday.recommendations || []).find(r => r.id === recId);
+  if (!rec || rec.status !== 'pending') return;
+
+  const ip = { maxPositions: 2, ...(state.intraday.params || {}) };
+  if ((state.intraday.openPositions || []).length >= ip.maxPositions) {
+    toast('Max intraday positions reached', 'error'); return;
+  }
+
+  const entryPrice = rec.priceRange[0];
+  const brokerage  = (state.settings && state.settings.brokerage) || 10;
+  const cost = rec.qty * entryPrice + brokerage;
+  if (cost > state.cash) { toast('Insufficient cash for this trade', 'error'); return; }
+
+  if (!state.intraday.openPositions) state.intraday.openPositions = [];
+  state.intraday.openPositions.push({
+    id:         rec.id,
+    ticker:     rec.ticker,
+    qty:        rec.qty,
+    entryPrice,
+    target:     rec.target,
+    stop:       rec.stopLoss,
+    enteredAt:  nowSydney(),
+  });
+
+  state.cash -= cost;
+  rec.status = 'executed';
+
+  scheduleSave();
+  if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
+  toast(`⚡ Intraday BUY: ${rec.ticker} × ${rec.qty} @ $${entryPrice.toFixed(3)}`, 'success');
+  renderPage();
+}
+
+// ── Close an intraday position ────────────────────────────────────────────────
+
+function closeIntradayPosition(posId, closePrice) {
+  if (!state.intraday || !closePrice || isNaN(closePrice)) return;
+  const pos = (state.intraday.openPositions || []).find(p => p.id === posId);
+  if (!pos) return;
+
+  const brokerage = (state.settings && state.settings.brokerage) || 10;
+  const gross = (closePrice - pos.entryPrice) * pos.qty;
+  const net   = gross - brokerage * 2;
+
+  if (!state.intraday.todayPnl) state.intraday.todayPnl = 0;
+  state.intraday.todayPnl += net;
+  state.cash += pos.qty * closePrice - brokerage;
+
+  // Log to trade journal
+  if (!state.tradeJournal) state.tradeJournal = [];
+  state.tradeJournal.unshift({
+    id:          Date.now(),
+    date:        todayStr(),
+    ticker:      pos.ticker,
+    action:      'SELL',
+    qty:         pos.qty,
+    entryPrice:  pos.entryPrice,
+    exitPrice:   closePrice,
+    fees:        brokerage * 2,
+    pnl:         net,
+    status:      'closed',
+    notes:       'Intraday same-day close',
+    closeDate:   todayStr(),
+  });
+
+  state.intraday.openPositions = state.intraday.openPositions.filter(p => p.id !== posId);
+
+  scheduleSave();
+  if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
+  const sign = net >= 0 ? '+' : '';
+  toast(`Closed ${pos.ticker}: ${sign}$${net.toFixed(2)}`, net >= 0 ? 'success' : 'warning');
+  renderPage();
+}
+
+// ── Update a single intraday parameter ───────────────────────────────────────
+
+function updateIntradayParam(key, val) {
+  if (!state.intraday) return;
+  if (key === 'autoRefresh') {
+    state.intraday.autoRefresh = !!val;
+  } else {
+    if (!state.intraday.params) state.intraday.params = {};
+    state.intraday.params[key] = val;
+  }
+  scheduleSave();
 }

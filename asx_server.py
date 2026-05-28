@@ -120,6 +120,7 @@ from routes.debate    import bp as _debate_bp
 from routes.news      import bp as _news_bp, _NE_OK
 from routes.alerts     import bp as _alerts_bp
 from routes.import_csv import bp as _import_csv_bp
+from routes.intraday   import bp as _intraday_bp
 app.register_blueprint(_claude_bp)
 app.register_blueprint(_portfolio_bp)
 app.register_blueprint(_dividends_bp)
@@ -131,6 +132,7 @@ app.register_blueprint(_debate_bp)
 app.register_blueprint(_news_bp)
 app.register_blueprint(_alerts_bp)
 app.register_blueprint(_import_csv_bp)
+app.register_blueprint(_intraday_bp)
 
 if _AE_OK:
     app.register_blueprint(ann_bp, url_prefix='/api/announcements')

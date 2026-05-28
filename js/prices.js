@@ -27,6 +27,8 @@ async function refreshPrices(opts = {}) {
   if(!silent) toast(`Updated ${updated} prices from yfinance`,'success');
   checkPriceAlerts();
   if (typeof checkRecStopTargetAlerts === 'function') checkRecStopTargetAlerts();
+  if (typeof checkStopProximityAlerts === 'function') checkStopProximityAlerts();
+  if (typeof checkIntradayCloseouts === 'function') checkIntradayCloseouts();
   checkExDivReminders();
   checkEarningsReminders();
   recordPortfolioSnapshot();

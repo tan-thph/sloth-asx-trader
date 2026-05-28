@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-28 (sprints 3–9 shipped)
+**Last Updated:** 2026-05-28 (sprints 3–11 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -11,7 +11,7 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 
 ---
 
-## 0. Shipped — 2026-05 sprints (through Sprint 9)
+## 0. Shipped — 2026-05 sprints (through Sprint 11)
 
 | Fix / Feature | Area | Detail |
 |---|---|---|
@@ -70,6 +70,11 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **Prompt version A/B delta** | AI (§2.7) | Learning Loop prompt version table now has Δ vs prev column: shows win-rate delta (pp) with ↑/↓/↔ arrow; greyed out when either version has <3 closed events. Current version highlighted with indigo "current" badge. |
 | **ETF filter for earnings calendar** | Reliability | `_fetch_earnings` checks `quoteType` from yfinance info; returns `{skipped:'ETF'}` for ETF/MUTUALFUND/MONEYMARKET — eliminates 404 log noise without a fragile static ticker list. |
 | **App Info card in Settings** | UX (§4) | Shows `PROMPT_VERSION`, `CLAUDE_MODEL`, server version/uptime, last DB backup date. `GET /health` now returns `version`, `uptime_s`, `last_backup`. |
+| **Forming-bar guard** | Data quality (§1.1) | `_drop_forming_bar(hist)` in `indicators.py` drops the current-day daily candle before 07:00 UTC (ASX close + 45-min settlement). Prevents incomplete intraday bar from inflating RSI/MACD/vol during market hours. Called in `analyse_ticker()` after every yfinance/Stooq fetch. |
+| **Stooq fallback data provider** | Reliability (§3.1) | `_fetch_stooq_history(ticker, period)` in `indicators.py`. When yfinance returns empty or < 30 bars, retries via `https://stooq.com/q/d/l/?s=bhp.au&i=d` (free, no key). Ticker conversion: `BHP.AX` → `bhp.au`. Returns same OHLCV schema. Uses `_HTTP_SESSION` from `core.py`. |
+| **Stop-proximity pre-warning** | Alerts (§2.3) | `checkStopProximityAlerts()` in `alerts.js` fires a `fireAlert()` + `toast()` when price is within `state.settings.stopProximityPct` % (default 3 %) of a stop, BEFORE the stop is breached. Direction-aware: BUY checks `(price − stop) / price`; SELL/TRIM inverts. One-shot via `_proximityAlertedAt`; re-arms when price retreats to 2× threshold. Called from `prices.js` after every price refresh. Configurable in Settings (0 = disable). |
+| **Position age + unrealised P&L enrichment** | AI accuracy | `_daysHeld(ticker)` helper in `analysis.js` queries `state.tradeJournal` for the earliest open BUY/TOP_UP. Both `daysHeld` and `unrealisedPnlPct` now included in `portfolioJson` sent to Claude — enabling time-aware recommendations ("held 60 days at −8%"). |
+| **ASX100 intraday same-day strategy** | Features | New `routes/intraday.py` + `js/intraday-strategy.js`. Scans ASX100 5m intraday bars for VWAP-discounted, RSI-oversold setups; composite score 0–100; hard gate 10:45–15:00 AEST only. New ⚡ Intraday tab in Day Trading page with configurable target % (default 3.5%), stop % (1.5%), max 2 positions. Open positions tracker with live P&L. `checkIntradayCloseouts()` fires time-stop alert at 15:00 AEST. `POST /api/intraday/scan` (batch, 8 threads, 2-min TTL); `GET /api/intraday/<ticker>` (single). |
 
 ---
 

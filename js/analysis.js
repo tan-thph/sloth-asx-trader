@@ -157,18 +157,37 @@ async function runAnalysis() {
     }).join('\n');
   }
 
+  // ── Helper: days held since earliest open BUY/TOP_UP for this ticker ──────
+  function _daysHeld(ticker) {
+    const buys = (state.tradeJournal || []).filter(t =>
+      t.ticker === ticker &&
+      (t.action === 'BUY' || t.action === 'TOP_UP') &&
+      !t.closeDate && t.date
+    );
+    if (!buys.length) return null;
+    const earliest = buys.reduce((a, b) => (a.date < b.date ? a : b));
+    return Math.floor((Date.now() - new Date(earliest.date).getTime()) / 86400000);
+  }
+
   // Merged portfolio for analysis (deduplicated, weighted avg)
   const mp = mergedPortfolio();
-  const portfolioJson = JSON.stringify(mp.map(h=>({
-    ticker: h.ticker,
-    sector: h.sector,
-    shares: h.shares,
-    avgPrice: h.avgPrice,
-    currentPrice: h.currentPrice,
-    value: h.shares * h.currentPrice,
-    unrealisedPnl: (h.currentPrice - h.avgPrice) * h.shares,
-    weight: ((h.shares * h.currentPrice) / portfolioValue() * 100).toFixed(1) + '%',
-  })));
+  const portfolioJson = JSON.stringify(mp.map(h => {
+    const days = _daysHeld(h.ticker);
+    const pnlPct = h.avgPrice > 0
+      ? +((h.currentPrice / h.avgPrice - 1) * 100).toFixed(2) : null;
+    return {
+      ticker: h.ticker,
+      sector: h.sector,
+      shares: h.shares,
+      avgPrice: h.avgPrice,
+      currentPrice: h.currentPrice,
+      value: h.shares * h.currentPrice,
+      unrealisedPnl: (h.currentPrice - h.avgPrice) * h.shares,
+      unrealisedPnlPct: pnlPct,
+      daysHeld: days,
+      weight: ((h.shares * h.currentPrice) / portfolioValue() * 100).toFixed(1) + '%',
+    };
+  }));
 
   // Recent recommendation history with outcomes + feedback
   // Strategy: send at most 10 recs. Prioritise:

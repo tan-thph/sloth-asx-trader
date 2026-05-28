@@ -5,6 +5,8 @@ All compute_* functions and analyse_ticker live here so they can be edited
 independently of the server routing logic in asx_server.py.
 """
 
+import datetime as _dt_mod
+import io
 import math
 from datetime import datetime
 
@@ -27,6 +29,74 @@ def safe_float(v, default=None):
         return None if (math.isnan(f) or math.isinf(f)) else f
     except Exception:
         return default
+
+
+# ── Forming-bar guard ─────────────────────────────────────────────────────────
+
+def _drop_forming_bar(hist: pd.DataFrame) -> pd.DataFrame:
+    """Drop the current-day bar when ASX data may not yet be fully settled.
+
+    ASX closes at ~16:12 AEST = ~06:12 UTC.  yfinance may return an incomplete
+    candle during market hours or within the first ~45 min after close.  We
+    treat the bar as settled only after 07:00 UTC to prevent RSI/MACD spikes
+    from intraday partial data.  Requires at least 2 rows so callers always
+    get a usable result.
+    """
+    if len(hist) < 2:
+        return hist
+    now_utc = _dt_mod.datetime.utcnow()
+    if now_utc.hour >= 7:
+        return hist   # well past settlement window — keep all bars
+    try:
+        last_date = pd.Timestamp(hist.index[-1]).date()
+    except Exception:
+        return hist
+    today_utc  = now_utc.date()
+    today_aest = (now_utc + _dt_mod.timedelta(hours=10)).date()
+    if last_date in (today_utc, today_aest):
+        return hist.iloc[:-1]
+    return hist
+
+
+# ── Stooq fallback data provider ─────────────────────────────────────────────
+
+def _fetch_stooq_history(ticker: str, period: str = "6mo") -> pd.DataFrame:
+    """Fetch daily OHLCV from Stooq when yfinance returns empty or fails.
+
+    ASX tickers are converted: BHP.AX → bhp.au  (Stooq's Australian market).
+    Returns a DataFrame matching yfinance's auto_adjust=True schema (Open, High,
+    Low, Close, Volume with a DatetimeIndex), or an empty DataFrame on failure.
+    """
+    _period_days = {"1mo": 35, "2mo": 65, "3mo": 95, "6mo": 185,
+                    "1y": 370, "2y": 740, "5y": 1830}
+    days = _period_days.get(period, 185)
+    end_dt   = _dt_mod.datetime.utcnow()
+    start_dt = end_dt - _dt_mod.timedelta(days=days)
+
+    sym_base  = ticker.upper().replace(".AX", "")
+    stooq_sym = sym_base.lower() + ".au"
+    url = (
+        f"https://stooq.com/q/d/l/?s={stooq_sym}"
+        f"&d1={start_dt.strftime('%Y%m%d')}"
+        f"&d2={end_dt.strftime('%Y%m%d')}"
+        f"&i=d"
+    )
+    try:
+        from core import _HTTP_SESSION
+        resp = _HTTP_SESSION.get(url, timeout=12)
+        if resp.status_code != 200 or not resp.text.strip():
+            return pd.DataFrame()
+        df = pd.read_csv(io.StringIO(resp.text))
+        if df.empty or "Date" not in df.columns:
+            return pd.DataFrame()
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date").sort_index()
+        required = ["Open", "High", "Low", "Close", "Volume"]
+        if not all(c in df.columns for c in required):
+            return pd.DataFrame()
+        return df[required].copy()
+    except Exception:
+        return pd.DataFrame()
 
 
 # ── ASX Sector Lookup ──────────────────────────────────────────────────────────
@@ -365,13 +435,23 @@ def _score_ticker(
 
 def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     t = asx(ticker)
+
+    # ── Primary: yfinance ────────────────────────────────────────────────────
+    stk = yf.Ticker(t)
     try:
-        stk = yf.Ticker(t)
         hist = stk.history(period=period, auto_adjust=True)
     except Exception as e:
-        return {"error": f"yfinance failed for {ticker}: {e}", "ticker": ticker.upper()}
+        hist = pd.DataFrame()
 
+    # ── Fallback: Stooq (free, no API key required) ──────────────────────────
     if hist.empty or len(hist) < 30:
+        hist = _fetch_stooq_history(ticker, period)
+        if hist.empty or len(hist) < 30:
+            return {"error": f"Insufficient data for {ticker}", "ticker": ticker.upper()}
+
+    # ── Drop forming bar (incomplete intraday candle during ASX market hours) ─
+    hist = _drop_forming_bar(hist)
+    if len(hist) < 30:
         return {"error": f"Insufficient data for {ticker}", "ticker": ticker.upper()}
 
     close  = hist["Close"]

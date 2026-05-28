@@ -55,6 +55,7 @@ const state = {
     scheduleWeekdaysOnly: true,
     scheduleRunOnOpen: true,
     sbcMode: false,
+    stopProximityPct: 3,
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary
@@ -161,7 +162,7 @@ const state = {
     extraTickers: [],      // watchlist tickers for day-trade scans only
     universeKey: 'asx200', // selected universe for universe scan
     scanProgress: null,    // {phase:'fetching'|'analysing', current, total, candidates} | null
-    activeTab: 'setups',   // 'setups' | 'rules'
+    activeTab: 'setups',   // 'setups' | 'intraday' | 'rules'
     filterParams: {        // pre-filter thresholds (applied client-side)
       maxBbPctB:   0.20,
       minAdvAud:   1500000,
@@ -177,6 +178,22 @@ const state = {
       volZScore:       1.5,
       fibReturnMin:    -20,
       fibReturnMax:    -5,
+    },
+  },
+  intraday: {
+    recommendations: [],    // [{id, ticker, priceRange, target, stopLoss, qty, score, signals, ...}]
+    openPositions:   [],    // [{id, ticker, qty, entryPrice, target, stop, enteredAt}]
+    todayPnl:        0,     // realized P&L for the session (AUD)
+    lastScan:        null,  // {date, time, total, passed, count}
+    scanRunning:     false,
+    autoRefresh:     false, // 2-min poller toggle
+    allocatedCash:   null,  // null = auto (allocPct% of state.cash)
+    params: {
+      targetPct:    3.5,   // exit target %
+      stopPct:      1.5,   // stop loss %
+      maxPositions: 2,     // max concurrent intraday trades
+      minScore:     40,    // minimum setup score (0–100)
+      allocPct:     20,    // % of state.cash allocated to intraday
     },
   },
 };

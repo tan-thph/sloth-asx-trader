@@ -75,7 +75,7 @@ def _install_in_memory_db():
     for name in ("routes.portfolio", "routes.dividends", "routes.market",
                  "routes.backtest", "routes.scanner", "routes.learning",
                  "routes.debate", "routes.news", "routes.claude",
-                 "routes.alerts", "routes.import_csv"):
+                 "routes.alerts", "routes.import_csv", "routes.intraday"):
         try:
             mod = importlib.import_module(name)
             if hasattr(mod, "get_db"):
@@ -1938,6 +1938,461 @@ class TestPromptVersionDelta(unittest.TestCase):
                       "learning.js must highlight the current prompt version")
         self.assertIn("PROMPT_VERSION", src,
                       "learning.js must reference PROMPT_VERSION for current-version badge")
+
+
+class TestSprint10FormingBarAndStooq(unittest.TestCase):
+    """Sprint 10 — forming-bar fix and Stooq fallback in indicators.py."""
+
+    def test_drop_forming_bar_function_exists(self):
+        """indicators.py must define _drop_forming_bar."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _drop_forming_bar(", src)
+
+    def test_drop_forming_bar_removes_todays_bar_before_settlement(self):
+        """_drop_forming_bar must remove the last row when now_utc.hour < 7 and last bar is today."""
+        import importlib, datetime
+        import pandas as pd
+        import indicators as ind
+
+        # Build a 3-row DataFrame whose last row is 'today' (AEST = UTC+10)
+        today_aest = (datetime.datetime.utcnow() + datetime.timedelta(hours=10)).date()
+        idx = pd.to_datetime([
+            str(today_aest - datetime.timedelta(days=2)),
+            str(today_aest - datetime.timedelta(days=1)),
+            str(today_aest),
+        ])
+        df = pd.DataFrame(
+            {"Open": [1, 2, 3], "High": [1, 2, 3], "Low": [1, 2, 3],
+             "Close": [1, 2, 3], "Volume": [100, 200, 300]},
+            index=idx,
+        )
+        import unittest.mock as _mock
+        # Patch utcnow to 06:00 UTC (before 07:00 settlement cutoff)
+        fake_now = datetime.datetime(today_aest.year, today_aest.month, today_aest.day, 6, 0, 0)
+        with _mock.patch("indicators._dt_mod") as mock_dt:
+            mock_dt.datetime.utcnow.return_value = fake_now
+            mock_dt.timedelta.side_effect = lambda **kw: datetime.timedelta(**kw)
+            result = ind._drop_forming_bar(df)
+        self.assertEqual(len(result), 2, "Forming bar should be dropped before 07:00 UTC")
+
+    def test_drop_forming_bar_keeps_bar_after_settlement(self):
+        """_drop_forming_bar must NOT remove the last row after 07:00 UTC."""
+        import importlib, datetime
+        import pandas as pd
+        import indicators as ind
+
+        today_aest = (datetime.datetime.utcnow() + datetime.timedelta(hours=10)).date()
+        idx = pd.to_datetime([
+            str(today_aest - datetime.timedelta(days=1)),
+            str(today_aest),
+        ])
+        df = pd.DataFrame(
+            {"Open": [1, 2], "High": [1, 2], "Low": [1, 2],
+             "Close": [1, 2], "Volume": [100, 200]},
+            index=idx,
+        )
+        import unittest.mock as _mock
+        fake_now = datetime.datetime(today_aest.year, today_aest.month, today_aest.day, 8, 0, 0)
+        with _mock.patch("indicators._dt_mod") as mock_dt:
+            mock_dt.datetime.utcnow.return_value = fake_now
+            result = ind._drop_forming_bar(df)
+        self.assertEqual(len(result), 2, "Bar must NOT be dropped after settlement window")
+
+    def test_drop_forming_bar_keeps_old_bars_before_settlement(self):
+        """_drop_forming_bar must not drop a bar from 2+ days ago even before 07:00 UTC."""
+        import datetime
+        import pandas as pd
+        import indicators as ind
+
+        yesterday = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).date()
+        idx = pd.to_datetime([
+            str(yesterday - datetime.timedelta(days=1)),
+            str(yesterday),
+        ])
+        df = pd.DataFrame(
+            {"Open": [1, 2], "High": [1, 2], "Low": [1, 2],
+             "Close": [1, 2], "Volume": [100, 200]},
+            index=idx,
+        )
+        import unittest.mock as _mock
+        fake_now = datetime.datetime.utcnow().replace(hour=3)
+        with _mock.patch("indicators._dt_mod") as mock_dt:
+            mock_dt.datetime.utcnow.return_value = fake_now
+            mock_dt.timedelta.side_effect = lambda **kw: datetime.timedelta(**kw)
+            result = ind._drop_forming_bar(df)
+        self.assertEqual(len(result), 2, "Old bars must never be dropped")
+
+    def test_fetch_stooq_history_function_exists(self):
+        """indicators.py must define _fetch_stooq_history."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _fetch_stooq_history(", src)
+
+    def test_stooq_url_format(self):
+        """_fetch_stooq_history must build a stooq.com URL with .au suffix."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("stooq.com", src)
+        self.assertIn(".au", src)  # ticker conversion suffix
+
+    def test_analyse_ticker_calls_forming_bar_drop(self):
+        """analyse_ticker must call _drop_forming_bar on the fetched hist."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_drop_forming_bar(hist)", src)
+
+    def test_analyse_ticker_calls_stooq_fallback(self):
+        """analyse_ticker must call _fetch_stooq_history when yfinance is insufficient."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_fetch_stooq_history(", src)
+
+    def test_analyse_ticker_stooq_returns_empty_df_on_failure(self):
+        """_fetch_stooq_history must return empty DataFrame when HTTP fails."""
+        import indicators as ind
+        import unittest.mock as _mock
+        # Patch _HTTP_SESSION import inside the function
+        with _mock.patch("indicators.io") as _io_mock:
+            _io_mock.StringIO.side_effect = Exception("network error")
+            from core import _HTTP_SESSION as real_sess
+            with _mock.patch.object(real_sess, "get", side_effect=Exception("connection refused")):
+                result = ind._fetch_stooq_history("BHP", "6mo")
+        import pandas as pd
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertTrue(result.empty)
+
+
+class TestSprint10StopProximityAlerts(unittest.TestCase):
+    """Sprint 10 — stop-proximity pre-warning alert feature."""
+
+    def test_check_stop_proximity_alerts_defined(self):
+        """alerts.js must define checkStopProximityAlerts."""
+        with open(os.path.join(ROOT, "js/alerts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function checkStopProximityAlerts(", src)
+
+    def test_proximity_alert_direction_aware(self):
+        """checkStopProximityAlerts must distinguish BUY from SELL direction."""
+        with open(os.path.join(ROOT, "js/alerts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("isBuy", src)
+        self.assertIn("SELL", src)
+
+    def test_proximity_alert_uses_setting(self):
+        """checkStopProximityAlerts must read stopProximityPct from state.settings."""
+        with open(os.path.join(ROOT, "js/alerts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("stopProximityPct", src)
+
+    def test_proximity_alert_one_shot(self):
+        """checkStopProximityAlerts must use _proximityAlertedAt for one-shot dedup."""
+        with open(os.path.join(ROOT, "js/alerts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_proximityAlertedAt", src)
+
+    def test_prices_calls_proximity_alerts(self):
+        """prices.js must call checkStopProximityAlerts after price refresh."""
+        with open(os.path.join(ROOT, "js/prices.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("checkStopProximityAlerts", src)
+
+    def test_stop_proximity_pct_in_config_defaults(self):
+        """config.js must define stopProximityPct in state.settings defaults."""
+        with open(os.path.join(ROOT, "js/config.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("stopProximityPct", src)
+
+    def test_stop_proximity_setting_in_settings_ui(self):
+        """settings.js must expose stopProximityPct as a configurable field."""
+        with open(os.path.join(ROOT, "js/pages/settings.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("stopProximityPct", src)
+        self.assertIn("Stop proximity", src)
+
+
+class TestSprint10PositionAge(unittest.TestCase):
+    """Sprint 10 — position age + unrealised P&L enrichment in analysis prompt."""
+
+    def test_days_held_helper_defined(self):
+        """analysis.js must define _daysHeld helper function."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_daysHeld", src)
+
+    def test_portfolio_json_includes_days_held(self):
+        """portfolioJson in analysis.js must include daysHeld field."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("daysHeld", src)
+
+    def test_portfolio_json_includes_unrealised_pnl_pct(self):
+        """portfolioJson in analysis.js must include unrealisedPnlPct field."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("unrealisedPnlPct", src)
+
+    def test_days_held_uses_trade_journal(self):
+        """_daysHeld must look up state.tradeJournal for earliest open BUY/TOP_UP."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("tradeJournal", src)
+        self.assertIn("TOP_UP", src)
+
+
+class TestIntradayStrategy(unittest.TestCase):
+    """Sprint 11 — ASX100 intraday 3-4% day-trade strategy."""
+
+    # ── Backend ──────────────────────────────────────────────────────────────
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_intraday_blueprint_registered(self):
+        """GET /api/intraday/<ticker> must return 200."""
+        import unittest.mock as _mock
+        import pandas as pd
+        import numpy as np
+
+        # Build a synthetic 10-bar 5m intraday DataFrame
+        dates = pd.date_range("2026-05-28 00:10", periods=10, freq="5min", tz="UTC")
+        df = pd.DataFrame({
+            "Open":   np.full(10, 50.0),
+            "High":   np.full(10, 51.0),
+            "Low":    np.full(10, 49.5),
+            "Close":  np.full(10, 50.2),
+            "Volume": np.full(10, 1_000_000),
+        }, index=dates)
+
+        import routes.intraday as _intraday_mod
+        with _mock.patch.object(_intraday_mod.yf, "Ticker") as mock_tk:
+            mock_tk.return_value.history.return_value = df
+            resp = self.client.get("/api/intraday/CBA")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("ticker", body)
+        self.assertEqual(body["ticker"], "CBA")
+
+    def test_intraday_scan_endpoint_exists(self):
+        """POST /api/intraday/scan must return a dict."""
+        import unittest.mock as _mock
+        import pandas as pd
+        import numpy as np
+
+        dates = pd.date_range("2026-05-28 00:10", periods=10, freq="5min", tz="UTC")
+        df = pd.DataFrame({
+            "Open":   np.full(10, 100.0),
+            "High":   np.full(10, 101.0),
+            "Low":    np.full(10, 99.5),
+            "Close":  np.full(10, 100.3),
+            "Volume": np.full(10, 2_000_000),
+        }, index=dates)
+
+        import routes.intraday as _intraday_mod
+        with _mock.patch.object(_intraday_mod.yf, "Ticker") as mock_tk:
+            mock_tk.return_value.history.return_value = df
+            resp = self.client.post(
+                "/api/intraday/scan",
+                json={"tickers": ["BHP"]},
+                content_type="application/json",
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIsInstance(body, dict)
+
+    def test_intraday_scan_empty_tickers_returns_empty(self):
+        """POST /api/intraday/scan with empty list must return {}."""
+        resp = self.client.post(
+            "/api/intraday/scan",
+            json={"tickers": []},
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(json.loads(resp.data), {})
+
+    def test_intraday_vwap_correct(self):
+        """_compute_vwap must return correct VWAP on a synthetic 5-row DataFrame."""
+        import pandas as pd
+        import numpy as np
+        from routes.intraday import _compute_vwap
+
+        df = pd.DataFrame({
+            "High":   [10.0, 11.0, 12.0, 11.5, 10.5],
+            "Low":    [ 9.0, 10.0, 11.0, 10.5,  9.5],
+            "Close":  [ 9.5, 10.5, 11.5, 11.0, 10.0],
+            "Volume": [1000, 2000, 1500, 1000, 1200],
+        })
+        vwap = _compute_vwap(df)
+        # Check that VWAP is cumulative and last value is finite
+        self.assertEqual(len(vwap), 5)
+        self.assertTrue(all(v > 0 and not np.isnan(v) for v in vwap))
+        # Check manual calculation for first bar: TP=9.5, vol=1000 → VWAP=9.5
+        self.assertAlmostEqual(float(vwap.iloc[0]), 9.5, places=4)
+
+    def test_intraday_rsi_returns_none_for_short_series(self):
+        """_compute_rsi_intraday must return None when close series is too short."""
+        import pandas as pd
+        from routes.intraday import _compute_rsi_intraday
+
+        short = pd.Series([50.0, 50.5, 51.0])
+        result = _compute_rsi_intraday(short, period=14)
+        self.assertIsNone(result)
+
+    def test_intraday_entry_window_gate(self):
+        """_in_entry_window must return False for times outside 10:45–15:00 AEST."""
+        import unittest.mock as _mock
+        from routes.intraday import _in_entry_window
+        import datetime
+
+        # Mock UTC time such that AEST = 10:30 (before window)
+        fake_utc = datetime.datetime(2026, 5, 28, 0, 30, 0)  # 00:30 UTC = 10:30 AEST
+        with _mock.patch("routes.intraday.datetime") as mock_dt:
+            mock_dt.utcnow.return_value = fake_utc
+            mock_dt.side_effect = lambda *a, **kw: datetime.datetime(*a, **kw)
+            result = _in_entry_window()
+        self.assertFalse(result)
+
+    def test_score_setup_zero_when_no_signals(self):
+        """_score_setup must return 0 when no signals are present."""
+        from routes.intraday import _score_setup
+        score = _score_setup(
+            pct_from_vwap=0.5,    # above VWAP — no VWAP discount
+            intraday_rsi=60,      # not oversold
+            vol_rising=False,
+            current_price=10.0,
+            day_low=10.0,         # price == day_low (fails ≥1.01 check)
+            day_open=10.5,        # price below open
+        )
+        self.assertEqual(score, 0)
+
+    def test_score_setup_max_100(self):
+        """_score_setup must never exceed 100."""
+        from routes.intraday import _score_setup
+        score = _score_setup(
+            pct_from_vwap=-5.0,   # huge discount
+            intraday_rsi=5,       # deeply oversold
+            vol_rising=True,
+            current_price=10.5,
+            day_low=9.0,
+            day_open=10.0,
+        )
+        self.assertLessEqual(score, 100)
+
+    # ── Frontend file checks ─────────────────────────────────────────────────
+
+    def test_intraday_js_exists(self):
+        """js/intraday-strategy.js must exist."""
+        self.assertTrue(
+            os.path.exists(os.path.join(ROOT, "js/intraday-strategy.js")),
+            "js/intraday-strategy.js not found"
+        )
+
+    def test_intraday_js_syntax(self):
+        """js/intraday-strategy.js must pass node --check."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/intraday-strategy.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+    def test_build_intraday_recs_defined(self):
+        """intraday-strategy.js must define _buildIntradayRecs."""
+        with open(os.path.join(ROOT, "js/intraday-strategy.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_buildIntradayRecs", src)
+
+    def test_run_intraday_scan_defined(self):
+        """intraday-strategy.js must define runIntradayScan."""
+        with open(os.path.join(ROOT, "js/intraday-strategy.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("runIntradayScan", src)
+
+    def test_intraday_defaults_defined(self):
+        """intraday-strategy.js must define INTRADAY_DEFAULTS with targetPct and stopPct."""
+        with open(os.path.join(ROOT, "js/intraday-strategy.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("INTRADAY_DEFAULTS", src)
+        self.assertIn("targetPct", src)
+        self.assertIn("stopPct", src)
+
+    def test_intraday_tab_in_day_trading(self):
+        """day-trading.js must include the ⚡ Intraday tab."""
+        with open(os.path.join(ROOT, "js/pages/day-trading.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("intraday", src)
+        self.assertIn("⚡ Intraday", src)
+
+    def test_execute_intraday_trade_defined(self):
+        """day-trading.js must define executeIntradayTrade."""
+        with open(os.path.join(ROOT, "js/pages/day-trading.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("executeIntradayTrade", src)
+
+    def test_close_intraday_position_defined(self):
+        """day-trading.js must define closeIntradayPosition."""
+        with open(os.path.join(ROOT, "js/pages/day-trading.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("closeIntradayPosition", src)
+
+    def test_update_intraday_param_defined(self):
+        """day-trading.js must define updateIntradayParam."""
+        with open(os.path.join(ROOT, "js/pages/day-trading.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("updateIntradayParam", src)
+
+    def test_intraday_state_in_config(self):
+        """config.js must contain the state.intraday block."""
+        with open(os.path.join(ROOT, "js/config.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("intraday:", src)
+        self.assertIn("openPositions", src)
+        self.assertIn("todayPnl", src)
+        self.assertIn("allocatedCash", src)
+
+    def test_intraday_closeout_in_alerts(self):
+        """alerts.js must define checkIntradayCloseouts."""
+        with open(os.path.join(ROOT, "js/alerts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("checkIntradayCloseouts", src)
+        self.assertIn("_intradayClosedAlertedAt", src)
+
+    def test_prices_calls_closeout(self):
+        """prices.js must call checkIntradayCloseouts after price refresh."""
+        with open(os.path.join(ROOT, "js/prices.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("checkIntradayCloseouts", src)
+
+    def test_intraday_script_in_html(self):
+        """asx_trading.html must load intraday-strategy.js."""
+        with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("intraday-strategy.js", src)
+
+    def test_intraday_script_order_in_html(self):
+        """intraday-strategy.js must be loaded after strategy.js and before day-trading-analysis.js."""
+        with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
+            src = f.read()
+        idx_strategy    = src.find("strategy.js")
+        idx_intraday    = src.find("intraday-strategy.js")
+        idx_dt_analysis = src.find("day-trading-analysis.js")
+        self.assertGreater(idx_intraday, idx_strategy,
+                           "intraday-strategy.js must load after strategy.js")
+        self.assertLess(idx_intraday, idx_dt_analysis,
+                        "intraday-strategy.js must load before day-trading-analysis.js")
+
+    def test_day_trading_js_syntax(self):
+        """day-trading.js must pass node --check after intraday additions."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/pages/day-trading.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
 
 
 if __name__ == "__main__":

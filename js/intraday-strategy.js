@@ -1,0 +1,157 @@
+// ============================================================
+// INTRADAY STRATEGY — ASX100 same-day 3-4% day-trade strategy
+// ============================================================
+// Buys technically discounted stocks (below VWAP, RSI oversold)
+// and exits at a configurable +3–4% target the same session.
+// Entry window: 10:45–15:00 AEST only. Max 2 concurrent positions.
+//
+// Globals used from other modules (loaded earlier):
+//   API, state, toast, renderPage, fmt, todayStr, nowSydney
+//   getUniverseTickers, computeTradeParams, scheduleSave
+
+const INTRADAY_DEFAULTS = {
+  targetPct:    3.5,   // exit target %
+  stopPct:      1.5,   // stop loss %
+  maxPositions: 2,     // max concurrent intraday trades
+  minScore:     40,    // minimum setup score (0–100)
+  allocPct:     20,    // % of state.cash allocated to intraday
+};
+
+// ── Build recs from scan results ──────────────────────────────────────────────
+
+function _buildIntradayRecs(scanData) {
+  const id = state.intraday || {};
+  const ip = { ...INTRADAY_DEFAULTS, ...(id.params || {}) };
+  const allocated = id.allocatedCash != null
+    ? id.allocatedCash
+    : Math.round(state.cash * ip.allocPct / 100);
+  const openCount = (id.openPositions || []).length;
+  const recs = [];
+
+  // Sort entries by score descending so best setups come first
+  const entries = Object.entries(scanData || {});
+  entries.sort((a, b) => (b[1].score || 0) - (a[1].score || 0));
+
+  for (const [ticker, d] of entries) {
+    if (d.error || !d.passes || d.score < ip.minScore) continue;
+    if (openCount + recs.length >= ip.maxPositions) break;
+
+    const entry  = d.current_price;
+    const target = +(entry * (1 + ip.targetPct / 100)).toFixed(3);
+    const stop   = +(entry * (1 - ip.stopPct   / 100)).toFixed(3);
+
+    // Try quant engine sizing first (requires daily signals for this ticker)
+    let qty = null;
+    const dailySig = state.liveSignals && state.liveSignals[ticker];
+    if (dailySig && typeof computeTradeParams === 'function') {
+      try {
+        const qt = computeTradeParams(
+          ticker, dailySig,
+          { allocatedCash: allocated, portfolioValue: 0,
+            brokerage: (state.settings && state.settings.brokerage) || 10,
+            rbaRate: state.rbaRate || 4.35 },
+          { winProb: Math.min(0.85, d.score / 100 * 0.85),
+            expectedTimeToTarget: 1,
+            priceRange: [entry, +(entry * 1.002).toFixed(3)],
+            target }
+        );
+        if (qt && qt.ok && qt.qty > 0) qty = qt.qty;
+      } catch (_) {}
+    }
+    // Fallback: risk 2% of allocated capital divided by the per-share stop distance
+    if (!qty) {
+      const riskPerTrade = allocated * 0.02;
+      const stopDist = entry * ip.stopPct / 100;
+      qty = stopDist > 0 ? Math.max(1, Math.floor(riskPerTrade / stopDist)) : 1;
+    }
+
+    const signals = [];
+    if (d.pct_from_vwap != null && d.pct_from_vwap <= -0.3)
+      signals.push(`VWAP −${Math.abs(d.pct_from_vwap).toFixed(1)}%`);
+    if (d.intraday_rsi != null && d.intraday_rsi <= 40)
+      signals.push(`RSI ${d.intraday_rsi}`);
+    if (d.vol_rising)
+      signals.push('Volume↑');
+    if (d.current_price != null && d.day_open != null && d.current_price > d.day_open)
+      signals.push('Above open');
+
+    recs.push({
+      id:            `IDT-${Date.now()}-${ticker}`,
+      ticker,
+      action:        'BUY',
+      status:        'pending',
+      date:          todayStr(),
+      generatedAt:   nowSydney(),
+      priceRange:    [entry, +(entry * 1.002).toFixed(3)],
+      target,
+      stopLoss:      stop,
+      rrRatio:       +(ip.targetPct / ip.stopPct).toFixed(1),
+      confidence:    +(Math.min(0.85, d.score / 100 * 0.85)).toFixed(2),
+      intradayScore: d.score,
+      qty,
+      vwap:          d.vwap,
+      pctFromVwap:   d.pct_from_vwap,
+      intradayRsi:   d.intraday_rsi,
+      dayOpen:       d.day_open,
+      dayHigh:       d.day_high,
+      dayLow:        d.day_low,
+      barsToday:     d.bars_today,
+      signals,
+      _isIntraday:   true,
+    });
+  }
+
+  return recs;
+}
+
+// ── Main scan function (called from UI) ───────────────────────────────────────
+
+async function runIntradayScan() {
+  // Ensure state.intraday is initialised (guard for first load before config is written)
+  if (!state.intraday) {
+    state.intraday = {
+      recommendations: [], openPositions: [], todayPnl: 0,
+      lastScan: null, scanRunning: false, autoRefresh: false,
+      allocatedCash: null, params: { ...INTRADAY_DEFAULTS },
+    };
+  }
+  if (state.intraday.scanRunning) return;
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  state.intraday.scanRunning = true;
+  renderPage();
+  toast('Scanning ASX100 for intraday setups…', 'info');
+
+  // Strip .AX suffix — backend's asx() helper re-appends it
+  const tickers = getUniverseTickers('asx100').map(t => t.replace('.AX', ''));
+
+  try {
+    const r = await fetch(`${API}/api/intraday/scan`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ tickers }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+
+    state.intraday.recommendations = _buildIntradayRecs(data);
+    const passed = Object.values(data).filter(d => d.passes).length;
+    state.intraday.lastScan = {
+      date:   todayStr(),
+      time:   nowSydney(),
+      total:  tickers.length,
+      passed,
+      count:  state.intraday.recommendations.length,
+    };
+    const count = state.intraday.recommendations.length;
+    toast(
+      `Intraday scan: ${count} setup${count !== 1 ? 's' : ''} found (${passed} passed filters)`,
+      count > 0 ? 'success' : 'info'
+    );
+  } catch (e) {
+    toast(`Intraday scan failed: ${e.message}`, 'error');
+  } finally {
+    state.intraday.scanRunning = false;
+    renderPage();
+  }
+}
