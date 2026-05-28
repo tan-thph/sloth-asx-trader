@@ -337,17 +337,36 @@ def _pm_build_summary(row) -> str:
     Compact trade summary for postmortem classification.
     recommendation must be first — without it models assume BUY direction
     and misinterpret entry prices for SELL/TRIM trades.
+    Annotates stop/target with direction notes so models know when prices
+    are on the 'wrong' side (e.g. stop below entry for a SELL).
     """
-    status = row["outcome_status"]
+    status  = row["outcome_status"]
+    action  = (row["recommendation"] or "BUY").upper()
+    is_exit = action in ("SELL", "TRIM")
+    entry   = row["actual_entry_price"]
+    stop    = row["suggested_stop"]
+    target  = row["suggested_target"]
+
+    def _dir_note(price, entry, price_should_be_above: bool) -> str:
+        """Return '(correct)' / '(STORED INCORRECTLY — wrong direction)' annotation."""
+        if price is None or entry is None:
+            return ""
+        above = price > entry
+        ok = above if price_should_be_above else not above
+        return " [correct dir]" if ok else " [⚠ wrong dir — stored incorrectly?]"
+
+    stop_note   = _dir_note(stop,   entry, price_should_be_above=is_exit)   # SELL stop above entry
+    target_note = _dir_note(target, entry, price_should_be_above=not is_exit) # SELL target below entry
+
     return (
-        f"{row['recommendation'] or '?'} {row['ticker']} {status.upper()}"
+        f"{action} {row['ticker']} {status.upper()}"
         + (f" | PnL={row['realized_pnl_pct']:.1f}%"           if row["realized_pnl_pct"]    is not None else "")
         + (f" | hold={row['holding_period_days']}d"             if row["holding_period_days"] is not None else "")
         + (f" | AI_conf={row['ai_confidence']:.0%}"             if row["ai_confidence"]       is not None else "")
         + (f" | RR={row['rr_ratio']:.1f}"                       if row["rr_ratio"]            is not None else "")
-        + (f" | entry={row['actual_entry_price']:.3f}"          if row["actual_entry_price"]  is not None else "")
-        + (f" | stop={row['suggested_stop']:.3f}"               if row["suggested_stop"]      is not None else "")
-        + (f" | target={row['suggested_target']:.3f}"           if row["suggested_target"]    is not None else "")
+        + (f" | entry={entry:.3f}"                              if entry                      is not None else "")
+        + (f" | stop={stop:.3f}{stop_note}"                     if stop                       is not None else "")
+        + (f" | target={target:.3f}{target_note}"               if target                     is not None else "")
         + (f" | exit={row['exit_reason']}"                      if row["exit_reason"]         else "")
         + (f" | regime={row['regime']}"                         if row["regime"]              else "")
         + (f" | sector={row['sector']}"                         if row["sector"]              else "")
@@ -365,10 +384,29 @@ def _pm_exit_hint(exit_reason: str) -> str:
 
 
 def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
-                     entry_signals_str: str = "") -> str:
-    """Full postmortem classification prompt. D5: accepts entry_signals_str."""
+                     entry_signals_str: str = "", action: str = "BUY") -> str:
+    """Full postmortem classification prompt. D5: entry_signals_str. D6: action for direction."""
+    is_exit = action.upper() in ("SELL", "TRIM")
+
+    # Direction preamble — prevents models from defaulting to BUY framing on SELL/TRIM trades.
+    # Without this, models misread the stop/target position (e.g. call a correctly-set
+    # SELL target "below entry — wrong" when that is exactly correct for a short thesis).
+    direction_note = (
+        "DIRECTION: This is a SELL/TRIM (exit/bearish) trade.\n"
+        "  For SELL/TRIM → stop loss is set ABOVE entry (price rising = wrong direction, cut loss).\n"
+        "  For SELL/TRIM → target is set BELOW entry (price falling = thesis confirmed, take profit).\n"
+        "  If the summary shows stop BELOW entry for this SELL, the price was stored incorrectly —\n"
+        "  do NOT tag 'stop_too_tight' or compute R:R based on that wrong-direction stop.\n"
+        "  R:R for SELL = (entry − target) / (stop − entry) [both distances must be positive].\n\n"
+    ) if is_exit else (
+        "DIRECTION: This is a BUY/TOP_UP (long) trade.\n"
+        "  Stop loss is BELOW entry; target is ABOVE entry.\n"
+        "  R:R = (target − entry) / (entry − stop).\n\n"
+    )
+
     return (
-        f"ASX closed trade (LOSS or BREAKEVEN): {summary}\n"
+        direction_note
+        + f"ASX closed trade (LOSS or BREAKEVEN): {summary}\n"
         + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "No original rationale stored.\n")
         + (f"Exit context: {exit_hint}\n" if exit_hint else "")
         + (f"Entry signals at the time: {entry_signals_str}\n" if entry_signals_str else "")
@@ -489,6 +527,57 @@ def _call_cloud_adjudicator(provider: str, api_key: str, model: str,
     if provider == "groq":
         return _call_groq_json(api_key, model, prompt, timeout=timeout)
     return {"ok": False, "error": f"Unknown adjudicator provider: {provider}"}
+
+
+def _get_cloud_keys() -> dict:
+    """
+    Read Groq and Gemini keys from blob_store.news_settings.
+    Returns {"groq_key": ..., "groq_model": ..., "gemini_key": ..., "gemini_model": ...}.
+    """
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT value FROM blob_store WHERE key='news_settings'"
+            ).fetchone()
+    except Exception:
+        row = None
+    s = json.loads(row["value"]) if row else {}
+    return {
+        "groq_key":     s.get("groq_api_key", "") or "",
+        "groq_model":   s.get("groq_model")   or "llama-3.3-70b-versatile",
+        "gemini_key":   s.get("google_api_key", "") or "",
+        "gemini_model": s.get("google_model") or "gemini-2.0-flash",
+    }
+
+
+def _call_model_any(model_name: str, prompt: str, timeout: int) -> dict:
+    """
+    Unified model dispatcher for postmortem debate phases.
+
+    model_name prefixes:
+      "groq:<model>"   → Groq API (reads key from news_settings blob)
+      "gemini:<model>" → Gemini API (reads key from news_settings blob)
+      anything else    → Ollama local
+    """
+    if model_name.startswith("groq:"):
+        actual = model_name[5:].strip()
+        keys   = _get_cloud_keys()
+        if not keys["groq_key"]:
+            return {"ok": False, "error": "Groq API key not configured (add it in News Scanner settings)"}
+        return _call_groq_json(keys["groq_key"], actual or keys["groq_model"], prompt, timeout=timeout)
+
+    if model_name.startswith("gemini:"):
+        actual = model_name[7:].strip()
+        keys   = _get_cloud_keys()
+        if not keys["gemini_key"]:
+            return {"ok": False, "error": "Google API key not configured (add it in News Scanner settings)"}
+        return _call_gemini_json(keys["gemini_key"], actual or keys["gemini_model"], prompt, timeout=timeout)
+
+    return _call_ollama(model_name, prompt, timeout=timeout, retries=0, think=False)
+
+
+def _is_cloud_model(model_name: str) -> bool:
+    return model_name.startswith("groq:") or model_name.startswith("gemini:")
 
 
 def _pm_sanity_check_tags(final_tags: str, row, ev_id: int, label: str = "") -> str:
@@ -648,11 +737,10 @@ def debate_postmortem():
             )
     except Exception:
         pass
-    prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str)
+    action = (row["recommendation"] or "BUY").upper()
+    prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str, action=action)
 
-    # think=False: suppress thinking tokens so they don't eat num_predict budget
-    # retries=0 — timeout means model is too slow; caller should switch to a smaller model
-    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False)
+    result = _call_model_any(model, prompt, timeout=tout)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 
@@ -762,17 +850,18 @@ def debate_postmortem_debate():
             )
     except Exception:
         pass
-    base_prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str)
+    action      = (row["recommendation"] or "BUY").upper()
+    base_prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str, action=action)
 
     # ── Phase 1: Independent classification ───────────────────────────────────
     t0    = time.time()
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1A — {model_a}…")
-    res_a = _call_ollama(model_a, base_prompt, timeout=tout, retries=0, think=False)
+    res_a = _call_model_any(model_a, base_prompt, timeout=tout)
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1A done ({int((time.time()-t0)*1000)}ms)")
 
     t1 = time.time()
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1B — {model_b}…")
-    res_b = _call_ollama(model_b, base_prompt, timeout=tout, retries=0, think=False)
+    res_b = _call_model_any(model_b, base_prompt, timeout=tout)
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1B done ({int((time.time()-t1)*1000)}ms)")
 
     if not res_a["ok"]:
@@ -888,7 +977,7 @@ def debate_postmortem_debate():
             'To concede: {"maintain":false,"final_tags":"TAG1,TAG2","reason":"which of their points convinced you"}\n'
             "No markdown, no explanation outside JSON."
         )
-        res_ch = _call_ollama(model_a, challenge_prompt, timeout=tout, retries=0, think=False)
+        res_ch = _call_model_any(model_a, challenge_prompt, timeout=tout)
         current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 3 done ({int((time.time()-t2)*1000)}ms)")
 
         transcript["phase_3"] = {

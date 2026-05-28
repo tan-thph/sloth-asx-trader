@@ -750,23 +750,30 @@ async function renderLearningDebateCard() {
   const currentOppModel = state.debate?.oppositionModel || '';
   const currentAgg      = state.debate?.aggression || 'light';
 
-  // Model <select> options — "Auto" + all pulled models
-  const modelOptions = ['', ...models].map(m => {
-    const label = m === '' ? `Auto (${typeof preferredDebateModel === 'function' ? preferredDebateModel(models) : models[0] || '?'})` : m;
-    return `<option value="${m}" ${currentModel === m ? 'selected' : ''}>${label}</option>`;
-  }).join('');
+  // Cloud model presets — always shown; backend reads keys from news_settings
+  const CLOUD_MODELS = [
+    { value: 'groq:llama-3.3-70b-versatile', label: 'groq: llama-3.3-70b (free)' },
+    { value: 'groq:mixtral-8x7b-32768',      label: 'groq: mixtral-8x7b (free)'  },
+    { value: 'gemini:gemini-2.0-flash',       label: 'gemini: 2.0-flash (free)'   },
+    { value: 'gemini:gemini-1.5-flash',       label: 'gemini: 1.5-flash (free)'   },
+  ];
 
-  // Opposition model options — "Auto (pick different)" + all pulled models
-  const oppModelOptions = ['', ...models].map(m => {
-    const label = m === '' ? 'Auto (pick different model)' : m;
-    return `<option value="${m}" ${currentOppModel === m ? 'selected' : ''}>${label}</option>`;
-  }).join('');
+  const _mkOpts = (list, current, autoLabel) => [
+    `<option value="" ${current === '' ? 'selected' : ''}>${autoLabel}</option>`,
+    ...list.map(m => `<option value="${m}" ${current === m ? 'selected' : ''}>${m}</option>`),
+    `<optgroup label="─ Cloud (needs key in News settings) ─">`,
+    ...CLOUD_MODELS.map(c => `<option value="${c.value}" ${current === c.value ? 'selected' : ''}>${c.label}</option>`),
+    `</optgroup>`,
+  ].join('');
+
+  const modelOptions    = _mkOpts(models, currentModel,    `Auto (${typeof preferredDebateModel === 'function' ? preferredDebateModel(models) : models[0] || '?'})`);
+  const oppModelOptions = _mkOpts(models, currentOppModel, 'Auto (pick different model)');
 
   el.style.display = 'block';
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <div class="card-title" style="margin:0">🤖 Local Debate Engine</div>
-      <span style="font-size:11px;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;padding:2px 8px;border-radius:4px">● Online · ${models.length} model${models.length !== 1 ? 's' : ''} pulled</span>
+      <div class="card-title" style="margin:0">🤖 Debate Engine</div>
+      <span style="font-size:11px;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;padding:2px 8px;border-radius:4px">● Online · ${models.length} local model${models.length !== 1 ? 's' : ''} pulled</span>
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
@@ -799,6 +806,7 @@ async function renderLearningDebateCard() {
       <div style="display:flex;align-items:flex-end">
         <p class="text-xs text-muted" style="margin:0;line-height:1.4">
           ⚔️ on each loss row runs an adversarial 3-phase debate between primary and opposition models — only on demand.
+          Cloud models (groq:/gemini:) bypass Ollama and use your API key from News settings.
         </p>
       </div>
     </div>
@@ -1050,25 +1058,39 @@ async function triggerAdversarialPostmortem(eventId) {
   const btn = document.getElementById(`adv-btn-${eventId}`);
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; btn.title = 'Debate running…'; }
 
+  const _isCloud = m => m && (m.startsWith('groq:') || m.startsWith('gemini:'));
+
   try {
-    const status = await debateStatus();
-    if (!status.available) {
-      toast('Ollama is not running — start it first', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
-      return;
+    const primaryPref = state.debate?.model || '';
+    const oppPref     = state.debate?.oppositionModel || '';
+    const bothCloud   = _isCloud(primaryPref) && _isCloud(oppPref);
+
+    let models = [];
+    if (!bothCloud) {
+      const status = await debateStatus();
+      if (!status.available && !_isCloud(primaryPref)) {
+        toast('Ollama is not running — start it or pick cloud models (groq:/gemini:)', 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
+        return;
+      }
+      models = status.models || [];
     }
 
-    const models  = status.models || [];
-    const modelA  = (typeof preferredDebateModel === 'function')
-      ? preferredDebateModel(models) : (models[0] || 'qwen3:9b');
+    const modelA  = _isCloud(primaryPref) ? primaryPref
+      : (typeof preferredDebateModel === 'function') ? preferredDebateModel(models) : (models[0] || 'qwen3:9b');
 
-    // Opposition model — must differ from primary; fall back to second model in list
-    let modelB = state.debate?.oppositionModel || '';
+    // Opposition model — must differ from primary
+    let modelB = oppPref;
     if (!modelB || modelB === modelA) {
+      if (_isCloud(modelA)) {
+        toast('⚔️ Set an opposition model (different cloud or local) to run the debate.', 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
+        return;
+      }
       modelB = models.find(m => m !== modelA) || '';
     }
     if (!modelB) {
-      toast('⚔️ Debate needs at least 2 pulled models. Pull a second model (e.g. gemma3:4b).', 'error');
+      toast('⚔️ Debate needs at least 2 models. Pull a second Ollama model or pick a cloud opposition.', 'error');
       if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
       return;
     }
@@ -1138,14 +1160,28 @@ function showPostmortemDebateModal(result, eventId) {
   const _fnum = (v, dp = 2) => v == null ? '—' : Number(v).toFixed(dp);
   const _fpct = (v, dp = 1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(dp) + '%';
 
-  // Fix #4: Trade context block — shows recommendation direction + prices
-  // upfront so the user can immediately spot model misreads (e.g. SELL trade
-  // tagged with "poor_entry" because model assumed BUY direction).
-  // Gracefully omitted for older stored debates that pre-date the trade field.
+  // Trade context block — shows recommendation direction + prices upfront so
+  // the user can immediately spot model misreads (e.g. SELL trade tagged with
+  // "poor_entry" because model assumed BUY direction).
+  // Also flags when stop/target are on the wrong side for the rec direction
+  // (e.g. stop below entry for a SELL — stored incorrectly by the AI rec generator).
   const trade = d.trade;
   let stopDistPct = null, targetDistPct = null;
   if (trade?.entry && trade?.stop)   stopDistPct   = ((trade.stop   - trade.entry) / trade.entry) * 100;
   if (trade?.entry && trade?.target) targetDistPct = ((trade.target - trade.entry) / trade.entry) * 100;
+
+  const _isExitAction = rec => rec && (rec.toUpperCase() === 'SELL' || rec.toUpperCase() === 'TRIM');
+  // Direction warnings: for SELL/TRIM, stop should be above entry and target below
+  const _dirWarn = (distPct, shouldBeAbove) => {
+    if (distPct == null) return '';
+    const above = distPct > 0;
+    const ok = shouldBeAbove ? above : !above;
+    return ok ? '' : ` <span style="background:#fef3c7;border:1px solid #fde68a;border-radius:3px;padding:1px 5px;font-size:10px;color:#92400e" title="This price is on the wrong side of entry for the trade direction — it may have been stored incorrectly by the AI rec.">⚠ wrong dir</span>`;
+  };
+
+  const isExit = _isExitAction(trade?.recommendation);
+  const stopWarn   = trade ? _dirWarn(stopDistPct,   isExit)     : '';  // SELL: stop should be above (+)
+  const targetWarn = trade ? _dirWarn(targetDistPct, !isExit)    : '';  // SELL: target should be below (-)
 
   const tradeBlock = trade ? `
     <div style="background:var(--bg-secondary);border:1px solid var(--border);
@@ -1155,16 +1191,18 @@ function showPostmortemDebateModal(result, eventId) {
       </div>
       <div style="font-size:12px;color:var(--text-primary);display:grid;grid-template-columns:auto 1fr;gap:4px 14px">
         <span style="color:var(--text-muted)">Action</span>
-        <span><strong>${trade.recommendation || '?'}</strong> ${trade.ticker || ''}${trade.hold_days != null ? ` · held ${trade.hold_days}d` : ''}${trade.regime ? ` · ${trade.regime}` : ''}</span>
+        <span><strong>${trade.recommendation || '?'}</strong> ${trade.ticker || ''}${trade.hold_days != null ? ` · held ${trade.hold_days}d` : ''}${trade.regime ? ` · ${trade.regime}` : ''}
+          ${isExit ? `<span style="font-size:10px;color:var(--text-muted);margin-left:6px">stop↑ above entry · target↓ below entry</span>` : `<span style="font-size:10px;color:var(--text-muted);margin-left:6px">stop↓ below entry · target↑ above entry</span>`}
+        </span>
 
         <span style="color:var(--text-muted)">Entry</span>
         <span>$${_fnum(trade.entry, 3)}</span>
 
         <span style="color:var(--text-muted)">Stop</span>
-        <span>$${_fnum(trade.stop, 3)}${stopDistPct != null ? ` <span style="color:var(--text-muted)">(${_fpct(stopDistPct)})</span>` : ''}</span>
+        <span>$${_fnum(trade.stop, 3)}${stopDistPct != null ? ` <span style="color:var(--text-muted)">(${_fpct(stopDistPct)})</span>` : ''}${stopWarn}</span>
 
         <span style="color:var(--text-muted)">Target</span>
-        <span>$${_fnum(trade.target, 3)}${targetDistPct != null ? ` <span style="color:var(--text-muted)">(${_fpct(targetDistPct)})</span>` : ''}</span>
+        <span>$${_fnum(trade.target, 3)}${targetDistPct != null ? ` <span style="color:var(--text-muted)">(${_fpct(targetDistPct)})</span>` : ''}${targetWarn}</span>
 
         <span style="color:var(--text-muted)">P&amp;L · Exit</span>
         <span>
