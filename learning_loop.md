@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** May 2026
-**Status:** Phases 1–5, 7 Complete · Stages 1–4 + D1–D7 + L1–L6 improvements applied · Phase 6 & 8 Planned
+**Last Updated:** May 2026 (Sprint 23 hardening)
+**Status:** Phases 1–5, 7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23 improvements applied · Phase 6 & 8 Planned
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -119,13 +119,25 @@ Protective stops are excluded from confidence calibration regardless of tags, bu
 
 The count of confidence-band exclusions is shown in the block prefix as `Nexcl` so Claude knows they were filtered.
 
-**3. Regime freshness gate** ✅
-If 1–2 trades exist in the current regime, the calibration block warns Claude rather than omitting data silently (L1):
+**3. Effective Sample Size (ESS) gating** ✅ *(Sprint 23)*
+Raw trade count is a poor gate for stale samples. If 4 trades exist but 3 are 90 days old (weight ≈ 0.1 each) and 1 is fresh (weight = 1.0), the sample reads as 4 but is dominated entirely by the single recent trade.
+
+All calibration sections now use Kish's ESS formula:
 ```
-⚠only 1 trade in bullTrending regime—calibration limited
+ESS = (Σwi)² / Σwi²
 ```
-0 trades = silently omitted (nothing to warn about). 3+ trades = full decay-weighted win rate shown.
-This prevents a freshly-transitioned regime from inheriting the previous regime's failure patterns.
+Threshold is **ESS ≥ 2.5**. Below this, the system emits a warning token rather than a confidence nudge:
+```
+conf 70-80%:⚠low ESS=1.6(n=4)—data too stale for reliable calibration
+```
+Equal-weight samples behave the same as before (4 trades, equal weights → ESS = 4.0). Stale samples are correctly gated regardless of raw count.
+
+**3b. Regime freshness gate** ✅ (L1, now ESS-integrated)
+The regime section checks ESS first. Low ESS emits:
+```
+⚠bullTrending:ESS=1.4(n=3)—regime data too stale for calibration
+```
+0 trades = silently omitted. ESS ≥ 2.5 = full decay-weighted win rate shown. This prevents a freshly-transitioned regime from inheriting the previous regime's failure patterns.
 
 **4. Date range in calibration block** ✅
 Every calibration block includes the date range and regime so Claude can contextualise the data:
@@ -138,13 +150,15 @@ Calibration fetches the current regime from the request and compares same-regime
 
 ### Still to implement
 
-**Skill-weighted calibration (Phase 8)**
-Once enough `skill_score` values accumulate (target: ~20+ scored events), weight calibration by:
+**Skill-weighted calibration (Phase 8) — partially live**
+The `_weight()` function in `_calib_compute()` already applies skill weighting:
 ```python
-weight = time_decay × max(0.2, skill_score / 10)
+weight = time_decay × max(0.2, skill_score / 10)   # skill_score ∈ [0, 10]
 ```
-A luck win from 60 days ago: `0.5 × 0.2 = 0.10` effective weight.
-A high-skill win from last week: `1.0 × 0.9 = 0.90` effective weight.
+This is live code. However, skill_score is `NULL` for events not yet scored — those fall back to weight = time_decay × 1.0 (neutral). Phase 8 is fully realised once ~20+ scored events exist and all recent events have a score; at that point the weighting has enough coverage to meaningfully differentiate luck wins from skill wins.
+
+**Virtual outcomes / paper-trade skipped recs (deferred)**
+When calibration suppresses Claude's confidence in a regime and recs are skipped, no new outcomes enter the loop — the pessimism can become self-reinforcing. The fix: track hypothetical P&L on `was_executed=0` events at their suggested entry/stop/target prices, feed those back into calibration at a discount (weight × 0.75). Deferred — requires scheduled background price-checking + new DB columns + frontend visibility.
 
 ---
 
@@ -152,14 +166,15 @@ A high-skill win from last week: `1.0 × 0.9 = 0.90` effective weight.
 
 `fetchCalibrationBlock(regime, sectors, tickers)` in `analysis.js` calls `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` after regime detection. The backend:
 1. Fetches last 90 days of closed events (max 180d) — pure `_calib_compute()` function, TTL-cached 5 min (L4)
-2. Applies exponential decay weighting (half-life 45d)
+2. Applies exponential + skill-weighted decay (`weight = time_decay × max(0.2, skill_score/10)`, half-life 45d)
 3. Excludes `external_shock` / `protective_stop` from confidence band calculations only
-4. Only emits findings where signal is statistically meaningful (n ≥ 3 + delta threshold)
-5. Warns on thin same-regime data (1–2 trades) rather than silently omitting (L1)
-6. Dominant error type threshold: 33% of losses, min 3 losses (L2, lowered from 40%/4)
-7. Per-ticker stats: emits `per-ticker:BHP.AX:62%(Δ+14pp,n=5)✓strong` for portfolio tickers with >15pp delta vs overall WR (Stage 2)
-8. Returns a block labelled with date range + regime for Claude context
-9. Auto-expire (events >120 days old → `expired`) runs on write path only, not on this GET (L3)
+4. Only emits findings where **ESS ≥ 2.5** (Kish's formula) — replaces raw n≥3 guard (Sprint 23)
+5. Low-ESS subsets emit a warning token rather than a calibration nudge (Sprint 23)
+6. Warns on low-ESS same-regime data rather than silently omitting (L1 + Sprint 23)
+7. Dominant error type threshold: 33% of losses, min 3 losses (L2, lowered from 40%/4)
+8. Per-ticker stats: emits `per-ticker:BHP.AX:62%(Δ+14pp,ESS=3.2)✓strong` for portfolio tickers with >15pp delta vs overall WR (Stage 2 + Sprint 23)
+9. Returns a block labelled with date range + regime for Claude context
+10. Auto-expire (events >120 days old → `expired`) runs on write path only, not on this GET (L3)
 
 Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` — never the system prompt (preserves Anthropic's server-side prompt cache).
 Target size: 30–60 tokens.
@@ -253,6 +268,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 - `keep_alive: "10m"` keeps model in VRAM between calls
 - `num_predict` is per-endpoint: **180** for synthesizer (D1, increased from 120), **200** for postmortem/staleness (short JSON), **350** for skill score (longer reason string)
 - `think: false` passed to Ollama for all JSON-output endpoints — suppresses thinking tokens that would consume the token budget before any JSON is written
+- **`format_schema` (Sprint 23):** All JSON-producing Ollama calls now pass a JSON Schema via Ollama's native `format` parameter. The inference engine constrains token selection at the grammar level — valid JSON is guaranteed without relying on regex fallback parsers. Schemas: `_SCHEMA_POSTMORTEM`, `_SCHEMA_WIN_TAG`, `_SCHEMA_SYNTHESIS`, `_SCHEMA_EXIT_SYNTHESIS`, `_SCHEMA_PM_SYNTHESIS`, `_SCHEMA_SKILL`. Cloud callers (Groq/Gemini/Claude) are not affected — they receive schema guidance via prompt text.
 - No retry on timeout — fail immediately, caller switches to smaller model
 - Batch concurrency always 1 — Ollama queues internally; external concurrency wastes VRAM
 
@@ -293,7 +309,11 @@ If all three fail and `skill_raw` is still unparseable, the error response now i
 | sector={sector}
 ```
 
-Plus (when available): `entry_signals_json` unpacked as `key=value` pairs appended to the prompt (D5/D6). This gives the model the actual technical picture at the time of entry — rather than inferring conditions from price/stop/target alone.
+Plus (when available): `entry_signals_json` serialised via `_flatten_entry_signals()` (D5/D6, Sprint 23). This produces a compact flat string of the 12 most diagnostic fields:
+```
+[Signals] rsi=42.1 | macd_hist=-0.12 | bb%b=0.31 | vol_z=1.4σ | atr_pct=2.1% | ret5d=-1.8% | ret20d=+3.2% | adx=22.4 | score=61 | sma200=28.45 | px=31.20 | rr=2.10
+```
+Raw nested JSON blobs and `None`/NaN values are dropped. This reduces context window overhead and improves extraction accuracy for smaller local models (Qwen 4B, Gemma 2B). Contrast with the earlier approach of dumping all `key=value` pairs including raw arrays and metadata — which wasted ~200 tokens and confused small models.
 
 `recommendation` (BUY/SELL/TRIM) is listed first so the model knows trade direction. Without it, the model assumes BUY for all trades and misinterprets entry prices for SELL/TRIM (e.g. calling a high entry "suboptimal" on a short where a higher entry is better).
 
@@ -338,21 +358,21 @@ For PARTIAL, only the *agreed* tags are kept. This is conservative — an agreed
 
 The SINGLETON case prevents a wasteful Phase 3 debate when one model parses successfully and the other doesn't. Without this guard, the challenge round would ask the successful model to defend its real classification against an empty "none" reason from the failed model — meaningless and slow.
 
-**Phase 3 — Challenge round** *(only on full divergence)*  
-Model A is shown:
-- Its own Phase 1 tags + reason
-- Model B's Phase 1 tags + reason  
+**Phase 3 — Neutral synthesis** *(only on full divergence)*  
+Rather than asking one model to defend its position against the other (which biases toward whichever model is the "challenger"), Phase 3 runs a neutral reconciliation: both positions are presented to Model A as a third-party adjudication task.
+
+Model A sees:
+- Model A's Phase 1 tags + reason
+- Model B's Phase 1 tags + reason
 - The original trade summary (for reference)
 
-The prompt explicitly forbids restating prior reasoning — Model A must either cite specific numbers showing why B's interpretation is wrong, or concede.
+The prompt asks: *produce the single best error classification by reconciling both assessments*. The model must choose which position is better-supported and explain why — it is **not** defending its own prior output.
 
-Model A must respond: `{"maintain": bool, "final_tags": "TAG1,TAG2", "reason": "specific rebuttal citing numbers"}`
+Model A responds: `{"error_type": "TAG1,TAG2", "reason": "why this classification over the alternative, citing specific numbers"}`
 
-- If **maintains** AND rebuttal contains at least one digit: Model A's (possibly refined) `final_tags` are used
-- If **maintains** but rebuttal has NO digits: **auto-concede** is applied (the incumbent cannot win by silence — recorded in `phase_3.auto_concede_reason`)
-- If **concedes**: Model B's Phase 1 tags are used
+`error_type_source` is `debated-synthesis` if the synthesis parsed successfully, `debated` otherwise (fallback to whichever Phase 1 result was non-empty).
 
-`error_type_source` is `debated` in either case.
+> **Note:** An earlier design used a "Model A maintains or concedes" protocol with a digit-check heuristic. This was replaced with neutral synthesis because the challenger framing introduced a structural bias toward Model B's position regardless of analytical quality. The neutral synthesis gives equal weight to both positions and produces more consistent results.
 
 ### Post-classification sanity check (`_pm_sanity_check_tags`)
 After all phases (and also after the single-model 🤖 path), tags are validated against the actual trade numbers and stripped if logically inconsistent:
@@ -373,7 +393,7 @@ Results are stored in:
 The transcript contains:
 - `trade` — recommendation, entry/stop/target, P&L, R:R, regime, hold days, AI confidence — surfaced in the modal so users can spot direction misreads (e.g. SELL trade tagged as `poor_entry` by a model that assumed BUY)
 - `phase_1` — both models' tags and reasons
-- `phase_3` (optional) — challenger, full raw response (600 chars), `maintains` flag, `final_tags`, optional `auto_concede_reason`
+- `phase_3` (optional) — `synthesis_model`, full raw response (600 chars), `final_tags`, `reason`
 - `verdict`, `final_tags`
 
 The modal is shown immediately after the debate completes and is re-openable later via the 📜 button on rows with stored transcripts.
@@ -392,8 +412,8 @@ The divergence pattern between models is valuable but computationally expensive:
 
 **Endpoint:** `POST /api/debate/adjudicate`  
 **Trigger:** ⚖️ button per row — **never automatic**. Only visible on rows with stored `postmortem_debate`.  
-**Provider:** auto-detected — Gemini preferred (uses configured `google_api_key`), Groq as fallback (`groq_api_key`). Keys read from the existing `blob_store.news_settings` entry (same place News Scanner uses them).  
-**Status check:** `GET /api/debate/adjudicator-status` returns `{available, provider, model}` so the UI can show a useful error if no key is configured.
+**Provider:** User-selectable (Sprint 22). Auto-detect order: Gemini → Groq → Claude. Keys: Gemini/Groq read from `blob_store.news_settings` (same as News Scanner); Claude API key read from `settings.claude_api_key`. The ⚖️ button shows a provider picker when multiple keys are configured; fires immediately if only one is available.  
+**Status check:** `GET /api/debate/adjudicator-status` returns `{available, provider, model, providers:[...]}` — `providers` lists all three with availability flags for the picker UI.
 
 ### Purpose
 The local debate (Phase 1–3) can deadlock with a stubborn incumbent or both models missing the actual issue (e.g. both flagging `poor_entry` when the real problem was `overconfident` position sizing). The adjudicator brings in a larger, capable cloud model to:
@@ -474,8 +494,12 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Adversarial debate: user-initiated only | 3 sequential Ollama calls × up to 120s each; auto-running on every loss would block UI for minutes. 🤖 fast-path handles the common case; ⚔️ is for disputes |
 | PARTIAL verdict: keep intersection only | Higher confidence than either model's full output. A tag both agreed on is stronger signal than either individual response |
 | Phase 3 challenges Model A (not arbitrary) | Model A runs first and is the "incumbent"; Model B is the challenger. Incumbent defends first — this mirrors how human debates work and produces more decisive outcomes |
-| Phase 3 maintain requires numeric rebuttal | A "maintain" response containing zero digits is auto-downgraded to concede. Prevents the incumbent from winning by silently restating prior reasoning. Models that engage with specific numbers can still maintain |
+| Phase 3 neutral synthesis replaces challenger model | Earlier design: Model A defends vs Model B (challenger bias toward B regardless of quality). Current: both positions presented as equal inputs to a neutral reconciliation pass. More balanced and produces more consistent results |
 | Sanity check after final tags determined | Catches model self-contradictions like `stop_too_tight` on a 43%-distance stop. Cheaper and more reliable than asking the model to verify its own output |
+| ESS instead of raw trade count for calibration gates | Raw count misrepresents statistical power when most weights are near zero. Kish ESS = (Σwi)²/Σwi² correctly reflects a sample dominated by one fresh trade vs N equally-weighted trades. Threshold 2.5 — below this a warning token replaces a calibration nudge |
+| `format_schema` for Ollama JSON calls | Engine-level constraint eliminates the regex fallback parser chain. When the schema is provided, Ollama guarantees the output is valid JSON matching the schema — `_strip_think_tags`, reverse-scanning, and field regexes are still present as defensive safety nets but will rarely trigger |
+| `_flatten_entry_signals()` for prompt injection | Raw `entry_signals_json` contains ~40+ fields including NaN values, arrays, and metadata. Injecting it verbatim wastes ~200 tokens and confuses smaller models. Flattening to 12 key fields in a single line reduces overhead and improves signal extraction accuracy |
+| SQLite `timeout=30` (up from 10) | Concurrent postmortem + debate + price-refresh writes can all arrive within seconds during market close. 30s gives queued writers enough time to succeed without aborting |
 | Trade context block at top of debate modal | Surfaces recommendation (BUY/SELL/TRIM) and prices upfront so users can spot direction misreads. The model can still hallucinate direction in its reason, but the user sees the actual numbers |
 | Phase 3 raw response shown via collapsible `<details>` | Lets users see exactly what the challenger wrote without dominating the modal. Critical for diagnosing whether the model engaged with B's points or just rubber-stamped |
 | Adjudicator is user-initiated, not auto | Costs real money per call. Worth spending on disputed cases (the user explicitly clicks ⚖️) but wasteful as a default on every postmortem |
@@ -495,6 +519,13 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - Stage 4: synthesizer returns `{winner, margin, key_pivot}`; stored in DB and shown in SYNTHESIS line
 - **D1–D7 debate improvements (May 2026):** synthesizer `num_predict` 120→180 (D1); reversed JSON scan (D2); `/no_think` suffix removed (D3); 5d/20d/ATR signals in debate + hash (D4); `entry_signals_json` in postmortem/skill prompts (D5/D6); direction-aware prompts for SELL/TRIM (D7)
 - **L1–L6 learning improvements (May 2026):** regime warning skips 0 trades (L1); error-type threshold 40%→33%, min losses 4→3 (L2); auto-expire moved to write path only (L3); `_calib_compute()` pure function + 5-min TTL cache (L4); synthesis winner in `buildDebateSummary` (L5); `debate_synthesis_winner` logged from JS (L6)
+- **Sprint 23 hardening (May 2026):**
+  - **Ollama structured outputs:** `format_schema` param added to `_call_ollama`; all 6 JSON-producing Ollama endpoints now pass a schema object; Ollama constrains token generation at grammar level
+  - **ESS calibration gates:** `_ess(subset)` helper added to `_calib_compute()`; all `n≥3` raw count guards replaced with `ESS≥2.5`; low-ESS subsets emit warning tokens instead of confidence nudges; ESS values shown in calibration block output
+  - **SQLite timeout:** `sqlite3.connect(timeout=10)` → `timeout=30` in `db.py`
+  - **Signal flattening:** `_flatten_entry_signals(json_str)` helper; 12 key diagnostic fields; compact pipe-separated format; replaces all raw `", ".join(k=v)` patterns in postmortem, postmortem-debate, and skill endpoints
+  - **Phase 3 corrected in docs:** was documenting old "maintains/concedes + digit check" protocol; current code is neutral synthesis since the challenger-bias redesign; doc now accurately reflects the implementation
+  - **Cloud adjudicator provider picker (Sprint 22):** user can select Gemini, Groq, or Claude API explicitly; auto-detect still available; provider picker modal shown when multiple keys are configured
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
 - **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
 - **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.
@@ -516,7 +547,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 
 ## Next Milestones
 
-1. Accumulate ~20+ `skill_score` values, then implement skill-weighted calibration (Phase 8)
-2. Phase 6: Calibration quality debate card (local model interprets band deltas)
-3. Success tags for wins (`strong_confluence`, `catalyst_capture`, `regime_aligned`)
+1. Accumulate ~20+ `skill_score` values — skill-weighted calibration formula is already live; full coverage needed for it to differentiate meaningfully (Phase 8)
+2. Phase 6: Calibration quality debate card (local model interprets calibration band deltas)
+3. Virtual outcomes for skipped recs — paper-trade `was_executed=0` events to break potential pessimism loops (deferred Sprint)
 4. Structured Trade Checklist UI form (currently documented as reference only)
