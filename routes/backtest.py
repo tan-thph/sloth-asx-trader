@@ -100,15 +100,17 @@ def backtest():
 
             for i in range(50, len(close)):
                 price = close.iloc[i]
+                if math.isnan(float(price)) or price <= 0:
+                    continue
                 date_str = close.index[i].strftime("%Y-%m-%d")
 
                 if strategy == "rsi_trend":
-                    # Buy: RSI oversold AND price above SMA50 (trend filter)
-                    # Note: MACD > 0 was removed — when RSI < 35 the MACD histogram is
-                    # almost always negative (EMA12 < EMA26 during a selloff), making the
-                    # combined condition near-impossible to satisfy.
+                    # Buy: RSI oversold (< 40) AND price above SMA50 (trend filter).
+                    # Threshold is 40, not 35: for large-cap stocks a deep oversold (< 35)
+                    # almost always coincides with price being below SMA50 too, making the
+                    # combined condition fire ~0 times over a 2y window.
                     buy_sig = (
-                        safe_float(rsi.iloc[i], 50) < 35 and
+                        safe_float(rsi.iloc[i], 50) < 40 and
                         price > safe_float(sma_50.iloc[i], price)
                     )
                     # Sell: RSI overbought OR price drops >2% below SMA50
@@ -250,6 +252,8 @@ def backtest():
             _ep = None
             for i in range(50, len(close)):
                 price = close.iloc[i]
+                if math.isnan(float(price)) or price <= 0:
+                    continue
                 date_str = close.index[i].strftime("%Y-%m-%d")
                 # Same signal logic — simplified for equity curve
                 rsi_v = safe_float(rsi.iloc[i], 50)
@@ -264,7 +268,7 @@ def backtest():
 
                 if strategy == "rsi_trend":
                     sma50_v = safe_float(sma_50.iloc[i], price)
-                    buy_sig = rsi_v < 35 and price > sma50_v
+                    buy_sig = rsi_v < 40 and price > sma50_v
                     sell_sig = rsi_v > 65 or price < sma50_v * 0.98
                 elif strategy == "macd":
                     buy_sig = macd_v > 0 and macd_prev <= 0
@@ -399,7 +403,7 @@ _WF_PARAM_GRIDS = {
     "rsi_trend": [
         {"rsi_period": rp, "rsi_oversold": ob, "rsi_overbought": os_, "trend_period": tp}
         for rp in [10, 14, 21]
-        for ob in [28, 32, 36]
+        for ob in [35, 40, 45]
         for os_ in [62, 68, 72]
         for tp in [20, 50]
     ],
@@ -523,8 +527,8 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
 
     # Strategy-specific indicator precompute
     rp = params.get("rsi_period", 14)
-    ob = params.get("rsi_oversold", 30)
-    os_ = params.get("rsi_overbought", 70)
+    ob = params.get("rsi_oversold", 40)
+    os_ = params.get("rsi_overbought", 65)
     fast = params.get("fast", 12)
     slow = params.get("slow", 26)
     sig_period = params.get("signal", 9)
