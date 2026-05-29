@@ -431,6 +431,7 @@ function buildRiskPage(merged, riskData) {
   })()}
 
   ${_buildTargetAllocCard(merged)}
+  ${_buildRebalancePlanCard(merged)}
 `;
 }
 
@@ -494,6 +495,93 @@ function _buildTargetAllocCard(merged) {
         </table>
       </div>
       ${!hasTargets ? '<div class="text-xs text-muted" style="margin-top:8px">Enter target weights above to see drift analysis.</div>' : ''}
+    </div>`;
+}
+
+function _buildRebalancePlanCard(merged) {
+  const pv = portfolioValue();
+  if (!pv || !merged.length) return '';
+  const targets = state.targetAllocations || {};
+  const hasTargets = Object.keys(targets).some(k => targets[k] > 0);
+  if (!hasTargets) return '';
+
+  const cash = state.cash || 0;
+  const actions = [];
+
+  for (const h of merged) {
+    const target = targets[h.ticker] != null ? Number(targets[h.ticker]) : null;
+    if (target == null) continue;
+    const price = h.currentPrice || h.avgPrice || 0;
+    if (!price) continue;
+    const curVal     = h.shares * price;
+    const targetVal  = pv * (target / 100);
+    const diffVal    = targetVal - curVal;
+    const diffShares = Math.round(diffVal / price);
+    if (Math.abs(diffShares) < 1) continue;
+    const action = diffShares > 0 ? 'BUY' : 'SELL';
+    const qty    = Math.abs(diffShares);
+    const cost   = qty * price;
+    const driftPct = ((curVal / pv * 100) - target).toFixed(1);
+    actions.push({ ticker: h.ticker, action, qty, price, cost, driftPct });
+  }
+
+  if (!actions.length) {
+    return `
+    <div class="card" style="margin-top:14px">
+      <div class="card-title" style="margin-bottom:6px">Rebalancing Action Plan</div>
+      <div class="text-xs text-muted">Portfolio is within tolerance — no trades needed.</div>
+    </div>`;
+  }
+
+  const buys  = actions.filter(a => a.action === 'BUY');
+  const sells = actions.filter(a => a.action === 'SELL');
+  const totalBuyAUD  = buys.reduce((s, a) => s + a.cost, 0);
+  const totalSellAUD = sells.reduce((s, a) => s + a.cost, 0);
+  const netCashNeeded = totalBuyAUD - totalSellAUD;
+  const cashSuffix = netCashNeeded > 0
+    ? `<span style="color:${netCashNeeded > cash ? '#dc2626' : '#16a34a'};font-size:11px">
+        Net cash needed: <strong>$${fmt(netCashNeeded, 0)}</strong>
+        ${netCashNeeded > cash ? ' — <span style="color:#dc2626">⚠ exceeds available cash</span>' : ' ✓'}
+      </span>`
+    : `<span style="color:#16a34a;font-size:11px">Net proceeds: <strong>$${fmt(Math.abs(netCashNeeded), 0)}</strong></span>`;
+
+  const rows = actions.map(a => {
+    const col = a.action === 'BUY' ? '#16a34a' : '#dc2626';
+    return `<tr>
+      <td style="padding:6px 8px;font-size:12px;font-weight:600">${a.ticker}</td>
+      <td style="padding:6px 8px;font-size:12px">
+        <span style="background:${col};color:#fff;border-radius:4px;padding:1px 7px;font-size:11px">${a.action}</span>
+      </td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">${a.qty.toLocaleString()}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right;color:var(--text-muted)">@$${a.price.toFixed(2)}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right;font-weight:600">$${fmt(a.cost, 0)}</td>
+      <td style="padding:6px 8px;font-size:11px;color:${parseFloat(a.driftPct) > 0 ? '#d97706' : '#0ea5e9'}">${parseFloat(a.driftPct) > 0 ? '+' : ''}${a.driftPct}% drift</td>
+    </tr>`;
+  });
+
+  return `
+    <div class="card" style="margin-top:14px">
+      <div class="flex-between" style="margin-bottom:10px">
+        <div>
+          <div class="card-title" style="margin:0">Rebalancing Action Plan</div>
+          <div class="text-xs text-muted" style="margin-top:2px">Trades to move portfolio to target weights</div>
+        </div>
+        ${cashSuffix}
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:left">Ticker</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border)">Action</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Shares</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Price</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right">Value</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);border-bottom:1px solid var(--border)">Drift</th>
+          </tr></thead>
+          <tbody>${rows.join('')}</tbody>
+        </table>
+      </div>
+      <div class="text-xs text-muted" style="margin-top:8px">Share counts are estimates based on current price. Execute sells before buys to free up cash.</div>
     </div>`;
 }
 

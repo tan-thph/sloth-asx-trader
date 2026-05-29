@@ -563,6 +563,7 @@ function _renderTechPanel() {
             <option value="macd">MACD Crossover</option>
             <option value="bb_reversion">BB Mean Reversion</option>
             <option value="momentum">Momentum (ADX)</option>
+            <option value="sma_crossover">SMA Crossover (Golden/Death Cross)</option>
             <option value="buy_hold">Buy &amp; Hold (benchmark)</option>
           </select>
         </div>
@@ -636,11 +637,12 @@ async function runBacktest() {
     if (res.error) throw new Error(res.error);
 
     const strategyLabels = {
-      rsi_trend:    'RSI + Trend Following',
-      macd:         'MACD Crossover',
-      bb_reversion: 'BB Mean Reversion',
-      momentum:     'Momentum (ADX)',
-      buy_hold:     'Buy & Hold',
+      rsi_trend:     'RSI + Trend Following',
+      macd:          'MACD Crossover',
+      bb_reversion:  'BB Mean Reversion',
+      momentum:      'Momentum (ADX)',
+      sma_crossover: 'SMA Crossover',
+      buy_hold:      'Buy & Hold',
     };
 
     const isLiqMode = res.slippageMode === 'liquidity';
@@ -882,6 +884,7 @@ function _renderWfPanel() {
             <option value="macd">MACD Crossover</option>
             <option value="bb_reversion">BB Mean Reversion</option>
             <option value="momentum">Momentum (ADX)</option>
+            <option value="sma_crossover">SMA Crossover (Golden/Death Cross)</option>
           </select>
         </div>
         <div class="form-row">
@@ -996,7 +999,7 @@ function _renderWfResults(res) {
     ? `<span style="color:${retColor(edgeOverBh)}">${Number(edgeOverBh) >= 0 ? '+' : ''}${edgeOverBh}% vs B&H</span>`
     : '';
 
-  const strategyLabels = { rsi_trend: 'RSI + Trend', macd: 'MACD', bb_reversion: 'BB Reversion', momentum: 'Momentum (ADX)' };
+  const strategyLabels = { rsi_trend: 'RSI + Trend', macd: 'MACD', bb_reversion: 'BB Reversion', momentum: 'Momentum (ADX)', sma_crossover: 'SMA Crossover' };
   const stratLabel = strategyLabels[res.strategy] || res.strategy;
 
   const foldRows = (res.folds || []).map(f => {

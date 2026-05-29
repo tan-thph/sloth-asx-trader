@@ -155,6 +155,16 @@ def backtest():
                     buy_sig = position == 0 and i == 50
                     sell_sig = False
 
+                elif strategy == "sma_crossover":
+                    # Golden cross: fast SMA crosses above slow SMA → buy
+                    # Death cross: fast SMA crosses below slow SMA → sell
+                    _sma_fast_cur  = safe_float(sma_20.iloc[i],   None) or price
+                    _sma_slow_cur  = safe_float(sma_50.iloc[i],   None) or price
+                    _sma_fast_prev = safe_float(sma_20.iloc[i-1], None) or price
+                    _sma_slow_prev = safe_float(sma_50.iloc[i-1], None) or price
+                    buy_sig  = _sma_fast_cur > _sma_slow_cur and _sma_fast_prev <= _sma_slow_prev
+                    sell_sig = _sma_fast_cur < _sma_slow_cur and _sma_fast_prev >= _sma_slow_prev
+
                 else:
                     buy_sig = sell_sig = False
 
@@ -279,6 +289,13 @@ def backtest():
                 elif strategy == "buy_hold":
                     buy_sig = _pos == 0 and i == 50
                     sell_sig = False
+                elif strategy == "sma_crossover":
+                    _sf_cur  = safe_float(sma_20.iloc[i],   None) or price
+                    _ss_cur  = safe_float(sma_50.iloc[i],   None) or price
+                    _sf_prev = safe_float(sma_20.iloc[i-1], None) or price
+                    _ss_prev = safe_float(sma_50.iloc[i-1], None) or price
+                    buy_sig  = _sf_cur > _ss_cur and _sf_prev <= _ss_prev
+                    sell_sig = _sf_cur < _ss_cur and _sf_prev >= _ss_prev
                 else:
                     buy_sig = sell_sig = False
 
@@ -421,6 +438,11 @@ _WF_PARAM_GRIDS = {
         for ax in [15, 18, 22]
         for tp in [20, 50]
     ],
+    "sma_crossover": [
+        {"fast_period": fp, "slow_period": sp}
+        for fp in [10, 20]
+        for sp in [30, 50, 100]
+    ],
 }
 
 
@@ -535,6 +557,8 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
     adx_entry = params.get("adx_entry", 25)
     adx_exit  = params.get("adx_exit", 18)
     trend_period = params.get("trend_period", 50)
+    fast_period  = params.get("fast_period", 20)
+    slow_period  = params.get("slow_period", 50)
 
     rsi_vals  = _rsi(prices, rp)
     ema_fast  = _ema(prices, fast)
@@ -544,6 +568,8 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
     macd_hist = [macd_line[i] - macd_sig[i] for i in range(len(prices))]
     bb_upper, bb_mid, bb_lower = _bb(prices, bb_period, bb_std)
     sma_trend = _sma(prices, trend_period)
+    sma_fast  = _sma(prices, fast_period)
+    sma_slow  = _sma(prices, slow_period)
     adx_v, pdi_v, mdi_v = _adx_vals(highs, lows, prices)
 
     cash = capital
@@ -551,7 +577,7 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
     entry_price = None
     trades = []
     equity = []
-    warmup = max(50, slow + sig_period, trend_period)
+    warmup = max(50, slow + sig_period, trend_period, slow_period)
     # Effective start: indicators need warmup bars; trade_from_idx may extend this for burn-in.
     start_idx = min(warmup, trade_from_idx) if trade_from_idx > warmup else warmup
 
@@ -591,6 +617,13 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
             elif strategy == "buy_hold":
                 buy_sig  = position == 0 and i == trade_from_idx
                 sell_sig = False
+            elif strategy == "sma_crossover":
+                sf_cur  = sma_fast[i]  if i < len(sma_fast)  and sma_fast[i]  is not None else price
+                ss_cur  = sma_slow[i]  if i < len(sma_slow)  and sma_slow[i]  is not None else price
+                sf_prev = sma_fast[i-1] if i > 0 and i-1 < len(sma_fast) and sma_fast[i-1] is not None else price
+                ss_prev = sma_slow[i-1] if i > 0 and i-1 < len(sma_slow) and sma_slow[i-1] is not None else price
+                buy_sig  = sf_cur > ss_cur and sf_prev <= ss_prev
+                sell_sig = sf_cur < ss_cur and sf_prev >= ss_prev
             else:
                 buy_sig = sell_sig = False
 

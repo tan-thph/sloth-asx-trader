@@ -273,6 +273,7 @@ python3 asx_server.py</pre>
         Every Claude call is logged here — system prompt, user message, response, tokens, and timing.
         Calls are stored in <code>ai_call_log</code> and written to <code>ai_responses/</code> files.
       </div>
+      <div id="ai-spend-summary"></div>
       <div id="ai-call-log-container">
         <div class="text-xs text-muted" style="padding:10px 0">Loading…</div>
       </div>
@@ -474,7 +475,7 @@ async function testTelegramAlert() {
   }
 }
 
-// ── AI Call Log ───────────────────────────────────────────────────────────────
+// ── AI Call Log + Spend Tracker ───────────────────────────────────────────────
 
 async function loadAICallLog() {
   const container = document.getElementById('ai-call-log-container');
@@ -484,9 +485,14 @@ async function loadAICallLog() {
   const url = `${API}/api/log/ai_calls?limit=15${filter ? '&agent_type=' + encodeURIComponent(filter) : ''}`;
 
   try {
-    const r = await fetch(url);
+    const [r, rc] = await Promise.all([fetch(url), fetch(`${API}/api/log/ai_cost`)]);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
+    const dc = rc.ok ? await rc.json() : null;
+    if (dc && dc.ok) {
+      const costEl = document.getElementById('ai-spend-summary');
+      if (costEl) costEl.innerHTML = _renderAISpendSummary(dc);
+    }
     if (!d.ok || !d.entries || !d.entries.length) {
       container.innerHTML = '<div class="text-xs text-muted" style="padding:10px 0">No calls logged yet.</div>';
       return;
@@ -495,6 +501,41 @@ async function loadAICallLog() {
   } catch (e) {
     container.innerHTML = `<div class="text-xs text-danger">Failed to load: ${e.message}</div>`;
   }
+}
+
+function _renderAISpendSummary(d) {
+  const agentColors = {
+    portfolio: '#6366f1', analyst: '#8b5cf6', pm: '#a78bfa',
+    dayTrade: '#f59e0b',  universe: '#f97316', macro: '#0ea5e9',
+    assistant: '#22c55e', briefing: '#14b8a6',
+  };
+  const byAgent = {};
+  for (const row of d.breakdown) {
+    const ag = row.agent_type || 'other';
+    if (!byAgent[ag]) byAgent[ag] = { cost: 0, calls: 0 };
+    byAgent[ag].cost  += row.cost_usd;
+    byAgent[ag].calls += row.call_count;
+  }
+  const agentRows = Object.entries(byAgent)
+    .sort((a, b) => b[1].cost - a[1].cost)
+    .map(([ag, v]) => {
+      const col = agentColors[ag] || 'var(--text-muted)';
+      return `<span style="display:inline-flex;align-items:center;gap:5px;margin:2px 6px 2px 0;font-size:11px">
+        <span style="background:${col};color:#fff;border-radius:8px;padding:1px 6px;font-size:10px">${escapeHTML(ag)}</span>
+        <span style="color:var(--text-secondary)">$${v.cost.toFixed(4)}</span>
+        <span style="color:var(--text-muted)">${v.calls}×</span>
+      </span>`;
+    }).join('');
+
+  const costColor = d.total_cost_usd > 5 ? '#dc2626' : d.total_cost_usd > 1 ? '#d97706' : '#16a34a';
+  return `
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 0 4px">
+      <div style="font-size:13px;font-weight:600">
+        30-day spend: <span style="color:${costColor}">$${d.total_cost_usd.toFixed(4)} USD</span>
+        <span class="text-muted" style="font-size:11px;font-weight:400;margin-left:6px">${d.total_calls} calls · ${d.all_time_calls} all-time</span>
+      </div>
+      <div style="flex:1;min-width:200px">${agentRows}</div>
+    </div>`;
 }
 
 function _renderAICallLogTable(entries, total) {
@@ -510,9 +551,11 @@ function _renderAICallLogTable(entries, total) {
     const cacheR = e.cache_read    > 0    ? `<span style="color:#22c55e"> +${e.cache_read.toLocaleString()}c</span>` : '';
     const dur    = e.duration_ms   != null ? `${(e.duration_ms/1000).toFixed(1)}s` : '—';
     const ts     = (e.timestamp || '').replace('T', ' ').slice(0, 16);
-    const sys    = e.sys_snippet  ? escapeHTML(e.sys_snippet.slice(0, 80))  + '…' : '—';
     const usr    = e.usr_snippet  ? escapeHTML(e.usr_snippet.slice(0, 100)) + '…' : '—';
     const resp   = e.resp_snippet ? escapeHTML(e.resp_snippet.slice(0, 80)) + '…' : '—';
+    const costStr = e.cost_usd != null && e.cost_usd > 0
+      ? `<span style="color:var(--text-muted);font-size:10px">$${e.cost_usd < 0.001 ? e.cost_usd.toFixed(5) : e.cost_usd.toFixed(4)}</span>`
+      : '—';
 
     return `
       <tr style="cursor:pointer" onclick="viewAICall(${e.id})" title="Click to view full call">
@@ -521,6 +564,7 @@ function _renderAICallLogTable(entries, total) {
           <span style="background:${col};color:#fff;border-radius:9px;padding:1px 7px;font-size:10px;white-space:nowrap">${escapeHTML(e.agent_type || '?')}</span>
         </td>
         <td style="padding:5px 6px;font-size:11px;white-space:nowrap">${tokIn}→${tokOut}${cacheR}</td>
+        <td style="padding:5px 6px;font-size:11px;white-space:nowrap">${costStr}</td>
         <td style="padding:5px 6px;font-size:11px;color:var(--text-muted);white-space:nowrap">${dur}</td>
         <td style="padding:5px 6px;font-size:11px;color:var(--text-secondary);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${usr}</td>
         <td style="padding:5px 6px;font-size:11px;color:var(--text-muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${resp}</td>
@@ -539,6 +583,7 @@ function _renderAICallLogTable(entries, total) {
             <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Time</th>
             <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Agent</th>
             <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Tokens</th>
+            <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Cost</th>
             <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Duration</th>
             <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">User message</th>
             <th style="text-align:left;padding:4px 6px;font-size:11px;color:var(--text-muted);font-weight:500">Response</th>

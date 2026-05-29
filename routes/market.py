@@ -879,6 +879,9 @@ def list_ai_calls():
             total = conn.execute("SELECT COUNT(*) FROM ai_call_log").fetchone()[0]
 
     entries = [dict(r) for r in rows]
+    for e in entries:
+        e["cost_usd"] = _calc_cost(e.get("model"), e.get("input_tokens"), e.get("output_tokens"),
+                                    e.get("cache_read"), e.get("cache_written"))
     return jsonify({"ok": True, "total": total, "limit": limit, "offset": offset, "entries": entries})
 
 
@@ -892,3 +895,75 @@ def get_ai_call(call_id):
     if not row:
         return jsonify({"error": "not found"}), 404
     return jsonify(dict(row))
+
+
+# USD cost per million tokens for each model (input/output/cache_read/cache_write)
+_MODEL_PRICING = {
+    # Claude Sonnet 4.x
+    "claude-sonnet-4-6":            {"input": 3.00, "output": 15.00, "cache_read": 0.30,  "cache_write": 3.75},
+    # Claude Haiku 4.5
+    "claude-haiku-4-5-20251001":    {"input": 0.80, "output": 4.00,  "cache_read": 0.08,  "cache_write": 1.00},
+    # Claude Opus 4.x
+    "claude-opus-4-7":              {"input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_write": 18.75},
+    # Fallback for unknown models — use Sonnet pricing
+    "_default":                     {"input": 3.00, "output": 15.00, "cache_read": 0.30,  "cache_write": 3.75},
+}
+
+
+def _calc_cost(model, input_tokens, output_tokens, cache_read=0, cache_write=0):
+    p = _MODEL_PRICING.get(model) or _MODEL_PRICING["_default"]
+    cost = (
+        (input_tokens  or 0) / 1_000_000 * p["input"]  +
+        (output_tokens or 0) / 1_000_000 * p["output"] +
+        (cache_read    or 0) / 1_000_000 * p["cache_read"] +
+        (cache_write   or 0) / 1_000_000 * p["cache_write"]
+    )
+    return round(cost, 6)
+
+
+@bp.route("/api/log/ai_cost")
+def ai_cost_summary():
+    """Return per-model and per-agent token usage and USD cost estimates for the last 30 days."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT model, agent_type,
+                      SUM(input_tokens)   AS total_input,
+                      SUM(output_tokens)  AS total_output,
+                      SUM(cache_read)     AS total_cache_read,
+                      SUM(cache_written)  AS total_cache_write,
+                      COUNT(*)            AS call_count
+               FROM ai_call_log
+               WHERE timestamp >= datetime('now', '-30 days')
+               GROUP BY model, agent_type
+               ORDER BY model, agent_type"""
+        ).fetchall()
+        total_calls = conn.execute(
+            "SELECT COUNT(*) FROM ai_call_log WHERE timestamp >= datetime('now', '-30 days')"
+        ).fetchone()[0]
+        all_time_calls = conn.execute("SELECT COUNT(*) FROM ai_call_log").fetchone()[0]
+
+    breakdown = []
+    grand_cost = 0.0
+    for r in rows:
+        cost = _calc_cost(r["model"], r["total_input"], r["total_output"],
+                          r["total_cache_read"], r["total_cache_write"])
+        grand_cost += cost
+        breakdown.append({
+            "model":       r["model"],
+            "agent_type":  r["agent_type"],
+            "call_count":  r["call_count"],
+            "input_tokens":  r["total_input"]  or 0,
+            "output_tokens": r["total_output"] or 0,
+            "cache_read":    r["total_cache_read"]   or 0,
+            "cache_write":   r["total_cache_write"]  or 0,
+            "cost_usd":    cost,
+        })
+
+    return jsonify({
+        "ok": True,
+        "window_days": 30,
+        "total_calls": total_calls,
+        "all_time_calls": all_time_calls,
+        "total_cost_usd": round(grand_cost, 4),
+        "breakdown": breakdown,
+    })
