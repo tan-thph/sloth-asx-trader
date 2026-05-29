@@ -583,14 +583,31 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
     cutoff      = (datetime.now() - timedelta(days=days)).isoformat()
     cutoff_30   = (datetime.now() - timedelta(days=30)).isoformat()
 
-    def _decay(ts, half_life=45):
+    # Volatility-adaptive half-life: fast decay in volatile/panic regimes so
+    # stale data from a different market state doesn't dilute the calibration;
+    # slow decay in calm/sideways regimes to preserve statistical sample power.
+    _HL_MAP = {
+        "panic":        20,
+        "bearVolatile": 25,
+        "highVol":      25,
+        "riskOff":      30,
+        "bearTrending": 35,
+        "riskOn":       45,
+        "bullTrending": 50,
+        "sideways":     60,
+        "neutral":      60,
+    }
+    hl = _HL_MAP.get(regime or "", 45)
+
+    def _decay(ts, half_life=None):
+        half_life = hl if half_life is None else half_life
         try:
             d = (datetime.now() - datetime.fromisoformat(ts)).days
             return math.exp(-math.log(2) * d / half_life)
         except Exception:
             return 1.0
 
-    def _weight(r, half_life=45):
+    def _weight(r, half_life=None):
         """Skill-weighted time-decay: weight = time_decay × skill_factor.
 
         Skill factor is centred at 5/10 = 1.0 (neutral).
@@ -603,6 +620,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         This avoids the old discontinuity where an outstanding scored trade (8/10 → 0.8)
         was penalised relative to an unscored trade (→ 1.0).
         """
+        half_life = hl if half_life is None else half_life
         td = _decay(r["timestamp"], half_life)
         sk = r["skill_score"]
         sf = max(0.2, min(1.8, float(sk) / 5.0)) if sk is not None else 1.0
@@ -811,8 +829,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         date_to    = datetime.now().strftime("%Y-%m")
         regime_tag = f",{regime}" if regime else ""
         excl_note  = f",{n_excluded}excl" if n_excluded > 0 else ""
+        hl_note    = f",hl={hl}d" if hl != 45 else ""
         block = (
-            f"CALIBRATION({n}cls,{date_from}→{date_to}{regime_tag}{excl_note}): "
+            f"CALIBRATION({n}cls,{date_from}→{date_to}{regime_tag}{excl_note}{hl_note}): "
             + "; ".join(parts) + "."
         )
         return {"available": True, "block": block, "sample": n}

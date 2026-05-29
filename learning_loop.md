@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** May 2026 (Sprint 24)
-**Status:** Phases 1–5, 7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–24 improvements applied · Phase 6 & 8 Planned
+**Last Updated:** May 2026 (Sprint 25)
+**Status:** Phases 1–5, 7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–25 improvements applied · Phase 6 & 8 Planned
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -94,13 +94,29 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 
 ### How the system addresses this (implemented)
 
-**1. Exponential time-decay weighting** ✅
+**1. Exponential time-decay weighting with adaptive half-life** ✅ *(Sprint 25)*
 All confidence-band, regime, sector, and decay calculations use decay-weighted win rates:
 ```python
-weight = exp(-ln(2) × days_since_close / 45)
-# Today = 1.0 · 45 days ago = 0.5 · 90 days ago = 0.25 · 6 months ago ≈ 0.1
+weight = exp(-ln(2) × days_since_close / half_life)
+# half_life=45 (default): Today=1.0 · 45d=0.5 · 90d=0.25 · 6mo≈0.1
 ```
-Old data fades gracefully — it still contributes when sample sizes are small, but cannot dominate when fresh data exists. The default window is 90 days (extended from 60d) with a 180-day hard cap.
+The half-life is **regime-adaptive** — volatile regimes force faster decay so stale data from a different market state doesn't dilute the calibration; calm regimes keep older samples to preserve statistical power:
+
+| Regime | Half-life | Rationale |
+|--------|-----------|-----------|
+| `panic` | 20d | Fast-moving; yesterday's patterns may already be invalid |
+| `bearVolatile`, `highVol` | 25d | High intraday noise; quick regime transitions |
+| `riskOff` | 30d | Sustained bear bias; still moving fast |
+| `bearTrending` | 35d | Directional but slower than volatile regimes |
+| `riskOn`, `bullTrending` | 45–50d | Momentum regimes; moderate recency bias |
+| `sideways`, `neutral` | 60d | Low volatility; historical samples remain valid longer |
+
+The active half-life is logged in the calibration block header when non-default:
+```
+CALIBRATION(18cls,2026-02→2026-05,panic,hl=20d): conf 70-80%:52%WR(ESS=3.1)⚠adj -8pp
+```
+
+The default window is 90 days (extended from 60d) with a 180-day hard cap.
 
 **2. Protective stop & external shock exclusion** ✅
 Exclusion rules differ by calibration check — they are not a blanket filter:
@@ -154,6 +170,15 @@ CALIBRATION(12cls,2026-02→2026-05,bullTrending,2excl): conf 70-80%:61%WR(…)
 **5. Regime-conditional filtering** ✅ (partial)
 Calibration fetches the current regime from the request and compares same-regime historical trades. The `regime` column on each event stores the regime active at the time of the recommendation.
 
+**SQLite passive maintenance on startup** ✅ *(Sprint 25)*
+`init_db()` in `db.py` runs two non-blocking pragmas on every server start:
+- `PRAGMA optimize` — updates index statistics so the query planner stays accurate as `ai_learning_events` and `ai_call_log` accumulate large JSON blobs (debate transcripts, signal snapshots).
+- `PRAGMA wal_checkpoint(PASSIVE)` — moves WAL pages back to the main DB file without blocking any concurrent reader or writer. Prevents WAL file growth under heavy write workloads (postmortem debates, call log writes, scan state updates).
+
+Both are safe on any existing database and complete in milliseconds on a <100 MB DB.
+
+---
+
 ### Still to implement
 
 **Skill-weighted calibration (Phase 8) — partially live**
@@ -164,6 +189,30 @@ weight = time_decay × sf
 ```
 Centering at 5 means unscored events (`skill_score=NULL`) fall back to `sf=1.0` — identical to a neutral-scored trade. A high-skill trade (score=8) gets `sf=1.6`, amplifying its calibration signal; a low-skill trade (score=2) gets `sf=0.4`, down-weighting lucky wins. The old formula (`max(0.2, skill/10)`) centred at 10 and penalised all scored trades vs unscored, which was backwards. Phase 8 is fully realised once ~20+ scored events exist; the formula is already live (Sprint 24).
 
+**Phase 6: Calibration quality debate — design spec (not yet implemented)**
+A local Ollama model will interpret calibration band deltas (e.g. "target 80%, actual 61%W over 12 trades") and assess whether this represents systemic bias or normal statistical noise.
+
+*Guard against statistical hallucination:* LLMs, particularly 4B–9B parameter models, cannot reliably assess statistical significance from raw numbers — they will invent plausible-sounding causal narratives for deviations that are pure random variance. The prompt must pre-calculate the noise boundary and present it as an immutable fact:
+
+```python
+# Backend pre-calculation (Python, not LLM)
+import math
+p_expected = 0.75          # calibrated target win rate
+n = 12                     # trades in band
+se = math.sqrt(p_expected * (1 - p_expected) / n)   # ≈ 0.125 (12.5%)
+actual_wr = 0.63
+z = (actual_wr - p_expected) / se                    # ≈ -0.96
+prob_noise = 2 * (1 - norm_cdf(abs(z)))              # ~34%
+```
+
+Prompt template:
+> "The system expected a 75% win rate but achieved 63% over 12 trades. Programmatic analysis shows a 34% probability this 12pp underperformance is pure statistical noise (Z = -0.96, SE = 12.5%). Do NOT attempt to identify a systemic cause if the deviation is within one standard error. Instead, focus only on whether the specific failure tags of the N losses share a common mechanism."
+
+This constrains the model to *qualitative root-cause analysis of actual errors*, not arithmetic it will get wrong. Implementation: `GET /api/debate/calib-quality` — backend calculates Z-scores per band, builds the constrained prompt, calls local model.
+
+**Confidence → position sizing (deferred)**
+The quant engine already binds Claude's calibrated confidence to Kelly position sizing via `winProb: r.confidence`. When the calibration block instructs Claude to adjust confidence (e.g. -8pp nudge), that adjusted value flows directly into the Kelly fraction and thus the share count. Adding a second linear multiplier on top would double-discount. Deferred until empirical evidence shows Kelly alone is insufficient to transmit calibration feedback into execution sizes.
+
 **Virtual outcomes / paper-trade skipped recs (deferred)**
 When calibration suppresses Claude's confidence in a regime and recs are skipped, no new outcomes enter the loop — the pessimism can become self-reinforcing. The fix: track hypothetical P&L on `was_executed=0` events at their suggested entry/stop/target prices, feed those back into calibration at a discount (weight × 0.75). Deferred — requires scheduled background price-checking + new DB columns + frontend visibility.
 
@@ -173,7 +222,7 @@ When calibration suppresses Claude's confidence in a regime and recs are skipped
 
 `fetchCalibrationBlock(regime, sectors, tickers)` in `analysis.js` calls `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` after regime detection. The backend:
 1. Fetches last 90 days of closed events (max 180d) — pure `_calib_compute()` function, TTL-cached 5 min (L4)
-2. Applies exponential + skill-weighted decay (`weight = time_decay × max(0.2, min(1.8, skill_score/5.0))`, half-life 45d; unscored → sf=1.0)
+2. Applies exponential + skill-weighted decay (`weight = time_decay × max(0.2, min(1.8, skill_score/5.0))`); half-life is **regime-adaptive** (20–60d, default 45d); unscored → sf=1.0
 3. Excludes `external_shock` / `protective_stop` from confidence band calculations only
 4. Only emits findings where **ESS ≥ 2.5** (Kish's formula) — replaces raw n≥3 guard (Sprint 23)
 5. Low-ESS subsets emit a warning token rather than a calibration nudge (Sprint 23)
@@ -535,6 +584,10 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Skill weight centered at 5, not 10 | Old formula `max(0.2, skill/10)` set neutral at 10 — a skill=8 trade (0.8×) was penalised vs unscored (1.0×). Centering at 5 makes unscored and average-skill identical (sf=1.0); high-skill amplified (sf up to 1.8); low-skill down-weighted (sf down to 0.2) |
 | Hierarchical regime fallbacks (specific → macro → all) | When a newly-transitioned regime has ESS < 2.5, falling back to a macro group (bearish/bullish/neutral) gives Claude useful signal instead of nothing. Each level is labelled so Claude knows the specificity |
 | JS priority queue: HIGH/LOW semaphore | Auto-postmortems fire on trade close and can queue multiple background calls. Without a priority gate, a burst of auto-postmortems would block the user's next manual debate for several minutes |
+| Volatility-adaptive half-life (panic=20d, calm=60d) | Fixed 45d assumes constant regime-shift speed. Volatile regimes invalidate historical patterns faster; calm regimes benefit from larger statistical samples. Non-default hl logged in calibration block header |
+| SQLite `PRAGMA optimize` + `wal_checkpoint(PASSIVE)` on startup | Accumulating JSON blobs (debate transcripts, call logs) degrade query planner statistics and grow the WAL file. Both pragmas are non-blocking and complete in ms — zero runtime cost |
+| Phase 6 pre-calculates Z-scores before LLM prompt | Small local models invent causal narratives for deviations that are pure noise. Pre-computing binomial SE and presenting the significance verdict as a fact constrains the model to qualitative analysis of actual failure tags |
+| Confidence → Kelly binding (not a second multiplier) | `winProb: r.confidence` already feeds calibrated confidence into Kelly sizing. A second linear multiplier would double-discount and over-suppress trades. Kelly alone transmits calibration feedback mechanically |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
 | Lessons Database deferred | Needs proper design: what is a "lesson"? How injected? Until defined, premature to implement. |
 
@@ -561,6 +614,11 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **JS Ollama priority queue:** `_oqEnqueue(fn, priority)` added to `debate-client.js`; HIGH lane for user-initiated calls (`fetchDebate`, manual `fetchPostmortemDebate`); LOW lane for background auto-triggers (`triggerPostmortem`, `fetchSkillScore`); manual postmortem button in Learning page passes `priority:'HIGH'`
   - **Skill-weight centering:** `_weight()` formula changed from `max(0.2, sk/10)` to `max(0.2, min(1.8, sk/5.0))`; neutral at 5 instead of 10; unscored events remain at sf=1.0
   - **Hierarchical regime fallbacks:** `_REGIME_GROUPS` dict added to `learning.py`; calibration falls through: specific regime → macro group (bearish/bullish/neutral) → all trades when ESS < 2.5; each level labelled with specificity warning
+- **Sprint 25 (May 2026):**
+  - **Volatility-adaptive half-life:** `_HL_MAP` dict in `_calib_compute()` maps regime → half-life (20–60d); `_decay()` and `_weight()` pick up `hl` via closure; non-default half-life shown in calibration block header as `hl=Nd`
+  - **SQLite startup maintenance:** `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` added to `init_db()` in `db.py`; runs non-blocking on every server start
+  - **Phase 6 design spec documented:** binomial SE pre-calculation as statistical hallucination guard; prompt template constraining model to qualitative failure-tag analysis only
+  - **Confidence → sizing analysis:** Kelly already binds calibrated confidence to position size via `winProb`; second multiplier deferred as double-discount risk
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
 - **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
 - **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.
@@ -583,6 +641,6 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 ## Next Milestones
 
 1. Accumulate ~20+ `skill_score` values — skill-weighted calibration formula is already live; full coverage needed for it to differentiate meaningfully (Phase 8)
-2. Phase 6: Calibration quality debate card (local model interprets calibration band deltas)
+2. Phase 6: Calibration quality debate card — implement `GET /api/debate/calib-quality`; backend pre-calculates binomial SE + Z-scores per band, builds constrained prompt, calls local model; spec documented above
 3. Virtual outcomes for skipped recs — paper-trade `was_executed=0` events to break potential pessimism loops (deferred Sprint)
 4. Structured Trade Checklist UI form (currently documented as reference only)

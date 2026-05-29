@@ -262,6 +262,15 @@ def init_db():
         if "close_date" not in tj_cols:
             conn.execute("ALTER TABLE trade_journal ADD COLUMN close_date TEXT")
 
+        # Passive maintenance on every startup:
+        # - optimize: updates index statistics so the query planner stays accurate
+        #   as rows accumulate in ai_learning_events / ai_call_log (large JSON blobs).
+        # - wal_checkpoint(PASSIVE): moves WAL pages back to the main DB file without
+        #   blocking any concurrent readers. Prevents the WAL file from growing
+        #   unboundedly under heavy write workloads (debate transcripts, call logs).
+        conn.execute("PRAGMA optimize")
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+
 
 def backup_db(keep: int = 7) -> str | None:
     """Copy DB to a dated backup file; prune oldest if > keep copies exist.
