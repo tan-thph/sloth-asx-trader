@@ -419,10 +419,11 @@ _WF_PARAM_GRIDS = {
 }
 
 
-def _run_strategy_slice(close, high, low, volume, strategy, params, capital, brokerage, slip_pct):
+def _run_strategy_slice(close, high, low, volume, strategy, params, capital, brokerage, slip_pct, trade_from_idx=0):
     """
     Run a single strategy with given params over a price slice.
-    Returns dict: {final_value, trades, sharpe, total_return_pct, win_rate}.
+    trade_from_idx: bars before this index compute indicators but don't execute trades (burn-in).
+    Returns dict: {final_value, trades, sharpe, total_return_pct, win_rate, equity}.
     """
     import statistics
 
@@ -546,11 +547,14 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
     trades = []
     equity = []
     warmup = max(50, slow + sig_period, trend_period)
+    # Effective start: indicators need warmup bars; trade_from_idx may extend this for burn-in.
+    start_idx = min(warmup, trade_from_idx) if trade_from_idx > warmup else warmup
 
-    for i in range(warmup, n):
+    for i in range(start_idx, n):
         price = prices[i]
         if price <= 0:
-            equity.append(cash + position * price)
+            if i >= trade_from_idx:
+                equity.append(cash + position * price)
             continue
 
         rv = rsi_vals[i] if i < len(rsi_vals) else 50
@@ -564,41 +568,42 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
         pdi = pdi_v[i] if i < len(pdi_v) else 20
         mdi = mdi_v[i] if i < len(mdi_v) else 20
 
-        if strategy == "rsi_trend":
-            buy_sig  = rv < ob and price > smt and mh > 0
-            sell_sig = rv > os_ or price < smt * 0.98
-        elif strategy == "macd":
-            buy_sig  = mh > 0 and mh_prev <= 0
-            sell_sig = mh < 0 and mh_prev >= 0
-        elif strategy == "bb_reversion":
-            buy_sig  = bbl is not None and price <= bbl * 1.005 and rv < rsi_entry
-            sell_sig = position > 0 and bbm is not None and price >= bbm * 0.995
-        elif strategy == "momentum":
-            buy_sig  = adx > adx_entry and pdi > mdi and price > smt
-            sell_sig = adx < adx_exit or mdi > pdi
-        elif strategy == "buy_hold":
-            buy_sig  = position == 0 and i == warmup
-            sell_sig = False
-        else:
-            buy_sig = sell_sig = False
+        if i >= trade_from_idx:
+            if strategy == "rsi_trend":
+                buy_sig  = rv < ob and price > smt and mh > 0
+                sell_sig = rv > os_ or price < smt * 0.98
+            elif strategy == "macd":
+                buy_sig  = mh > 0 and mh_prev <= 0
+                sell_sig = mh < 0 and mh_prev >= 0
+            elif strategy == "bb_reversion":
+                buy_sig  = bbl is not None and price <= bbl * 1.005 and rv < rsi_entry
+                sell_sig = position > 0 and bbm is not None and price >= bbm * 0.995
+            elif strategy == "momentum":
+                buy_sig  = adx > adx_entry and pdi > mdi and price > smt
+                sell_sig = adx < adx_exit or mdi > pdi
+            elif strategy == "buy_hold":
+                buy_sig  = position == 0 and i == trade_from_idx
+                sell_sig = False
+            else:
+                buy_sig = sell_sig = False
 
-        if buy_sig and position == 0 and cash > brokerage * 2:
-            fp = price * (1 + slip_pct)
-            qty = int((cash - brokerage) / fp)
-            if qty > 0:
-                cash -= qty * fp + brokerage
-                position = qty
-                entry_price = fp
+            if buy_sig and position == 0 and cash > brokerage * 2:
+                fp = price * (1 + slip_pct)
+                qty = int((cash - brokerage) / fp)
+                if qty > 0:
+                    cash -= qty * fp + brokerage
+                    position = qty
+                    entry_price = fp
 
-        elif sell_sig and position > 0:
-            fp = price * (1 - slip_pct)
-            pnl = position * fp - brokerage - position * entry_price
-            cash += position * fp - brokerage
-            trades.append({"pnl": round(pnl, 2), "entry": round(entry_price, 3), "exit": round(fp, 3)})
-            position = 0
-            entry_price = None
+            elif sell_sig and position > 0:
+                fp = price * (1 - slip_pct)
+                pnl = position * fp - brokerage - position * entry_price
+                cash += position * fp - brokerage
+                trades.append({"pnl": round(pnl, 2), "entry": round(entry_price, 3), "exit": round(fp, 3)})
+                position = 0
+                entry_price = None
 
-        equity.append(cash + position * price)
+            equity.append(cash + position * price)
 
     # Close open position at end of slice
     if position > 0 and entry_price:
@@ -721,10 +726,15 @@ def backtest_walk_forward():
         l_train = low[fold_start:train_end]
         v_train = volume[fold_start:train_end]
 
-        c_test = close[test_start:test_end]
-        h_test = high[test_start:test_end]
-        l_test = low[test_start:test_end]
-        v_test = volume[test_start:test_end]
+        # Prepend burn-in bars from training window so indicators warm up before OOS trading.
+        BURNIN = 65  # enough to cover max warmup (max(50, slow+signal, trend_period))
+        burn_start  = max(fold_start, test_start - BURNIN)
+        actual_burnin = test_start - burn_start
+
+        c_test = close[burn_start:test_end]
+        h_test = high[burn_start:test_end]
+        l_test = low[burn_start:test_end]
+        v_test = volume[burn_start:test_end]
 
         # ── Grid-search on training window ────────────────────────────────────
         best_params = param_grid[0]
@@ -739,13 +749,14 @@ def backtest_walk_forward():
         train_result = _run_strategy_slice(c_train, h_train, l_train, v_train,
                                            strategy, best_params, oos_capital, brokerage, slip_pct)
 
-        # ── Apply best params to test (OOS) window ────────────────────────────
+        # ── Apply best params to test (OOS) window with burn-in prefix ────────
         test_result = _run_strategy_slice(c_test, h_test, l_test, v_test,
-                                          strategy, best_params, oos_capital, brokerage, slip_pct)
+                                          strategy, best_params, oos_capital, brokerage, slip_pct,
+                                          trade_from_idx=actual_burnin)
 
         oos_all_pnls.extend([t["pnl"] for t in test_result["trades"]])
 
-        # Build OOS equity curve segment
+        # Build OOS equity curve segment (equity list starts at trade_from_idx)
         for j, val in enumerate(test_result["equity"]):
             date_idx = test_start + j
             dt = dates[date_idx] if date_idx < len(dates) else dates[-1]
