@@ -105,21 +105,16 @@ def backtest():
                 date_str = close.index[i].strftime("%Y-%m-%d")
 
                 if strategy == "rsi_trend":
-                    # Buy: RSI < 40 AND price above SMA20.
-                    # SMA20 (not SMA50) matches the RSI(14) time-frame: when a stock
-                    # has been falling for ~10-15 days (RSI → 40), it can still be above
-                    # its 20-day MA (short-term trend intact), but SMA50 will already
-                    # have been breached — making RSI < 40 + price > SMA50 near-impossible.
-                    _sma20 = safe_float(sma_20.iloc[i], None) or price
-                    buy_sig = (
-                        safe_float(rsi.iloc[i], 50) < 40 and
-                        price > _sma20
-                    )
-                    # Sell: RSI overbought OR price drops >3% below SMA20
-                    sell_sig = (
-                        safe_float(rsi.iloc[i], 50) > 65 or
-                        price < _sma20 * 0.97
-                    )
+                    # Buy: RSI < 45 (mild short-term weakness) AND price > SMA50
+                    # (medium-term uptrend intact).
+                    # RSI < 40 required a severe 10-15 day decline which almost always
+                    # breaks SMA20 too. RSI < 45 fires on 3-5 weak days — shallow enough
+                    # that SMA50 (2.5 months of history) is still below current price.
+                    _sma50 = safe_float(sma_50.iloc[i], None) or price
+                    _rsi_v = safe_float(rsi.iloc[i], 50)
+                    buy_sig = _rsi_v < 45 and price > _sma50
+                    # Sell: RSI overbought OR price drops >3% below SMA50 (trend broken)
+                    sell_sig = _rsi_v > 70 or price < _sma50 * 0.97
 
                 elif strategy == "macd":
                     # Buy: MACD crosses above signal
@@ -269,9 +264,9 @@ def backtest():
                 bb_m = safe_float(bb_mid.iloc[i], price)
 
                 if strategy == "rsi_trend":
-                    _sma20e = safe_float(sma_20.iloc[i], None) or price
-                    buy_sig = rsi_v < 40 and price > _sma20e
-                    sell_sig = rsi_v > 65 or price < _sma20e * 0.97
+                    _sma50e = safe_float(sma_50.iloc[i], None) or price
+                    buy_sig = rsi_v < 45 and price > _sma50e
+                    sell_sig = rsi_v > 70 or price < _sma50e * 0.97
                 elif strategy == "macd":
                     buy_sig = macd_v > 0 and macd_prev <= 0
                     sell_sig = macd_v < 0 and macd_prev >= 0
@@ -405,8 +400,8 @@ _WF_PARAM_GRIDS = {
     "rsi_trend": [
         {"rsi_period": rp, "rsi_oversold": ob, "rsi_overbought": os_, "trend_period": tp}
         for rp in [10, 14, 21]
-        for ob in [35, 40, 45]
-        for os_ in [62, 68, 72]
+        for ob in [38, 42, 45, 48]
+        for os_ in [65, 70, 75]
         for tp in [20, 50]
     ],
     "macd": [
@@ -529,8 +524,8 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
 
     # Strategy-specific indicator precompute
     rp = params.get("rsi_period", 14)
-    ob = params.get("rsi_oversold", 40)
-    os_ = params.get("rsi_overbought", 65)
+    ob = params.get("rsi_oversold", 45)
+    os_ = params.get("rsi_overbought", 70)
     fast = params.get("fast", 12)
     slow = params.get("slow", 26)
     sig_period = params.get("signal", 9)
@@ -539,7 +534,7 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
     rsi_entry = params.get("rsi_entry", 40)
     adx_entry = params.get("adx_entry", 25)
     adx_exit  = params.get("adx_exit", 18)
-    trend_period = params.get("trend_period", 20)
+    trend_period = params.get("trend_period", 50)
 
     rsi_vals  = _rsi(prices, rp)
     ema_fast  = _ema(prices, fast)
