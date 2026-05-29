@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** May 2026 (Sprint 23 hardening)
-**Status:** Phases 1–5, 7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23 improvements applied · Phase 6 & 8 Planned
+**Last Updated:** May 2026 (Sprint 24)
+**Status:** Phases 1–5, 7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–24 improvements applied · Phase 6 & 8 Planned
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -132,12 +132,18 @@ conf 70-80%:⚠low ESS=1.6(n=4)—data too stale for reliable calibration
 ```
 Equal-weight samples behave the same as before (4 trades, equal weights → ESS = 4.0). Stale samples are correctly gated regardless of raw count.
 
-**3b. Regime freshness gate** ✅ (L1, now ESS-integrated)
-The regime section checks ESS first. Low ESS emits:
+**3b. Hierarchical regime fallbacks** ✅ (L1, ESS-integrated, Sprint 24)
+When the active regime has ESS < 2.5 (e.g. recently transitioned), rather than emitting nothing, the system falls through three levels:
+
+1. **Specific regime** (e.g. `bullTrending`) — ESS ≥ 2.5 → full decay-weighted win rate
+2. **Macro group** (`bearish` / `bullish` / `neutral`) — if specific is thin, pool all regimes in the same macro family
+3. **All trades** — if even the macro group is thin, fall back to overall with a low-specificity warning
+
+This prevents a freshly-transitioned regime from getting no signal at all. Each fallback level emits a progressively weaker warning so Claude knows how specific the data is:
 ```
-⚠bullTrending:ESS=1.4(n=3)—regime data too stale for calibration
+⚠bullTrending(ESS=1.4)→bullish-group:68%W(ESS=3.2)⚠low-specificity
 ```
-0 trades = silently omitted. ESS ≥ 2.5 = full decay-weighted win rate shown. This prevents a freshly-transitioned regime from inheriting the previous regime's failure patterns.
+0 trades in a regime = silently omitted even at the all-trades level.
 
 **4. Date range in calibration block** ✅
 Every calibration block includes the date range and regime so Claude can contextualise the data:
@@ -151,11 +157,12 @@ Calibration fetches the current regime from the request and compares same-regime
 ### Still to implement
 
 **Skill-weighted calibration (Phase 8) — partially live**
-The `_weight()` function in `_calib_compute()` already applies skill weighting:
+The `_weight()` function in `_calib_compute()` applies skill weighting centered at 5 (neutral):
 ```python
-weight = time_decay × max(0.2, skill_score / 10)   # skill_score ∈ [0, 10]
+sf = max(0.2, min(1.8, skill_score / 5.0))  # skill_score=5 → sf=1.0 (neutral)
+weight = time_decay × sf
 ```
-This is live code. However, skill_score is `NULL` for events not yet scored — those fall back to weight = time_decay × 1.0 (neutral). Phase 8 is fully realised once ~20+ scored events exist and all recent events have a score; at that point the weighting has enough coverage to meaningfully differentiate luck wins from skill wins.
+Centering at 5 means unscored events (`skill_score=NULL`) fall back to `sf=1.0` — identical to a neutral-scored trade. A high-skill trade (score=8) gets `sf=1.6`, amplifying its calibration signal; a low-skill trade (score=2) gets `sf=0.4`, down-weighting lucky wins. The old formula (`max(0.2, skill/10)`) centred at 10 and penalised all scored trades vs unscored, which was backwards. Phase 8 is fully realised once ~20+ scored events exist; the formula is already live (Sprint 24).
 
 **Virtual outcomes / paper-trade skipped recs (deferred)**
 When calibration suppresses Claude's confidence in a regime and recs are skipped, no new outcomes enter the loop — the pessimism can become self-reinforcing. The fix: track hypothetical P&L on `was_executed=0` events at their suggested entry/stop/target prices, feed those back into calibration at a discount (weight × 0.75). Deferred — requires scheduled background price-checking + new DB columns + frontend visibility.
@@ -166,7 +173,7 @@ When calibration suppresses Claude's confidence in a regime and recs are skipped
 
 `fetchCalibrationBlock(regime, sectors, tickers)` in `analysis.js` calls `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` after regime detection. The backend:
 1. Fetches last 90 days of closed events (max 180d) — pure `_calib_compute()` function, TTL-cached 5 min (L4)
-2. Applies exponential + skill-weighted decay (`weight = time_decay × max(0.2, skill_score/10)`, half-life 45d)
+2. Applies exponential + skill-weighted decay (`weight = time_decay × max(0.2, min(1.8, skill_score/5.0))`, half-life 45d; unscored → sf=1.0)
 3. Excludes `external_shock` / `protective_stop` from confidence band calculations only
 4. Only emits findings where **ESS ≥ 2.5** (Kish's formula) — replaces raw n≥3 guard (Sprint 23)
 5. Low-ESS subsets emit a warning token rather than a calibration nudge (Sprint 23)
@@ -271,6 +278,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 - **`format_schema` (Sprint 23):** All JSON-producing Ollama calls now pass a JSON Schema via Ollama's native `format` parameter. The inference engine constrains token selection at the grammar level — valid JSON is guaranteed without relying on regex fallback parsers. Schemas: `_SCHEMA_POSTMORTEM`, `_SCHEMA_WIN_TAG`, `_SCHEMA_SYNTHESIS`, `_SCHEMA_EXIT_SYNTHESIS`, `_SCHEMA_PM_SYNTHESIS`, `_SCHEMA_SKILL`. Cloud callers (Groq/Gemini/Claude) are not affected — they receive schema guidance via prompt text.
 - No retry on timeout — fail immediately, caller switches to smaller model
 - Batch concurrency always 1 — Ollama queues internally; external concurrency wastes VRAM
+- **JS priority queue (Sprint 24):** `_oqEnqueue(fn, priority)` in `debate-client.js` enforces a HIGH/LOW semaphore on all Ollama backend calls. HIGH tasks (user-initiated: `fetchDebate`, manual postmortem button) insert before queued LOW tasks. LOW tasks (auto-triggered: `triggerPostmortem`, `fetchSkillScore`, auto `fetchPostmortemDebate`) are queued in arrival order. A running call is never interrupted — the priority only determines insertion point in the waiting queue.
 
 ### Model priority (Auto selection)
 `preferredDebateModel()` selects from pulled models in this order:
@@ -427,6 +435,20 @@ The local debate (Phase 1–3) can deadlock with a stubborn incumbent or both mo
 
 `NEITHER` means both models missed the real issue — the adjudicator proposes its own tags.
 
+### Blind adjudication *(Sprint 24)*
+Before building the adjudicator prompt, the server randomly assigns aliases:
+```python
+if random.random() < 0.5:
+    alias_a, alias_b = "Analyst Alpha", "Analyst Beta"
+    # identity map — no swap
+else:
+    alias_a, alias_b = "Analyst Beta", "Analyst Alpha"
+    # swapped — winner must be un-swapped after parsing
+```
+The cloud model receives "Analyst Alpha" and "Analyst Beta" instead of model names. This prevents halo-effect bias — Gemini Flash has been observed preferring `qwen3.5:9b` over `gemma3:4b` by name alone, independent of reasoning quality. The swap is resolved after parsing: the winner alias is translated back to canonical "A"/"B" using the stored `blind_map`.
+
+Score fields in the JSON response are named `score_alpha`/`score_beta` (matching the alias names), then swapped back to `score_a`/`score_b` (canonical model order) before storage.
+
 ### Storage
 - `error_type` is overwritten with the adjudicator's `final_tags` (unless empty/invalid)
 - `error_type_source` becomes `'adjudicated'`
@@ -439,10 +461,14 @@ The local debate (Phase 1–3) can deadlock with a stubborn incumbent or both mo
     "score_a":    7.5,
     "score_b":    4.0,
     "final_tags": "stop_too_tight,poor_rr",
-    "reason":     "Model A engaged with the R:R numbers; B was generic.",
-    "elapsed_ms": 2840
+    "reason":     "Analyst Alpha engaged with the R:R numbers; Beta was generic.",
+    "elapsed_ms": 2840,
+    "blind_swap": true,
+    "alias_a":    "Analyst Beta",
+    "alias_b":    "Analyst Alpha"
   }
   ```
+`blind_swap`, `alias_a`, and `alias_b` are stored for auditability — they let you verify the winner translation is correct and track any systematic alias bias over time.
 
 ### Output validation
 The adjudicator's `final_tags` go through the same `_pm_validate_tags` + `_pm_sanity_check_tags` pipeline as the local models — even a cloud model can't claim `stop_too_tight` on a 43%-wide stop.
@@ -505,6 +531,10 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Adjudicator is user-initiated, not auto | Costs real money per call. Worth spending on disputed cases (the user explicitly clicks ⚖️) but wasteful as a default on every postmortem |
 | Adjudicator output validated by same `_pm_sanity_check_tags` | Even a 70B+ cloud model can produce contradictory tags. Same validation pipeline = same guarantees |
 | Provider auto-pick (Gemini > Groq) | Gemini Flash has a generous free tier and you're already using it for ASX announcements — zero extra cost in common case. Groq is the fallback because it's also free up to per-day limits |
+| Blind adjudication (aliases not model names) | Cloud models exhibit halo-effect bias — they prefer certain model families by name regardless of reasoning quality. Random alias assignment removes this bias. `blind_swap` stored in phase_4 for audit |
+| Skill weight centered at 5, not 10 | Old formula `max(0.2, skill/10)` set neutral at 10 — a skill=8 trade (0.8×) was penalised vs unscored (1.0×). Centering at 5 makes unscored and average-skill identical (sf=1.0); high-skill amplified (sf up to 1.8); low-skill down-weighted (sf down to 0.2) |
+| Hierarchical regime fallbacks (specific → macro → all) | When a newly-transitioned regime has ESS < 2.5, falling back to a macro group (bearish/bullish/neutral) gives Claude useful signal instead of nothing. Each level is labelled so Claude knows the specificity |
+| JS priority queue: HIGH/LOW semaphore | Auto-postmortems fire on trade close and can queue multiple background calls. Without a priority gate, a burst of auto-postmortems would block the user's next manual debate for several minutes |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
 | Lessons Database deferred | Needs proper design: what is a "lesson"? How injected? Until defined, premature to implement. |
 
@@ -526,6 +556,11 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **Signal flattening:** `_flatten_entry_signals(json_str)` helper; 12 key diagnostic fields; compact pipe-separated format; replaces all raw `", ".join(k=v)` patterns in postmortem, postmortem-debate, and skill endpoints
   - **Phase 3 corrected in docs:** was documenting old "maintains/concedes + digit check" protocol; current code is neutral synthesis since the challenger-bias redesign; doc now accurately reflects the implementation
   - **Cloud adjudicator provider picker (Sprint 22):** user can select Gemini, Groq, or Claude API explicitly; auto-detect still available; provider picker modal shown when multiple keys are configured
+- **Sprint 24 (May 2026):**
+  - **Blind adjudication:** `debate_adjudicate()` randomly assigns "Analyst Alpha"/"Analyst Beta" aliases before building the cloud prompt; response parsed using `score_alpha`/`score_beta` fields; winner un-swapped via `blind_map` to canonical A/B before storage; `blind_swap`, `alias_a`, `alias_b` stored in `phase_4` transcript
+  - **JS Ollama priority queue:** `_oqEnqueue(fn, priority)` added to `debate-client.js`; HIGH lane for user-initiated calls (`fetchDebate`, manual `fetchPostmortemDebate`); LOW lane for background auto-triggers (`triggerPostmortem`, `fetchSkillScore`); manual postmortem button in Learning page passes `priority:'HIGH'`
+  - **Skill-weight centering:** `_weight()` formula changed from `max(0.2, sk/10)` to `max(0.2, min(1.8, sk/5.0))`; neutral at 5 instead of 10; unscored events remain at sf=1.0
+  - **Hierarchical regime fallbacks:** `_REGIME_GROUPS` dict added to `learning.py`; calibration falls through: specific regime → macro group (bearish/bullish/neutral) → all trades when ESS < 2.5; each level labelled with specificity warning
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
 - **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
 - **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.
