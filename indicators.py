@@ -26,7 +26,7 @@ def asx(ticker: str) -> str:
 def safe_float(v, default=None):
     try:
         f = float(v)
-        return None if (math.isnan(f) or math.isinf(f)) else f
+        return default if (math.isnan(f) or math.isinf(f)) else f
     except Exception:
         return default
 
