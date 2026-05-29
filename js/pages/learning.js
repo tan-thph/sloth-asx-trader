@@ -1439,31 +1439,101 @@ function showPostmortemDebateModal(result, eventId) {
   document.body.appendChild(modal);
 }
 
-// ── Cloud adjudicator (Gemini / Groq) — score both models + pick winner ───────
-// Triggered by the AI judge button. Reads stored debate transcript, sends it
-// to a configured cloud model, scores Phase 1 reasoning 0-10 per model and
-// picks a winner. The result is appended as phase_4 in the transcript and
-// (if winner is A or B) overwrites error_type with error_type_source='adjudicated'.
+// ── Cloud adjudicator (Gemini / Groq / Claude) — score both models + pick winner
+// Triggered by the AI judge button. When multiple providers are configured the
+// user gets a compact picker; with only one available it fires immediately.
+const _ADJ_BTN_HTML = '&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span>';
+
+function _adjBtnReset(btn) {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.innerHTML = _ADJ_BTN_HTML;
+  btn.title = 'Cloud adjudicator';
+}
+
 async function triggerAdjudication(eventId) {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   const btn = document.getElementById(`adj-btn-${eventId}`);
   if (btn) { btn.disabled = true; btn.innerHTML = '&#8987;'; btn.title = 'Adjudicating…'; }
 
   try {
-    // Check provider availability first so we can give a useful error
     const status = await adjudicatorStatus();
-    if (!status.available) {
-      toast('No cloud adjudicator configured. Set a Gemini or Groq API key in News Scanner → Settings.', 'error');
-      if (btn) { btn.disabled = false; btn.innerHTML = '&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span>'; btn.title = 'Cloud adjudicator'; }
+    const available = (status.providers || []).filter(p => p.available);
+
+    if (!available.length) {
+      toast('No cloud adjudicator configured. Add a Gemini or Groq key in News Scanner → Settings, or a Claude key in Settings → Claude API.', 'error');
+      _adjBtnReset(btn);
       return;
     }
 
-    toast(`&#9878; ${status.provider}:${status.model} adjudicating event #${eventId}…`, 'info');
+    // One provider available — fire directly
+    if (available.length === 1) {
+      _adjBtnReset(btn);
+      return _runAdjudication(eventId, available[0].provider, available[0].model);
+    }
+
+    // Multiple available — show compact picker
+    _adjBtnReset(btn);
+    _showAdjudicatorPicker(eventId, available);
+  } catch (e) {
+    toast('Adjudicate error: ' + e.message, 'error');
+    _adjBtnReset(btn);
+  }
+}
+
+function _showAdjudicatorPicker(eventId, providers) {
+  document.getElementById('_adj-picker')?.remove();
+
+  const ICONS = { claude: '🤖', gemini: '🌟', groq: '⚡' };
+  const providerBtns = providers.map(p => `
+    <button
+      onclick="document.getElementById('_adj-picker').remove();_runAdjudication(${eventId},'${p.provider}','${p.model}')"
+      style="display:flex;align-items:center;gap:10px;width:100%;padding:10px 14px;margin-bottom:8px;
+             background:var(--bg-secondary);border:1px solid var(--border-color);
+             border-radius:var(--radius-md);cursor:pointer;color:var(--text-primary);font-size:13px;text-align:left">
+      <span style="font-size:16px">${ICONS[p.provider] || '🔮'}</span>
+      <span style="font-weight:600;text-transform:capitalize;min-width:54px">${p.provider}</span>
+      <span style="color:var(--text-muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.model}</span>
+    </button>`).join('');
+
+  const modal = document.createElement('div');
+  modal.id = '_adj-picker';
+  modal.style.cssText = [
+    'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%)',
+    'background:var(--bg-card);border:1px solid var(--border-color)',
+    'border-radius:var(--radius-md);padding:20px 20px 14px',
+    'z-index:9999;min-width:300px;max-width:380px',
+    'box-shadow:0 8px 32px rgba(0,0,0,0.5)',
+  ].join(';');
+
+  modal.innerHTML = `
+    <div style="font-weight:600;font-size:14px;margin-bottom:14px;color:var(--text-primary)">
+      &#9878; Choose Adjudicator
+    </div>
+    ${providerBtns}
+    <button onclick="document.getElementById('_adj-picker').remove()"
+      style="width:100%;padding:7px;background:none;border:1px solid var(--border-color);
+             border-radius:var(--radius-sm);cursor:pointer;color:var(--text-muted);font-size:12px;margin-top:2px">
+      Cancel
+    </button>`;
+
+  // Close on backdrop click
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+
+async function _runAdjudication(eventId, provider, model) {
+  if (!state.serverOk) return;
+  const btn = document.getElementById(`adj-btn-${eventId}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '&#8987;'; btn.title = 'Adjudicating…'; }
+
+  try {
+    toast(`&#9878; ${provider}:${model} adjudicating event #${eventId}…`, 'info');
     const t0 = Date.now();
-    const result = await fetchAdjudication(eventId);
+    const result = await fetchAdjudication(eventId, provider);
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
-    if (btn) { btn.disabled = false; btn.innerHTML = '&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span>'; btn.title = 'Cloud adjudicator'; }
+    _adjBtnReset(btn);
 
     if (!result?.ok) {
       toast(`Adjudicate failed (${elapsed}s): ${result?.error || 'no response'}`, 'error');
@@ -1472,15 +1542,12 @@ async function triggerAdjudication(eventId) {
 
     const w = result.winner === 'NEITHER' ? 'NEITHER' : `Model ${result.winner}`;
     toast(`Adjudicator: ${w} (A=${result.score_a ?? '—'}, B=${result.score_b ?? '—'}) in ${elapsed}s`, 'success');
-
-    // Re-render the page so the cache (_learningEventsById) is refreshed with
-    // the new transcript, THEN open the modal so it shows phase_4.
+    clearAdjudicatorStatusCache();
     showPage('learning');
-    // Small delay to let render complete before opening modal
     setTimeout(() => viewStoredDebate(eventId), 100);
   } catch (e) {
     toast('Adjudicate error: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.innerHTML = '&#9878;<span style="font-size:8px;display:block;line-height:1;text-align:center">AI</span>'; btn.title = 'Cloud adjudicator'; }
+    _adjBtnReset(btn);
   }
 }
 

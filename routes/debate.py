@@ -441,38 +441,88 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
 # Used by the user-initiated 🧑‍⚖️ adjudicator. Reads API keys from the
 # blob_store 'news_settings' entry (same place news + announcements use).
 
-def _get_adjudicator_provider() -> dict:
+def _get_adjudicator_providers() -> list:
     """
-    Auto-detect which cloud provider to use, preferring Gemini.
-
-    Returns a dict: {"provider": "gemini"|"groq"|None,
-                     "api_key": "...", "model": "..."}
-    The 'model' is the default for that provider; the endpoint may override.
+    Return all three cloud adjudicator providers with availability flags.
+    Keys are NEVER included in the list — call _get_adjudicator_provider(name) to get the key.
+    Order: gemini, groq, claude.
     """
     try:
         with get_db() as conn:
-            row = conn.execute(
+            ns_row = conn.execute(
                 "SELECT value FROM blob_store WHERE key='news_settings'"
             ).fetchone()
+            cl_row = conn.execute(
+                "SELECT value FROM settings WHERE key='claude_api_key'"
+            ).fetchone()
     except Exception:
-        row = None
-    settings = json.loads(row["value"]) if row else {}
+        ns_row = cl_row = None
 
-    google_key = settings.get("google_api_key", "") or ""
-    groq_key   = settings.get("groq_api_key", "") or ""
+    settings    = json.loads(ns_row["value"]) if ns_row else {}
+    google_key  = settings.get("google_api_key", "") or ""
+    groq_key    = settings.get("groq_api_key", "") or ""
+    claude_key  = (json.loads(cl_row["value"]) if cl_row else "") or ""
 
-    if google_key:
-        return {
-            "provider": "gemini",
-            "api_key":  google_key,
-            "model":    settings.get("google_model") or "gemini-2.0-flash",
-        }
-    if groq_key:
-        return {
-            "provider": "groq",
-            "api_key":  groq_key,
-            "model":    settings.get("groq_model") or "llama-3.1-8b-instant",
-        }
+    return [
+        {
+            "provider":  "gemini",
+            "available": bool(google_key),
+            "model":     settings.get("google_model") or "gemini-2.0-flash",
+        },
+        {
+            "provider":  "groq",
+            "available": bool(groq_key),
+            "model":     settings.get("groq_model") or "llama-3.1-8b-instant",
+        },
+        {
+            "provider":  "claude",
+            "available": bool(claude_key),
+            "model":     "claude-haiku-4-5-20251001",
+        },
+    ]
+
+
+def _get_adjudicator_provider(provider_hint: str | None = None) -> dict:
+    """
+    Resolve a specific provider by name, or auto-detect (Gemini → Groq → Claude).
+    Returns {"provider": str|None, "api_key": str, "model": str}.
+    """
+    try:
+        with get_db() as conn:
+            ns_row = conn.execute(
+                "SELECT value FROM blob_store WHERE key='news_settings'"
+            ).fetchone()
+            cl_row = conn.execute(
+                "SELECT value FROM settings WHERE key='claude_api_key'"
+            ).fetchone()
+    except Exception:
+        ns_row = cl_row = None
+
+    settings    = json.loads(ns_row["value"]) if ns_row else {}
+    google_key  = settings.get("google_api_key", "") or ""
+    groq_key    = settings.get("groq_api_key", "") or ""
+    claude_key  = (json.loads(cl_row["value"]) if cl_row else "") or ""
+
+    all_providers = {
+        "gemini": {"provider": "gemini", "api_key": google_key,
+                   "model": settings.get("google_model") or "gemini-2.0-flash"},
+        "groq":   {"provider": "groq",   "api_key": groq_key,
+                   "model": settings.get("groq_model") or "llama-3.1-8b-instant"},
+        "claude": {"provider": "claude", "api_key": claude_key,
+                   "model": "claude-haiku-4-5-20251001"},
+    }
+
+    if provider_hint:
+        cfg = all_providers.get(provider_hint)
+        if cfg and cfg["api_key"]:
+            return cfg
+        return {"provider": None, "api_key": "", "model": ""}
+
+    # Auto-detect: Gemini preferred, then Groq, then Claude
+    for name in ("gemini", "groq", "claude"):
+        cfg = all_providers[name]
+        if cfg["api_key"]:
+            return cfg
     return {"provider": None, "api_key": "", "model": ""}
 
 
@@ -525,13 +575,42 @@ def _call_groq_json(api_key: str, model: str, prompt: str, timeout: int = 30) ->
         return {"ok": False, "error": str(ex)}
 
 
+def _call_claude_json(api_key: str, model: str, prompt: str, timeout: int = 30) -> dict:
+    """Call Anthropic Claude directly; same return shape as other cloud callers."""
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key":         api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type":      "application/json",
+            },
+            json={
+                "model":      model,
+                "max_tokens": 500,
+                "messages":   [{"role": "user", "content": prompt}],
+            },
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            return {"ok": False, "error": f"Claude HTTP {r.status_code}: {r.text[:120]}"}
+        text = r.json()["content"][0]["text"]
+        return {"ok": True, "text": (text or "").strip()}
+    except requests.exceptions.Timeout:
+        return {"ok": False, "error": f"Claude timeout after {timeout}s"}
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)}
+
+
 def _call_cloud_adjudicator(provider: str, api_key: str, model: str,
                             prompt: str, timeout: int = 30) -> dict:
-    """Dispatch to gemini or groq. Returns {"ok", "text"} or {"ok", "error"}."""
+    """Dispatch to gemini, groq, or claude. Returns {"ok", "text"} or {"ok", "error"}."""
     if provider == "gemini":
         return _call_gemini_json(api_key, model, prompt, timeout=timeout)
     if provider == "groq":
         return _call_groq_json(api_key, model, prompt, timeout=timeout)
+    if provider == "claude":
+        return _call_claude_json(api_key, model, prompt, timeout=timeout)
     return {"ok": False, "error": f"Unknown adjudicator provider: {provider}"}
 
 
@@ -1199,18 +1278,24 @@ def debate_adjudicate():
       "error_type_source": "adjudicated"
     }
     """
-    data  = request.get_json() or {}
-    ev_id = data.get("id")
+    data      = request.get_json() or {}
+    ev_id     = data.get("id")
+    provider_hint = data.get("provider")  # optional — None means auto-detect
     if not ev_id:
         return jsonify({"ok": False, "error": "id required"}), 400
 
-    # Auto-detect provider from stored API keys
-    cfg = _get_adjudicator_provider()
+    # Resolve provider (explicit selection or auto-detect)
+    cfg = _get_adjudicator_provider(provider_hint)
     if not cfg["provider"]:
+        if provider_hint:
+            return jsonify({
+                "ok": False,
+                "error": f"'{provider_hint}' API key not configured. "
+                         f"Add it in Settings (Claude proxy) or News Scanner → Settings (Gemini/Groq).",
+            }), 400
         return jsonify({
             "ok": False,
-            "error": "No cloud adjudicator configured. Set a Gemini or Groq API key "
-                     "in News Scanner → Settings.",
+            "error": "No cloud adjudicator configured. Set a Gemini, Groq, or Claude API key.",
         }), 400
 
     # Load the event + its stored debate transcript
@@ -1420,12 +1505,14 @@ def debate_adjudicate():
 
 @bp.route("/api/debate/adjudicator-status")
 def debate_adjudicator_status():
-    """Quick check: is a cloud adjudicator available? Used by UI to enable/disable the 🧑‍⚖️ button."""
-    cfg = _get_adjudicator_provider()
+    """Return all available cloud adjudicators. Used by UI to populate provider picker."""
+    providers = _get_adjudicator_providers()
+    cfg       = _get_adjudicator_provider()   # auto-detected default
     return jsonify({
-        "available": bool(cfg["provider"]),
-        "provider":  cfg["provider"],
-        "model":     cfg["model"],
+        "available":  bool(cfg["provider"]),
+        "provider":   cfg["provider"],
+        "model":      cfg["model"],
+        "providers":  providers,              # full list for the picker UI
     })
 
 

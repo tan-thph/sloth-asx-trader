@@ -405,23 +405,24 @@ function clearAdjudicatorStatusCache() {
 
 /**
  * Send a stored debate to the cloud adjudicator.
- * The backend auto-detects provider (Gemini preferred, Groq fallback).
  * @param {number} eventId
+ * @param {string|null} provider  — 'gemini'|'groq'|'claude'|null (null = auto-detect)
  * @returns {Promise<{ok, provider, model, winner, score_a, score_b,
  *                    final_tags, reason, error_type, error_type_source,
  *                    elapsed_ms}|null>}
  */
-async function fetchAdjudication(eventId) {
+async function fetchAdjudication(eventId, provider = null) {
   if (!state.serverOk) return null;
   try {
+    const body = { id: eventId };
+    if (provider) body.provider = provider;
     const r = await fetch(`${API}/api/debate/adjudicate`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ id: eventId }),
-      signal:  AbortSignal.timeout(60_000),  // cloud calls are <30s typically
+      body:    JSON.stringify(body),
+      signal:  AbortSignal.timeout(60_000),
     });
     if (r.ok) return await r.json();
-    // Try to surface the JSON error body if available
     try { return await r.json(); } catch { return null; }
   } catch {
     return null;
