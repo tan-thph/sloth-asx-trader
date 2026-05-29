@@ -88,6 +88,7 @@ function _renderLearningContent(d, brier) {
   const events          = d.recent_events     || [];
   const failed          = d.failed_tickers    || [];
   const failPats        = d.failure_patterns  || {};
+  const successPats     = d.success_patterns  || {};
   const debateInsights  = d.debate_insights   || [];
   const insufficientData = d.insufficient_data ?? (closed < 10);
 
@@ -335,6 +336,50 @@ function _renderLearningContent(d, brier) {
               <span style="font-weight:600;color:var(--text-secondary)">${cnt}</span>
             </div>`;
           }).join('') : '<span class="text-xs text-muted">No tags yet — tag recent events below</span>'}
+        </div>
+      </div>
+    </div>` : '';
+
+  // ── Success patterns ───────────────────────────────────────────────────────
+  const WIN_TAG_META = {
+    catalyst_capture: { label: 'Catalyst Capture',  color: '#3b82f6', tip: 'Trade captured a planned earnings/news/dividend event' },
+    regime_aligned:   { label: 'Regime Aligned',    color: '#8b5cf6', tip: 'Entry timing matched the active macro regime' },
+    confluence_entry: { label: 'Confluence Entry',  color: '#0891b2', tip: 'Multiple independent indicators aligned at entry' },
+    disciplined_hold: { label: 'Disciplined Hold',  color: '#059669', tip: 'Held through normal volatility; original thesis validated' },
+    good_sizing:      { label: 'Good Sizing',        color: '#d97706', tip: 'Position size was appropriate for conviction and risk' },
+  };
+  const successTypes = Object.entries(successPats.by_success_type || {})
+    .sort((a, b) => b[1] - a[1]);
+  const successCard = successTypes.length ? `
+    <div class="card section-gap">
+      <div class="card-title">Success Patterns</div>
+      <p class="text-xs text-muted" style="margin-bottom:10px">
+        What's working — success tags on closed wins (🏆 button). Dominant tags are emitted as positive calibration nudges.
+      </p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:6px;font-weight:600">Success type tags</div>
+          ${successTypes.map(([tag, cnt]) => {
+            const meta = WIN_TAG_META[tag] || { label: tag, color: '#16a34a', tip: tag };
+            const barW = Math.round((cnt / successTypes[0][1]) * 100);
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)">
+              <div style="display:flex;align-items:center;gap:6px">
+                <span title="${meta.tip}" style="font-size:11px;padding:1px 6px;border-radius:3px;font-weight:600;background:${meta.color}22;color:${meta.color};white-space:nowrap">${meta.label}</span>
+                <div style="background:var(--bg-secondary);border-radius:2px;height:6px;width:60px">
+                  <div style="background:${meta.color};border-radius:2px;height:6px;width:${barW * 0.6}px"></div>
+                </div>
+              </div>
+              <span style="font-weight:600;color:var(--text-secondary);font-size:12px">${cnt}</span>
+            </div>`;
+          }).join('')}
+        </div>
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:6px;font-weight:600">Calibration nudge rule</div>
+          <p class="text-xs text-muted">When ≥33% of recent wins share a tag (ESS≥2.5), a positive nudge is injected into Claude's calibration block:</p>
+          <div style="margin-top:8px;padding:6px 8px;background:var(--bg-secondary);border-radius:4px;font-family:monospace;font-size:11px;color:#16a34a">
+            ✓confluence_entry(5/12wins,ESS=4.1)→lean into this
+          </div>
+          <p class="text-xs text-muted" style="margin-top:6px">Tag wins using the 🏆 button on individual rows below.</p>
         </div>
       </div>
     </div>` : '';
@@ -636,7 +681,7 @@ function _renderLearningContent(d, brier) {
 
   return summaryCards + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
-    failureCard + recentCard + failedCard + debateInsightsCard +
+    failureCard + successCard + recentCard + failedCard + debateInsightsCard +
     digestCard + lessonsPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
 }
 

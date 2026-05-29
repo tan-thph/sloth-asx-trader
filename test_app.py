@@ -2868,6 +2868,48 @@ class TestSprint19VitestInfrastructure(unittest.TestCase):
         self.assertIn("stop must be above entry", src)
 
 
+class TestSuccessTagsIntegration(unittest.TestCase):
+    """Success tags: calibration nudge + success_patterns in stats."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+
+    def test_stats_returns_success_patterns(self):
+        """/api/learning/stats must include success_patterns key."""
+        r = self.client.get("/api/learning/stats")
+        data = json.loads(r.data)
+        self.assertIn("success_patterns", data)
+        self.assertIn("by_success_type", data["success_patterns"])
+
+    def test_calib_success_nudge_in_source(self):
+        """_calib_compute must have a dominant success tag nudge (mirror of L2)."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("wins_tagged", src)
+        self.assertIn("lean into this", src)
+        # Same ESS threshold as error check
+        self.assertIn("win_ess >= _ESS_MIN", src)
+
+    def test_calib_query_includes_success_tags(self):
+        """_calib_compute SQL query must select success_tags column."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # The calibration SELECT must include success_tags
+        self.assertIn("success_tags", src.split("def learning_calibration")[0]
+                      if "def learning_calibration" in src else src)
+
+    def test_success_card_in_learning_js(self):
+        """learning.js must render a Success Patterns card."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("Success Patterns", src)
+        self.assertIn("successCard", src)
+        self.assertIn("by_success_type", src)
+
+
 class TestPhase6CalibQuality(unittest.TestCase):
     """Phase 6 — Calibration quality debate endpoint."""
 

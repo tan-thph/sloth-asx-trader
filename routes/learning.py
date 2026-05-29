@@ -339,6 +339,22 @@ def learning_stats():
                 "by_error_type":  dict(sorted(type_counts.items(), key=lambda x: -x[1])),
             }
 
+            # Success patterns — success_tags distribution for wins
+            success_tag_rows = conn.execute("""
+                SELECT success_tags FROM ai_learning_events
+                WHERE success_tags IS NOT NULL AND success_tags != ''
+                  AND outcome_status = 'win'
+            """).fetchall()
+            success_counts: dict = {}
+            for r in success_tag_rows:
+                for tag in (r["success_tags"] or "").split(","):
+                    tag = tag.strip()
+                    if tag and tag != "none":
+                        success_counts[tag] = success_counts.get(tag, 0) + 1
+            success_patterns = {
+                "by_success_type": dict(sorted(success_counts.items(), key=lambda x: -x[1])),
+            }
+
             # Failed tickers
             failed = conn.execute(
                 "SELECT ticker, error, context, timestamp FROM failed_tickers ORDER BY id DESC LIMIT 20"
@@ -363,6 +379,7 @@ def learning_stats():
             "exit_reason_dist":   exit_reason_dist,
             "rr_stats":           rr_stats,
             "failure_patterns":   failure_patterns,
+            "success_patterns":   success_patterns,
             "debate_insights":    debate_insights,
         })
     except Exception as e:
@@ -656,7 +673,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
                        realized_pnl_pct, rr_ratio, timestamp,
-                       error_type, exit_reason, skill_score
+                       error_type, exit_reason, skill_score, success_tags
                 FROM ai_learning_events
                 WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
                 ORDER BY timestamp DESC LIMIT 300
@@ -803,6 +820,28 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                            "require min R:R 2.5" if top_et == "poor_rr" else
                            "add re-validation step")
                     )
+
+        # 6b. Dominant success tag — mirror of L2 dominant error check
+        # Only emit when ESS of wins is high enough to trust the pattern.
+        wins_tagged = [r for r in rows if r["outcome_status"] == "win"
+                       and r.get("success_tags") and r["success_tags"] not in ("", "none")]
+        if len(wins_tagged) >= 3:
+            win_ess = _ess(wins_tagged)
+            if win_ess >= _ESS_MIN:
+                stag_counts: dict = {}
+                for r in wins_tagged:
+                    for tag in (r["success_tags"] or "").split(","):
+                        tag = tag.strip()
+                        if tag and tag != "none":
+                            stag_counts[tag] = stag_counts.get(tag, 0) + 1
+                if stag_counts:
+                    top_st, top_sc = max(stag_counts.items(), key=lambda x: x[1])
+                    top_spct = top_sc / len(wins_tagged)
+                    if top_spct >= 0.33:
+                        parts.append(
+                            f"✓{top_st}({top_sc}/{len(wins_tagged)}wins,ESS={win_ess:.1f})"
+                            "→lean into this"
+                        )
 
         # 7. Per-ticker memory — ESS≥2.5 AND |delta from overall WR| > 15pp
         if tickers_req and len(calib_rows) >= 5:
