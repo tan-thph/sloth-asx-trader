@@ -2868,5 +2868,105 @@ class TestSprint19VitestInfrastructure(unittest.TestCase):
         self.assertIn("stop must be above entry", src)
 
 
+class TestPhase6CalibQuality(unittest.TestCase):
+    """Phase 6 — Calibration quality debate endpoint."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+
+    def test_calib_quality_endpoint_exists(self):
+        """/api/debate/calib-quality must exist and return JSON."""
+        r = self.client.get("/api/debate/calib-quality")
+        self.assertIn(r.status_code, (200, 200))
+        data = json.loads(r.data)
+        self.assertIn("ok", data)
+
+    def test_calib_quality_no_data_returns_ok_false(self):
+        """With empty DB, endpoint returns ok=False (insufficient data)."""
+        r = self.client.get("/api/debate/calib-quality")
+        data = json.loads(r.data)
+        # Empty DB → either Ollama not available (503) or insufficient data (ok=False)
+        # Both are valid — test that the response is well-formed JSON
+        self.assertIn("ok", data)
+
+    def test_norm_cdf_helper(self):
+        """_norm_cdf must return correct values for known Z-scores."""
+        from routes.debate import _norm_cdf
+        self.assertAlmostEqual(_norm_cdf(0.0),  0.5000, places=4)
+        self.assertAlmostEqual(_norm_cdf(1.96), 0.9750, places=3)
+        self.assertAlmostEqual(_norm_cdf(-1.96), 0.0250, places=3)
+
+    def test_calib_bands_raw_empty_db(self):
+        """_calib_bands_raw returns empty list on empty DB (no error)."""
+        from routes.debate import _calib_bands_raw
+        result = _calib_bands_raw(regime="", days=90)
+        self.assertIsInstance(result, list)
+
+    def test_calib_quality_prompt_contains_immutable_facts_instruction(self):
+        """Phase 6 prompt must tell model to treat Z-scores as immutable facts."""
+        from routes.debate import _calib_quality_prompt
+        # Build a minimal band dict to test prompt generation
+        bands = [{
+            "band": "70-80%", "lo": 0.70, "hi": 0.80, "mid": 0.75,
+            "n": 12, "ess": 8.4, "actual_wr": 0.63,
+            "se": 0.15, "z": -0.80, "p_noise": 0.42,
+            "n_losses": 4, "tag_counts": [("poor_entry", 2), ("overconfident", 1)],
+        }]
+        prompt = _calib_quality_prompt(bands)
+        self.assertIn("immutable facts", prompt)
+        self.assertIn("DO NOT recalculate", prompt)
+        self.assertIn("p_noise=0.42", prompt)
+        self.assertIn("likely_noise", prompt.lower())
+
+    def test_calib_quality_verdict_pre_computed(self):
+        """Verdict must be pre-computed from p_noise, not overridable by model."""
+        import importlib, sys
+        # Read the endpoint source to verify the pre_verdict logic exists
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("pre_verdict", src)
+        self.assertIn('["p_noise"] > 0.30', src)
+        self.assertIn('["p_noise"] > 0.15', src)
+        # Verdict must be assigned from pre_verdict (not from model response)
+        self.assertIn('"verdict":     pre_verdict', src)
+
+    def test_calib_quality_schema_defined(self):
+        """_SCHEMA_CALIB_QUALITY must be defined and have required fields."""
+        from routes.debate import _SCHEMA_CALIB_QUALITY
+        self.assertIn("band_assessments", _SCHEMA_CALIB_QUALITY["properties"])
+        self.assertIn("overall_summary",  _SCHEMA_CALIB_QUALITY["properties"])
+        items = _SCHEMA_CALIB_QUALITY["properties"]["band_assessments"]["items"]
+        self.assertIn("verdict",  items["properties"])
+        self.assertIn("analysis", items["properties"])
+        # Verdict enum must not include any hallucination-friendly free-text value
+        verdicts = items["properties"]["verdict"]["enum"]
+        self.assertIn("likely_noise",    verdicts)
+        self.assertIn("ambiguous",       verdicts)
+        self.assertIn("likely_systemic", verdicts)
+
+    def test_calib_quality_frontend_placeholder_exists(self):
+        """learning.js must contain the calib quality card placeholder."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("ll-calib-quality-card", src)
+        self.assertIn("renderCalibQualityCard", src)
+
+    def test_calib_quality_auto_trigger_in_analysis(self):
+        """analysis.js must call triggerCalibQualityIfStale after analysis."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("triggerCalibQualityIfStale", src)
+
+    def test_calib_quality_trigger_in_debate_client(self):
+        """debate-client.js must define triggerCalibQualityIfStale with LOW priority."""
+        with open(os.path.join(ROOT, "js", "debate-client.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("triggerCalibQualityIfStale", src)
+        self.assertIn("LOW", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -486,6 +486,33 @@ async function fetchAdjudication(eventId, provider = null) {
  * @param {number} eventId
  * @param {string} [model]
  */
+/**
+ * Fire Phase 6 calib quality analysis in the background on the first Claude
+ * call of each trading day.  Stores today's date in localStorage so it only
+ * runs once.  Uses LOW priority so it never blocks user-initiated calls.
+ * @param {string} [regime]  Current market regime — used for adaptive half-life.
+ */
+async function triggerCalibQualityIfStale(regime = '') {
+  if (!state.serverOk) return;
+  const today = new Date().toISOString().slice(0, 10);
+  if (localStorage.getItem('_calibQualityDate') === today) return;
+
+  const status = await debateStatus();
+  if (!status.available) return;
+
+  _oqEnqueue(async () => {
+    try {
+      const url = `${API}/api/debate/calib-quality`
+        + (regime ? `?regime=${encodeURIComponent(regime)}` : '');
+      const r = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.ok) localStorage.setItem('_calibQualityDate', today);
+      }
+    } catch {}
+  }, 'LOW').catch(() => {});
+}
+
 async function triggerPostmortem(eventId, model) {
   if (!state.serverOk) return;
   const status = await debateStatus();

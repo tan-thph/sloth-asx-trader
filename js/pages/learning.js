@@ -65,6 +65,8 @@ async function renderLearningPage(gen) {
   if (typeof debateStatus === 'function') {
     renderLearningDebateCard().catch(() => {});
   }
+  // Async: load Phase 6 calibration quality card
+  renderCalibQualityCard().catch(() => {});
   // Async: load debate stats card (per-pairing agreement breakdown)
   renderDebateStatsCard().catch(() => {});
   // Async: load trading lessons card
@@ -629,7 +631,10 @@ function _renderLearningContent(d, brier) {
   // ── Trading Lessons card (async — filled by renderLessonsCard()) ─────────────
   const lessonsPlaceholder = `<div id="ll-lessons-card" class="card section-gap" style="min-height:60px"></div>`;
 
-  return summaryCards + calibCard +
+  // ── Calibration Quality card (async — filled by renderCalibQualityCard()) ──
+  const calibQualityPlaceholder = `<div id="ll-calib-quality-card"></div>`;
+
+  return summaryCards + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + recentCard + failedCard + debateInsightsCard +
     digestCard + lessonsPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
@@ -1650,6 +1655,109 @@ async function renderDebateStatsCard() {
       </table>
     </div>
     ${data.skipped ? `<p class="text-xs text-muted" style="margin-top:6px">⚠ ${data.skipped} transcript${data.skipped !== 1 ? 's' : ''} could not be parsed (skipped from stats)</p>` : ''}`;
+}
+
+// ── Phase 6: Calibration Quality card ────────────────────────────────────────
+// Fetches today's cached calib quality result (or shows a Run button).
+// Displays traffic-light verdict per confidence band plus the model's
+// qualitative tag-clustering summary.
+async function renderCalibQualityCard() {
+  const el = document.getElementById('ll-calib-quality-card');
+  if (!el) return;
+
+  // Traffic-light helpers
+  const VERDICT_ICON = {
+    likely_noise:    '🟢',
+    ambiguous:       '🟡',
+    likely_systemic: '🔴',
+  };
+  const VERDICT_LABEL = {
+    likely_noise:    'Likely noise',
+    ambiguous:       'Ambiguous',
+    likely_systemic: 'Likely systemic',
+  };
+
+  async function _fetchAndRender(force = false) {
+    el.innerHTML = `<div class="card" style="margin-top:14px;padding:14px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="loading-dots"><span></span><span></span><span></span></div>
+        <span class="text-xs text-muted">${force ? 'Running calibration quality analysis…' : 'Loading calibration quality…'}</span>
+      </div>
+    </div>`;
+
+    try {
+      const regime = (state.currentRegime?.regime || '');
+      const url = `${API}/api/debate/calib-quality?regime=${encodeURIComponent(regime)}`
+                + (force ? '&force=1' : '');
+      const r = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+      if (!r.ok) { el.innerHTML = ''; return; }
+      const d = await r.json();
+      if (!d.ok) { el.innerHTML = ''; return; }
+      _renderCard(d);
+    } catch {
+      el.innerHTML = '';
+    }
+  }
+
+  function _renderCard(d) {
+    const bands = d.bands || [];
+    if (!bands.length) { el.innerHTML = ''; return; }
+
+    const cachedNote = d.cached
+      ? `<span class="text-xs text-muted" style="margin-left:6px">cached ${d.date}</span>`
+      : `<span class="text-xs text-muted" style="margin-left:6px">${d.model} · ${(d.elapsed_ms/1000).toFixed(1)}s</span>`;
+
+    const rows = bands.map(b => {
+      const icon  = VERDICT_ICON[b.verdict]  || '⚪';
+      const label = VERDICT_LABEL[b.verdict] || b.verdict;
+      const wr    = b.actual_wr  != null ? (b.actual_wr  * 100).toFixed(0) + '%' : '—';
+      const exp   = b.expected_wr != null ? (b.expected_wr * 100).toFixed(0) + '%' : '—';
+      const delta = b.actual_wr != null && b.expected_wr != null
+        ? ((b.actual_wr - b.expected_wr) * 100)
+        : null;
+      const deltaStr = delta != null
+        ? `<span style="font-size:10px;color:${delta < -5 ? '#dc2626' : delta > 5 ? '#16a34a' : 'var(--text-muted)'}">${delta >= 0 ? '+' : ''}${delta.toFixed(0)}pp</span>`
+        : '';
+      const pNoise = b.p_noise != null ? (b.p_noise * 100).toFixed(0) + '%' : '—';
+      const analysis = b.analysis
+        ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:2px;padding-left:22px">${b.analysis}</div>`
+        : '';
+      return `
+        <div style="padding:6px 0;border-bottom:1px solid var(--border)">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-size:14px" title="${label}">${icon}</span>
+            <strong style="font-size:12px;min-width:50px">${b.band}</strong>
+            <span class="text-xs text-muted">actual ${wr} vs expected ${exp}</span>
+            ${deltaStr}
+            <span class="text-xs text-muted" style="margin-left:auto">p_noise=${pNoise} · ESS=${b.ess}</span>
+          </div>
+          ${analysis}
+        </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="card" style="margin-top:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div class="card-title" style="margin:0">Calibration Quality</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            ${cachedNote}
+            <button class="btn btn-sm" onclick="renderCalibQualityCard._force()" title="Re-run analysis">↺ Refresh</button>
+          </div>
+        </div>
+        <p class="text-xs text-muted" style="margin-bottom:10px">
+          🟢 noise · 🟡 ambiguous · 🔴 systemic — verdict is pre-computed from binomial SE; model provides qualitative tag analysis only.
+        </p>
+        ${rows}
+        ${d.summary ? `<div style="margin-top:10px;padding:8px;background:var(--bg-secondary);border-radius:6px;font-size:12px"><strong>Summary:</strong> ${d.summary}</div>` : ''}
+      </div>`;
+  }
+
+  // Expose force-refresh for the Refresh button
+  renderCalibQualityCard._force = () => _fetchAndRender(true);
+
+  // Initial load — use cached result if available
+  if (!state.serverOk) return;
+  await _fetchAndRender(false);
 }
 
 // ── Trading Lessons card ──────────────────────────────────────────────────────

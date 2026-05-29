@@ -14,13 +14,15 @@ Endpoints:
   /api/debate/adjudicator-status     GET    — is a cloud adjudicator configured?
   /api/debate/staleness              POST   — re-check pending recs for invalidation
   /api/debate/skill                  POST   — 0-10 quality score for an event
+  /api/debate/calib-quality          GET    — Phase 6: calibration quality debate card
 """
 
 import json
+import math
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from flask import Blueprint, current_app, jsonify, request
@@ -92,6 +94,27 @@ _SCHEMA_SKILL = {
         "reason": {"type": "string"},
     },
     "required": ["score", "reason"],
+}
+
+_SCHEMA_CALIB_QUALITY = {
+    "type": "object",
+    "properties": {
+        "band_assessments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "band":     {"type": "string"},
+                    "verdict":  {"type": "string",
+                                 "enum": ["likely_noise", "ambiguous", "likely_systemic"]},
+                    "analysis": {"type": "string"},
+                },
+                "required": ["band", "verdict", "analysis"],
+            },
+        },
+        "overall_summary": {"type": "string"},
+    },
+    "required": ["band_assessments", "overall_summary"],
 }
 
 
@@ -1853,5 +1876,326 @@ def debate_skill():
 
 
 # ── Claude API proxy lives in routes/claude.py (registered below) ─────────────
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 6 — Calibration Quality Debate
+# Pre-computes per-band Z-scores / binomial SE to guard against LLM statistical
+# hallucination, then asks a local model for *qualitative* tag-clustering only.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF via complementary error function (math.erfc).
+    Exact — no approximation table required. Available in Python 3.2+.
+    """
+    return 0.5 * math.erfc(-x / math.sqrt(2))
+
+
+def _calib_bands_raw(regime: str = "", days: int = 90) -> list[dict]:
+    """
+    Query calibration data and return per-band statistics for Phase 6 prompt.
+
+    Each dict contains:
+      band, lo, hi, mid, n, ess, actual_wr,
+      se, z, p_noise,
+      loss_tags  (Counter-style list of (tag, count) tuples sorted by freq)
+    """
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+    _HL_MAP = {
+        "panic": 20, "bearVolatile": 25, "highVol": 25, "riskOff": 30,
+        "bearTrending": 35, "riskOn": 45, "bullTrending": 50,
+        "sideways": 60, "neutral": 60,
+    }
+    hl = _HL_MAP.get(regime or "", 45)
+
+    def _decay(ts):
+        try:
+            d = (datetime.now() - datetime.fromisoformat(ts)).days
+            return math.exp(-math.log(2) * d / hl)
+        except Exception:
+            return 1.0
+
+    def _weight(r):
+        td = _decay(r["timestamp"])
+        sk = r["skill_score"]
+        sf = max(0.2, min(1.8, float(sk) / 5.0)) if sk is not None else 1.0
+        return td * sf
+
+    def _ess(subset):
+        ws = [_weight(r) for r in subset]
+        sw, sw2 = sum(ws), sum(w * w for w in ws)
+        return (sw * sw) / sw2 if sw2 > 0 else 0.0
+
+    def _wwr(subset):
+        w_win = sum(_weight(r) for r in subset if r["outcome_status"] == "win")
+        w_all = sum(_weight(r) for r in subset)
+        return w_win / w_all if w_all > 0 else 0.0
+
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT ai_confidence, outcome_status, timestamp, error_type,
+                   exit_reason, skill_score
+            FROM ai_learning_events
+            WHERE timestamp >= ?
+              AND outcome_status IN ('win','loss','breakeven')
+              AND was_executed = 1
+            ORDER BY timestamp DESC LIMIT 300
+        """, (cutoff,)).fetchall()
+
+    # Exclude protective_stop / external_shock from band calibration
+    def _is_shock(r):
+        et = r["error_type"] or ""
+        return ("external_shock" in et.split(",")
+                or (r["exit_reason"] or "") == "protective_stop")
+
+    calib = [r for r in rows if not _is_shock(r)]
+
+    BANDS = [
+        ("60-70%", 0.60, 0.70, 0.65),
+        ("70-80%", 0.70, 0.80, 0.75),
+        ("80-90%", 0.80, 0.90, 0.85),
+        ("90%+",   0.90, 1.01, 0.95),
+    ]
+
+    result = []
+    for band_label, lo, hi, mid in BANDS:
+        subset = [r for r in calib if lo <= (r["ai_confidence"] or 0) < hi]
+        if not subset:
+            continue
+        n    = len(subset)
+        ess  = _ess(subset)
+        if ess < 2.5:
+            continue  # too thin for meaningful Phase 6 analysis
+
+        actual_wr = _wwr(subset)
+        se = math.sqrt(mid * (1 - mid) / ess) if ess > 0 else 0.0
+        z  = (actual_wr - mid) / se if se > 0 else 0.0
+        p_noise = 2 * (1 - _norm_cdf(abs(z)))
+
+        # Collect failure tags from loss/breakeven trades in this band
+        tag_counts: dict[str, int] = {}
+        losses = [r for r in subset if r["outcome_status"] in ("loss", "breakeven")]
+        for r in losses:
+            for tag in (r["error_type"] or "").split(","):
+                tag = tag.strip()
+                if tag and tag != "none":
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        result.append({
+            "band":      band_label,
+            "lo":        lo,
+            "hi":        hi,
+            "mid":       mid,
+            "n":         n,
+            "ess":       round(ess, 1),
+            "actual_wr": round(actual_wr, 4),
+            "se":        round(se, 4),
+            "z":         round(z, 2),
+            "p_noise":   round(p_noise, 3),
+            "n_losses":  len(losses),
+            "tag_counts": sorted(tag_counts.items(), key=lambda x: -x[1]),
+        })
+
+    return result
+
+
+def _calib_quality_prompt(bands: list[dict]) -> str:
+    """Build the constrained Phase 6 prompt with pre-computed Z-scores."""
+    lines = [
+        "You are analysing calibration quality for an ASX trading AI system.",
+        "The statistics below were computed programmatically — treat them as immutable facts.",
+        "DO NOT recalculate, re-derive, or second-guess the Z-scores or p_noise values.",
+        "",
+        "BAND STATISTICS:",
+    ]
+    for b in bands:
+        wr_pct     = round(b["actual_wr"] * 100, 1)
+        exp_pct    = round(b["mid"] * 100, 0)
+        se_pct     = round(b["se"] * 100, 1)
+        verdict_hint = (
+            "→ LIKELY NOISE (p_noise > 0.30 — deviation is within normal variance)"
+            if b["p_noise"] > 0.30
+            else "→ AMBIGUOUS (0.15–0.30 — possible signal, more data needed)"
+            if b["p_noise"] > 0.15
+            else "→ LIKELY SYSTEMIC (p_noise < 0.15 — deviation exceeds expected noise)"
+        )
+        tag_str = (
+            ", ".join(f"{t}×{c}" for t, c in b["tag_counts"])
+            if b["tag_counts"]
+            else "no tagged losses"
+        )
+        lines.append(
+            f"  Band {b['band']}: expected={exp_pct}%, actual={wr_pct}%, "
+            f"ESS={b['ess']}, SE={se_pct}%, Z={b['z']:+.2f}, p_noise={b['p_noise']:.2f} {verdict_hint}"
+        )
+        if b["n_losses"] > 0:
+            lines.append(f"    Failure tags ({b['n_losses']} losses): {tag_str}")
+
+    lines += [
+        "",
+        "TASK — for each band above, provide:",
+        "  1. verdict: 'likely_noise' if p_noise>0.30, 'ambiguous' if 0.15–0.30, 'likely_systemic' if <0.15",
+        "  2. analysis: ONE sentence only.",
+        "     - For likely_noise: confirm deviation is within variance. No causal narrative.",
+        "     - For ambiguous: note ambiguity and the most frequent failure tag if any.",
+        "     - For likely_systemic: identify whether failure tags share a mechanism "
+        "(requires ≥40% of losses to share one tag — state the tag and count; otherwise say 'no dominant pattern').",
+        "",
+        "Then provide overall_summary: one sentence — is calibration healthy overall, "
+        "or is there a specific band requiring attention?",
+        "",
+        'Reply with JSON only — no markdown, no text outside JSON:',
+        '{"band_assessments":[{"band":"...","verdict":"...","analysis":"..."},...], "overall_summary":"..."}',
+    ]
+    return "\n".join(lines)
+
+
+@bp.route("/api/debate/calib-quality")
+def debate_calib_quality():
+    """
+    Phase 6 — Calibration quality debate card.
+
+    Pre-computes per-band binomial SE + Z-scores, then asks a local Ollama
+    model for *qualitative* tag-clustering analysis only. The statistical
+    verdict (likely_noise / ambiguous / likely_systemic) is pre-determined
+    programmatically — the model cannot override it.
+
+    Query params:
+      regime  — current regime (optional, for adaptive half-life)
+      model   — Ollama model override (optional)
+      timeout — seconds per call (default 45, max 90)
+      force   — '1' to bypass today's cache and re-run
+
+    Response:
+      {
+        ok, cached, date,
+        bands: [{band, expected_wr, actual_wr, ess, se, z, p_noise,
+                 verdict, analysis, n, n_losses, tag_counts}],
+        summary, model, elapsed_ms
+      }
+    """
+    regime  = (request.args.get("regime") or "").strip()
+    model   = (request.args.get("model")  or "qwen3:9b").strip()
+    tout    = min(int(request.args.get("timeout", 45)), 90)
+    force   = request.args.get("force", "0") == "1"
+    today   = datetime.now().strftime("%Y-%m-%d")
+
+    # ── Cache check — return today's stored result unless force=1 ─────────────
+    if not force:
+        try:
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT value FROM blob_store WHERE key='calib_quality_latest'"
+                ).fetchone()
+            if row:
+                stored = json.loads(row["value"])
+                if stored.get("date") == today:
+                    return jsonify({**stored, "ok": True, "cached": True})
+        except Exception:
+            pass
+
+    # ── Compute per-band statistics ───────────────────────────────────────────
+    try:
+        bands = _calib_bands_raw(regime=regime, days=90)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"DB query failed: {ex}"}), 500
+
+    if not bands:
+        return jsonify({
+            "ok":     False,
+            "error":  "Insufficient calibration data (need ESS≥2.5 in at least one band)",
+            "cached": False,
+        }), 200
+
+    # ── Check Ollama ──────────────────────────────────────────────────────────
+    try:
+        status_r = requests.get(f"{_OLLAMA_BASE}/api/tags", timeout=4)
+        if not status_r.ok:
+            raise ConnectionError()
+    except Exception:
+        return jsonify({"ok": False, "error": "Ollama not available"}), 503
+
+    prompt    = _calib_quality_prompt(bands)
+    t_start   = time.time()
+    ollama_r  = _call_ollama(
+        model       = model,
+        prompt      = prompt,
+        timeout     = tout,
+        think       = False,
+        num_predict = 400,
+        format_schema = _SCHEMA_CALIB_QUALITY,
+    )
+    elapsed_ms = int((time.time() - t_start) * 1000)
+
+    if not ollama_r["ok"]:
+        return jsonify({"ok": False, "error": ollama_r.get("error", "Ollama error")}), 502
+
+    # ── Parse response ────────────────────────────────────────────────────────
+    raw = _strip_think_tags(ollama_r["text"])
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$",       "", raw).strip()
+
+    band_assessments: list[dict] = []
+    summary_text = ""
+    try:
+        parsed = json.loads(raw)
+        band_assessments = parsed.get("band_assessments") or []
+        summary_text     = parsed.get("overall_summary", "")
+    except Exception:
+        current_app.logger.warning(f"[CalibQuality] parse failure: {raw[:200]}")
+        # Fall through with empty assessments — stats still useful
+
+    # ── Merge pre-computed stats with model assessments ───────────────────────
+    assessment_map = {a.get("band", ""): a for a in band_assessments}
+    result_bands = []
+    for b in bands:
+        assessment = assessment_map.get(b["band"], {})
+        # Pre-computed verdict overrides model verdict to prevent hallucination
+        pre_verdict = (
+            "likely_noise"    if b["p_noise"] > 0.30
+            else "ambiguous"  if b["p_noise"] > 0.15
+            else "likely_systemic"
+        )
+        result_bands.append({
+            "band":        b["band"],
+            "expected_wr": b["mid"],
+            "actual_wr":   b["actual_wr"],
+            "n":           b["n"],
+            "ess":         b["ess"],
+            "se":          b["se"],
+            "z":           b["z"],
+            "p_noise":     b["p_noise"],
+            "n_losses":    b["n_losses"],
+            "tag_counts":  b["tag_counts"],
+            "verdict":     pre_verdict,          # authoritative — never overridden by model
+            "analysis":    assessment.get("analysis", ""),
+        })
+
+    payload = {
+        "date":      today,
+        "bands":     result_bands,
+        "summary":   summary_text or "No summary generated.",
+        "model":     model,
+        "elapsed_ms": elapsed_ms,
+    }
+
+    # ── Persist to blob_store ─────────────────────────────────────────────────
+    try:
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO blob_store (key, value) VALUES ('calib_quality_latest', ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                                  updated_at=datetime('now','localtime')""",
+                (json.dumps(payload),)
+            )
+    except Exception as ex:
+        current_app.logger.warning(f"[CalibQuality] blob_store write failed: {ex}")
+
+    current_app.logger.info(
+        f"[CalibQuality] {len(result_bands)} bands analysed via {model} in {elapsed_ms}ms"
+    )
+    return jsonify({**payload, "ok": True, "cached": False})
+
 
 

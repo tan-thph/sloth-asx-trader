@@ -902,6 +902,10 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     if (typeof alertHighConviction === 'function') alertHighConviction(cappedDedupedRecs);
     // Log recommendations to the Learning Loop backend (fire-and-forget)
     logRecsToLearningLoop(cappedDedupedRecs, _activeRegime, _debateResults);
+    // Phase 6: refresh calib quality card once per trading day (LOW priority)
+    if (typeof triggerCalibQualityIfStale === 'function') {
+      triggerCalibQualityIfStale(_activeRegime).catch(() => {});
+    }
     showPage('recommendations');
   } catch(e) {
     state.analysisRunning = false;
