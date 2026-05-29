@@ -126,7 +126,7 @@ def db_save():
         BLOB_KEYS = [
             'analysisConfig', 'macroData', 'macroDate', 'analysisLastSummary',
             'portfolioHistory', 'cgtParcels', 'cgtDisposals', 'cgtMethod', 'activityLog',
-            'recommendations', 'priceAlerts', 'dayTrading',
+            'recommendations', 'priceAlerts', 'dayTrading', 'intraday',
             'watchlist', 'savedScreeners', 'targetAllocations', 'digestHistory', 'termDeposits',
         ]
         for key in BLOB_KEYS:
@@ -239,6 +239,7 @@ def db_load():
         "targetAllocations":    blobs.get("targetAllocations"),
         "digestHistory":        blobs.get("digestHistory"),
         "termDeposits":         blobs.get("termDeposits"),
+        "intraday":             blobs.get("intraday"),
     })
 
 
