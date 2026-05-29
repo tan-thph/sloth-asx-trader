@@ -601,6 +601,21 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         sf = max(0.2, float(sk) / 10.0) if sk is not None else 1.0
         return td * sf
 
+    def _ess(subset):
+        """Kish's effective sample size for weighted samples.
+
+        ESS = (Σwi)² / Σwi²
+
+        A subset with N trades of equal weight returns ESS = N.
+        A subset with 1 recent trade (w=1.0) and 3 very old trades (w≈0.1)
+        returns ESS ≈ 1.6 — correctly reflecting poor statistical power
+        despite the raw count of 4.
+        """
+        weights = [_weight(r) for r in subset]
+        sum_w   = sum(weights)
+        sum_w2  = sum(w * w for w in weights)
+        return (sum_w * sum_w) / sum_w2 if sum_w2 > 0 else 0.0
+
     def _wwr(subset):
         w_wins  = sum(_weight(r) for r in subset if r["outcome_status"] == "win")
         w_total = sum(_weight(r) for r in subset)
@@ -637,32 +652,46 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         calib_rows = [r for r in rows if not _is_shock(r)]
         n_excluded = n - len(calib_rows)
 
-        # 1. Confidence bands — decay-weighted; n≥3 AND |delta|>5pp
+        _ESS_MIN = 2.5  # Kish ESS threshold — suppresses calibration when decay renders
+                        # sample statistically unreliable (e.g. 1 fresh + 3 very stale trades)
+
+        # 1. Confidence bands — decay-weighted ESS≥2.5 AND |delta|>5pp
         for label, lo, hi, mid in [("60-70", 0.60, 0.70, 0.65), ("70-80", 0.70, 0.80, 0.75),
                                     ("80-90", 0.80, 0.90, 0.85)]:
             subset = [r for r in calib_rows if lo <= (r["ai_confidence"] or 0) < hi]
-            if len(subset) < 3:
+            if not subset:
+                continue
+            ess = _ess(subset)
+            if ess < _ESS_MIN:
+                # Low ESS: warn rather than emit a calibration nudge
+                parts.append(f"conf {label}%:⚠low ESS={ess:.1f}(n={len(subset)})—data too stale for reliable calibration")
                 continue
             wr    = _wwr(subset)
             delta = wr - mid
             if abs(delta) > 0.05:
                 adj_val = round(max(-0.15, min(0.10, delta * 0.8)), 2)
-                parts.append(f"conf {label}%:{wr*100:.0f}%WR(Δ{delta*100:+.0f}pp,adj{adj_val:+.2f},n={len(subset)})")
+                parts.append(f"conf {label}%:{wr*100:.0f}%WR(Δ{delta*100:+.0f}pp,adj{adj_val:+.2f},ESS={ess:.1f})")
 
-        # 2. Current regime — L1: only warn when 1-2 trades (skip if 0 — no data to warn about)
+        # 2. Current regime — ESS-gated; warn on low ESS
         if regime:
             reg = [r for r in rows if r["regime"] == regime]
-            if 0 < len(reg) < 3:
-                parts.append(f"⚠only {len(reg)} trade{'s' if len(reg)!=1 else ''} in {regime} regime—calibration limited")
-            elif len(reg) >= 3:
-                wr   = _wwr(reg)
-                warn = " ⚠AVOID" if wr < 0.40 else (" ⚠CAUTION" if wr < 0.50 else "")
-                parts.append(f"{regime}:{wr*100:.0f}%W(n={len(reg)}){warn}")
+            if not reg:
+                pass  # no data — omit
+            else:
+                ess_reg = _ess(reg)
+                if ess_reg < _ESS_MIN:
+                    parts.append(f"⚠{regime}:ESS={ess_reg:.1f}(n={len(reg)})—regime data too stale for calibration")
+                else:
+                    wr   = _wwr(reg)
+                    warn = " ⚠AVOID" if wr < 0.40 else (" ⚠CAUTION" if wr < 0.50 else "")
+                    parts.append(f"{regime}:{wr*100:.0f}%W(ESS={ess_reg:.1f}){warn}")
 
-        # 3. Relevant sectors — decay-weighted; n≥3 AND notable rate
+        # 3. Relevant sectors — ESS≥2.5 AND notable rate
         for sector in sectors:
             s_rows = [r for r in rows if r["sector"] == sector]
-            if len(s_rows) < 3:
+            if not s_rows:
+                continue
+            if _ess(s_rows) < _ESS_MIN:
                 continue
             wr = _wwr(s_rows)
             if wr < 0.45:
@@ -716,20 +745,20 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                            "add re-validation step")
                     )
 
-        # 7. Per-ticker memory — n≥3 AND |delta from overall WR| > 15pp
+        # 7. Per-ticker memory — ESS≥2.5 AND |delta from overall WR| > 15pp
         if tickers_req and len(calib_rows) >= 5:
             overall_wr = _wwr(calib_rows)
             ticker_parts = []
             for tk in tickers_req[:5]:
                 tk_rows = [r for r in calib_rows if r["ticker"] == tk]
-                if len(tk_rows) < 3:
+                if not tk_rows or _ess(tk_rows) < _ESS_MIN:
                     continue
                 tk_wr = _wwr(tk_rows)
                 delta = tk_wr - overall_wr
                 if abs(delta) > 0.15:
                     direction = "✓strong" if delta > 0 else "⚠weak"
                     ticker_parts.append(
-                        f"{tk}:{tk_wr*100:.0f}%(Δ{delta*100:+.0f}pp,n={len(tk_rows)}){direction}"
+                        f"{tk}:{tk_wr*100:.0f}%(Δ{delta*100:+.0f}pp,ESS={_ess(tk_rows):.1f}){direction}"
                     )
             if ticker_parts:
                 parts.append("per-ticker:" + ",".join(ticker_parts))

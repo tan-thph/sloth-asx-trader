@@ -31,6 +31,69 @@ from db import get_db
 bp = Blueprint("debate", __name__)
 
 
+# ── Ollama structured output schemas ─────────────────────────────────────────
+# Passed as `format` to /api/generate so the engine constrains token selection
+# at the grammar level — guarantees valid JSON without regex fallback parsers.
+# Only used with Ollama local models; cloud callers (Gemini, Groq, Claude)
+# receive the schema description in the prompt text instead.
+
+_SCHEMA_POSTMORTEM = {
+    "type": "object",
+    "properties": {
+        "error_type": {"type": "string"},
+        "reason":     {"type": "string"},
+    },
+    "required": ["error_type", "reason"],
+}
+
+_SCHEMA_WIN_TAG = {
+    "type": "object",
+    "properties": {
+        "success_tags": {"type": "string"},
+        "reason":       {"type": "string"},
+    },
+    "required": ["success_tags", "reason"],
+}
+
+_SCHEMA_SYNTHESIS = {
+    "type": "object",
+    "properties": {
+        "winner":    {"type": "string", "enum": ["bull", "bear", "neutral"]},
+        "margin":    {"type": "string", "enum": ["strong", "moderate", "thin"]},
+        "key_pivot": {"type": "string"},
+    },
+    "required": ["winner", "margin", "key_pivot"],
+}
+
+_SCHEMA_EXIT_SYNTHESIS = {
+    "type": "object",
+    "properties": {
+        "winner":    {"type": "string", "enum": ["hold", "exit", "neutral"]},
+        "margin":    {"type": "string", "enum": ["strong", "moderate", "thin"]},
+        "key_pivot": {"type": "string"},
+    },
+    "required": ["winner", "margin", "key_pivot"],
+}
+
+_SCHEMA_PM_SYNTHESIS = {
+    "type": "object",
+    "properties": {
+        "error_type": {"type": "string"},
+        "reason":     {"type": "string"},
+    },
+    "required": ["error_type", "reason"],
+}
+
+_SCHEMA_SKILL = {
+    "type": "object",
+    "properties": {
+        "score":  {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["score", "reason"],
+}
+
+
 # ============================================================
 # INTERNAL DEBATE ENGINE
 # Uses a local Ollama model (e.g. qwen3:9b) to generate a
@@ -43,7 +106,8 @@ bp = Blueprint("debate", __name__)
 
 
 def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1,
-                 think: bool | None = None, num_predict: int = 200) -> dict:
+                 think: bool | None = None, num_predict: int = 200,
+                 format_schema: dict | None = None) -> dict:
     """
     Send a prompt to a local Ollama model via /api/generate.
     Returns {"ok": True, "text": "..."} or {"ok": False, "error": "..."}.
@@ -79,6 +143,10 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1,
             }
             if think is not None:
                 payload["think"] = think   # Ollama ≥0.6: disable/enable thinking tokens
+            if format_schema is not None:
+                # Ollama native structured output — engine constrains token selection
+                # to exactly match this schema, eliminating regex fallback parsers.
+                payload["format"] = format_schema
             resp = requests.post(
                 f"{_OLLAMA_BASE}/api/generate",
                 json=payload,
@@ -290,8 +358,10 @@ def debate_bull_bear():
             '{"winner":"bull"|"bear"|"neutral","margin":"strong"|"moderate"|"thin",'
             '"key_pivot":"one short phrase — the single most decisive factor"}'
         )
+    _synth_schema = _SCHEMA_EXIT_SYNTHESIS if is_exit else _SCHEMA_SYNTHESIS
     synth_result = _call_ollama(model, synth_prompt, timeout=min(tout, 30),
-                                think=False, num_predict=180)
+                                think=False, num_predict=180,
+                                format_schema=_synth_schema)
 
     # D2: try whole-response parse first; scan from end for last valid JSON object
     synthesis = None
@@ -331,6 +401,58 @@ VALID_PM_TYPES = {
     "poor_entry", "stop_too_tight",
     "poor_rr", "external_shock", "thesis_broken", "none",
 }
+
+def _flatten_entry_signals(entry_signals_json: str) -> str:
+    """
+    Produce a compact, flat key=value string from the stored signals JSON.
+
+    Filters to the analytically meaningful fields and formats numbers tightly
+    so local small models (Qwen 4B, Gemma 2B) can extract them without parsing
+    nested JSON. Drops raw arrays, NaN/None values, and redundant metadata.
+
+    Example output:
+      [Signals] rsi=42.1 | macd_hist=-0.12 | sma200_dist=3.4% | atr_pct=2.1% | vol_z=1.4
+    Returns '' if input is empty/unparseable.
+    """
+    if not entry_signals_json:
+        return ""
+    try:
+        sigs = json.loads(entry_signals_json)
+    except Exception:
+        return ""
+
+    # Priority fields — ordered from most to least diagnostic
+    _KEY_MAP = [
+        ("rsi_14",          "rsi",       lambda v: f"{v:.1f}"),
+        ("macd_hist",       "macd_hist", lambda v: f"{v:+.3f}"),
+        ("bb_pct_b",        "bb%b",      lambda v: f"{v:.2f}"),
+        ("volume_z_score",  "vol_z",     lambda v: f"{v:.1f}σ"),
+        ("atr_pct",         "atr_pct",   lambda v: f"{v:.1f}%"),
+        ("return_5d",       "ret5d",     lambda v: f"{v:+.1f}%"),
+        ("return_20d",      "ret20d",    lambda v: f"{v:+.1f}%"),
+        ("adx_14",          "adx",       lambda v: f"{v:.1f}"),
+        ("score",           "score",     lambda v: f"{v:.0f}"),
+        ("sma_200",         "sma200",    lambda v: f"{v:.2f}"),
+        ("current_price",   "px",        lambda v: f"{v:.3f}"),
+        ("rr_ratio",        "rr",        lambda v: f"{v:.2f}"),
+    ]
+
+    parts = []
+    for src_key, label, fmt in _KEY_MAP:
+        val = sigs.get(src_key)
+        if val is None:
+            continue
+        try:
+            f = float(val)
+            import math as _math
+            if _math.isnan(f) or _math.isinf(f):
+                continue
+            parts.append(f"{label}={fmt(f)}")
+        except (TypeError, ValueError):
+            continue
+
+    return "[Signals] " + " | ".join(parts) if parts else ""
+
 
 def _pm_build_summary(row) -> str:
     """
@@ -635,7 +757,8 @@ def _get_cloud_keys() -> dict:
     }
 
 
-def _call_model_any(model_name: str, prompt: str, timeout: int) -> dict:
+def _call_model_any(model_name: str, prompt: str, timeout: int,
+                    format_schema: dict | None = None) -> dict:
     """
     Unified model dispatcher for postmortem debate phases.
 
@@ -643,6 +766,10 @@ def _call_model_any(model_name: str, prompt: str, timeout: int) -> dict:
       "groq:<model>"   → Groq API (reads key from news_settings blob)
       "gemini:<model>" → Gemini API (reads key from news_settings blob)
       anything else    → Ollama local
+
+    format_schema: when provided and model is Ollama-local, passed as Ollama's
+      `format` parameter for engine-level JSON constraint. Ignored for cloud models
+      (they receive schema guidance via the prompt text instead).
     """
     if model_name.startswith("groq:"):
         actual = model_name[5:].strip()
@@ -658,7 +785,8 @@ def _call_model_any(model_name: str, prompt: str, timeout: int) -> dict:
             return {"ok": False, "error": "Google API key not configured (add it in News Scanner settings)"}
         return _call_gemini_json(keys["gemini_key"], actual or keys["gemini_model"], prompt, timeout=timeout)
 
-    return _call_ollama(model_name, prompt, timeout=timeout, retries=0, think=False)
+    return _call_ollama(model_name, prompt, timeout=timeout, retries=0, think=False,
+                        format_schema=format_schema)
 
 
 def _is_cloud_model(model_name: str) -> bool:
@@ -854,7 +982,7 @@ def debate_tag_win():
     rationale = (row["rationale_summary"] or "").strip()[:250]
     prompt    = _win_build_prompt(summary, rationale)
 
-    result = _call_model_any(model, prompt, timeout=tout)
+    result = _call_model_any(model, prompt, timeout=tout, format_schema=_SCHEMA_WIN_TAG)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 
@@ -928,21 +1056,11 @@ def debate_postmortem():
     summary   = _pm_build_summary(row)
     rationale = (row["rationale_summary"] or "").strip()[:250]
     exit_hint = _pm_exit_hint(row["exit_reason"] or "")
-    # D5: include entry signals in the prompt when available
-    entry_signals_str = ""
-    try:
-        esj = row["entry_signals_json"]
-        if esj:
-            sigs = json.loads(esj)
-            entry_signals_str = ", ".join(
-                f"{k}={v}" for k, v in sigs.items() if v is not None
-            )
-    except Exception:
-        pass
+    entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
     action = (row["recommendation"] or "BUY").upper()
     prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str, action=action)
 
-    result = _call_model_any(model, prompt, timeout=tout)
+    result = _call_model_any(model, prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 
@@ -1040,30 +1158,20 @@ def debate_postmortem_debate():
 
     summary     = _pm_build_summary(row)
     rationale   = (row["rationale_summary"] or "").strip()[:250]
-    exit_hint   = _pm_exit_hint(row["exit_reason"] or "")
-    # D5: include entry signals in the prompt when available
-    entry_signals_str = ""
-    try:
-        esj = row["entry_signals_json"]
-        if esj:
-            sigs = json.loads(esj)
-            entry_signals_str = ", ".join(
-                f"{k}={v}" for k, v in sigs.items() if v is not None
-            )
-    except Exception:
-        pass
+    exit_hint         = _pm_exit_hint(row["exit_reason"] or "")
+    entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
     action      = (row["recommendation"] or "BUY").upper()
     base_prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str, action=action)
 
     # ── Phase 1: Independent classification ───────────────────────────────────
     t0    = time.time()
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1A — {model_a}…")
-    res_a = _call_model_any(model_a, base_prompt, timeout=tout)
+    res_a = _call_model_any(model_a, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1A done ({int((time.time()-t0)*1000)}ms)")
 
     t1 = time.time()
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1B — {model_b}…")
-    res_b = _call_model_any(model_b, base_prompt, timeout=tout)
+    res_b = _call_model_any(model_b, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1B done ({int((time.time()-t1)*1000)}ms)")
 
     if not res_a["ok"]:
@@ -1183,7 +1291,8 @@ def debate_postmortem_debate():
             "No markdown, no explanation outside JSON."
         )
 
-        res_synth = _call_model_any(model_a, synthesis_prompt, timeout=tout)
+        res_synth = _call_model_any(model_a, synthesis_prompt, timeout=tout,
+                                    format_schema=_SCHEMA_PM_SYNTHESIS)
         current_app.logger.info(
             f"[PostMortemDebate] event#{ev_id} Phase 3 done ({int((time.time()-t2)*1000)}ms)"
         )
@@ -1630,17 +1739,7 @@ def debate_skill():
     )
     rationale = (row["rationale_summary"] or "").strip()[:200]
 
-    # D6: extract entry signals for skill scoring context
-    entry_signals_str = ""
-    try:
-        esj = row["entry_signals_json"]
-        if esj:
-            sigs = json.loads(esj)
-            entry_signals_str = ", ".join(
-                f"{k}={v}" for k, v in sigs.items() if v is not None
-            )
-    except Exception:
-        pass
+    entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
 
     prompt = (
         f"ASX closed trade: {summary}\n"
@@ -1659,7 +1758,8 @@ def debate_skill():
 
     # think=False: suppress thinking tokens; num_predict=350 gives headroom for
     # the JSON wrapper + a full reason sentence without truncation
-    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False, num_predict=350)
+    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False, num_predict=350,
+                          format_schema=_SCHEMA_SKILL)
     if not result["ok"]:
         return jsonify({"ok": False, "error": result["error"]})
 

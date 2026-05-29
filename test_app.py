@@ -1050,9 +1050,12 @@ class TestLearningImprovements(unittest.TestCase):
         """Calibration must not emit regime warning when 0 trades exist (L1)."""
         with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
             src = f.read()
-        # The condition must be '0 < len(reg) < 3', not just 'len(reg) < 3'
-        self.assertIn("0 < len(reg) < 3", src,
-                      "L1: regime warning must gate on 0 < n < 3, not n < 3")
+        # Since ESS migration: regime section must skip when reg is empty.
+        # Old: '0 < len(reg) < 3'. New: 'if not reg:' guard in ESS branch.
+        self.assertTrue(
+            "0 < len(reg) < 3" in src or "if not reg:" in src,
+            "L1: regime warning must skip when 0 trades exist (either old or ESS guard)"
+        )
 
     def test_error_type_threshold_lowered(self):
         """Error-type threshold must be 0.33, not 0.40 (L2)."""

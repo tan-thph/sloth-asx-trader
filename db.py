@@ -24,7 +24,7 @@ def get_db():
     """Return a tuned SQLite connection. WAL + 256 MB mmap + 64 MB cache."""
     # check_same_thread=False because Flask background threads (market scan,
     # news scheduler) need access. Connections are still short-lived.
-    conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
