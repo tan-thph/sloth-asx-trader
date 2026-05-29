@@ -103,16 +103,18 @@ def backtest():
                 date_str = close.index[i].strftime("%Y-%m-%d")
 
                 if strategy == "rsi_trend":
-                    # Buy: RSI < 35 AND price above SMA20 AND MACD hist positive
+                    # Buy: RSI oversold AND price above SMA50 (trend filter)
+                    # Note: MACD > 0 was removed — when RSI < 35 the MACD histogram is
+                    # almost always negative (EMA12 < EMA26 during a selloff), making the
+                    # combined condition near-impossible to satisfy.
                     buy_sig = (
                         safe_float(rsi.iloc[i], 50) < 35 and
-                        price > safe_float(sma_20.iloc[i], price) and
-                        safe_float(macd_hist.iloc[i], 0) > 0
+                        price > safe_float(sma_50.iloc[i], price)
                     )
-                    # Sell: RSI > 65 OR price crosses below SMA20
+                    # Sell: RSI overbought OR price drops >2% below SMA50
                     sell_sig = (
                         safe_float(rsi.iloc[i], 50) > 65 or
-                        price < safe_float(sma_20.iloc[i], price * 0.98)
+                        price < safe_float(sma_50.iloc[i], price) * 0.98
                     )
 
                 elif strategy == "macd":
@@ -261,8 +263,9 @@ def backtest():
                 bb_m = safe_float(bb_mid.iloc[i], price)
 
                 if strategy == "rsi_trend":
-                    buy_sig = rsi_v < 35 and price > sma20_v and macd_v > 0
-                    sell_sig = rsi_v > 65 or price < sma20_v * 0.98
+                    sma50_v = safe_float(sma_50.iloc[i], price)
+                    buy_sig = rsi_v < 35 and price > sma50_v
+                    sell_sig = rsi_v > 65 or price < sma50_v * 0.98
                 elif strategy == "macd":
                     buy_sig = macd_v > 0 and macd_prev <= 0
                     sell_sig = macd_v < 0 and macd_prev >= 0
@@ -394,10 +397,11 @@ def backtest():
 # Parameter grids — one dict per strategy; each entry is one candidate param set.
 _WF_PARAM_GRIDS = {
     "rsi_trend": [
-        {"rsi_period": rp, "rsi_oversold": ob, "rsi_overbought": os_}
+        {"rsi_period": rp, "rsi_oversold": ob, "rsi_overbought": os_, "trend_period": tp}
         for rp in [10, 14, 21]
         for ob in [28, 32, 36]
         for os_ in [62, 68, 72]
+        for tp in [20, 50]
     ],
     "macd": [
         {"fast": f, "slow": s, "signal": sig}
@@ -570,7 +574,9 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
 
         if i >= trade_from_idx:
             if strategy == "rsi_trend":
-                buy_sig  = rv < ob and price > smt and mh > 0
+                # Buy: RSI oversold AND price above trend SMA.
+                # MACD > 0 removed — contradicts RSI < oversold (both can't be true simultaneously).
+                buy_sig  = rv < ob and price > smt
                 sell_sig = rv > os_ or price < smt * 0.98
             elif strategy == "macd":
                 buy_sig  = mh > 0 and mh_prev <= 0
