@@ -129,6 +129,8 @@ const state = {
       ollama_url: 'http://localhost:11434',
       groq_api_key: '',
       groq_model: 'llama-3.1-8b-instant',
+      google_api_key: '',
+      google_model: 'gemini-2.0-flash',
       scan_interval_hours: 6,
       enabled: true,
       max_age_days: 7,

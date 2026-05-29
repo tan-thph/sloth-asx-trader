@@ -233,3 +233,19 @@ async function loadStateFromDb() {
     return false;
   }
 }
+
+// ============================================================
+// NEWS SETTINGS SYNC (fetch Groq/Gemini keys from backend on startup)
+// ============================================================
+async function fetchNewsSettings() {
+  if (!state.serverOk) return;
+  try {
+    const r = await fetch(`${API}/api/news/status`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.settings && typeof d.settings === 'object') {
+      state.news.settings = { ...state.news.settings, ...d.settings };
+      console.log('News settings loaded from DB (provider:', d.settings.llm_provider, ')');
+    }
+  } catch(e) { console.warn('News settings fetch failed:', e.message); }
+}

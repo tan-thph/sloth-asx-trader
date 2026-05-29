@@ -11,6 +11,7 @@ async function initApp() {
       fetchRbaRate(),
       fetchCashFromDb(),
       fetchEarningsCalendar(),
+      fetchNewsSettings(),
     ]);
   }
   // Restore portfolioHistory from localStorage if DB had none (offline fallback)
