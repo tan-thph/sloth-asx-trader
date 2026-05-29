@@ -247,6 +247,17 @@ async function renderSignalsPage(gen) {
             ${f.analyst_target&&s.current_price?`<span class="text-xs text-muted">Upside: <span class="${f.analyst_target>s.current_price?'text-success':'text-danger'}">${fmtp((f.analyst_target/s.current_price-1)*100,1)}</span></span>`:''}
           </div>
         </div>`:''}
+
+        <!-- Seasonality -->
+        <div class="card mt-2" style="padding:1rem" id="seas-card-${t}">
+          <div class="flex-between mb-1">
+            <div class="card-title" style="margin:0">Monthly Seasonality <span class="text-xs text-muted" style="font-weight:400">(10yr avg)</span></div>
+            <span class="text-xs text-muted" id="seas-meta-${t}">Loading…</span>
+          </div>
+          <div id="seas-body-${t}" style="min-height:48px;display:flex;align-items:center;justify-content:center">
+            <span class="text-xs text-muted">Fetching…</span>
+          </div>
+        </div>
       </div>`;
     }).join('')}
   `;
@@ -263,6 +274,76 @@ async function renderSignalsPage(gen) {
       }
     }
   });
+
+  // Load seasonality for expanded tickers
+  tickers.forEach(t=>{
+    const detail=document.getElementById(`detail-${t}`);
+    if(detail&&detail.style.display!=='none') {
+      _loadSeasonality(t, gen);
+    }
+  });
+}
+
+// Cached seasonality data per ticker session
+if(!window._seasonalityCache) window._seasonalityCache={};
+
+async function _loadSeasonality(ticker, gen) {
+  if(window._seasonalityCache[ticker]) {
+    _renderSeasonality(ticker, window._seasonalityCache[ticker]);
+    return;
+  }
+  try {
+    const r = await fetch(`${API}/api/seasonality/${ticker}`);
+    const d = await r.json();
+    if(state._renderGen!==gen) return;
+    window._seasonalityCache[ticker] = d;
+    _renderSeasonality(ticker, d);
+  } catch(e) {
+    const body=document.getElementById(`seas-body-${ticker}`);
+    if(body) body.innerHTML='<span class="text-xs text-muted">Unavailable</span>';
+  }
+}
+
+function _renderSeasonality(ticker, d) {
+  const metaEl=document.getElementById(`seas-meta-${ticker}`);
+  const bodyEl=document.getElementById(`seas-body-${ticker}`);
+  if(!bodyEl) return;
+  if(!d||!d.ok||!d.months) {
+    bodyEl.innerHTML='<span class="text-xs text-muted">No seasonality data</span>';
+    if(metaEl) metaEl.textContent='';
+    return;
+  }
+  if(metaEl) metaEl.textContent=`${d.years||'?'}yr sample`;
+
+  const months=d.months;
+  const maxAbs=Math.max(...months.map(m=>Math.abs(m.avg)),0.1);
+  const now=new Date().getMonth(); // 0-based, matches index 0=Jan
+
+  const bars=months.map((m,i)=>{
+    const pct=Math.min(Math.abs(m.avg)/maxAbs*100,100);
+    const isPos=m.avg>=0;
+    const isCurrent=i===now;
+    const winRate=m.count>0?Math.round(m.positive/m.count*100):0;
+    const col=isPos?'#16a34a':'#dc2626';
+    const border=isCurrent?'2px solid var(--accent)':'1px solid transparent';
+    return `<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0;cursor:default;border:${border};border-radius:4px;padding:2px 1px"
+              title="${m.month}: avg ${m.avg>=0?'+':''}${m.avg}% | win rate ${winRate}% | range ${m.min}% to ${m.max}% (${m.count} years)">
+      <div style="font-size:10px;font-weight:600;color:${col};margin-bottom:2px">${m.avg>=0?'+':''}${m.avg}%</div>
+      <div style="width:100%;height:40px;display:flex;align-items:${isPos?'flex-end':'flex-start'};justify-content:center">
+        <div style="width:70%;background:${col};opacity:0.8;height:${Math.max(pct*0.4,2)}px;border-radius:2px"></div>
+      </div>
+      <div style="font-size:9px;color:var(--text-secondary);margin-top:2px">${m.month}</div>
+      <div style="font-size:9px;color:var(--text-muted)">${winRate}%</div>
+    </div>`;
+  }).join('');
+
+  bodyEl.innerHTML=`
+    <div style="width:100%">
+      <div style="display:flex;gap:1px;align-items:stretch;padding:4px 0">${bars}</div>
+      <div style="display:flex;justify-content:space-between;margin-top:4px">
+        <span class="text-xs text-muted">Bar = avg monthly return · bottom % = historical win rate · highlighted = current month</span>
+      </div>
+    </div>`;
 }
 
 function drawSparklineFromData(ticker, s) {
@@ -350,7 +431,12 @@ function _sigChartSet(ticker, key, val) {
 function showTickerDetail(ticker) {
   document.querySelectorAll('[id^="detail-"]').forEach(el=>el.style.display='none');
   const el=document.getElementById(`detail-${ticker}`);
-  if(el) { el.style.display='block'; el.scrollIntoView({behavior:'smooth',block:'start'}); setTimeout(()=>_sigChartDraw(ticker), 100); }
+  if(el) {
+    el.style.display='block';
+    el.scrollIntoView({behavior:'smooth',block:'start'});
+    setTimeout(()=>_sigChartDraw(ticker), 100);
+    _loadSeasonality(ticker, state._renderGen);
+  }
 }
 
 async function refreshSignals() {

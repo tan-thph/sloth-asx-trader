@@ -180,6 +180,7 @@ async function renderPerformancePage(gen) {
   el.innerHTML = renderPerformance(); // sync render first (no waiting)
   // Then fetch and draw equity curve overlay
   if (state.serverOk && state.portfolio.length) {
+    const equityDiv = document.getElementById('perf-equity-curve');
     try {
       const resp = await fetch(`${API}/api/portfolio/nav-history`, {
         method: 'POST',
@@ -193,15 +194,30 @@ async function renderPerformancePage(gen) {
       if (resp.ok && state._renderGen === gen) {
         const navData = await resp.json();
         if (!navData.error) {
-          // Inject the equity curve card above the existing content
-          const equityDiv = document.getElementById('perf-equity-curve');
           if (equityDiv) {
             equityDiv.innerHTML = _buildEquityCurveCard(navData);
             setTimeout(() => { if (state._renderGen === gen) _drawEquityCurveChart(navData); }, 60);
           }
+        } else if (equityDiv) {
+          equityDiv.innerHTML = `<div class="card" style="margin-bottom:12px;padding:12px 16px;border-left:3px solid #f59e0b;background:var(--bg-secondary)">
+            <span style="font-size:13px;color:var(--text-secondary)">⚠ Equity curve unavailable: ${escapeHTML(navData.error)}</span>
+            ${_retryBtn('⟳ Retry', 'showPage(\'performance\')')}
+          </div>`;
         }
+      } else if (equityDiv && state._renderGen === gen) {
+        equityDiv.innerHTML = `<div class="card" style="margin-bottom:12px;padding:12px 16px;border-left:3px solid #f59e0b;background:var(--bg-secondary)">
+          <span style="font-size:13px;color:var(--text-secondary)">⚠ Equity curve unavailable — server returned ${resp.status}</span>
+          ${_retryBtn('⟳ Retry', 'showPage(\'performance\')')}
+        </div>`;
       }
-    } catch {}
+    } catch (e) {
+      if (equityDiv && state._renderGen === gen) {
+        equityDiv.innerHTML = `<div class="card" style="margin-bottom:12px;padding:12px 16px;border-left:3px solid #f59e0b;background:var(--bg-secondary)">
+          <span style="font-size:13px;color:var(--text-secondary)">⚠ Equity curve unavailable — ${escapeHTML(e.message || 'network error')}</span>
+          ${_retryBtn('⟳ Retry', 'showPage(\'performance\')')}
+        </div>`;
+      }
+    }
   }
 }
 

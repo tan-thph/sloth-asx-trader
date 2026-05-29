@@ -9,10 +9,9 @@ async function renderRiskPage(gen) {
   const merged = mergedPortfolio();
 
   if (!merged.length) {
-    el.innerHTML = `<div class="card"><div class="empty-state">
-      <div class="empty-icon">◎</div>
-      <p>No holdings in portfolio yet.</p>
-    </div></div>`;
+    el.innerHTML = _emptyCard('◎', 'No holdings yet',
+      'Add trades to your portfolio to see risk metrics, beta, Sharpe ratio, VaR, and correlation analysis here.',
+      `<button class="btn btn-primary" onclick="showPage('portfolio')">→ Go to Portfolio</button>`);
     return;
   }
 
@@ -25,13 +24,41 @@ async function renderRiskPage(gen) {
 
   const tickers = merged.map(h => h.ticker);
   let riskData = { metrics: {}, correlation: {} };
+  let riskFetchError = null;
 
   if (state.serverOk) {
     try {
       const rf = state.rbaRate || 4.35;
       const resp = await fetch(`${API}/api/risk?tickers=${tickers.join(',')}&rf=${rf}`);
       if (resp.ok) riskData = await resp.json();
-    } catch {}
+      else riskFetchError = `Server returned ${resp.status}`;
+    } catch (e) {
+      riskFetchError = e.message || 'Network error';
+    }
+  } else {
+    riskFetchError = 'Server offline';
+  }
+
+  if (riskFetchError && state._renderGen === gen) {
+    // Show error banner at top but still render the page with cached/empty data
+    el.innerHTML = `
+      <div class="card" style="margin-bottom:12px;padding:12px 16px;border-left:3px solid #f59e0b;background:var(--bg-secondary)">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:15px">⚠</span>
+          <div style="flex:1">
+            <div style="font-weight:600;font-size:13px">Risk data unavailable — ${escapeHTML(riskFetchError)}</div>
+            <div style="font-size:12px;color:var(--text-secondary)">Metrics are shown as — below. yfinance may be rate-limited; try again in a moment.</div>
+          </div>
+          ${_retryBtn('⟳ Retry', 'showPage(\'risk\')')}
+        </div>
+      </div>` + buildRiskPage(merged, riskData);
+    setTimeout(() => {
+      if (state._renderGen !== gen) return;
+      drawRiskScoreGauge(_riskPageScore);
+      drawSectorPie(merged);
+      drawCorrelationHeatmap(merged, riskData.correlation || {});
+    }, 60);
+    return;
   }
 
   if (state._renderGen !== gen) return; // navigated away mid-fetch

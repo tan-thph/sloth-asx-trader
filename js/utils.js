@@ -66,6 +66,23 @@ function toast(msg, type='info') {
   setTimeout(()=>el.remove(), 3500);
 }
 
+// _retryBtn — standardised amber retry button for error/failure cards.
+// label: button text; onclick: JS expression string or function reference name.
+function _retryBtn(label, onclick) {
+  return `<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border-color:#d97706;margin-top:10px" onclick="${escapeHTML(onclick)}">${label}</button>`;
+}
+
+// _emptyCard — consistent empty-state card with optional action buttons.
+// icon: emoji/char; title: bold heading; body: HTML paragraph(s); actions: HTML button string.
+function _emptyCard(icon, title, body, actions='') {
+  return `<div class="card"><div class="empty-state" style="padding:2rem;text-align:center">
+    <div class="empty-icon" style="font-size:2rem;margin-bottom:0.5rem">${icon}</div>
+    <div style="font-weight:600;font-size:15px;margin-bottom:6px">${title}</div>
+    <div style="color:var(--text-secondary);font-size:13px;max-width:480px;margin:0 auto;line-height:1.6">${body}</div>
+    ${actions ? `<div style="margin-top:14px">${actions}</div>` : ''}
+  </div></div>`;
+}
+
 // parseClaudeJSON — safe JSON parser for Claude API responses (2.5)
 // Strips markdown fences and trailing commas before parsing.
 // Returns { ok:true, data } or { ok:false, error, raw }

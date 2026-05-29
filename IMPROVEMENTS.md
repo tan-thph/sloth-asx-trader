@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-28 (sprints 3–14 shipped + Learning Loop UX fixes)
+**Last Updated:** 2026-05-29 (Sprints 17–18 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -11,7 +11,17 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 
 ---
 
-## 0. Shipped — 2026-05 sprints (through Sprint 14)
+## 0. Shipped — 2026-05 sprints (through Sprint 18)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **Monthly seasonality card** | Research (§2.4) | `GET /api/seasonality/<ticker>` (24 h TTL). Fetches 10yr monthly price history, computes avg/min/max return and win-rate per calendar month. Signals page detail view shows a 12-bar horizontal chart with current month highlighted and per-bar tooltips. `window._seasonalityCache` stores results for the session. |
+| **Error recovery + retry buttons** | UX (§3.4) | `_retryBtn(label, onclick)` and `_emptyCard(icon, title, body, actions)` helpers added to `utils.js`. `risk.js` now shows an amber error banner + retry button when yfinance is rate-limited instead of silently showing blank metrics. `performance.js` equity curve section shows an error card + retry on `nav-history` failure instead of silently hiding the chart. `portfolio.js` no-holdings state upgraded to an actionable first-run card with "Import Broker CSV" and "Add Trade Manually" CTAs. |
+| **Split CGT auto-adjust** | Workflow (§1.9) | When the existing split-warning banner appears on Portfolio page, each split now has an "Apply split" button. `applySplitAdjustment(ticker, ratio, date)` multiplies `holding.shares` and all open CGT parcel `qty`/`remainingQty` by the ratio, divides `avgPrice` and `costPerShare`, then dismisses the warning and saves state. One-confirm guard prevents accidental double application. |
+
+---
+
+## 0a. Shipped — 2026-05 sprints (through Sprint 14)
 
 | Fix / Feature | Area | Detail |
 |---|---|---|
@@ -126,9 +136,13 @@ and overstate returns. Use point-in-time membership for honest historical tests.
 Weights tuned on history curve-fit easily. Validate with **walk-forward / k-fold** and report
 out-of-sample degradation; prefer fewer robust factors over many fragile ones.
 
-### 1.7 Walk-forward backtesting engine — `XL` · ★★★
-Vectorised OHLCV replay with rolling train/test split + parameter grid. The honest way to know a
-strategy works, and the foundation for §1.6. (Carried over from deferred.)
+### ✓ 1.7 Walk-forward backtesting engine — `XL` · ★★★ **SHIPPED Sprint 20**
+Rolling train/test split + per-fold parameter grid-search (Sharpe-optimised in-sample, applied
+out-of-sample). New `POST /api/backtest/walk-forward` endpoint; new **Walk-Forward** tab in the
+Backtest page. Supports rsi_trend, macd, bb_reversion, momentum strategies. Fold-by-fold table
+(best params, train Sharpe, test return) + stitched OOS equity curve + B&H benchmark comparison.
+`_run_strategy_slice` helper refactors strategy logic into a single parameterised function used by
+both the grid-search and the final OOS evaluation.
 
 ### ✓ 1.8 Revive market-breadth signal — `M` · ★★ **SHIPPED**
 Scanner computes `breadth_ratio` (% of universe above 20-day SMA) after each scan; `/api/macro` reads
@@ -186,7 +200,7 @@ already exist (quant, regime, learning, dividends, CGT).
 | ✓ **Side-by-side ticker compare** | M | ★★ | **SHIPPED** — `js/pages/compare.js`, g+x shortcut, ↔ nav button, Watchlist ↔ button. See §0. |
 | ✓ **Saved screeners** | S | ★★ | **SHIPPED** — `state.savedScreeners`, ⊕ Save/Load/Delete in scanner config bar. See §0. |
 | **Economic calendar** | M | ★★ | RBA meetings, US Fed, CPI, jobs, ASX reporting season — overlaid on the dashboard so you trade around known catalysts. |
-| **Seasonality view** | M | ★ | ASX/ticker monthly seasonality (e.g. "Santa rally", May weakness) as context, clearly labelled as low-confidence. |
+| ✓ **Seasonality view** | M | ★ | **SHIPPED** — `GET /api/seasonality/<ticker>` + 12-bar card on Signals detail view. See §0. |
 | **A-VIX / volatility gauge** | S | ★★ | Surface an ASX volatility proxy alongside the US VIX already in macro, for a local fear/greed read. |
 | ✓ **Regime overlay on trade history** | S | ★★ | **SHIPPED** — coloured regime badge per journal row. See §0. |
 
@@ -277,7 +291,7 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 1. ✓ **Trust the numbers first:** §1.3 Wilson CI, §1.4 Brier score, §1.2 slippage — **done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias.
 2. ✓ **Don't lose data:** §3.2 backups, §3.1 retry + stale-cache — **done**. Remaining: secondary data provider fallback.
 3. ✓ **Highest daily payoff:** pre-trade checklist, CGT countdown, trade tags, heat gauge, drawdown monitor, Telegram, broker CSV, indicator alerts, tax-loss planner, EOFY pack, watchlist, morning briefing, regime journal, stale nudge — **all done**.
-4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. Remaining: §2.5 correlation-aware sizing, §1.7 walk-forward backtest.
+4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. ✓ §1.7 walk-forward backtest — **done Sprint 20**. Remaining: §2.5 correlation-aware sizing.
 5. ✓ **Sprint 6 shipped:** §2.7 portfolio-aware Q&A, §2.1 performance attribution, §2.5 sector-concentration warning, §2.6 thesis capture, §2.2 dividend forecast + franking credits — **all done**.
 6. ✓ **Sprint 7 shipped:** thesis review at exit, prompt-version P&L, target allocations + drift alerts, economic calendar (RBA dates + ex-div + earnings), franking 45-day rule warnings — **all done**.
 7. ✓ **Sprint 8 shipped:** A-VIX (ASX realized vol), cash/TD tracker, exact correlation-aware sizing, macro endpoint perf (3 serial fetches eliminated), keyboard shortcuts (`g`+letter + `?`) — **all done**.
@@ -285,7 +299,9 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 9. ✓ **Sprint 12 shipped:** §1.1 look-ahead bias (AI Replay fixed to nominal prices; strategy backtest disclosed as total-return), TRIM/SELL ATR stop floor, intraday Extreme Mode, intraday dynamic UI updates, Groq/Gemini key consolidation, neutral debate synthesis — **all done**.
 10. ✓ **Sprint 13 shipped:** compact/density mode, in-app changelog, macro loading state, corporate-actions split detection, liquidity-scaled slippage — **all done**.
 11. ✓ **Sprint 14 shipped:** signals page candlestick chart, journal monthly P&L bar chart, portfolio sector sidebar (replaced canvas donut), numpy.bool_ JSON serialization fix, Learning Loop table alignment + dark-theme button colors — **all done**.
-12. **Polish:** §3.3 Vitest tests, §3.4 performance, §4 UX (mobile/PWA), §3.7 types/modules.
+12. ✓ **Sprint 17 shipped:** monthly seasonality card (Signals page detail), CGT split auto-adjust with one-click Apply button (Portfolio) — **all done**.
+13. ✓ **Sprint 18 shipped:** `_retryBtn`/`_emptyCard` utils helpers, risk.js error banner + retry, performance.js equity-curve error card, portfolio first-run empty state — **all done**.
+14. **Polish:** §3.3 Vitest tests, §4 UX (mobile/PWA), §3.7 types/modules.
 
 ---
 

@@ -49,15 +49,26 @@ function renderPortfolio() {
       const items = splits.map(([t, events]) =>
         events.map(e => `<strong>${t}</strong>: ${e.ratio}:1 split on ${e.date}`).join(', ')
       ).join('; ');
+      // Build per-split apply buttons
+      const applyBtns = splits.map(([t, events]) =>
+        events.map(e => `<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border-color:#d97706;margin-top:6px;margin-right:4px" onclick="applySplitAdjustment('${t}',${e.ratio},'${e.date}')">Apply ${t} ${e.ratio}:1 split</button>`).join('')
+      ).join('');
       return `
       <div class="critical-alert-banner" style="border-color:#f59e0b;background:#fffbeb;color:#92400e;margin-bottom:12px">
         <span style="font-size:16px">⚠️</span>
-        <div>
+        <div style="flex:1">
           <div style="font-weight:600;margin-bottom:2px">Recent stock split detected — verify your cost base</div>
-          <div style="font-size:12px">${items}. Please check your avg cost and CGT parcels are up to date.</div>
+          <div style="font-size:12px">${items}. Click below to auto-adjust shares, avg price, and CGT parcels.</div>
+          <div>${applyBtns}</div>
         </div>
       </div>`;
     })()}
+
+    ${merged.length === 0 ? _emptyCard('⬢',
+      'No holdings yet',
+      'Add your first trade to start tracking your portfolio. Import a broker CSV to bulk-load positions, or add holdings manually below.',
+      `<button class="btn btn-primary" onclick="document.getElementById('brokerCsvUpload').click()">↑ Import Broker CSV</button>
+       <button class="btn" style="margin-left:8px" onclick="showPage('journal')">+ Add Trade Manually</button>`) : ''}
 
     <div style="display:grid;grid-template-columns:1fr 220px;gap:12px;align-items:start;margin-bottom:12px">
     <div class="card">
@@ -759,6 +770,36 @@ function _buildSectorSidebar(merged, totalValue) {
       </div>
     </div>
   </div>`;
+}
+
+function applySplitAdjustment(ticker, ratio, date) {
+  if (!confirm(`Apply ${ratio}:1 split for ${ticker} on ${date}?\n\nThis will:\n• Multiply shares by ${ratio}\n• Divide avg price by ${ratio}\n• Multiply all open CGT parcel quantities by ${ratio}\n• Divide CGT parcel cost-per-share by ${ratio}\n\nMake sure this split has not already been applied.`)) return;
+
+  // Adjust portfolio holding
+  const holding = state.portfolio.find(h => h.ticker === ticker);
+  if (holding) {
+    holding.shares       = Math.round(holding.shares * ratio * 10000) / 10000;
+    holding.avgPrice     = Math.round(holding.avgPrice / ratio * 10000) / 10000;
+    holding.currentPrice = Math.round(holding.currentPrice / ratio * 10000) / 10000;
+  }
+
+  // Adjust open CGT parcels for this ticker
+  let parcelCount = 0;
+  (state.cgtParcels || []).forEach(p => {
+    if (p.ticker === ticker && (p.remainingQty || 0) > 0) {
+      p.qty          = Math.round(p.qty          * ratio * 10000) / 10000;
+      p.remainingQty = Math.round(p.remainingQty * ratio * 10000) / 10000;
+      p.costPerShare = Math.round(p.costPerShare / ratio * 10000) / 10000;
+      parcelCount++;
+    }
+  });
+
+  // Dismiss the split warning for this ticker so the button doesn't show again
+  if (state._splitWarnings) state._splitWarnings[ticker] = [];
+
+  saveStateToDb();
+  renderPage();
+  toast(`Split applied: ${ticker} ${ratio}:1 — ${holding ? 'holding' : 'no holding'} updated, ${parcelCount} parcel(s) adjusted`, 'success');
 }
 
 async function checkPortfolioSplits() {

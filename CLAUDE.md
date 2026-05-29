@@ -33,7 +33,8 @@ API key options (one of these is required for analysis):
 
 Tests:
 ```bash
-python test_app.py        # all 215 tests, ~10 s
+python test_app.py        # all Python tests (backend + frontend syntax/function checks)
+npm run test:js           # Vitest suite — 122 JS unit tests for pure engine files
 ```
 
 ---
@@ -214,6 +215,7 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 - `GET /api/portfolio/splits-check?tickers=BHP.AX,CBA.AX` — returns any stock splits in the last 90 days for the given tickers. Response: `{TICKER:[{date,ratio}]}`. Capped at 50 tickers. Portfolio page calls this once per load (cached in `state._splitWarnings`); shows amber warning card if splits found.
 
 ### Market data (all cached via `ttl_cache`)
+- `GET /api/seasonality/<ticker>` — 12-month avg return pattern from 10yr monthly history. Returns `{ok, ticker, years, months:[{month, avg, positive, count, min, max}]}`. avg/min/max in %. **24 h cache.** Displayed on Signals page detail card; cached in `window._seasonalityCache` per session.
 - `GET /api/macro` — ASX200, AUD/USD, gold, iron ore + regime fields. **5 min cache.** `advance_decline_ratio` is now populated from the last scanner run: `routes/market.py` lazy-imports `_scan_state["breadth_ratio"]` from `routes/scanner.py` (computed as % of universe above 20-day SMA after each scan). Will be `null` until the first scan completes.
 - `GET /api/quote/<ticker>` — fast price + sector + **`fetched_at` (UTC ISO)**. **45 s cache.** Both `_quote_cached` and `_fetch_symbol` (macro) use `fetch_with_retry` with stale-cache fallback.
 - `GET /api/analyse/<ticker>` / `POST /api/analyse/batch` — full indicator pack. **5 min cache.**
@@ -306,9 +308,12 @@ Settings page → Telegram section. Enter bot token (from `@BotFather`) and chat
 
 ### Run tests
 ```bash
-python test_app.py
+python test_app.py   # all Python tests
+npm run test:js      # Vitest JS tests (quant-engine, regime-engine, response-validator, _detectExitReason)
 ```
-The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket shape, JS syntax for every modified file, function presence (catches accidental deletion), regression tests for every fixed bug, infra invariants (db.py contract, ttl_cache memoisation, gunicorn config).
+The Python suite covers: all learning-loop routes, Claude proxy endpoints, polymarket shape, JS syntax for every modified file, function presence (catches accidental deletion), regression tests for every fixed bug, infra invariants (db.py contract, ttl_cache memoisation, gunicorn config).
+
+The Vitest suite (`tests/`) uses `vm.runInThisContext` to load browser-global scripts into Node context (mirrors the browser `<script>` tag loading order). `extractFunction()` in `tests/setup.js` uses brace-counting to extract individual functions from page files — used for `_detectExitReason` which is duplicated in `recommendations.js` and `performance.js`.
 
 ---
 
@@ -366,10 +371,10 @@ The suite covers: all learning-loop routes, Claude proxy endpoints, polymarket s
 |---|---|---|
 | **Full ES-modules migration** | Touching 27 JS files with no dev-server verification = high regression risk. Better to do under a feature branch + visual smoke test. | Safe dependency order, dead-code elimination, single bundled HTTP request. |
 | **FastAPI migration** | Half-day refactor of every route. Current Flask + gthread is fast enough. | Native async, auto-generated OpenAPI docs, faster I/O concurrency. |
-| **Walk-forward backtesting** | Requires vectorised OHLCV replay engine + parameter grid — a mini framework. | Robust strategy parameter tuning. |
+| **Walk-forward backtesting** | ~~Requires vectorised OHLCV replay engine + parameter grid.~~ **Shipped Sprint 20.** `POST /api/backtest/walk-forward`; Walk-Forward tab in Backtest page. | Robust strategy parameter tuning. |
 | **Mobile / responsive layout** | Needs CSS breakpoint pass on every card/table — compact mode toggle (shipped Sprint 13) helps on small screens but doesn't reflow columns. | Phone-friendly read-only mode during market hours. |
 | **DRP parcel tracking** | Dividend income forecast assumes no DRP (dividend reinvestment); DRP parcels need their own CGT lot management. | Accurate CGT cost-base for DRP investors. |
-| **Vitest frontend tests** | JS test infrastructure needs setting up (jsdom, mocking globals). | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
+| **Vitest frontend tests** | ~~JS test infrastructure needs setting up (jsdom, mocking globals).~~ **Shipped Sprint 19.** `npm run test:js` — 122 tests. | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
 | **Hoist `_detectExitReason` into `utils.js`** | Currently duplicated in two page files; dedup risks the fragile script order. | Single source of truth for exit classification. |
 | **`pip install feedparser`** | Optional dep; RSS falls back to a built-in XML parser when absent (logs a warning each scan). | More robust news-feed parsing. |
 | **Stooq rate-limiting** | Stooq.com has undocumented rate limits (typically 1 req/sec). Under parallel batch requests the fallback may 429 silently (returns empty CSV). A per-domain semaphore or retry delay would prevent silent fallback failures. | Reliable Stooq fallback under load. |
@@ -390,6 +395,7 @@ Per-request timing middleware logs handlers >500 ms (INFO) and >2 s (WARN). The 
 ```bash
 # 1. Tests still green?
 python test_app.py
+npm run test:js
 
 # 2. Server starts?
 python asx_server.py &

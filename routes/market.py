@@ -12,6 +12,7 @@ Endpoints:
   /api/risk                        GET     — beta, Sharpe, VaR, CVaR per ticker
   /api/portfolio/nav-history       POST    — reconstruct NAV curve vs VAS
   /api/earnings-calendar           GET     — next earnings + EPS per ticker (ETFs skipped)
+  /api/seasonality/<ticker>        GET     — 12-month avg return pattern (10yr, 24 h cache)
   /api/log/ai_response             POST/GET — store + retrieve raw Claude output (legacy)
   /api/log/ai_calls                GET     — browse ai_call_log (limit/offset/agent_type)
   /api/log/ai_call/<id>            GET     — full detail for one logged call
@@ -95,6 +96,55 @@ def analyse_batch():
         for ticker, result in pool.map(_one, tickers):
             results[ticker] = result
     return jsonify(results)
+
+
+# ── Seasonality ──────────────────────────────────────────────────────────────
+
+_MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
+@ttl_cache(seconds=86400)  # 24 h — historical monthly returns change very slowly
+def _seasonality_cached(ticker: str) -> dict:
+    sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+    hist = yf.download(sym, period="10y", interval="1mo", auto_adjust=True, progress=False)
+    if hist.empty:
+        return {"ok": False, "error": "no data", "ticker": ticker}
+    close = hist["Close"]
+    if hasattr(close, "squeeze"):
+        close = close.squeeze()
+    returns = close.pct_change().dropna()
+    by_month: dict[int, list[float]] = {}
+    for idx, val in returns.items():
+        m = idx.month
+        v = float(val) * 100
+        if not (v != v):  # skip NaN
+            by_month.setdefault(m, []).append(v)
+    months = []
+    for m in range(1, 13):
+        vals = by_month.get(m, [])
+        pos = sum(1 for v in vals if v > 0)
+        months.append({
+            "month":    _MONTH_NAMES[m - 1],
+            "avg":      round(sum(vals) / len(vals), 2) if vals else 0.0,
+            "positive": pos,
+            "count":    len(vals),
+            "min":      round(min(vals), 2) if vals else 0.0,
+            "max":      round(max(vals), 2) if vals else 0.0,
+        })
+    return {"ok": True, "ticker": ticker, "months": months, "years": len(close) // 12}
+
+
+@bp.route("/api/seasonality/<ticker>")
+def seasonality(ticker):
+    """Monthly return seasonality pattern for a ticker (10yr, 24 h cache).
+
+    Returns {ok, ticker, years, months:[{month, avg, positive, count, min, max}]}.
+    avg and min/max are in percent.
+    """
+    try:
+        return jsonify(_seasonality_cached(ticker.upper()))
+    except Exception as e:
+        log_failed_ticker(ticker, str(e), context='seasonality')
+        return jsonify({"ok": False, "error": str(e), "ticker": ticker.upper()})
 
 
 # ── Quote ────────────────────────────────────────────────────────────────────

@@ -387,6 +387,468 @@ def backtest():
     })
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Walk-forward backtesting helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Parameter grids — one dict per strategy; each entry is one candidate param set.
+_WF_PARAM_GRIDS = {
+    "rsi_trend": [
+        {"rsi_period": rp, "rsi_oversold": ob, "rsi_overbought": os_}
+        for rp in [10, 14, 21]
+        for ob in [28, 32, 36]
+        for os_ in [62, 68, 72]
+    ],
+    "macd": [
+        {"fast": f, "slow": s, "signal": sig}
+        for f, s in [(8, 21), (12, 26), (10, 22)]
+        for sig in [7, 9]
+    ],
+    "bb_reversion": [
+        {"bb_period": p, "bb_std": std, "rsi_entry": re}
+        for p in [14, 20]
+        for std in [1.5, 2.0, 2.5]
+        for re in [35, 40]
+    ],
+    "momentum": [
+        {"adx_entry": ae, "adx_exit": ax, "trend_period": tp}
+        for ae in [20, 25, 30]
+        for ax in [15, 18, 22]
+        for tp in [20, 50]
+    ],
+}
+
+
+def _run_strategy_slice(close, high, low, volume, strategy, params, capital, brokerage, slip_pct):
+    """
+    Run a single strategy with given params over a price slice.
+    Returns dict: {final_value, trades, sharpe, total_return_pct, win_rate}.
+    """
+    import statistics
+
+    n = len(close)
+    if n < 40:
+        return {"final_value": capital, "trades": [], "sharpe": 0, "total_return_pct": 0, "win_rate": 0}
+
+    # Precompute indicators
+    def _rsi(prices, period=14):
+        deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+        gains = [max(d, 0) for d in deltas]
+        losses = [abs(min(d, 0)) for d in deltas]
+        if len(gains) < period:
+            return [50.0] * len(prices)
+        avg_g = sum(gains[:period]) / period
+        avg_l = sum(losses[:period]) / period
+        rsi = [50.0] * (period + 1)
+        for i in range(period, len(gains)):
+            avg_g = (avg_g * (period - 1) + gains[i]) / period
+            avg_l = (avg_l * (period - 1) + losses[i]) / period
+            rs = avg_g / avg_l if avg_l > 0 else 100
+            rsi.append(100 - 100 / (1 + rs))
+        return [50.0] + rsi  # align length
+
+    def _ema(prices, period):
+        k = 2 / (period + 1)
+        result = [prices[0]]
+        for p in prices[1:]:
+            result.append(p * k + result[-1] * (1 - k))
+        return result
+
+    def _sma(prices, period):
+        result = [None] * (period - 1)
+        for i in range(period - 1, len(prices)):
+            result.append(sum(prices[i-period+1:i+1]) / period)
+        return result
+
+    def _bb(prices, period=20, std_mult=2.0):
+        sma = _sma(prices, period)
+        upper = [None] * len(prices)
+        lower = [None] * len(prices)
+        mid   = sma
+        for i in range(period - 1, len(prices)):
+            window = prices[i-period+1:i+1]
+            sd = statistics.stdev(window)
+            upper[i] = sma[i] + std_mult * sd
+            lower[i] = sma[i] - std_mult * sd
+        return upper, mid, lower
+
+    def _atr(high, low, close, period=14):
+        trs = [max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+               for i in range(1, len(high))]
+        result = [None] + trs[:period-1]
+        avg = sum(trs[:period]) / period
+        result.append(avg)
+        for tr in trs[period:]:
+            avg = (avg * (period - 1) + tr) / period
+            result.append(avg)
+        return result
+
+    def _adx_vals(high, low, close, period=14):
+        """Returns (adx, plus_di, minus_di) lists."""
+        pdm = [max(high[i] - high[i-1], 0) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
+               for i in range(1, len(high))]
+        mdm = [max(low[i-1] - low[i], 0) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
+               for i in range(1, len(low))]
+        trs = [max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+               for i in range(1, len(high))]
+        atr_sum = sum(trs[:period]) if len(trs) >= period else sum(trs)
+        pdm_sum = sum(pdm[:period]) if len(pdm) >= period else sum(pdm)
+        mdm_sum = sum(mdm[:period]) if len(mdm) >= period else sum(mdm)
+        adx_vals = [25.0] * (period + 1)
+        pdi_vals = [25.0] * (period + 1)
+        mdi_vals = [25.0] * (period + 1)
+        prev_dx = 25.0
+        for i in range(period, len(trs)):
+            atr_sum = atr_sum - atr_sum / period + trs[i]
+            pdm_sum = pdm_sum - pdm_sum / period + pdm[i]
+            mdm_sum = mdm_sum - mdm_sum / period + mdm[i]
+            pdi = 100 * pdm_sum / atr_sum if atr_sum > 0 else 0
+            mdi = 100 * mdm_sum / atr_sum if atr_sum > 0 else 0
+            dx = 100 * abs(pdi - mdi) / (pdi + mdi) if (pdi + mdi) > 0 else 0
+            adx_val = (prev_dx * (period - 1) + dx) / period
+            adx_vals.append(adx_val)
+            pdi_vals.append(pdi)
+            mdi_vals.append(mdi)
+            prev_dx = adx_val
+        return adx_vals, pdi_vals, mdi_vals
+
+    prices = list(close)
+    highs  = list(high)
+    lows   = list(low)
+
+    # Strategy-specific indicator precompute
+    rp = params.get("rsi_period", 14)
+    ob = params.get("rsi_oversold", 30)
+    os_ = params.get("rsi_overbought", 70)
+    fast = params.get("fast", 12)
+    slow = params.get("slow", 26)
+    sig_period = params.get("signal", 9)
+    bb_period = params.get("bb_period", 20)
+    bb_std = params.get("bb_std", 2.0)
+    rsi_entry = params.get("rsi_entry", 40)
+    adx_entry = params.get("adx_entry", 25)
+    adx_exit  = params.get("adx_exit", 18)
+    trend_period = params.get("trend_period", 50)
+
+    rsi_vals  = _rsi(prices, rp)
+    ema_fast  = _ema(prices, fast)
+    ema_slow  = _ema(prices, slow)
+    macd_line = [ema_fast[i] - ema_slow[i] for i in range(len(prices))]
+    macd_sig  = _ema(macd_line, sig_period)
+    macd_hist = [macd_line[i] - macd_sig[i] for i in range(len(prices))]
+    bb_upper, bb_mid, bb_lower = _bb(prices, bb_period, bb_std)
+    sma_trend = _sma(prices, trend_period)
+    adx_v, pdi_v, mdi_v = _adx_vals(highs, lows, prices)
+
+    cash = capital
+    position = 0
+    entry_price = None
+    trades = []
+    equity = []
+    warmup = max(50, slow + sig_period, trend_period)
+
+    for i in range(warmup, n):
+        price = prices[i]
+        if price <= 0:
+            equity.append(cash + position * price)
+            continue
+
+        rv = rsi_vals[i] if i < len(rsi_vals) else 50
+        mh = macd_hist[i] if i < len(macd_hist) else 0
+        mh_prev = macd_hist[i-1] if i > 0 and i - 1 < len(macd_hist) else 0
+        bbu = bb_upper[i] if i < len(bb_upper) and bb_upper[i] is not None else price * 1.04
+        bbm = bb_mid[i] if i < len(bb_mid) and bb_mid[i] is not None else price
+        bbl = bb_lower[i] if i < len(bb_lower) and bb_lower[i] is not None else price * 0.96
+        smt = sma_trend[i] if i < len(sma_trend) and sma_trend[i] is not None else price
+        adx = adx_v[i] if i < len(adx_v) else 20
+        pdi = pdi_v[i] if i < len(pdi_v) else 20
+        mdi = mdi_v[i] if i < len(mdi_v) else 20
+
+        if strategy == "rsi_trend":
+            buy_sig  = rv < ob and price > smt and mh > 0
+            sell_sig = rv > os_ or price < smt * 0.98
+        elif strategy == "macd":
+            buy_sig  = mh > 0 and mh_prev <= 0
+            sell_sig = mh < 0 and mh_prev >= 0
+        elif strategy == "bb_reversion":
+            buy_sig  = bbl is not None and price <= bbl * 1.005 and rv < rsi_entry
+            sell_sig = position > 0 and bbm is not None and price >= bbm * 0.995
+        elif strategy == "momentum":
+            buy_sig  = adx > adx_entry and pdi > mdi and price > smt
+            sell_sig = adx < adx_exit or mdi > pdi
+        elif strategy == "buy_hold":
+            buy_sig  = position == 0 and i == warmup
+            sell_sig = False
+        else:
+            buy_sig = sell_sig = False
+
+        if buy_sig and position == 0 and cash > brokerage * 2:
+            fp = price * (1 + slip_pct)
+            qty = int((cash - brokerage) / fp)
+            if qty > 0:
+                cash -= qty * fp + brokerage
+                position = qty
+                entry_price = fp
+
+        elif sell_sig and position > 0:
+            fp = price * (1 - slip_pct)
+            pnl = position * fp - brokerage - position * entry_price
+            cash += position * fp - brokerage
+            trades.append({"pnl": round(pnl, 2), "entry": round(entry_price, 3), "exit": round(fp, 3)})
+            position = 0
+            entry_price = None
+
+        equity.append(cash + position * price)
+
+    # Close open position at end of slice
+    if position > 0 and entry_price:
+        fp = prices[-1] * (1 - slip_pct)
+        pnl = position * fp - brokerage - position * entry_price
+        cash += position * fp - brokerage
+        trades.append({"pnl": round(pnl, 2), "entry": round(entry_price, 3), "exit": round(fp, 3), "forced_close": True})
+
+    final_value = cash
+    total_return_pct = round((final_value / capital - 1) * 100, 2) if capital > 0 else 0
+    wins = [t for t in trades if t["pnl"] > 0]
+    win_rate = round(len(wins) / len(trades) * 100, 1) if trades else 0
+
+    # Annualised Sharpe from equity curve
+    sharpe = 0.0
+    try:
+        if len(equity) > 20:
+            daily_rets = [(equity[i] / equity[i-1] - 1) for i in range(1, len(equity)) if equity[i-1] > 0]
+            if len(daily_rets) > 5:
+                mean_r = statistics.mean(daily_rets)
+                std_r  = statistics.stdev(daily_rets)
+                rf_d   = 0.041 / 252
+                sharpe = round((mean_r - rf_d) / std_r * math.sqrt(252), 3) if std_r > 0 else 0.0
+    except Exception:
+        pass
+
+    return {
+        "final_value": round(final_value, 2),
+        "trades": trades,
+        "sharpe": sharpe,
+        "total_return_pct": total_return_pct,
+        "win_rate": win_rate,
+        "equity": equity,
+    }
+
+
+@bp.route("/api/backtest/walk-forward", methods=["POST"])
+def backtest_walk_forward():
+    """
+    Walk-forward backtest: rolling train/test windows with in-sample parameter
+    optimisation and out-of-sample performance measurement.
+
+    Body: {
+        "ticker":      "CBA",
+        "period":      "3y",      // 2y | 3y | 5y
+        "strategy":    "rsi_trend",
+        "capital":     50000,
+        "brokerage":   10,
+        "slippage_pct": 0.10,
+        "n_splits":    5,         // number of walk-forward folds
+        "train_ratio": 0.70       // fraction of each window used for training
+    }
+    Returns per-fold results + combined out-of-sample equity curve + aggregate stats.
+    """
+    data = request.get_json() or {}
+    ticker      = data.get("ticker", "")
+    period      = data.get("period", "3y")
+    strategy    = data.get("strategy", "rsi_trend")
+    capital     = float(data.get("capital", 50000))
+    brokerage   = float(data.get("brokerage", 10))
+    slip_pct    = float(data.get("slippage_pct", 0.10)) / 100
+    n_splits    = int(data.get("n_splits", 5))
+    train_ratio = float(data.get("train_ratio", 0.70))
+
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+    if strategy not in _WF_PARAM_GRIDS and strategy != "buy_hold":
+        return jsonify({"error": f"strategy '{strategy}' not supported for walk-forward"}), 400
+    if n_splits < 2 or n_splits > 10:
+        return jsonify({"error": "n_splits must be 2–10"}), 400
+
+    t_sym = asx(ticker)
+    try:
+        stk  = yf.Ticker(t_sym)
+        hist = stk.history(period=period, auto_adjust=True)
+    except Exception as e:
+        return jsonify({"error": f"yfinance fetch failed: {e}"}), 500
+
+    if hist.empty or len(hist) < 150:
+        return jsonify({"error": f"Insufficient data for {ticker} (need ≥150 bars; got {len(hist)})"}), 422
+
+    close  = list(hist["Close"])
+    high   = list(hist["High"])
+    low    = list(hist["Low"])
+    volume = list(hist["Volume"])
+    dates  = [d.strftime("%Y-%m-%d") for d in hist.index]
+
+    n_bars = len(close)
+    param_grid = _WF_PARAM_GRIDS.get(strategy, [{}])
+
+    # Divide the full bar range into n_splits consecutive, non-overlapping TEST windows.
+    # Each fold = [fold_start .. fold_end], with [fold_start .. train_end] as train
+    # and [train_end+1 .. fold_end] as test.
+    fold_size  = n_bars // n_splits
+    min_warmup = 60  # bars needed before signals become reliable
+
+    folds = []
+    oos_equity   = []          # combined out-of-sample equity curve
+    oos_all_pnls = []
+
+    oos_capital = capital / n_splits  # each fold trades an equal share of capital
+
+    for split_idx in range(n_splits):
+        fold_start = split_idx * fold_size
+        fold_end   = (fold_start + fold_size) if split_idx < n_splits - 1 else n_bars
+        fold_len   = fold_end - fold_start
+
+        if fold_len < min_warmup + 20:
+            continue
+
+        train_end = fold_start + max(min_warmup, int(fold_len * train_ratio))
+        test_start = train_end
+        test_end   = fold_end
+
+        if test_end - test_start < 10:
+            continue
+
+        c_train = close[fold_start:train_end]
+        h_train = high[fold_start:train_end]
+        l_train = low[fold_start:train_end]
+        v_train = volume[fold_start:train_end]
+
+        c_test = close[test_start:test_end]
+        h_test = high[test_start:test_end]
+        l_test = low[test_start:test_end]
+        v_test = volume[test_start:test_end]
+
+        # ── Grid-search on training window ────────────────────────────────────
+        best_params = param_grid[0]
+        best_sharpe = -999
+        for params in param_grid:
+            res = _run_strategy_slice(c_train, h_train, l_train, v_train,
+                                      strategy, params, oos_capital, brokerage, slip_pct)
+            if res["sharpe"] > best_sharpe:
+                best_sharpe = res["sharpe"]
+                best_params = params
+
+        train_result = _run_strategy_slice(c_train, h_train, l_train, v_train,
+                                           strategy, best_params, oos_capital, brokerage, slip_pct)
+
+        # ── Apply best params to test (OOS) window ────────────────────────────
+        test_result = _run_strategy_slice(c_test, h_test, l_test, v_test,
+                                          strategy, best_params, oos_capital, brokerage, slip_pct)
+
+        oos_all_pnls.extend([t["pnl"] for t in test_result["trades"]])
+
+        # Build OOS equity curve segment
+        for j, val in enumerate(test_result["equity"]):
+            date_idx = test_start + j
+            dt = dates[date_idx] if date_idx < len(dates) else dates[-1]
+            oos_equity.append({"date": dt, "value": round(val, 2)})
+
+        folds.append({
+            "fold":             split_idx + 1,
+            "train_start":      dates[fold_start],
+            "train_end":        dates[train_end - 1],
+            "test_start":       dates[test_start],
+            "test_end":         dates[test_end - 1],
+            "best_params":      best_params,
+            "train_return_pct": train_result["total_return_pct"],
+            "train_sharpe":     round(best_sharpe, 3),
+            "train_trades":     len(train_result["trades"]),
+            "test_return_pct":  test_result["total_return_pct"],
+            "test_sharpe":      test_result["sharpe"],
+            "test_trades":      len(test_result["trades"]),
+            "test_win_rate":    test_result["win_rate"],
+        })
+
+    if not folds:
+        return jsonify({"error": "Not enough data to build any walk-forward folds"}), 422
+
+    # ── Buy-and-hold benchmark (same period, same capital) ────────────────────
+    bh_result = _run_strategy_slice(close, high, low, volume,
+                                    "buy_hold", {}, capital, brokerage, slip_pct)
+
+    # ── OOS aggregate stats ───────────────────────────────────────────────────
+    import statistics as _stats
+
+    oos_wins   = [p for p in oos_all_pnls if p > 0]
+    oos_losses = [p for p in oos_all_pnls if p <= 0]
+    oos_total_pnl = round(sum(oos_all_pnls), 2)
+
+    # Reconstruct combined OOS curve starting at 'capital'
+    oos_combined_curve = []
+    if oos_equity:
+        scale = capital / oos_capital  # scale up from per-fold capital
+        running = capital
+        for pt in oos_equity:
+            oos_combined_curve.append({"date": pt["date"], "value": round(pt["value"] * scale, 2)})
+
+    # OOS Sharpe
+    oos_sharpe = None
+    try:
+        vals = [pt["value"] for pt in oos_combined_curve]
+        if len(vals) > 20:
+            dr = [(vals[i] / vals[i-1] - 1) for i in range(1, len(vals)) if vals[i-1] > 0]
+            if len(dr) > 5:
+                mean_r = _stats.mean(dr)
+                std_r  = _stats.stdev(dr)
+                rf_d   = 0.041 / 252
+                oos_sharpe = round((mean_r - rf_d) / std_r * math.sqrt(252), 2) if std_r > 0 else None
+    except Exception:
+        pass
+
+    # OOS max drawdown
+    oos_max_dd = None
+    try:
+        vals = [pt["value"] for pt in oos_combined_curve]
+        if vals:
+            peak = vals[0]
+            worst = 0.0
+            for v in vals:
+                if v > peak: peak = v
+                dd = (v - peak) / peak * 100 if peak > 0 else 0
+                if dd < worst: worst = dd
+            oos_max_dd = round(worst, 2)
+    except Exception:
+        pass
+
+    # OOS total return from combined curve
+    oos_return_pct = None
+    if oos_combined_curve:
+        start_val = oos_combined_curve[0]["value"]
+        end_val   = oos_combined_curve[-1]["value"]
+        oos_return_pct = round((end_val / start_val - 1) * 100, 2) if start_val > 0 else None
+
+    return jsonify({
+        "ok":             True,
+        "ticker":         ticker.upper(),
+        "strategy":       strategy,
+        "period":         period,
+        "n_splits":       n_splits,
+        "train_ratio":    train_ratio,
+        "capital":        capital,
+        "folds":          folds,
+        "oos_equity_curve": oos_combined_curve,
+        "oos_return_pct": oos_return_pct,
+        "oos_sharpe":     oos_sharpe,
+        "oos_max_drawdown_pct": oos_max_dd,
+        "oos_total_pnl":  oos_total_pnl,
+        "oos_trades":     len(oos_all_pnls),
+        "oos_win_rate":   round(len(oos_wins) / len(oos_all_pnls) * 100, 1) if oos_all_pnls else 0,
+        "oos_avg_win":    round(sum(oos_wins) / len(oos_wins), 2) if oos_wins else 0,
+        "oos_avg_loss":   round(sum(oos_losses) / len(oos_losses), 2) if oos_losses else 0,
+        "buy_hold_return_pct": bh_result["total_return_pct"],
+        "data_bars":      n_bars,
+        "price_basis":    "total_return_adjusted",
+    })
+
+
 # ── AI Recommendation Replay ───────────────────────────────────────────────────
 @bp.route("/api/backtest/ai-replay", methods=["POST"])
 def backtest_ai_replay():

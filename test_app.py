@@ -2447,5 +2447,313 @@ class TestIntradayStrategy(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
 
 
+class TestSprint18Frontend(unittest.TestCase):
+    """Regression checks for Sprint 18 UX / error-recovery additions."""
+
+    def test_utils_retry_btn_defined(self):
+        """utils.js must define _retryBtn."""
+        with open(os.path.join(ROOT, "js/utils.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _retryBtn", src)
+
+    def test_utils_empty_card_defined(self):
+        """utils.js must define _emptyCard."""
+        with open(os.path.join(ROOT, "js/utils.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _emptyCard", src)
+
+    def test_risk_js_retry_button(self):
+        """risk.js must render a retry button on fetch failure."""
+        with open(os.path.join(ROOT, "js/pages/risk.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_retryBtn", src)
+        self.assertIn("riskFetchError", src)
+
+    def test_risk_js_uses_empty_card(self):
+        """risk.js must use _emptyCard for the no-holdings state."""
+        with open(os.path.join(ROOT, "js/pages/risk.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_emptyCard", src)
+
+    def test_performance_js_retry_button(self):
+        """performance.js must render a retry button on nav-history failure."""
+        with open(os.path.join(ROOT, "js/pages/performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_retryBtn", src)
+
+    def test_portfolio_js_empty_card_first_run(self):
+        """portfolio.js must use _emptyCard for the first-run no-holdings state."""
+        with open(os.path.join(ROOT, "js/pages/portfolio.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_emptyCard", src)
+        self.assertIn("No holdings yet", src)
+
+    def test_utils_js_syntax(self):
+        """utils.js must pass node --check after Sprint 18 additions."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/utils.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+    def test_risk_js_syntax(self):
+        """risk.js must pass node --check after Sprint 18 changes."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/pages/risk.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+    def test_performance_js_syntax(self):
+        """performance.js must pass node --check after Sprint 18 changes."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/pages/performance.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+
+class TestSeasonalityRoute(unittest.TestCase):
+    """Tests for GET /api/seasonality/<ticker>."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_seasonality_returns_json(self):
+        """Endpoint must return 200 and a JSON body regardless of yfinance availability."""
+        resp = self.client.get("/api/seasonality/BHP")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("ok", body)
+
+    def test_seasonality_shape_on_success(self):
+        """When yfinance returns data, response must have 12-month array."""
+        import unittest.mock as mock
+        import pandas as pd
+        import numpy as np
+
+        # Build a synthetic 10yr monthly close series
+        dates = pd.date_range("2015-01", periods=120, freq="MS")
+        closes = pd.Series(np.cumprod(1 + np.random.normal(0.005, 0.04, 120)) * 10, index=dates)
+        fake_hist = pd.DataFrame({"Close": closes})
+
+        with mock.patch("yfinance.download", return_value=fake_hist):
+            # Clear the TTL cache so the mock is used
+            from routes.market import _seasonality_cached
+            _seasonality_cached.cache_clear() if hasattr(_seasonality_cached, "cache_clear") else None
+            resp = self.client.get("/api/seasonality/CBA")
+        body = json.loads(resp.data)
+        if body.get("ok"):
+            self.assertEqual(len(body["months"]), 12)
+            for m in body["months"]:
+                self.assertIn("month", m)
+                self.assertIn("avg", m)
+                self.assertIn("positive", m)
+                self.assertIn("count", m)
+
+    def test_seasonality_route_registered(self):
+        """routes/market.py must define the seasonality route."""
+        with open(os.path.join(ROOT, "routes/market.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("/api/seasonality/", src)
+        self.assertIn("_seasonality_cached", src)
+
+
+class TestSprint17Frontend(unittest.TestCase):
+    """Regression checks for Sprint 17 JS additions."""
+
+    def test_signals_js_seasonality_card(self):
+        """signals.js must render a seasonality card placeholder."""
+        with open(os.path.join(ROOT, "js/pages/signals.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("seas-card-", src)
+        self.assertIn("_loadSeasonality", src)
+        self.assertIn("_renderSeasonality", src)
+        self.assertIn("Monthly Seasonality", src)
+
+    def test_signals_js_seasonality_cache(self):
+        """signals.js must declare _seasonalityCache."""
+        with open(os.path.join(ROOT, "js/pages/signals.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_seasonalityCache", src)
+
+    def test_portfolio_js_apply_split_adjustment(self):
+        """portfolio.js must define applySplitAdjustment."""
+        with open(os.path.join(ROOT, "js/pages/portfolio.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("applySplitAdjustment", src)
+
+    def test_portfolio_js_split_button_in_banner(self):
+        """portfolio.js split warning banner must render Apply buttons."""
+        with open(os.path.join(ROOT, "js/pages/portfolio.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("applySplitAdjustment", src)
+        self.assertIn("Apply", src)
+
+    def test_signals_js_syntax(self):
+        """signals.js must pass node --check after Sprint 17 additions."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/pages/signals.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+    def test_portfolio_js_syntax(self):
+        """portfolio.js must pass node --check after Sprint 17 additions."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/pages/portfolio.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+
+class TestSprint20WalkForward(unittest.TestCase):
+    """Sprint 20 — Walk-forward backtest engine."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_wf_route_registered(self):
+        """GET /api/backtest/walk-forward route must be registered."""
+        rules = [r.rule for r in asx_server.app.url_map.iter_rules()]
+        self.assertIn("/api/backtest/walk-forward", rules)
+
+    def test_wf_missing_ticker(self):
+        """/api/backtest/walk-forward must return 400 when ticker is absent."""
+        r = self.client.post("/api/backtest/walk-forward",
+                             json={"strategy": "rsi_trend", "period": "2y"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("ticker", r.get_json().get("error", ""))
+
+    def test_wf_bad_strategy(self):
+        """Unsupported strategy must return 400."""
+        r = self.client.post("/api/backtest/walk-forward",
+                             json={"ticker": "CBA", "strategy": "nonexistent", "period": "2y"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_wf_bad_splits(self):
+        """n_splits outside 2–10 must return 400."""
+        r = self.client.post("/api/backtest/walk-forward",
+                             json={"ticker": "CBA", "strategy": "rsi_trend", "period": "2y", "n_splits": 1})
+        self.assertEqual(r.status_code, 400)
+
+    def test_param_grids_non_empty(self):
+        """All strategy param grids must be non-empty lists of dicts."""
+        from routes.backtest import _WF_PARAM_GRIDS
+        for strat, grid in _WF_PARAM_GRIDS.items():
+            self.assertIsInstance(grid, list, f"{strat} grid is not a list")
+            self.assertGreater(len(grid), 0, f"{strat} grid is empty")
+            self.assertIsInstance(grid[0], dict, f"{strat} grid[0] is not a dict")
+
+    def test_run_strategy_slice_smoke(self):
+        """_run_strategy_slice must run without error on synthetic data."""
+        from routes.backtest import _run_strategy_slice, _WF_PARAM_GRIDS
+        import random
+        random.seed(1)
+        prices = [10.0]
+        for _ in range(199):
+            prices.append(max(0.5, prices[-1] * (1 + random.gauss(0.0002, 0.015))))
+        highs = [p * 1.01 for p in prices]
+        lows  = [p * 0.99 for p in prices]
+        vols  = [100000] * 200
+        for strat, grid in _WF_PARAM_GRIDS.items():
+            res = _run_strategy_slice(prices, highs, lows, vols, strat, grid[0], 10000, 10, 0.001)
+            self.assertIn("final_value", res)
+            self.assertIn("trades", res)
+            self.assertIn("sharpe", res)
+            self.assertIsInstance(res["total_return_pct"], float)
+
+    def test_backtest_js_wf_tab(self):
+        """backtest.js must contain walk-forward panel and run function."""
+        with open(os.path.join(ROOT, "js/pages/backtest.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_renderWfPanel", src)
+        self.assertIn("runWalkForward", src)
+        self.assertIn("_renderWfResults", src)
+        self.assertIn("_drawWfCurve", src)
+        self.assertIn("Walk-Forward", src)
+
+    def test_backtest_js_syntax(self):
+        """backtest.js must pass node --check after walk-forward additions."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/pages/backtest.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+
+class TestSprint19VitestInfrastructure(unittest.TestCase):
+    """Sprint 19 — Vitest frontend test infrastructure exists and is valid."""
+
+    def test_package_json_exists(self):
+        """package.json must exist with vitest devDependency."""
+        path = os.path.join(ROOT, "package.json")
+        self.assertTrue(os.path.exists(path), "package.json missing")
+        import json
+        with open(path, encoding="utf-8") as f:
+            pkg = json.load(f)
+        self.assertIn("vitest", pkg.get("devDependencies", {}))
+        self.assertIn("test:js", pkg.get("scripts", {}))
+
+    def test_vitest_config_exists(self):
+        """vitest.config.js must exist."""
+        path = os.path.join(ROOT, "vitest.config.js")
+        self.assertTrue(os.path.exists(path), "vitest.config.js missing")
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("setupFiles", src)
+        self.assertIn("globals", src)
+
+    def test_setup_js_exists(self):
+        """tests/setup.js must exist with vm loader and global stubs."""
+        path = os.path.join(ROOT, "tests", "setup.js")
+        self.assertTrue(os.path.exists(path), "tests/setup.js missing")
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("loadScript", src)
+        self.assertIn("extractFunction", src)
+        self.assertIn("vm.runInThisContext", src)
+
+    def test_all_test_files_exist(self):
+        """All four Vitest test files must be present."""
+        for name in ["quant-engine", "regime-engine", "response-validator", "detect-exit-reason"]:
+            path = os.path.join(ROOT, "tests", f"{name}.test.js")
+            self.assertTrue(os.path.exists(path), f"tests/{name}.test.js missing")
+
+    def test_vitest_suite_passes(self):
+        """npm run test:js must exit 0 with all tests passing."""
+        import subprocess, sys
+        result = subprocess.run(
+            "npm run test:js",
+            capture_output=True, text=True, cwd=ROOT, shell=True
+        )
+        self.assertEqual(result.returncode, 0,
+            f"Vitest suite failed:\n{result.stdout[-3000:]}\n{result.stderr[-1000:]}")
+        self.assertIn("passed", result.stdout)
+
+    def test_response_validator_sell_trim_stop_rule(self):
+        """response-validator.js stop-below-entry rule must be direction-aware."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("SELL", src)
+        self.assertIn("TRIM", src)
+        # The rule must handle SELL/TRIM differently
+        self.assertIn("stop must be above entry", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

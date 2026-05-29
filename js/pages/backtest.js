@@ -5,7 +5,7 @@
 // ============================================================
 
 // ── Shared state ──────────────────────────────────────────────────────────────
-if (!window._btMode) window._btMode = 'ai';   // 'ai' | 'tech'
+if (!window._btMode) window._btMode = 'ai';   // 'ai' | 'tech' | 'wf'
 
 // ============================================================
 // RENDER
@@ -15,19 +15,22 @@ function renderBacktest() {
     <div class="flex-row" style="gap:0;margin-bottom:16px;border-bottom:1px solid var(--border-light)">
       <button class="tab ${_btMode==='ai'?'active':''}"  data-bt-tab="ai"   onclick="_btSwitch('ai')">🤖 AI Replay</button>
       <button class="tab ${_btMode==='tech'?'active':''}" data-bt-tab="tech" onclick="_btSwitch('tech')">📈 Technical Benchmark</button>
+      <button class="tab ${_btMode==='wf'?'active':''}"  data-bt-tab="wf"   onclick="_btSwitch('wf')">🔄 Walk-Forward</button>
     </div>
-    <div id="bt-panel">${_btMode==='ai' ? _renderAiPanel() : _renderTechPanel()}</div>
+    <div id="bt-panel">${_btMode==='ai' ? _renderAiPanel() : _btMode==='tech' ? _renderTechPanel() : _renderWfPanel()}</div>
   `;
 }
 
 function _btSwitch(mode) {
   window._btMode = mode;
-  // Update active underline on tab buttons without re-rendering the whole page
   document.querySelectorAll('[data-bt-tab]').forEach(el => {
     el.classList.toggle('active', el.dataset.btTab === mode);
   });
   const panel = document.getElementById('bt-panel');
-  if (panel) panel.innerHTML = mode === 'ai' ? _renderAiPanel() : _renderTechPanel();
+  if (!panel) return;
+  if (mode === 'ai')   panel.innerHTML = _renderAiPanel();
+  else if (mode === 'tech') panel.innerHTML = _renderTechPanel();
+  else panel.innerHTML = _renderWfPanel();
 }
 
 // ============================================================
@@ -850,4 +853,310 @@ function drawBacktestEquity(equityCurve) {
   for (let i = 0; i < dates.length; i += step) {
     ctx.fillText(dates[i].slice(5), xOf(i), H - 8);
   }
+}
+
+// ============================================================
+// ── MODE 3: WALK-FORWARD BACKTEST ────────────────────────────
+// ============================================================
+
+function _renderWfPanel() {
+  const portfolioTickers = mergedPortfolio().map(h => h.ticker);
+  const defaultTicker = portfolioTickers[0] || 'CBA';
+  return `
+    <div class="card section-gap">
+      <div class="card-title">Walk-Forward Backtest</div>
+      <p class="text-xs text-muted" style="margin-bottom:12px">
+        Splits historical data into rolling train/test windows. Strategy parameters are
+        optimised on each training window, then applied out-of-sample — the honest way
+        to know whether a strategy actually works.
+      </p>
+      <div class="grid-2" style="gap:14px">
+        <div class="form-row">
+          <div class="form-label">Ticker</div>
+          <input type="text" value="${defaultTicker}" id="wf-ticker" placeholder="e.g. CBA" style="text-transform:uppercase">
+        </div>
+        <div class="form-row">
+          <div class="form-label">Strategy</div>
+          <select id="wf-strategy">
+            <option value="rsi_trend">RSI + Trend Following</option>
+            <option value="macd">MACD Crossover</option>
+            <option value="bb_reversion">BB Mean Reversion</option>
+            <option value="momentum">Momentum (ADX)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="form-label">History period</div>
+          <select id="wf-period">
+            <option value="2y">2 years</option>
+            <option value="3y" selected>3 years</option>
+            <option value="5y">5 years</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="form-label">Walk-forward folds</div>
+          <select id="wf-splits">
+            <option value="3">3 folds</option>
+            <option value="5" selected>5 folds</option>
+            <option value="7">7 folds</option>
+            <option value="10">10 folds</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="form-label">Train ratio</div>
+          <select id="wf-train-ratio">
+            <option value="0.60">60 / 40</option>
+            <option value="0.70" selected>70 / 30</option>
+            <option value="0.80">80 / 20</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="form-label">Starting capital ($)</div>
+          <input type="number" value="${fmt(totalNetWorth(),0).replace(/,/g,'')}" id="wf-capital">
+        </div>
+        <div class="form-row">
+          <div class="form-label">Brokerage per trade ($)</div>
+          <input type="number" value="${state.settings.brokerage}" id="wf-brokerage" min="0" step="1">
+        </div>
+        <div class="form-row">
+          <div class="form-label">Slippage %</div>
+          <input type="number" value="0.10" id="wf-slippage" min="0" max="2" step="0.01"
+            title="Entry/exit slippage in % (0.10 = 0.10%)">
+        </div>
+      </div>
+      <div class="flex-row mt-1" style="gap:10px;align-items:center">
+        <button class="btn btn-primary" id="wf-run-btn" onclick="runWalkForward()">▷ Run Walk-Forward</button>
+        ${!state.serverOk ? '<span class="text-xs text-danger">⚠ Backend server required</span>'
+          : '<span class="text-xs text-muted">Optimises parameters per fold on training data, tests out-of-sample</span>'}
+      </div>
+    </div>
+    <div id="wf-results"></div>
+  `;
+}
+
+async function runWalkForward() {
+  if (!state.serverOk) { toast('Backend server required', 'error'); return; }
+
+  const ticker     = (document.getElementById('wf-ticker').value || '').trim().toUpperCase();
+  const strategy   = document.getElementById('wf-strategy').value;
+  const period     = document.getElementById('wf-period').value;
+  const n_splits   = parseInt(document.getElementById('wf-splits').value, 10);
+  const trainRatio = parseFloat(document.getElementById('wf-train-ratio').value);
+  const capital    = Number(document.getElementById('wf-capital').value) || 50000;
+  const brokerage  = Number(document.getElementById('wf-brokerage').value) || state.settings.brokerage;
+  const slippage   = Number(document.getElementById('wf-slippage').value) || 0.10;
+
+  if (!ticker) { toast('Enter a ticker', 'error'); return; }
+
+  const btn = document.getElementById('wf-run-btn');
+  if (btn) btn.disabled = true;
+
+  document.getElementById('wf-results').innerHTML = `
+    <div class="card"><div class="empty-state" style="padding:2rem">
+      <div class="loading-dots"><span></span><span></span><span></span></div>
+      <p class="text-muted mt-1">Running ${n_splits}-fold walk-forward on ${ticker} (${period})…</p>
+      <p class="text-xs text-muted">Fetching OHLCV data and optimising parameters per training window</p>
+    </div></div>`;
+
+  try {
+    const r = await fetch(`${API}/api/backtest/walk-forward`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker, strategy, period, capital, brokerage,
+        slippage_pct: slippage, n_splits, train_ratio: trainRatio }),
+    });
+    const res = await r.json();
+    if (btn) btn.disabled = false;
+
+    if (!r.ok || res.error) {
+      document.getElementById('wf-results').innerHTML =
+        `<div class="card"><div class="text-danger" style="padding:1rem">Error: ${escapeHTML(res.error || 'Unknown error')}</div></div>`;
+      return;
+    }
+    document.getElementById('wf-results').innerHTML = _renderWfResults(res);
+    // Draw OOS equity curve after DOM insertion
+    if (res.oos_equity_curve && res.oos_equity_curve.length) {
+      requestAnimationFrame(() => _drawWfCurve('wf-oos-canvas', res.oos_equity_curve));
+    }
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    document.getElementById('wf-results').innerHTML =
+      `<div class="card"><div class="text-danger" style="padding:1rem">Fetch error: ${escapeHTML(err.message)}</div></div>`;
+  }
+}
+
+function _renderWfResults(res) {
+  const oosRet   = res.oos_return_pct != null ? res.oos_return_pct.toFixed(2) : '—';
+  const bhRet    = res.buy_hold_return_pct != null ? res.buy_hold_return_pct.toFixed(2) : '—';
+  const oosSharpe = res.oos_sharpe != null ? res.oos_sharpe.toFixed(2) : '—';
+  const oosDD    = res.oos_max_drawdown_pct != null ? res.oos_max_drawdown_pct.toFixed(1) : '—';
+  const edgeOverBh = res.oos_return_pct != null && res.buy_hold_return_pct != null
+    ? (res.oos_return_pct - res.buy_hold_return_pct).toFixed(2) : null;
+  const retColor  = c => Number(c) >= 0 ? '#16a34a' : '#dc2626';
+  const edgeLabel = edgeOverBh != null
+    ? `<span style="color:${retColor(edgeOverBh)}">${Number(edgeOverBh) >= 0 ? '+' : ''}${edgeOverBh}% vs B&H</span>`
+    : '';
+
+  const strategyLabels = { rsi_trend: 'RSI + Trend', macd: 'MACD', bb_reversion: 'BB Reversion', momentum: 'Momentum (ADX)' };
+  const stratLabel = strategyLabels[res.strategy] || res.strategy;
+
+  const foldRows = (res.folds || []).map(f => {
+    const paramStr = Object.entries(f.best_params || {}).map(([k,v]) => `${k}=${v}`).join(', ') || '—';
+    return `<tr>
+      <td style="text-align:center">${f.fold}</td>
+      <td style="font-size:11px;color:var(--text-secondary)">${f.train_start}→${f.train_end}</td>
+      <td style="font-size:11px;color:var(--text-secondary)">${f.test_start}→${f.test_end}</td>
+      <td style="font-size:11px;color:var(--text-muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(paramStr)}">${escapeHTML(paramStr)}</td>
+      <td style="text-align:right;color:${retColor(f.train_return_pct)}">${f.train_return_pct.toFixed(1)}%</td>
+      <td style="text-align:right">${f.train_sharpe.toFixed(2)}</td>
+      <td style="text-align:right;color:${retColor(f.test_return_pct)};font-weight:600">${f.test_return_pct.toFixed(1)}%</td>
+      <td style="text-align:right">${f.test_sharpe.toFixed(2)}</td>
+      <td style="text-align:right">${f.test_trades}</td>
+      <td style="text-align:right">${f.test_win_rate.toFixed(0)}%</td>
+    </tr>`;
+  }).join('');
+
+  return `
+    <div class="card section-gap" style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:16px">
+        <div>
+          <div class="card-title" style="margin-bottom:4px">${res.ticker} — ${stratLabel} Walk-Forward Results</div>
+          <div class="text-xs text-muted">${res.n_splits} folds · ${Math.round(res.train_ratio*100)}/${Math.round((1-res.train_ratio)*100)} train/test split · ${res.data_bars} trading days</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <div class="chip" style="background:${Number(oosRet)>=0?'#dcfce7':'#fee2e2'};color:${retColor(oosRet)};font-weight:700">
+            OOS ${Number(oosRet)>=0?'+':''}${oosRet}%
+          </div>
+          <div class="chip" style="background:var(--bg-secondary);color:var(--text-secondary)">
+            B&amp;H ${Number(bhRet)>=0?'+':''}${bhRet}%
+          </div>
+          ${edgeLabel ? `<div class="chip" style="background:var(--bg-secondary)">${edgeLabel}</div>` : ''}
+        </div>
+      </div>
+
+      <!-- OOS Summary stats -->
+      <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:16px">
+        ${[
+          ['OOS Return', `<span style="color:${retColor(oosRet)};font-weight:700">${Number(oosRet)>=0?'+':''}${oosRet}%</span>`],
+          ['OOS Sharpe', oosSharpe],
+          ['Max Drawdown', `<span style="color:${Number(oosDD)<0?'#dc2626':'var(--text-primary)'}">${oosDD}%</span>`],
+          ['OOS Trades', res.oos_trades],
+          ['Win Rate', `${res.oos_win_rate.toFixed(0)}%`],
+          ['B&H Return', `<span style="color:${retColor(bhRet)}">${Number(bhRet)>=0?'+':''}${bhRet}%</span>`],
+        ].map(([lbl, val]) => `
+          <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 12px">
+            <div class="text-xs text-muted">${lbl}</div>
+            <div style="font-size:15px;font-weight:600;margin-top:3px">${val}</div>
+          </div>`).join('')}
+      </div>
+
+      <!-- OOS Equity Curve -->
+      <div style="margin-bottom:16px">
+        <div class="text-xs text-muted" style="margin-bottom:6px">Out-of-sample equity curve (stitched test windows)</div>
+        <canvas id="wf-oos-canvas" width="700" height="180"
+          style="width:100%;height:180px;border-radius:var(--radius-md);background:var(--bg-secondary)"></canvas>
+      </div>
+
+      <!-- Per-fold table -->
+      <div class="text-xs text-muted" style="margin-bottom:6px">Per-fold breakdown — best params chosen in-sample, returns measured out-of-sample</div>
+      <div style="overflow-x:auto">
+        <table class="table table-sm" style="font-size:12px;min-width:700px">
+          <thead>
+            <tr>
+              <th style="text-align:center">Fold</th>
+              <th>Train window</th>
+              <th>Test window</th>
+              <th>Best params</th>
+              <th style="text-align:right">Train ret%</th>
+              <th style="text-align:right">Train Sharpe</th>
+              <th style="text-align:right">Test ret%</th>
+              <th style="text-align:right">Test Sharpe</th>
+              <th style="text-align:right">Trades</th>
+              <th style="text-align:right">Win%</th>
+            </tr>
+          </thead>
+          <tbody>${foldRows}</tbody>
+        </table>
+      </div>
+
+      <div class="text-xs text-muted" style="margin-top:10px;padding:8px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
+        <strong>Methodology:</strong> Data is split into ${res.n_splits} consecutive folds.
+        For each fold the training window (${Math.round(res.train_ratio*100)}%) is used to grid-search
+        the best parameter set (by Sharpe ratio). That set is then applied to the out-of-sample test
+        window (${Math.round((1-res.train_ratio)*100)}%) — no look-ahead. The OOS equity curve stitches
+        the test segments together. Prices use yfinance dividend-adjusted (total-return) series.
+      </div>
+    </div>
+  `;
+}
+
+function _drawWfCurve(canvasId, curve) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const pad = { top: 12, right: 12, bottom: 24, left: 52 };
+  const vals  = curve.map(p => p.value);
+  const dates = curve.map(p => p.date);
+  const minV  = Math.min(...vals);
+  const maxV  = Math.max(...vals);
+  const range = maxV - minV || 1;
+  const startV = vals[0];
+  const endV   = vals[vals.length - 1];
+  const isUp   = endV >= startV;
+
+  const xOf = i => pad.left + (i / (vals.length - 1 || 1)) * (W - pad.left - pad.right);
+  const yOf = v => pad.top + (1 - (v - minV) / range) * (H - pad.top - pad.bottom);
+
+  // Grid lines + Y labels
+  ctx.strokeStyle = 'rgba(128,128,128,0.15)'; ctx.lineWidth = 1;
+  [0, 0.25, 0.5, 0.75, 1].forEach(frac => {
+    const y = pad.top + frac * (H - pad.top - pad.bottom);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+    const v = maxV - frac * range;
+    ctx.fillStyle = 'rgba(128,128,128,0.7)'; ctx.textAlign = 'right'; ctx.font = '10px sans-serif';
+    ctx.fillText('$' + (v >= 1000 ? (v/1000).toFixed(0)+'k' : v.toFixed(0)), pad.left - 4, y + 4);
+  });
+
+  // Fold dividers — derive from date changes in curve
+  ctx.strokeStyle = 'rgba(128,128,128,0.3)'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+  const stepSize = Math.floor(vals.length / (dates.length > 0 ? 5 : 1));
+  if (stepSize > 10) {
+    for (let i = stepSize; i < vals.length; i += stepSize) {
+      const x = xOf(i); ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, H - pad.bottom); ctx.stroke();
+    }
+  }
+  ctx.setLineDash([]);
+
+  // Equity line + fill
+  const grad = ctx.createLinearGradient(0, pad.top, 0, H - pad.bottom);
+  grad.addColorStop(0, isUp ? 'rgba(22,163,74,0.18)' : 'rgba(220,38,38,0.18)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath();
+  vals.forEach((v, i) => i === 0 ? ctx.moveTo(xOf(i), yOf(v)) : ctx.lineTo(xOf(i), yOf(v)));
+  ctx.lineTo(xOf(vals.length-1), H - pad.bottom);
+  ctx.lineTo(xOf(0), H - pad.bottom);
+  ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+
+  ctx.beginPath();
+  vals.forEach((v, i) => i === 0 ? ctx.moveTo(xOf(i), yOf(v)) : ctx.lineTo(xOf(i), yOf(v)));
+  ctx.strokeStyle = isUp ? '#16a34a' : '#dc2626'; ctx.lineWidth = 2; ctx.stroke();
+
+  // X-axis date labels
+  ctx.fillStyle = 'rgba(128,128,128,0.8)'; ctx.textAlign = 'center'; ctx.font = '10px sans-serif';
+  const xStep = Math.max(1, Math.floor(dates.length / 6));
+  for (let i = 0; i < dates.length; i += xStep) {
+    ctx.fillText(dates[i].slice(0, 7), xOf(i), H - 6);
+  }
+
+  // End-value label
+  ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillStyle = isUp ? '#16a34a' : '#dc2626';
+  const lastX = xOf(vals.length - 1);
+  const lastY = yOf(endV);
+  ctx.fillText('$' + (endV >= 1000 ? (endV/1000).toFixed(1)+'k' : endV.toFixed(0)), lastX - 2, lastY - 6);
 }

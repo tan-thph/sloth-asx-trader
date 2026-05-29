@@ -74,14 +74,22 @@ const _REC_BUSINESS_RULES = [
     },
     message: r => `target $${r.target} ≤ entry high $${Array.isArray(r.priceRange) ? r.priceRange[1] : '?'} — BUY/TOP_UP is unprofitable`,
   },
-  // Stop must be below entry low
+  // Stop placement must be direction-aware:
+  // BUY/TOP_UP: stop below entry low; SELL/TRIM: stop above entry high
   {
     id: 'stop-below-entry',
     check: r => {
+      if (r.action === 'HOLD') return true;
       const lo = Array.isArray(r.priceRange) ? r.priceRange[0] : null;
-      return lo == null || r.stopLoss < lo;
+      const hi = Array.isArray(r.priceRange) ? r.priceRange[1] : null;
+      if (r.action === 'SELL' || r.action === 'TRIM') {
+        return hi == null || r.stopLoss == null || r.stopLoss > hi;
+      }
+      return lo == null || r.stopLoss == null || r.stopLoss < lo;
     },
-    message: r => `stopLoss $${r.stopLoss} ≥ entry low $${Array.isArray(r.priceRange) ? r.priceRange[0] : '?'}`,
+    message: r => (r.action === 'SELL' || r.action === 'TRIM')
+      ? `stopLoss $${r.stopLoss} ≤ entry high $${Array.isArray(r.priceRange) ? r.priceRange[1] : '?'} — SELL/TRIM stop must be above entry`
+      : `stopLoss $${r.stopLoss} ≥ entry low $${Array.isArray(r.priceRange) ? r.priceRange[0] : '?'}`,
   },
   // priceRange must be a 2-element array with lo ≤ hi (not required for HOLD)
   {
