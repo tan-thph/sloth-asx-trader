@@ -56,7 +56,14 @@ except ImportError as _ae_err:
     _AE_OK = False
 
 app = Flask(__name__)
-CORS(app)  # allow browser requests from the HTML file
+# Allow requests only from file:// origins and localhost (the HTML file and dev server).
+# Adjust origins if you serve the frontend from a specific domain.
+CORS(app, origins=[
+    "null",          # file:// pages send Origin: null
+    "http://localhost:5000",
+    "http://127.0.0.1:5000",
+    "http://localhost:8080",   # common dev-server port
+])
 
 
 # ── Per-request timing — warn on slow handlers ────────────────────────────────
@@ -74,6 +81,10 @@ def _req_end(resp):
             log.warning("SLOW %s %s %dms → %d", request.method, request.path, dur_ms, resp.status_code)
         elif dur_ms > 500:
             log.info("%s %s %dms → %d", request.method, request.path, dur_ms, resp.status_code)
+    # Security headers — low-risk hardening for a local personal app
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     return resp
 
 # ── SQLite database ─────────────────────────────────────────────────────────────

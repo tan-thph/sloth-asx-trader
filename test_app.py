@@ -2616,6 +2616,113 @@ class TestSprint17Frontend(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
 
 
+class TestSprint21FactorStabilityAndSecurity(unittest.TestCase):
+    """Sprint 21 — Factor stability (§1.6) + security hardening (§3.5)."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    # ── Factor stability route ─────────────────────────────────────────────────
+
+    def test_factor_stability_route_registered(self):
+        """POST /api/scanner/factor-stability must be registered."""
+        rules = [r.rule for r in asx_server.app.url_map.iter_rules()]
+        self.assertIn("/api/scanner/factor-stability", rules)
+
+    def test_factor_stability_missing_tickers(self):
+        """Returns 400 when tickers are absent."""
+        r = self.client.post("/api/scanner/factor-stability", json={"period": "2y"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_factor_stability_bad_folds(self):
+        """Returns 400 for n_folds outside 2-10."""
+        r = self.client.post("/api/scanner/factor-stability",
+                             json={"tickers": ["CBA"], "n_folds": 1})
+        self.assertEqual(r.status_code, 400)
+
+    def test_compute_factor_ic_smoke(self):
+        """_compute_factor_ic returns a dict with all factor keys."""
+        from routes.scanner import _compute_factor_ic, _FACTORS
+        import random
+        closes_list = []
+        vols_list   = []
+        rng = random.Random(7)
+        for _ in range(12):
+            c = [10.0]
+            for __ in range(149):
+                c.append(max(0.5, c[-1] * (1 + rng.gauss(0.001, 0.018))))
+            closes_list.append(c)
+            vols_list.append([100000] * 150)
+        ics = _compute_factor_ic(closes_list, vols_list, forward_bars=20)
+        self.assertEqual(set(ics.keys()), set(_FACTORS.keys()))
+
+    def test_factor_helper_functions(self):
+        """All _FACTORS lambdas run without error on valid arrays."""
+        from routes.scanner import _FACTORS
+        import numpy as np
+        closes  = np.linspace(10, 12, 100)
+        volumes = np.full(100, 50000.0)
+        for fname, fn in _FACTORS.items():
+            val = fn(closes, volumes)
+            self.assertIsInstance(val, float, f"{fname} did not return float")
+
+    def test_factor_weights_completeness(self):
+        """All factors in _FACTORS have an entry in _FACTOR_WEIGHTS."""
+        from routes.scanner import _FACTORS, _FACTOR_WEIGHTS
+        for fname in _FACTORS:
+            self.assertIn(fname, _FACTOR_WEIGHTS, f"{fname} missing from _FACTOR_WEIGHTS")
+
+    def test_scanner_js_factor_tab(self):
+        """scanner.js must contain the factor stability tab functions."""
+        with open(os.path.join(ROOT, "js/pages/scanner.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_buildFactorStabilityHTML", src)
+        self.assertIn("runFactorStability", src)
+        self.assertIn("_renderFactorStabilityResults", src)
+        self.assertIn("factor-stability", src)
+
+    def test_scanner_js_syntax(self):
+        """scanner.js must pass node --check."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js/pages/scanner.js")],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+    # ── Security hardening ────────────────────────────────────────────────────
+
+    def test_security_headers_present(self):
+        """API responses must include X-Content-Type-Options and X-Frame-Options."""
+        r = self.client.get("/health")
+        self.assertEqual(r.headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(r.headers.get("X-Frame-Options"), "SAMEORIGIN")
+        self.assertIn(r.headers.get("Referrer-Policy", ""), ["strict-origin-when-cross-origin"])
+
+    def test_cors_restricted(self):
+        """asx_server.py CORS must specify an origins= list (not open wildcard)."""
+        with open(os.path.join(ROOT, "asx_server.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("CORS(app, origins=", src)
+        # The bare open-wildcard form must not be the active call
+        self.assertNotIn("CORS(app)  #", src)
+
+    def test_gunicorn_loopback_bind(self):
+        """gunicorn.conf.py must bind to 127.0.0.1, not 0.0.0.0."""
+        with open(os.path.join(ROOT, "gunicorn.conf.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("127.0.0.1", src)
+        # Should not have the old open binding as the active bind= line
+        import re
+        bind_line = re.search(r'^bind\s*=\s*"([^"]+)"', src, re.MULTILINE)
+        self.assertIsNotNone(bind_line, "bind= line not found in gunicorn.conf.py")
+        self.assertIn("127.0.0.1", bind_line.group(1))
+
+
 class TestSprint20WalkForward(unittest.TestCase):
     """Sprint 20 — Walk-forward backtest engine."""
 

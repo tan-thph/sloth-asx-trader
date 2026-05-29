@@ -14,8 +14,10 @@ Usage:
 
 import multiprocessing
 
-# Bind locally only — same as `app.run(host="0.0.0.0")` but explicit
-bind = "0.0.0.0:5000"
+# Bind to loopback only — prevents other devices on your LAN from reaching the API.
+# Change to "0.0.0.0:5000" only if you deliberately access the app from another
+# device (e.g. phone on the same Wi-Fi).
+bind = "127.0.0.1:5000"
 
 # Threaded model: yfinance is I/O-bound, so threads beat processes.
 # 2 workers × 8 threads = 16 concurrent in-flight requests.

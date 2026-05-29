@@ -6,7 +6,7 @@ let _scanPollTimer    = null;
 let _scannerSort      = { col: 'score', dir: 'desc' };
 let _scannerUniverse  = 'asx200';
 let _scannerSector    = null;   // null = all sectors; string = filter to one sector
-let _scannerTab       = 'opportunities';   // 'opportunities' | 'screener' | 'compare'
+let _scannerTab       = 'opportunities';   // 'opportunities' | 'screener' | 'compare' | 'factor-stability'
 
 // Technical Screener Sandbox state
 let _screenerData     = null;   // last fetched analyse result
@@ -49,7 +49,7 @@ function _buildScannerHTML(s) {
   // Tab nav
   const tabNav = `
   <div style="display:flex;gap:2px;margin-bottom:14px;border-bottom:1px solid var(--border-light);padding-bottom:0">
-    ${[['opportunities','◈ Opportunities'],['screener','⊙ Technical Screener'],['compare','↔ Compare']].map(([id,label]) => `
+    ${[['opportunities','◈ Opportunities'],['screener','⊙ Technical Screener'],['compare','↔ Compare'],['factor-stability','🔬 Factor Stability']].map(([id,label]) => `
       <button onclick="scannerSetTab('${id}')" style="padding:7px 16px;font-size:13px;font-weight:600;border:none;
         border-bottom:2px solid ${_scannerTab===id?'var(--accent-primary)':'transparent'};
         background:transparent;cursor:pointer;
@@ -57,8 +57,9 @@ function _buildScannerHTML(s) {
         transition:color 0.15s,border-color 0.15s">${label}</button>`).join('')}
   </div>`;
 
-  if (_scannerTab === 'screener') return tabNav + _buildScreenerHTML();
-  if (_scannerTab === 'compare')  return tabNav + _buildCompareShell();
+  if (_scannerTab === 'screener')          return tabNav + _buildScreenerHTML();
+  if (_scannerTab === 'compare')           return tabNav + _buildCompareShell();
+  if (_scannerTab === 'factor-stability')  return tabNav + _buildFactorStabilityHTML();
 
   return tabNav + `
   <!-- Config bar -->
@@ -921,4 +922,219 @@ async function scannerRunSignals(ticker) {
   } catch (e) {
     toast(`Could not fetch signals: ${e.message}`, 'error');
   }
+}
+
+// ============================================================
+// ── FACTOR STABILITY TAB (§1.6 overfitting guard) ────────────
+// ============================================================
+
+function _buildFactorStabilityHTML() {
+  const portfolioTickers = mergedPortfolio().map(h => h.ticker).join(', ');
+  return `
+    <div class="card section-gap">
+      <div class="card-title">Factor Stability — §1.6 Overfitting Guard</div>
+      <p class="text-xs text-muted" style="margin-bottom:12px">
+        K-fold cross-validation of the eight <code>_score_ticker</code> signal factors.
+        Each factor's Information Coefficient (rank correlation with 20-bar forward return)
+        is measured in-sample and out-of-sample. Factors where OOS IC drops below 30% of
+        in-sample IC, or flips sign, are flagged as potentially overfitted.
+      </p>
+      <div class="grid-2" style="gap:14px">
+        <div class="form-row">
+          <div class="form-label">Tickers to test (comma-separated)</div>
+          <input type="text" id="fs-tickers" value="${escapeHTML(portfolioTickers)}"
+            placeholder="CBA, BHP, TLS…" style="text-transform:uppercase">
+        </div>
+        <div class="form-row">
+          <div class="form-label">History period</div>
+          <select id="fs-period">
+            <option value="1y">1 year</option>
+            <option value="2y" selected>2 years</option>
+            <option value="3y">3 years</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="form-label">K-folds</div>
+          <select id="fs-folds">
+            <option value="3">3 folds</option>
+            <option value="5" selected>5 folds</option>
+            <option value="7">7 folds</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="form-label">Forward return window (bars)</div>
+          <select id="fs-fwd">
+            <option value="10">10 days (~2 weeks)</option>
+            <option value="20" selected>20 days (~1 month)</option>
+            <option value="40">40 days (~2 months)</option>
+          </select>
+        </div>
+      </div>
+      <div class="flex-row mt-1" style="gap:10px;align-items:center">
+        <button class="btn btn-primary" id="fs-run-btn" onclick="runFactorStability()">🔬 Run Stability Check</button>
+        ${!state.serverOk ? '<span class="text-xs text-danger">⚠ Backend server required</span>'
+          : '<span class="text-xs text-muted">Tests each scoring factor OOS across all supplied tickers</span>'}
+      </div>
+    </div>
+    <div id="fs-results"></div>
+  `;
+}
+
+async function runFactorStability() {
+  if (!state.serverOk) { toast('Backend server required', 'error'); return; }
+
+  const tickerStr = document.getElementById('fs-tickers').value || '';
+  const tickers   = tickerStr.split(/[,\s]+/).map(t => t.trim().toUpperCase()).filter(Boolean);
+  const period    = document.getElementById('fs-period').value;
+  const n_folds   = parseInt(document.getElementById('fs-folds').value, 10);
+  const fwd       = parseInt(document.getElementById('fs-fwd').value, 10);
+
+  if (!tickers.length) { toast('Enter at least one ticker', 'error'); return; }
+
+  const btn = document.getElementById('fs-run-btn');
+  if (btn) btn.disabled = true;
+
+  document.getElementById('fs-results').innerHTML = `
+    <div class="card"><div class="empty-state" style="padding:2rem">
+      <div class="loading-dots"><span></span><span></span><span></span></div>
+      <p class="text-muted mt-1">Running ${n_folds}-fold IC analysis on ${tickers.length} ticker(s)…</p>
+      <p class="text-xs text-muted">Fetching ${period} of history and cross-validating factor signals</p>
+    </div></div>`;
+
+  try {
+    const r   = await fetch(`${API}/api/scanner/factor-stability`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tickers, period, n_folds, forward_bars: fwd }),
+    });
+    const res = await r.json();
+    if (btn) btn.disabled = false;
+
+    if (!r.ok || res.error) {
+      document.getElementById('fs-results').innerHTML =
+        `<div class="card"><div class="text-danger" style="padding:1rem">Error: ${escapeHTML(res.error || 'Unknown error')}</div></div>`;
+      return;
+    }
+    document.getElementById('fs-results').innerHTML = _renderFactorStabilityResults(res);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    document.getElementById('fs-results').innerHTML =
+      `<div class="card"><div class="text-danger" style="padding:1rem">Fetch error: ${escapeHTML(err.message)}</div></div>`;
+  }
+}
+
+function _renderFactorStabilityResults(res) {
+  const verdictStyle = {
+    stable:            { bg: '#dcfce7', color: '#15803d', label: 'Stable' },
+    marginal:          { bg: '#fef9c3', color: '#854d0e', label: 'Marginal' },
+    weak:              { bg: '#ffedd5', color: '#9a3412', label: 'Weak' },
+    overfitted:        { bg: '#fee2e2', color: '#b91c1c', label: 'Overfitted' },
+    noise:             { bg: '#f3f4f6', color: '#6b7280', label: 'Noise' },
+    insufficient_data: { bg: '#f3f4f6', color: '#6b7280', label: 'No data' },
+  };
+
+  const factorLabels = {
+    above_sma20:  'Price > SMA20',
+    above_sma50:  'Price > SMA50',
+    sma20_rising: 'SMA20 rising',
+    rsi_zone:     'RSI zone (35–55)',
+    pullback_pct: 'Pullback depth',
+    vol_surge:    'Volume surge',
+    momentum_5d:  '5-day momentum',
+    momentum_20d: '20-day momentum',
+  };
+
+  const overallIC = res.overall_weighted_ic != null ? res.overall_weighted_ic.toFixed(4) : '—';
+  const overallColor = res.overall_weighted_ic > 0.05 ? '#15803d' : res.overall_weighted_ic > 0 ? '#854d0e' : '#b91c1c';
+
+  const rows = (res.factors || []).map(f => {
+    const vs = verdictStyle[f.verdict] || verdictStyle.noise;
+    const trainIC = f.train_ic != null ? (f.train_ic >= 0 ? '+' : '') + f.train_ic.toFixed(4) : '—';
+    const testIC  = f.test_ic  != null ? (f.test_ic  >= 0 ? '+' : '') + f.test_ic.toFixed(4) : '—';
+    const testColor = f.test_ic == null ? 'var(--text-muted)'
+      : f.test_ic > 0.05 ? '#15803d' : f.test_ic > 0 ? 'var(--text-primary)' : '#b91c1c';
+    const stability = f.stability != null ? (f.stability * 100).toFixed(0) + '%' : '—';
+    const stabColor = f.stability == null ? 'var(--text-muted)'
+      : f.stability >= 0.6 ? '#15803d' : f.stability >= 0.3 ? '#854d0e' : '#b91c1c';
+
+    // IC bar: visual representation of test IC magnitude
+    const barWidth = f.test_ic != null ? Math.min(100, Math.abs(f.test_ic) * 500) : 0;
+    const barColor = f.test_ic != null && f.test_ic < 0 ? '#dc2626' : '#16a34a';
+
+    return `<tr>
+      <td style="font-weight:600">${escapeHTML(factorLabels[f.factor] || f.factor)}</td>
+      <td style="text-align:center">
+        <span style="background:var(--bg-secondary);border-radius:4px;padding:2px 8px;font-size:11px">${f.weight}pt</span>
+      </td>
+      <td style="text-align:right;color:var(--text-secondary)">${trainIC}</td>
+      <td style="text-align:right;color:${testColor};font-weight:600">${testIC}</td>
+      <td style="text-align:right;color:${stabColor}">${stability}</td>
+      <td style="width:80px">
+        <div style="height:8px;background:var(--bg-secondary);border-radius:4px;overflow:hidden">
+          <div style="height:100%;width:${barWidth}%;background:${barColor};border-radius:4px;transition:width 0.4s"></div>
+        </div>
+      </td>
+      <td>
+        <span style="background:${vs.bg};color:${vs.color};border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">${vs.label}</span>
+      </td>
+    </tr>`;
+  }).join('');
+
+  const summaryColor = res.overfitted_count > 0 ? '#b91c1c' : res.stable_count === res.factors.length ? '#15803d' : '#854d0e';
+
+  return `
+    <div class="card section-gap" style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+        <div>
+          <div class="card-title" style="margin-bottom:4px">Factor Stability Results</div>
+          <div class="text-xs text-muted">${res.tickers_used.join(', ')} · ${res.n_folds} folds · ${res.forward_bars}-bar forward return</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 14px;text-align:center">
+            <div class="text-xs text-muted">Weighted OOS IC</div>
+            <div style="font-size:16px;font-weight:700;color:${overallColor}">${overallIC}</div>
+          </div>
+          <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 14px;text-align:center">
+            <div class="text-xs text-muted">Stable</div>
+            <div style="font-size:16px;font-weight:700;color:#15803d">${res.stable_count}/${res.factors.length}</div>
+          </div>
+          ${res.overfitted_count > 0 ? `
+          <div style="background:#fee2e2;border-radius:var(--radius-md);padding:8px 14px;text-align:center">
+            <div class="text-xs" style="color:#b91c1c">Overfitted</div>
+            <div style="font-size:16px;font-weight:700;color:#b91c1c">${res.overfitted_count}</div>
+          </div>` : ''}
+        </div>
+      </div>
+
+      <div style="padding:10px 14px;border-radius:var(--radius-md);margin-bottom:14px;
+        background:${res.overfitted_count > 0 ? '#fee2e2' : res.stable_count === res.factors.length ? '#dcfce7' : '#fef9c3'}">
+        <span style="font-weight:600;color:${summaryColor}">${escapeHTML(res.summary)}</span>
+      </div>
+
+      <div style="overflow-x:auto">
+        <table class="table table-sm" style="font-size:12px">
+          <thead>
+            <tr>
+              <th>Factor</th>
+              <th style="text-align:center">Weight</th>
+              <th style="text-align:right">Train IC</th>
+              <th style="text-align:right">OOS IC</th>
+              <th style="text-align:right">Stability</th>
+              <th style="width:80px">OOS IC</th>
+              <th>Verdict</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+
+      <div class="text-xs text-muted" style="margin-top:10px;padding:8px 12px;background:var(--bg-secondary);border-radius:var(--radius-sm);line-height:1.6">
+        <strong>IC</strong> = Spearman rank correlation between factor signal and ${res.forward_bars}-day forward return.
+        <strong>Stability</strong> = OOS IC / Train IC — values ≥ 60% indicate the factor survives out-of-sample.
+        Negative stability means the factor <em>reverses</em> OOS — a sign of overfitting.
+        <strong>Weighted OOS IC</strong> = score-point-weighted average of |OOS IC| across all factors.
+        A well-calibrated scorer typically shows IC of 0.05–0.15 on a diversified ticker set.
+      </div>
+    </div>
+  `;
 }

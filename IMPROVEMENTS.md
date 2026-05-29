@@ -132,9 +132,12 @@ Brier score metric card and a CSS bar diagram (actual win rate vs predicted conf
 `ASX_UNIVERSE` is *today's* constituents; backtests over it silently exclude delisted/relegated names
 and overstate returns. Use point-in-time membership for honest historical tests.
 
-### 1.6 Overfitting guard on `_score_ticker` weights — `L` · ★★
-Weights tuned on history curve-fit easily. Validate with **walk-forward / k-fold** and report
-out-of-sample degradation; prefer fewer robust factors over many fragile ones.
+### ✓ 1.6 Overfitting guard on `_score_ticker` weights — `L` · ★★ **SHIPPED Sprint 21**
+K-fold cross-validation of the eight `_score_ticker` signal factors. Each factor's Information
+Coefficient (Spearman rank correlation with N-bar forward return) is measured in-sample and
+out-of-sample. Stability ratio = OOS IC / train IC — < 30% or sign-flip flagged as overfitted.
+New `POST /api/scanner/factor-stability` endpoint; **Factor Stability** tab in Market Scanner.
+Weighted OOS IC summary + per-factor verdict (stable/marginal/weak/overfitted/noise).
 
 ### ✓ 1.7 Walk-forward backtesting engine — `XL` · ★★★ **SHIPPED Sprint 20**
 Rolling train/test split + per-fold parameter grid-search (Sharpe-optimised in-sample, applied
@@ -258,11 +261,11 @@ Add **Vitest** unit tests for the pure engines (`quant-engine`, `regime-engine`,
 Several endpoints are slow (macro/polymarket/earnings 3–5 s — see `SLOW` log lines). Parallelise
 remaining serial yfinance calls, widen caches for slow-moving data, and show optimistic loading states.
 
-### 3.5 Light security hygiene (personal) — `S` · ★
-Low-stakes on a trusted machine, but: if the app is reachable on your home Wi-Fi (`0.0.0.0`), anyone
-on the LAN can hit it. Consider binding `127.0.0.1` unless you specifically use it from a phone. The
-API-key-in-`localStorage` model is acceptable for personal use; backend-proxy mode is the safer option
-if you ever expose it.
+### ✓ 3.5 Light security hygiene (personal) — `S` · ★ **SHIPPED Sprint 21**
+- gunicorn now binds `127.0.0.1:5000` (was `0.0.0.0`) — LAN devices can no longer reach the API
+- CORS restricted to `null` (file://), localhost:5000/8080, 127.0.0.1:5000 origins
+- `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy` headers added
+  to every Flask response via `_req_end()`
 
 ### ✓ 3.6 Escape external text in the render layer — `S` · ★★ **SHIPPED**
 `escapeHTML()` added to `utils.js`; applied to all external text injection points. See §0.

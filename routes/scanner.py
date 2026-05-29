@@ -207,3 +207,295 @@ def market_scan_stop():
     with _scan_lock:
         _scan_state["stopped"] = True
     return jsonify({"ok": True})
+
+
+# ── Factor stability (§1.6 overfitting guard) ─────────────────────────────────
+
+# Factor definitions: name → lambda(closes_array, volumes_array) → float signal value.
+# Each signal is cross-sectionally evaluated against 20-bar forward return.
+_FACTORS = {
+    "above_sma20":   lambda c, v: 1.0 if c[-1] > float(np.mean(c[-20:])) else 0.0,
+    "above_sma50":   lambda c, v: 1.0 if len(c) >= 50 and c[-1] > float(np.mean(c[-50:])) else 0.0,
+    "sma20_rising":  lambda c, v: 1.0 if len(c) >= 25 and float(np.mean(c[-20:])) > float(np.mean(c[-25:-5])) else 0.0,
+    "rsi_zone":      lambda c, v: _rsi_factor_val(c),
+    "pullback_pct":  lambda c, v: _pullback_factor_val(c),
+    "vol_surge":     lambda c, v: _vol_factor_val(v),
+    "momentum_5d":   lambda c, v: float((c[-1] / c[-6] - 1) * 100) if len(c) > 6 else 0.0,
+    "momentum_20d":  lambda c, v: float((c[-1] / c[-21] - 1) * 100) if len(c) > 21 else 0.0,
+}
+
+# Score-component weights (must match _score_ticker bucketing; used to compute
+# current-weight IC contribution and flag any single overweight factor)
+_FACTOR_WEIGHTS = {
+    "above_sma20": 10, "above_sma50": 10, "sma20_rising": 10,
+    "rsi_zone": 15, "pullback_pct": 15,
+    "vol_surge": 20, "momentum_5d": 10, "momentum_20d": 0,
+}
+
+
+def _simple_rsi_arr(closes, period=14):
+    deltas = np.diff(closes[-period*3:])
+    gains  = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    avg_g = float(np.mean(gains[-period:]))
+    avg_l = float(np.mean(losses[-period:]))
+    rs = avg_g / avg_l if avg_l > 0 else 100.0
+    return 100 - 100 / (1 + rs)
+
+
+def _rsi_factor_val(c):
+    if len(c) < 30:
+        return 0.5
+    rsi = _simple_rsi_arr(c)
+    # Normalise: score 1.0 for ideal zone (35-55), down to 0.0 for extremes
+    if 35 <= rsi <= 55:   return 1.0
+    if 30 <= rsi < 35:    return 0.8
+    if 55 < rsi <= 65:    return 0.7
+    if rsi < 30:          return 0.3
+    return 0.2
+
+
+def _pullback_factor_val(c):
+    if len(c) < 10:
+        return 0.5
+    cp       = float(c[-1])
+    high_90  = float(np.max(c))
+    pct_high = (cp / high_90 - 1) * 100
+    if -20 <= pct_high <= -5:  return 1.0   # ideal pullback window
+    if  -5 < pct_high <=  0:  return 0.6
+    if -30 <= pct_high < -20: return 0.7
+    return 0.2
+
+
+def _vol_factor_val(v):
+    if len(v) < 20:
+        return 0.5
+    avg20 = float(np.mean(v[-20:])) or 1.0
+    ratio = float(np.mean(v[-5:])) / avg20
+    if ratio > 1.5:  return 1.0
+    if ratio > 1.1:  return 0.75
+    if ratio > 0.8:  return 0.5
+    return 0.25
+
+
+def _compute_factor_ic(closes_list, volumes_list, forward_bars=20):
+    """
+    Compute the Information Coefficient (rank correlation) between each factor
+    signal and the realized forward_bars-period return, across all tickers
+    supplied for one time window.
+
+    Returns dict: factor_name → IC float in [-1, 1].
+    """
+    import statistics as _stats
+
+    factor_signals  = {f: [] for f in _FACTORS}
+    forward_returns = []
+
+    for closes, volumes in zip(closes_list, volumes_list):
+        closes  = np.array(closes, dtype=float)
+        volumes = np.array(volumes, dtype=float)
+
+        n = len(closes)
+        if n < 50 + forward_bars:
+            continue
+
+        # Evaluate factors on the slice ending at bar (n - forward_bars)
+        c_eval = closes[:n - forward_bars]
+        v_eval = volumes[:n - forward_bars]
+
+        fwd_ret = float(closes[-1] / closes[n - forward_bars] - 1)
+        forward_returns.append(fwd_ret)
+
+        for fname, fn in _FACTORS.items():
+            try:
+                factor_signals[fname].append(fn(c_eval, v_eval))
+            except Exception:
+                factor_signals[fname].append(float("nan"))
+
+    if len(forward_returns) < 5:
+        return {f: None for f in _FACTORS}
+
+    def _rank_corr(xs, ys):
+        """Spearman rank correlation (no scipy needed)."""
+        paired = [(x, y) for x, y in zip(xs, ys) if x == x and y == y]  # drop nan
+        if len(paired) < 4:
+            return None
+        xs2, ys2 = zip(*paired)
+
+        def _ranks(seq):
+            s = sorted(range(len(seq)), key=lambda i: seq[i])
+            r = [0.0] * len(seq)
+            for rank, idx in enumerate(s):
+                r[idx] = rank + 1
+            return r
+
+        rx, ry = _ranks(xs2), _ranks(ys2)
+        n = len(rx)
+        mean_x = sum(rx) / n
+        mean_y = sum(ry) / n
+        num  = sum((rx[i] - mean_x) * (ry[i] - mean_y) for i in range(n))
+        den  = (sum((x - mean_x)**2 for x in rx) * sum((y - mean_y)**2 for y in ry)) ** 0.5
+        return round(num / den, 4) if den > 0 else 0.0
+
+    return {
+        fname: _rank_corr(factor_signals[fname], forward_returns)
+        for fname in _FACTORS
+    }
+
+
+@bp.route("/api/scanner/factor-stability", methods=["POST"])
+def factor_stability():
+    """
+    K-fold cross-validation of _score_ticker factor ICs.
+
+    Body: { "tickers": ["CBA","BHP",...], "period": "2y", "n_folds": 5,
+             "forward_bars": 20 }
+    Returns per-factor: train_ic, test_ic, stability_ratio, verdict.
+    """
+    data        = request.get_json() or {}
+    tickers     = data.get("tickers") or []
+    period      = data.get("period", "2y")
+    n_folds     = int(data.get("n_folds", 5))
+    fwd_bars    = int(data.get("forward_bars", 20))
+
+    if not tickers:
+        return jsonify({"error": "tickers required"}), 400
+    if n_folds < 2 or n_folds > 10:
+        return jsonify({"error": "n_folds must be 2-10"}), 400
+    tickers = [t.upper().replace(".AX", "") for t in tickers[:20]]
+
+    # Fetch OHLCV for each ticker
+    all_closes  = []
+    all_volumes = []
+    fetched     = []
+
+    for ticker in tickers:
+        sym = ticker + ".AX"
+        try:
+            hist = yf.Ticker(sym).history(period=period, auto_adjust=True)
+            if hist.empty or len(hist) < 80:
+                continue
+            all_closes.append(list(hist["Close"].values))
+            all_volumes.append(list(hist["Volume"].values))
+            fetched.append(ticker)
+        except Exception:
+            continue
+
+    if not fetched:
+        return jsonify({"error": "No usable data fetched for supplied tickers"}), 422
+
+    # Align all series to the shortest length (they should be the same period)
+    min_len = min(len(c) for c in all_closes)
+    all_closes  = [c[:min_len] for c in all_closes]
+    all_volumes = [v[:min_len] for v in all_volumes]
+
+    fold_size = min_len // n_folds
+    min_train = max(60, fold_size)  # need enough bars for indicators + forward return
+
+    # Accumulate per-fold ICs
+    train_ics = {f: [] for f in _FACTORS}
+    test_ics  = {f: [] for f in _FACTORS}
+
+    for fold in range(n_folds):
+        test_start = fold * fold_size
+        test_end   = test_start + fold_size if fold < n_folds - 1 else min_len
+        test_len   = test_end - test_start
+
+        if test_len < fwd_bars + 30:
+            continue
+
+        # All bars NOT in this fold = train
+        train_closes  = [c[:test_start] + c[test_end:] for c in all_closes]
+        train_volumes = [v[:test_start] + v[test_end:] for v in all_volumes]
+
+        # Keep only tickers with enough training data
+        usable = [(c, v) for c, v in zip(train_closes, train_volumes)
+                  if len(c) >= min_train + fwd_bars]
+
+        test_closes  = [c[test_start:test_end] for c in all_closes]
+        test_volumes = [v[test_start:test_end] for v in all_volumes]
+        usable_test  = [(c, v) for c, v in zip(test_closes, test_volumes)
+                        if len(c) >= 50 + fwd_bars]
+
+        if not usable or not usable_test:
+            continue
+
+        ic_train = _compute_factor_ic([c for c, _ in usable],  [v for _, v in usable],  fwd_bars)
+        ic_test  = _compute_factor_ic([c for c, _ in usable_test], [v for _, v in usable_test], fwd_bars)
+
+        for f in _FACTORS:
+            if ic_train.get(f) is not None:
+                train_ics[f].append(ic_train[f])
+            if ic_test.get(f) is not None:
+                test_ics[f].append(ic_test[f])
+
+    # Summarise
+    def _mean(lst):
+        lst2 = [x for x in lst if x is not None]
+        return round(sum(lst2) / len(lst2), 4) if lst2 else None
+
+    factors_out = []
+    for fname in _FACTORS:
+        tr_ic  = _mean(train_ics[fname])
+        te_ic  = _mean(test_ics[fname])
+        weight = _FACTOR_WEIGHTS.get(fname, 0)
+
+        # Stability: how well does OOS IC preserve the in-sample signal?
+        # Values > 0.5 = stable, 0.2-0.5 = marginal, < 0.2 or sign-flip = overfitted
+        if tr_ic is not None and te_ic is not None and abs(tr_ic) > 0.01:
+            stability = round(te_ic / tr_ic, 3)
+        else:
+            stability = None
+
+        if te_ic is None:
+            verdict = "insufficient_data"
+        elif abs(te_ic) < 0.03:
+            verdict = "noise"
+        elif stability is not None and stability < 0:
+            verdict = "overfitted"   # sign flips OOS — opposite effect
+        elif stability is not None and stability < 0.3:
+            verdict = "weak"
+        elif stability is not None and stability < 0.6:
+            verdict = "marginal"
+        else:
+            verdict = "stable"
+
+        factors_out.append({
+            "factor":    fname,
+            "weight":    weight,
+            "train_ic":  tr_ic,
+            "test_ic":   te_ic,
+            "stability": stability,
+            "verdict":   verdict,
+        })
+
+    # Sort by abs test IC descending
+    factors_out.sort(key=lambda x: abs(x["test_ic"] or 0), reverse=True)
+
+    # Overall score: weighted-average of absolute test ICs
+    weighted_ic = sum(
+        abs(f["test_ic"]) * f["weight"]
+        for f in factors_out if f["test_ic"] is not None and f["weight"] > 0
+    )
+    total_weight = sum(f["weight"] for f in factors_out if f["test_ic"] is not None and f["weight"] > 0)
+    overall_ic = round(weighted_ic / total_weight, 4) if total_weight > 0 else None
+
+    stable_count   = sum(1 for f in factors_out if f["verdict"] == "stable")
+    overfitted_count = sum(1 for f in factors_out if f["verdict"] == "overfitted")
+
+    return jsonify({
+        "ok":              True,
+        "tickers_used":    fetched,
+        "n_folds":         n_folds,
+        "forward_bars":    fwd_bars,
+        "factors":         factors_out,
+        "overall_weighted_ic": overall_ic,
+        "stable_count":    stable_count,
+        "overfitted_count": overfitted_count,
+        "summary": (
+            "All factors stable" if overfitted_count == 0 and stable_count == len(factors_out)
+            else f"{overfitted_count} factor(s) may be overfitted — consider reducing their weight"
+            if overfitted_count > 0
+            else f"{stable_count}/{len(factors_out)} factors stable OOS"
+        ),
+    })
