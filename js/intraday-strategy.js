@@ -85,10 +85,12 @@ function _buildIntradayRecs(scanData) {
       status:        'pending',
       date:          todayStr(),
       generatedAt:   nowSydney(),
+      generatedAtMs: Date.now(),       // epoch ms for staleness detection
       priceRange:    [entry, +(entry * 1.002).toFixed(3)],
       target,
       stopLoss:      stop,
-      rrRatio:       +(ip.targetPct / ip.stopPct).toFixed(1),
+      // R:R from actual price levels, not fixed parameter ratio
+      rrRatio:       +((target - entry) / Math.max(entry - stop, 0.0001)).toFixed(1),
       confidence:    +(Math.min(0.85, d.score / 100 * 0.85)).toFixed(2),
       intradayScore: d.score,
       qty,

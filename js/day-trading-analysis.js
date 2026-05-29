@@ -5,6 +5,42 @@
 // Stop: 2.5×ATR. Hard filters: ADV, SMA200, ADX, no catalyst.
 // ============================================================
 
+// ── _dtPreFilterWithStats ─────────────────────────────────────────────────────
+// Same logic as _dtPreFilter() but returns rejection counts per filter so the UI
+// can display a breakdown of why tickers were rejected.
+function _dtPreFilterWithStats(tickers) {
+  const fp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}) };
+  const stats = { bb: 0, adv: 0, sma: 0, adx: 0, noData: 0 };
+  const passing = [];
+
+  for (const t of tickers) {
+    const s = state.liveSignals[t];
+    if (!s || s.error) { stats.noData++; continue; }
+    if ((s.bb_pct_b  ?? 1) > fp.maxBbPctB)                                                                 { stats.bb++;  continue; }
+    if ((s.adv_20    ?? 0) < fp.minAdvAud)                                                                  { stats.adv++; continue; }
+    const ref = s.sma_200 ?? s.sma_50;
+    if (ref && s.current_price < ref * fp.sma200Floor)                                                      { stats.sma++; continue; }
+    if ((s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus)               { stats.adx++; continue; }
+    passing.push(t);
+  }
+  return { passing, stats };
+}
+
+// ── _dtDismissStaleRecs ───────────────────────────────────────────────────────
+// Auto-dismisses pending swing recs older than maxAgeDays (default 3).
+// Called at the start of each scan run so stale cards don't accumulate.
+function _dtDismissStaleRecs(maxAgeDays = 3) {
+  const cutoff = Date.now() - maxAgeDays * 86400000;
+  let dismissed = 0;
+  for (const r of (state.dayTrading.recommendations || [])) {
+    if (r.status === 'pending' && r.generatedAtMs && r.generatedAtMs < cutoff) {
+      r.status = 'dismissed';
+      dismissed++;
+    }
+  }
+  if (dismissed) console.log(`[DT] Auto-dismissed ${dismissed} stale pending rec(s) (>${maxAgeDays}d old)`);
+}
+
 async function runDayTradeAnalysis() {
   if (state.dayTrading.analysisRunning) { toast('Day trade analysis already running', 'info'); return; }
 
@@ -55,13 +91,18 @@ async function runDayTradeAnalysis() {
   };
   const _dtRegime = state.currentRegime?.regime;
 
+  // ── Auto-dismiss stale pending recs before replacing ─────────────────────────
+  _dtDismissStaleRecs(3);
+
   // ── Quantitative setup detection (no Claude) ─────────────────────────────────
-  const candidates = _dtPreFilter(allTickers);
+  const { passing: candidates, stats: filterStats } = _dtPreFilterWithStats(allTickers);
   const newRecs = _dtBuildRecs(candidates, _ap, _dtPortCtx, _dtRegime);
 
   state.dayTrading.recommendations = newRecs;
+  const _rejLine = `BB:${filterStats.bb} ADV:${filterStats.adv} SMA:${filterStats.sma} ADX:${filterStats.adx}${filterStats.noData ? ` NoData:${filterStats.noData}` : ''}`;
   state.dayTrading.lastSummary = {
-    text: `Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} tickers passed pre-filter`,
+    text: `Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} passed · Rejected — ${_rejLine}`,
+    filterStats,
     date: todayStr(),
     time: nowSydney(),
     recCount: newRecs.length,
@@ -140,10 +181,12 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
 
     recs.push({
       ...rec,
-      id: `DT-${Date.now()}-${i}`,
-      status: 'pending',
-      date: todayStr(),
-      generatedAt: nowSydney(),
+      id:            `DT-${Date.now()}-${i}`,
+      status:        'pending',
+      date:          todayStr(),
+      generatedAt:   nowSydney(),
+      generatedAtMs: Date.now(),       // epoch ms — used for staleness detection
+      holdDays:      8,                // estimated hold period in trading days
     });
   }
 
@@ -173,6 +216,18 @@ function executeDayTrade(recId) {
   }, (entryPrice, brokerage) => {
     const cost = rec.qty * entryPrice + brokerage;
     if (cost > state.cash) { toast('Insufficient cash', 'error'); return; }
+
+    // Sector concentration warning — fire a toast if another executed DT rec
+    // shares the same sector. Non-blocking; trader decides to proceed or not.
+    const thisSector = (state.liveSignals[rec.ticker] || {}).sector || '';
+    if (thisSector) {
+      const sectorCount = (state.dayTrading.recommendations || [])
+        .filter(r => r.status === 'executed' && ((state.liveSignals[r.ticker] || {}).sector || '') === thisSector)
+        .length;
+      if (sectorCount >= 1) {
+        toast(`⚠️ Sector concentration: ${sectorCount} other executed ${thisSector} swing trade(s)`, 'warning');
+      }
+    }
 
     const entry = {
       id:          Date.now(),
@@ -289,14 +344,17 @@ async function runUniverseScan() {
   }
 
   // ── Phase 2: Pre-filter ──────────────────────────────────────────────────────
-  const candidates = _dtPreFilter(universeTickers);
+  _dtDismissStaleRecs(3);
+  const { passing: candidates, stats: filterStats } = _dtPreFilterWithStats(universeTickers);
   const elapsedFetch = ((Date.now() - t0) / 1000).toFixed(0);
+  const _rejLine = `BB:${filterStats.bb} ADV:${filterStats.adv} SMA:${filterStats.sma} ADX:${filterStats.adx}${filterStats.noData ? ` NoData:${filterStats.noData}` : ''}`;
 
   if (candidates.length === 0) {
     state.dayTrading.analysisRunning = false;
     state.dayTrading.scanProgress = null;
     state.dayTrading.lastSummary = {
-      text: `${meta.label} universe scan: 0 candidates passed pre-filter (BB + ADV + SMA200 + ADX). No setups today. Fetch took ${elapsedFetch}s.`,
+      text: `${meta.label} universe scan: 0 candidates passed pre-filter. Rejected — ${_rejLine}. Fetch took ${elapsedFetch}s.`,
+      filterStats,
       date: todayStr(),
       time: nowSydney(),
       recCount: 0,
@@ -330,7 +388,8 @@ async function runUniverseScan() {
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
   state.dayTrading.lastSummary = {
-    text: `${meta.label}: ${candidates.length}/${universeTickers.length} passed pre-filter → ${newRecs.length} setup(s) (${elapsed}s)`,
+    text: `${meta.label}: ${candidates.length}/${universeTickers.length} passed · ${newRecs.length} setup(s) · Rejected — ${_rejLine} (${elapsed}s)`,
+    filterStats,
     date: todayStr(),
     time: nowSydney(),
     recCount: newRecs.length,

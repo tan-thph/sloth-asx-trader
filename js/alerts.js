@@ -3,9 +3,11 @@
 //
 // requestNotificationPermission() — call on first load
 // fireAlert(title, body, tag)     — fires Notification if permitted
-// alertScanComplete(results)      — fires when scan has score ≥ 75
-// alertHighConviction(recs)       — fires when ensembleConfidence ≥ 0.80
-// checkRecStopTargetAlerts()              — checks stop/target hits on live prices
+// alertScanComplete(results)            — fires when scan has score ≥ 75
+// alertHighConviction(recs)             — fires when ensembleConfidence ≥ 0.80
+// checkRecStopTargetAlerts()            — stop/target hits on portfolio AI recs
+// checkIntradayStopTarget()             — live stop/target monitoring for intraday positions
+// checkDayTradeStopTargetAlerts()       — stop/target monitoring for executed swing recs
 // ============================================================
 
 // Note: requestNotificationPermission() is defined in prices.js (already loaded).
@@ -222,6 +224,117 @@ function checkIndicatorAlerts() {
     }
   }
   if (anyTriggered && typeof scheduleSave === 'function') scheduleSave();
+}
+
+// ── Intraday live stop/target monitoring ─────────────────────────────────────
+// Called after every price refresh. Fires when live price crosses stop or target
+// on any open intraday position. One-shot per breach; re-arms when price retreats
+// 2% from the trigger level so a brief wick doesn't spam alerts.
+
+function checkIntradayStopTarget() {
+  if (!state.intraday || !(state.intraday.openPositions || []).length) return;
+
+  // Build price map from portfolio holdings (set by refreshPrices) + liveSignals
+  const priceMap = {};
+  for (const h of (state.portfolio || [])) {
+    if (h.ticker && h.currentPrice) priceMap[h.ticker] = h.currentPrice;
+  }
+  if (state.liveSignals) {
+    for (const [t, sig] of Object.entries(state.liveSignals)) {
+      if (sig && sig.current_price != null && priceMap[t] == null)
+        priceMap[t] = sig.current_price;
+    }
+  }
+
+  let anyFired = false;
+  for (const pos of state.intraday.openPositions) {
+    const price = priceMap[pos.ticker] ?? priceMap[pos.ticker + '.AX'];
+    if (price == null) continue;
+
+    if (pos.stop && price <= pos.stop) {
+      if (!pos._stopAlertedAt) {
+        fireAlert(
+          `🛑 Intraday stop hit: ${pos.ticker}`,
+          `Live $${price.toFixed(3)} ≤ stop $${pos.stop.toFixed(3)}. Close position immediately.`,
+          `sloth-idt-stop-${pos.id}`
+        );
+        toast(`🛑 ${pos.ticker} intraday stop hit — exit now`, 'error');
+        pos._stopAlertedAt = new Date().toISOString();
+        anyFired = true;
+      }
+    } else if (pos.target && price >= pos.target) {
+      if (!pos._targetAlertedAt) {
+        fireAlert(
+          `✅ Intraday target hit: ${pos.ticker}`,
+          `Live $${price.toFixed(3)} ≥ target $${pos.target.toFixed(3)}. Consider closing.`,
+          `sloth-idt-target-${pos.id}`
+        );
+        toast(`✅ ${pos.ticker} intraday target reached — consider closing`, 'success');
+        pos._targetAlertedAt = new Date().toISOString();
+        anyFired = true;
+      }
+    } else {
+      // Re-arm when price retreats safely from the trigger zone
+      if (pos._stopAlertedAt   && pos.stop   && price > pos.stop   * 1.02) pos._stopAlertedAt   = null;
+      if (pos._targetAlertedAt && pos.target && price < pos.target * 0.98) pos._targetAlertedAt = null;
+    }
+  }
+  if (anyFired && typeof scheduleSave === 'function') scheduleSave();
+}
+
+// ── Swing trade stop/target alerts ───────────────────────────────────────────
+// Mirrors checkRecStopTargetAlerts() for state.dayTrading.recommendations with
+// status='executed'. Portfolio rec alerts handle state.recHistory separately.
+
+function checkDayTradeStopTargetAlerts() {
+  const recs = (state.dayTrading && state.dayTrading.recommendations) || [];
+  const executed = recs.filter(r => r.status === 'executed');
+  if (!executed.length) return;
+
+  const priceMap = {};
+  for (const h of (state.portfolio || [])) {
+    if (h.ticker && h.currentPrice) priceMap[h.ticker] = h.currentPrice;
+  }
+  if (state.liveSignals) {
+    for (const [t, sig] of Object.entries(state.liveSignals)) {
+      if (sig && sig.current_price != null && priceMap[t] == null)
+        priceMap[t] = sig.current_price;
+    }
+  }
+
+  let anyFired = false;
+  for (const r of executed) {
+    const price = priceMap[r.ticker] ?? priceMap[r.ticker + '.AX'];
+    if (price == null) continue;
+
+    if (r.stopLoss && price <= r.stopLoss) {
+      if (!r._stopAlertedAt) {
+        fireAlert(
+          `🛑 Swing stop hit: ${r.ticker}`,
+          `Live $${price.toFixed(3)} ≤ stop $${r.stopLoss.toFixed(3)}. Review swing trade exit.`,
+          `sloth-dt-stop-${r.ticker}`
+        );
+        toast(`🛑 Swing ${r.ticker} stop hit @ $${price.toFixed(3)}`, 'error');
+        r._stopAlertedAt = new Date().toISOString();
+        anyFired = true;
+      }
+    } else if (r.target && price >= r.target) {
+      if (!r._targetAlertedAt) {
+        fireAlert(
+          `✅ Swing target hit: ${r.ticker}`,
+          `Live $${price.toFixed(3)} ≥ target $${r.target.toFixed(3)}. Profit target reached.`,
+          `sloth-dt-target-${r.ticker}`
+        );
+        toast(`✅ Swing ${r.ticker} target hit @ $${price.toFixed(3)}`, 'success');
+        r._targetAlertedAt = new Date().toISOString();
+        anyFired = true;
+      }
+    } else {
+      if (r._stopAlertedAt   && r.stopLoss && price > r.stopLoss * 1.02) r._stopAlertedAt   = null;
+      if (r._targetAlertedAt && r.target   && price < r.target   * 0.98) r._targetAlertedAt = null;
+    }
+  }
+  if (anyFired && typeof scheduleSave === 'function') scheduleSave();
 }
 
 // ── Intraday 15:00 AEST hard time-stop ───────────────────────────────────────

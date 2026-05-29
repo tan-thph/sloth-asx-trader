@@ -28,7 +28,9 @@ async function refreshPrices(opts = {}) {
   checkPriceAlerts();
   if (typeof checkRecStopTargetAlerts === 'function') checkRecStopTargetAlerts();
   if (typeof checkStopProximityAlerts === 'function') checkStopProximityAlerts();
-  if (typeof checkIntradayCloseouts === 'function') checkIntradayCloseouts();
+  if (typeof checkIntradayCloseouts    === 'function') checkIntradayCloseouts();
+  if (typeof checkIntradayStopTarget   === 'function') checkIntradayStopTarget();
+  if (typeof checkDayTradeStopTargetAlerts === 'function') checkDayTradeStopTargetAlerts();
   checkExDivReminders();
   checkEarningsReminders();
   recordPortfolioSnapshot();

@@ -212,8 +212,15 @@ async function loadStateFromDb() {
     }
     if (data.intraday != null) {
       state.intraday = { ...(state.intraday || {}), ...data.intraday };
-      // Reset transient scan flag — scan must be manually re-triggered
-      if (state.intraday) state.intraday.scanRunning = false;
+      if (state.intraday) {
+        // Reset transient scan flag — scan must be manually re-triggered
+        state.intraday.scanRunning = false;
+        // Reset today's P&L when a new trading day starts
+        if (state.intraday.pnlDate !== todayStr()) {
+          state.intraday.todayPnl = 0;
+          state.intraday.pnlDate  = todayStr();
+        }
+      }
     }
     if (Array.isArray(data.priceAlerts)) state.priceAlerts = data.priceAlerts;
     if (Array.isArray(data.watchlist)) state.watchlist = data.watchlist;

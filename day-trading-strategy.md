@@ -1,12 +1,13 @@
 # ASX Equity Trading Strategy — Quantitative Confluence Framework
 
-> **Scope:** Mean-reversion entries for ASX-listed equities.
-> **Style:** Swing trading (holds of 5–15 trading days).
+> **Scope:** Mean-reversion entries for ASX-listed equities — two distinct modes.
+> **Swing:** 5–15 trading day holds using daily BB confluence.
+> **Intraday:** Same-day VWAP-reversion entries, 3–4% target, closed by 15:00 AEST.
 > **Philosophy:** Strict confluence of orthogonal (non-correlated) indicators. No subjective visual patterns — every rule is a computable formula. Cash is the default position when no setup qualifies.
 
 ---
 
-## 1. Orthogonal Indicator Stack
+## 1. Orthogonal Indicator Stack (Swing Trading)
 
 Indicators are assigned to distinct mathematical dimensions to prevent multicollinearity (where multiple signals all reflect the same underlying price move, creating the illusion of independent confirmation).
 
@@ -25,9 +26,10 @@ Indicators are assigned to distinct mathematical dimensions to prevent multicoll
 
 ---
 
-## 2. Hard Pre-Trade Filters
+## 2. Hard Pre-Trade Filters (Swing)
 
 All filters must pass **before** any chart analysis begins. Fail = no trade.
+The pre-filter runs client-side on live signals. After each scan the UI shows a colour-coded rejection breakdown (`BB −N · ADV −N · SMA −N · ADX −N`) so you can tune thresholds without trial-and-error.
 
 ### 2.1 Liquidity Filter
 Prevents trading stocks where wide spreads and low float degrade technical execution.
@@ -40,9 +42,9 @@ Prevents trading stocks where wide spreads and low float degrade technical execu
 - **SMA 200:** `Close > SMA_200` OR price is within ±1.5% of SMA_200 and bouncing upward.
 - **Rationale:** Bollinger Band mean-reversion in a structural downtrend generates low hit-rate losers.
 
-### 2.3 Regime Filter (re-introduced)
-- **ADX:** `ADX < 30` OR `ADX > 30 and clearly declining` (trend weakening).
-- **Rationale:** In strong trends (ADX > 30 rising), prices can stay far from the mean for weeks. BB lower-band touches in this regime are continuation setups dressed as reversals.
+### 2.3 Regime Filter
+- **ADX:** `ADX < 35` OR ADX > 35 but directional indicator DI+ is not dominant over DI−.
+- **Rationale:** In strong trends (ADX rising, DI+ > DI−), BB lower-band touches are continuation setups dressed as reversals.
 
 ### 2.4 Catalyst Filter
 - No earnings announcements, RBA decisions, or major corporate actions within **5 trading days**.
@@ -51,10 +53,15 @@ Prevents trading stocks where wide spreads and low float degrade technical execu
 ### 2.5 Portfolio Correlation Filter
 - The 20-day Pearson correlation ρ between the proposed trade and any open position must be **< 0.60**.
 - **Rationale:** Buying ANZ when you already hold CBA gives you two positions in the same risk, not two independent bets. The sector 30% rule from the earlier version was a soft proxy for this — this is the rigorous version.
+- **Runtime enforcement:** When executing a swing trade, the app fires a non-blocking toast warning if another executed DT rec shares the same sector.
+
+### 2.6 Setup Staleness
+- **Swing recs auto-expire after 3 days.** A `STALE Nd` badge is shown on setup cards older than 3 days (faded card, tooltip). Stale pending recs are auto-dismissed at the start of each new scan.
+- **Rationale:** A BB reclaim setup from Monday is technically invalid by Friday — price has moved, BB bands have shifted, and the signal was contingent on that day's close.
 
 ---
 
-## 3. Entry Signals
+## 3. Entry Signals (Swing)
 
 **Requirement: PRIMARY signal must fire + at least 2 Confirmations.**
 
@@ -75,7 +82,6 @@ Prevents trading stocks where wide spreads and low float degrade technical execu
 
 - `Volume Z-Score = (Volume_t − μ_Volume_20) / σ_Volume_20 > 1.50`
 - The entry candle has statistically significant volume — 1.5 standard deviations above the 20-day mean.
-- This is a more rigorous replacement for "above-average volume."
 
 ### Confirmation 3 — Fibonacci Retracement Zone
 
@@ -86,14 +92,11 @@ Prevents trading stocks where wide spreads and low float degrade technical execu
 ### Bonus Signal — OBV Bullish Divergence
 
 - OBV is rising (or its 10-day average is rising) while price is still falling.
-- Reveals hidden accumulation — institutional money absorbing supply while retail sells.
-- Not required for a valid setup, but materially increases confidence when present.
+- Reveals hidden accumulation. Not required for a valid setup, but materially increases confidence when present.
 
 ---
 
-## 4. Position Sizing and Stop-Loss Math
-
-The stop must be wider than normal daily noise to avoid premature stops on valid setups.
+## 4. Position Sizing and Stop-Loss Math (Swing)
 
 ### 4.1 Expected Noise Formula
 
@@ -122,15 +125,17 @@ Shares = $1,000 ÷ $8.75 = 114 shares.
 
 ---
 
-## 5. Target and R:R Requirement
+## 5. Target and R:R Requirement (Swing)
 
 - **Target:** `min(BB_Upper, nearest resistance level R1)` — whichever is closer.
 - **Minimum R:R:** 2:1 (`(Target − Entry) / (Entry − Stop) ≥ 2.0`). Reject the setup if R:R < 2.
 - **Typical R:R for strong setups:** 2.5–3.5:1 when entry is at lower BB and target is upper BB.
+- R:R is computed from actual price levels (`(target − entry) / (entry − stop)`), not from parameter ratios, so the displayed figure reflects any price movement between scan and execution.
+- **Estimated hold:** 8 trading days (shown on each setup card).
 
 ---
 
-## 6. Exit Framework
+## 6. Exit Framework (Swing)
 
 ### Step 1 — Partial Profit (50% of position)
 
@@ -155,9 +160,87 @@ Exit the entire position if **any** of these trigger:
 2. Daily close below SMA_200 on above-average volume (Z-Score > 1.0) — structural breakdown
 3. Unexpected material negative news — fundamentals override technicals
 
+### Recording the Exit
+
+From the Day Trading → Setups tab, click **📋 Record Close** on any executed swing card. The same price + brokerage dialog appears. The journal entry is updated and cash is credited automatically.
+
 ---
 
-## 7. Market Regime Awareness
+## 7. Alerts — Swing Trades
+
+| Alert | Trigger | Behaviour |
+|---|---|---|
+| **Stop hit** | Live price ≤ `stopLoss` | Desktop + Telegram notification, error toast. One-shot; re-arms when price retreats >2%. |
+| **Target hit** | Live price ≥ `target` | Desktop + Telegram notification, success toast. One-shot; re-arms when price falls >2%. |
+| **Stale setup** | Pending rec >3 days old | `STALE Nd` badge on card; auto-dismissed at next scan. |
+| **Sector concentration** | Execute with same-sector executed rec | Non-blocking warning toast before trade is committed. |
+
+Alerts are checked on every `refreshPrices()` call via `checkDayTradeStopTargetAlerts()`.
+
+---
+
+## 8. Intraday Strategy
+
+### 8.1 Overview
+
+| Attribute | Value |
+|---|---|
+| **Timeframe** | 5-minute bars (yfinance, ~5–15 min latency — indicative only) |
+| **Entry window** | 10:45–15:00 AEST |
+| **Target** | +3.5% from entry (configurable 1–10%) |
+| **Stop** | −1.5% from entry (configurable 0.5–5%) |
+| **R:R** | Computed from actual price levels — typically ~2.3:1 at defaults |
+| **Max positions** | 2 concurrent (configurable) |
+| **Universe** | ASX20 / 50 / 100 / 200 (selectable; ASX100 default) |
+| **Capital** | Separate allocation — 20% of cash by default |
+
+### 8.2 Intraday Entry Signals
+
+| Signal | Condition |
+|---|---|
+| **VWAP discount** | `price < VWAP × (1 − 0.003)` — at least 0.3% below VWAP |
+| **Intraday RSI oversold** | `intraday_rsi ≤ 40` on 5m bars |
+| **Volume acceleration** | `vol_rising = true` from backend (current 5m bar volume > recent average) |
+| **Above open** | `current_price > day_open` — short-term trend is up despite intraday dip |
+
+The backend's `/api/intraday/scan` computes a composite `score` (0–100) incorporating VWAP distance, RSI, volume, and session timing. Recs are generated only for tickers meeting the `minScore` threshold (default 40).
+
+### 8.3 Setup Staleness
+
+- Intraday setup cards older than 90 minutes show a `⚠ STALE Nmin` badge (faded card) and are disabled for execution. VWAP, RSI, and volume ratios change too quickly for a 90-minute-old signal to be valid.
+- Run a fresh scan before executing any stale setup.
+
+### 8.4 Execution Flow
+
+1. Click **⚡ Execute** — a dialog appears with pre-filled entry price (live) and default brokerage fee.
+2. Confirm → position added to Open Positions; cash debited including brokerage.
+3. Entry brokerage stored on the position (`entryFees`) for accurate round-trip P&L at close.
+
+### 8.5 Close Flow
+
+1. Click **Close @ $X.XXX** — dialog appears with live close price pre-filled and brokerage field.
+2. Confirm → net P&L = `(closePrice − entryPrice) × qty − sellFee − entryFees`.
+3. Trade journal entry created with actual round-trip fees; Today P&L updated.
+
+### 8.6 Intraday Alerts
+
+| Alert | Trigger | Behaviour |
+|---|---|---|
+| **Stop hit** | Live price ≤ position stop | Desktop notification + error toast; one-shot, re-arms on 2% retreat |
+| **Target hit** | Live price ≥ position target | Desktop notification + success toast; one-shot, re-arms on 2% retreat |
+| **Time-stop** | 15:00 AEST reached | Alert fires once per position; close before market liquidity thins |
+| **Stale setup** | Pending rec > 90 minutes | `⚠ STALE Nmin` badge; non-clickable for execution |
+
+Intraday stop/target alerts are checked via `checkIntradayStopTarget()` on every `refreshPrices()` call, independent of the 15:00 time-stop.
+
+### 8.7 Today P&L
+
+- `state.intraday.todayPnl` accumulates net P&L from all same-day closes.
+- **Resets automatically on the next page load after midnight** — `pnlDate` is compared to `todayStr()` on DB restore; stale values are zeroed.
+
+---
+
+## 9. Market Regime Awareness
 
 Identify the regime before scanning for setups. Not all environments suit mean-reversion.
 
@@ -168,26 +251,40 @@ Identify the regime before scanning for setups. Not all environments suit mean-r
 | **Trending Down** | Price < EMA21 < EMA50 < SMA200 | Avoid longs entirely. Sidelines or reduce position sizes |
 | **Breakout** | Price breaks SMA200 on high volume, ADX starting to rise | Wait for breakout retest — don't chase. Enter on first pullback |
 | **Macro Risk-Off** | XJO (ASX 200) selling broadly, elevated index volatility | Reduce all position sizes by 50%, widen stops, increase cash |
+| **High Volatility** | `regime = highVol` in regime engine | Min confidence raised to 0.75; size reduced 30%; no breakout chases |
 
-**ASX-specific rule:** Always check the XJO trend. A valid individual setup has a significantly lower hit rate when the broad market is in a downtrend. Trade with the macro tide.
+**ASX-specific rule:** Always check the XJO trend. A valid individual setup has a significantly lower hit rate when the broad market is in a downtrend.
 
 ---
 
-## 8. Trade Management Rules
+## 10. Trade Management Rules
 
 | Rule | Detail |
 |---|---|
 | Max risk per trade | 1–2% of total portfolio capital |
-| Max open positions | 5 concurrent (to limit correlated exposure) |
-| Max single sector | Implicit via correlation filter (ρ < 0.60) |
-| Hold period | 5–15 trading days (time-based exit if no signal) |
+| Max open swing positions | 5 concurrent (to limit correlated exposure) |
+| Max open intraday positions | 2 concurrent (configurable up to 5) |
+| Sector concentration | Soft warning when same-sector swing trade already executed |
+| Swing hold period | 5–15 trading days (time-based exit if no signal) |
+| Intraday hold period | Same session only — hard time-stop at 15:00 AEST |
 | Averaging down | Never. Only add to winners. |
 | Re-entry | Wait for a complete new setup to form after a stop-out. No revenge trading. |
 | Review cadence | Check daily. Update Chandelier stop levels each evening. |
 
 ---
 
-## 9. Pre-Trade Scorecard
+## 11. Execution Dialog (Both Modes)
+
+All executions (swing BUY, intraday BUY, intraday CLOSE, swing CLOSE) go through a `_showTradeDialog` modal that collects:
+- **Actual execution price** — pre-filled from the rec, user edits to fill price.
+- **Brokerage fee** — pre-filled from `Settings → Default brokerage`; editable per trade.
+- **Live cost/proceeds preview** — `N shares × $price ± $fee = $total` updates as you type.
+
+This ensures the journal and portfolio ledger always reflect actual fill prices, not indicative recommendations.
+
+---
+
+## 12. Pre-Trade Scorecard (Swing)
 
 ```
 ===================================================================
@@ -198,9 +295,10 @@ Ticker: ________    Date: __________    Price: $__________
 PART 1: HARD FILTERS (all must pass)
 [ ] ADV (20-day) > $1.5M AUD?                       YES / NO
 [ ] Price > SMA 200? (or bouncing off it)            YES / NO
-[ ] ADX < 30 or clearly declining?                  YES / NO
+[ ] ADX < 35 and/or DI+ not dominant?               YES / NO
 [ ] No earnings / catalyst within 5 days?           YES / NO
 [ ] Correlation to open trades < 0.60?              YES / NO
+[ ] Setup date < 3 days old?                        YES / NO
 
 PART 2: ENTRY SIGNALS (Primary + ≥2 Confirmations)
 [ ] PRIMARY: Close crossed back inside lower BB?    YES / NO  ← MANDATORY
@@ -225,7 +323,7 @@ R:R ratio:                __________   (must be ≥ 2.0)
 
 ---
 
-## 10. What Was Removed and Why
+## 13. What Was Removed and Why
 
 | Removed | Reason |
 |---|---|
@@ -234,6 +332,9 @@ R:R ratio:                __________   (must be ≥ 2.0)
 | Parabolic SAR | Replaced by Chandelier Exit which anchors to actual trade peak rather than a fixed formula. |
 | Fixed 30% sector limit | Replaced by portfolio correlation filter (ρ < 0.60) which catches cross-sector correlations. |
 | 1.5× ATR stop | Too tight for 5–15 day holds. Expected 10-day noise ≈ 3.16× ATR. 2.5× ATR sits above noise floor. |
+| Fixed R:R ratio display | Was `targetPct / stopPct` — a constant, not the real ratio. Now computed from actual price levels. |
+| Silent brokerage assumption | All executions now show a price + brokerage dialog; default pre-filled from settings. |
+| Persistent todayPnl across days | todayPnl now resets automatically on the first page load of a new trading day. |
 
 ---
 

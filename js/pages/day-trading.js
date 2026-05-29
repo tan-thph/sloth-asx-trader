@@ -53,12 +53,29 @@ function _renderDtSetupsTab() {
 
   const pending   = (dt.recommendations || []).filter(r => r.status === 'pending');
   const executed  = (dt.recommendations || []).filter(r => r.status === 'executed');
+  const closed    = (dt.recommendations || []).filter(r => r.status === 'closed');
   const dismissed = (dt.recommendations || []).filter(r => r.status === 'dismissed');
+
+  // Pre-filter rejection breakdown bar — shows how many tickers each filter rejected
+  const fs = dt.lastSummary?.filterStats;
+  const filterBreakdownHtml = fs
+    ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;font-size:10px">
+         ${[
+           {label:'BB %B', n:fs.bb, color:'#6366f1'},
+           {label:'ADV',   n:fs.adv,color:'#f59e0b'},
+           {label:'SMA200',n:fs.sma,color:'#ef4444'},
+           {label:'ADX',   n:fs.adx,color:'#8b5cf6'},
+           ...(fs.noData ? [{label:'No data',n:fs.noData,color:'#6b7280'}] : []),
+         ].map(f => `<span style="padding:2px 7px;border-radius:9px;background:${f.color}22;color:${f.color};font-weight:600">
+           ${f.label} −${f.n}</span>`).join('')}
+       </div>`
+    : '';
 
   const summaryHtml = dt.lastSummary
     ? `<div style="background:var(--bg-secondary);border:0.5px solid var(--border-medium);border-radius:6px;padding:9px 12px">
          <div class="text-xs text-muted" style="margin-bottom:3px">Last scan: ${dt.lastSummary.date} ${dt.lastSummary.time || ''}</div>
          <div style="font-size:13px;line-height:1.5">${(dt.lastSummary.text || '').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+         ${filterBreakdownHtml}
        </div>`
     : '<div class="text-xs text-muted">No scan run yet.</div>';
 
@@ -153,6 +170,14 @@ function _renderDtSetupsTab() {
       </div>
       <div style="display:flex;flex-direction:column;gap:8px">
         ${executed.map(r => _renderDtRec(r, true)).join('')}
+      </div>` : ''}
+
+    ${closed.length ? `
+      <div style="margin:16px 0 6px;font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">
+        Closed Trades (${closed.length})
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${closed.map(r => _renderDtRec(r, true)).join('')}
       </div>` : ''}
 
     ${dismissed.length ? `
@@ -308,6 +333,11 @@ function _renderDtRec(r, compact = false) {
   const confPct = Math.round((r.confidence || 0) * 100);
   const isPending  = r.status === 'pending';
   const isExecuted = r.status === 'executed';
+  const isClosed   = r.status === 'closed';
+
+  // Stale badge — pending rec older than 3 days may have a stale setup
+  const recAgeDays = r.generatedAtMs ? Math.floor((Date.now() - r.generatedAtMs) / 86400000) : 0;
+  const isStale    = isPending && recAgeDays >= 3;
 
   // Match each display signal against the AI-returned signalsHit strings
   const sigDots = _DT_SIGNALS.map((label, i) => {
@@ -338,8 +368,9 @@ function _renderDtRec(r, compact = false) {
   const entryLow  = Array.isArray(r.priceRange) ? r.priceRange[0] : null;
   const entryHigh = Array.isArray(r.priceRange) ? r.priceRange[1] : null;
 
+  const borderColor = isClosed ? '#059669' : isExecuted ? '#6366f1' : isPending ? '#f59e0b' : '#6b7280';
   return `
-    <div class="card" style="border-left:3px solid ${isExecuted ? '#6366f1' : isPending ? '#f59e0b' : '#6b7280'};padding:12px 14px">
+    <div class="card" style="border-left:3px solid ${borderColor};padding:12px 14px${isStale ? ';opacity:.75' : ''}">
       <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">
 
         <!-- Left: ticker + signals -->
@@ -348,6 +379,8 @@ function _renderDtRec(r, compact = false) {
             <span style="font-size:16px;font-weight:700">${r.ticker}</span>
             <span style="background:#f59e0b;color:#000;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px">BUY</span>
             ${isExecuted ? `<span style="background:#6366f1;color:#fff;font-size:10px;padding:2px 7px;border-radius:4px">EXECUTED</span>` : ''}
+            ${isClosed   ? `<span style="background:#059669;color:#fff;font-size:10px;padding:2px 7px;border-radius:4px">CLOSED</span>` : ''}
+            ${isStale    ? `<span style="background:#ef444422;color:#ef4444;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Setup is ${recAgeDays}d old — signals may no longer be valid">⚠ STALE ${recAgeDays}d</span>` : ''}
             ${r.holdDays ? `<span style="font-size:11px;color:var(--text-muted)">${r.holdDays}d hold est.</span>` : ''}
           </div>
           <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">${sigDots}</div>
@@ -386,6 +419,17 @@ function _renderDtRec(r, compact = false) {
             <div class="flex-row" style="gap:7px">
               <button class="btn btn-primary btn-sm" onclick="executeDayTrade('${r.id}')" style="flex:1">✓ Execute</button>
               <button class="btn btn-sm btn-danger" onclick="dismissDayTradeRec('${r.id}')">Dismiss</button>
+            </div>` : ''}
+          ${isExecuted ? `
+            <div class="flex-row" style="gap:7px;margin-top:8px">
+              <button class="btn btn-sm" onclick="_closeDayTrade('${r.id}')"
+                style="flex:1;font-size:11px;color:#6366f1;border-color:#6366f1">
+                📋 Record Close
+              </button>
+            </div>` : ''}
+          ${isClosed && r._closePrice ? `
+            <div style="margin-top:6px;font-size:11px;color:var(--text-muted)">
+              Closed ${r._closedAt || ''} @ $${Number(r._closePrice).toFixed(3)}
             </div>` : ''}
         </div>
       </div>
@@ -700,16 +744,19 @@ function _renderDtIntradayTab() {
          ${id.scanRunning ? 'Scanning…' : id.lastScan ? 'No qualifying setups found. Run scan again during entry window (10:45–15:00 AEST).' : 'Run a scan to discover intraday setups.'}
        </div>`
     : pending.map(r => {
-        const scoreColor = r.intradayScore >= 70 ? '#10b981' : r.intradayScore >= 50 ? '#f59e0b' : '#6b7280';
-        const canExecute = slotsLeft > 0 && r.status === 'pending';
+        const scoreColor  = r.intradayScore >= 70 ? '#10b981' : r.intradayScore >= 50 ? '#f59e0b' : '#6b7280';
+        const canExecute  = slotsLeft > 0 && r.status === 'pending';
+        const ageMinutes  = r.generatedAtMs ? Math.floor((Date.now() - r.generatedAtMs) / 60000) : 0;
+        const isStaleIdt  = ageMinutes >= 90;
         return `
-          <div class="card" style="border-left:3px solid #10b981;padding:12px 14px;margin-bottom:10px">
+          <div class="card" style="border-left:3px solid #10b981;padding:12px 14px;margin-bottom:10px${isStaleIdt ? ';opacity:.72' : ''}">
             <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">
               <div style="min-width:200px;flex:1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
                   <span style="font-size:16px;font-weight:700">${r.ticker}</span>
                   <span style="background:#10b981;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px">INTRADAY BUY</span>
                   <span style="background:${scoreColor};color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px">Score ${r.intradayScore}</span>
+                  ${isStaleIdt ? `<span style="background:#ef444422;color:#ef4444;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="VWAP and RSI levels are ${ageMinutes}min old — rescan for fresh data">⚠ STALE ${ageMinutes}min</span>` : ''}
                 </div>
                 <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
                   ${(r.signals || []).map(s => `<span style="font-size:10px;padding:2px 8px;border-radius:10px;font-weight:600;background:#d1fae5;color:#065f46">${s}</span>`).join('')}
@@ -907,6 +954,7 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
 
   if (!state.intraday.todayPnl) state.intraday.todayPnl = 0;
   state.intraday.todayPnl += net;
+  state.intraday.pnlDate   = todayStr();   // stamp date so day-change reset works
   state.cash += pos.qty * closePrice - sellFee;
 
   // Log to trade journal
@@ -933,6 +981,69 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
   const sign = net >= 0 ? '+' : '';
   toast(`Closed ${pos.ticker}: ${sign}$${net.toFixed(2)} (buy $${buyFee} + sell $${sellFee} fees)`, net >= 0 ? 'success' : 'warning');
   renderPage();
+}
+
+// ── Close / record exit for an executed swing trade ──────────────────────────
+// Opens _showTradeDialog (SELL) then journals the exit, updates cash, marks rec.
+
+function _closeDayTrade(recId) {
+  const rec = (state.dayTrading && state.dayTrading.recommendations || []).find(r => r.id === recId);
+  if (!rec || rec.status !== 'executed') return;
+
+  // Locate the open journal entry so we can read the actual entry price and fee
+  const journalEntry = (state.tradeJournal || []).find(e => e.recId === rec.id && e.status === 'open');
+  const entryPrice   = journalEntry ? journalEntry.entryPrice : (rec.priceRange ? rec.priceRange[0] : 0);
+  const buyFee       = journalEntry ? (journalEntry.fees || 0) : ((state.settings && state.settings.brokerage) || 10);
+
+  // Pre-fill close price with target (best case) so user edits down if needed
+  const suggestedClose = rec.target || entryPrice;
+
+  _showTradeDialog({
+    ticker: rec.ticker,
+    action: 'SELL',
+    qty:    rec.qty,
+    defaultPrice: suggestedClose,
+  }, (closePrice, sellFee) => {
+    const gross = (closePrice - entryPrice) * rec.qty;
+    const net   = gross - sellFee - buyFee;
+
+    // Update or create journal entry
+    if (journalEntry) {
+      journalEntry.exitPrice  = closePrice;
+      journalEntry.fees       = buyFee + sellFee;
+      journalEntry.pnl        = net;
+      journalEntry.status     = 'closed';
+      journalEntry.closeDate  = todayStr();
+    } else {
+      if (!state.tradeJournal) state.tradeJournal = [];
+      state.tradeJournal.unshift({
+        id:         Date.now(),
+        date:       todayStr(),
+        ticker:     rec.ticker,
+        action:     'SELL',
+        qty:        rec.qty,
+        entryPrice,
+        exitPrice:  closePrice,
+        fees:       buyFee + sellFee,
+        pnl:        net,
+        status:     'closed',
+        recId:      rec.id,
+        closeDate:  todayStr(),
+        notes:      `SwingTrade close | Stop $${rec.stopLoss} | Target $${rec.target}`,
+      });
+    }
+
+    rec.status      = 'closed';
+    rec._closedAt   = todayStr();
+    rec._closePrice = closePrice;
+
+    state.cash += rec.qty * closePrice - sellFee;
+    scheduleSave();
+    if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
+    const sign = net >= 0 ? '+' : '';
+    toast(`Closed swing ${rec.ticker}: ${sign}$${net.toFixed(2)} (buy $${buyFee} + sell $${sellFee} fees)`, net >= 0 ? 'success' : 'warning');
+    renderPage();
+  });
 }
 
 // ── Update a single intraday parameter ───────────────────────────────────────
