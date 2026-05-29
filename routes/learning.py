@@ -592,13 +592,20 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
 
     def _weight(r, half_life=45):
         """Skill-weighted time-decay: weight = time_decay × skill_factor.
-        Skill factor = max(0.2, skill_score/10) when scored, else 1.0.
-        High-skill trades (8-10) count up to 4× more than unscored baseline;
-        luck-driven lucky trades (score 2) count 0.2×.
+
+        Skill factor is centred at 5/10 = 1.0 (neutral).
+          skill=0  → 0.0 → clamped to 0.2  (lucky/random noise, heavily discounted)
+          skill=5  → 1.0                    (average, neutral weight — same for unscored)
+          skill=9  → 1.8                    (high-quality analysis, amplified)
+          skill=10 → 2.0 → clamped to 1.8  (prevents single-trade dominance)
+
+        Unscored trades (skill_score IS NULL) default to 1.0 — the neutral centre.
+        This avoids the old discontinuity where an outstanding scored trade (8/10 → 0.8)
+        was penalised relative to an unscored trade (→ 1.0).
         """
         td = _decay(r["timestamp"], half_life)
         sk = r["skill_score"]
-        sf = max(0.2, float(sk) / 10.0) if sk is not None else 1.0
+        sf = max(0.2, min(1.8, float(sk) / 5.0)) if sk is not None else 1.0
         return td * sf
 
     def _ess(subset):
@@ -672,19 +679,53 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                 adj_val = round(max(-0.15, min(0.10, delta * 0.8)), 2)
                 parts.append(f"conf {label}%:{wr*100:.0f}%WR(Δ{delta*100:+.0f}pp,adj{adj_val:+.2f},ESS={ess:.1f})")
 
-        # 2. Current regime — ESS-gated; warn on low ESS
+        # 2. Current regime — hierarchical fallback when ESS < 2.5
+        # Level 1: specific regime (e.g. "bearTrending")
+        # Level 2: macro group  (bearish / bullish / neutral — see _REGIME_GROUPS)
+        # Level 3: all trades   (90d window, mild 0.7× discount to flag lack of specificity)
+        _REGIME_GROUPS = {
+            "bearish": {"bearTrending", "bearVolatile", "riskOff", "panic"},
+            "bullish": {"bullTrending", "riskOn"},
+            "neutral": {"highVol", "sideways", "neutral"},
+        }
+        def _regime_macro(r_name):
+            """Return the macro-group name for a regime, or None if not mapped."""
+            for grp, members in _REGIME_GROUPS.items():
+                if r_name in members:
+                    return grp
+            return None
+
         if regime:
             reg = [r for r in rows if r["regime"] == regime]
-            if not reg:
-                pass  # no data — omit
+            ess_reg = _ess(reg) if reg else 0.0
+            if ess_reg >= _ESS_MIN:
+                # Level 1: specific regime — reliable data
+                wr   = _wwr(reg)
+                warn = " ⚠AVOID" if wr < 0.40 else (" ⚠CAUTION" if wr < 0.50 else "")
+                parts.append(f"{regime}:{wr*100:.0f}%W(ESS={ess_reg:.1f}){warn}")
             else:
-                ess_reg = _ess(reg)
-                if ess_reg < _ESS_MIN:
-                    parts.append(f"⚠{regime}:ESS={ess_reg:.1f}(n={len(reg)})—regime data too stale for calibration")
-                else:
-                    wr   = _wwr(reg)
+                # Specific regime is thin — try macro-group fallback
+                macro = _regime_macro(regime)
+                macro_rows = [r for r in rows if _regime_macro(r["regime"] or "") == macro] if macro else []
+                ess_macro  = _ess(macro_rows) if macro_rows else 0.0
+                if macro and ess_macro >= _ESS_MIN:
+                    wr   = _wwr(macro_rows)
                     warn = " ⚠AVOID" if wr < 0.40 else (" ⚠CAUTION" if wr < 0.50 else "")
-                    parts.append(f"{regime}:{wr*100:.0f}%W(ESS={ess_reg:.1f}){warn}")
+                    parts.append(
+                        f"{regime}⚠thin(ESS={ess_reg:.1f})→{macro}proxy:{wr*100:.0f}%W"
+                        f"(ESS={ess_macro:.1f},n={len(macro_rows)}){warn}"
+                    )
+                else:
+                    # No usable macro data either — fall back to all trades at 0.7× discount
+                    # Represent as a warning so Claude knows specificity is low
+                    if rows:
+                        wr_all = _wwr(rows)
+                        parts.append(
+                            f"{regime}⚠thin(ESS={ess_reg:.1f})→allRegimes:{wr_all*100:.0f}%W"
+                            f"(n={n},discount0.7×)⚠low-specificity"
+                        )
+                    else:
+                        parts.append(f"⚠{regime}:no calibration data available")
 
         # 3. Relevant sectors — ESS≥2.5 AND notable rate
         for sector in sectors:

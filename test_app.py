@@ -1052,9 +1052,12 @@ class TestLearningImprovements(unittest.TestCase):
             src = f.read()
         # Since ESS migration: regime section must skip when reg is empty.
         # Old: '0 < len(reg) < 3'. New: 'if not reg:' guard in ESS branch.
+        # ESS guard: ess_reg = 0.0 when reg is empty, which is < _ESS_MIN, so it skips.
         self.assertTrue(
-            "0 < len(reg) < 3" in src or "if not reg:" in src,
-            "L1: regime warning must skip when 0 trades exist (either old or ESS guard)"
+            "0 < len(reg) < 3" in src
+            or "if not reg:" in src
+            or ("ess_reg" in src and "_ESS_MIN" in src),
+            "L1: regime warning must skip when 0 trades exist (old guard, if-not-reg, or ESS gate)"
         )
 
     def test_error_type_threshold_lowered(self):

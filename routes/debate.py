@@ -17,6 +17,7 @@ Endpoints:
 """
 
 import json
+import random
 import re
 import time
 from datetime import datetime
@@ -1380,7 +1381,7 @@ def debate_adjudicate():
       "ok": true, "id": 123,
       "provider": "gemini", "model": "gemini-2.0-flash",
       "winner": "A" | "B" | "neither",
-      "score_a": 7, "score_b": 4,
+      "score_a": 7, "score_b": 4,  // canonical (blind alias already reversed)
       "final_tags": "stop_too_tight,poor_rr",
       "reason": "Model A engaged with the R:R numbers; B was generic.",
       "error_type": "stop_too_tight,poor_rr",
@@ -1438,29 +1439,43 @@ def debate_adjudicate():
     # may not have it; row is the source of truth either way)
     summary = _pm_build_summary(row)
 
+    # Blind adjudication — randomise which real model is called "Alpha" vs "Beta"
+    # so the cloud adjudicator cannot exhibit halo-effect bias toward known model
+    # families or parameter sizes (e.g. preferring "qwen3.5:9b" over "gemma3:4b"
+    # by name alone). The mapping is logged so the winner can be translated back.
+    if random.random() < 0.5:
+        alias_a, alias_b = "Analyst Alpha", "Analyst Beta"
+        blind_map = {"A": "A", "B": "B"}  # identity — no swap
+    else:
+        alias_a, alias_b = "Analyst Beta", "Analyst Alpha"
+        blind_map = {"A": "B", "B": "A"}  # swapped — must un-swap the winner
+    current_app.logger.debug(
+        f"[Adjudicate] event#{ev_id} blind map: {model_a}→{alias_a}, {model_b}→{alias_b}"
+    )
+
     # Adjudicator prompt — asks for scores + winner + final tags
     valid_tags_list = ", ".join(sorted(VALID_PM_TYPES - {"none"}))
     prompt = (
-        f"You are an expert trading-postmortem adjudicator. Two local models classified "
-        f"a closed trade and disagreed. Judge their reasoning quality and pick a winner.\n\n"
+        f"You are an expert trading-postmortem adjudicator. Two analysts independently "
+        f"classified a closed trade and disagreed. Judge their reasoning quality and pick a winner.\n\n"
         f"TRADE: {summary}\n\n"
-        f"--- MODEL A ({model_a}) ---\n"
+        f"--- {alias_a} ---\n"
         f"Tags: {tags_a}\n"
         f"Reason: {reason_a}\n\n"
-        f"--- MODEL B ({model_b}) ---\n"
+        f"--- {alias_b} ---\n"
         f"Tags: {tags_b}\n"
         f"Reason: {reason_b}\n\n"
         f"Scoring criteria (0-10 each):\n"
-        f"  - Did the model cite specific numbers (R:R, stop distance, P&L)?\n"
+        f"  - Did the analyst cite specific numbers (R:R, stop distance, P&L)?\n"
         f"  - Is the reasoning internally consistent (e.g. don't call a 40% stop 'tight')?\n"
         f"  - Are the tags well-supported by the trade data?\n"
-        f"  - Did the model interpret trade direction (BUY/SELL/TRIM) correctly?\n\n"
+        f"  - Did the analyst interpret trade direction (BUY/SELL/TRIM) correctly?\n\n"
         f"Valid tags: {valid_tags_list}\n\n"
         f"Reply with JSON only:\n"
-        f'{{"winner":"A"|"B"|"neither","score_a":0-10,"score_b":0-10,'
+        f'{{"winner":"{alias_a}"|"{alias_b}"|"neither","score_alpha":0-10,"score_beta":0-10,'
         f'"final_tags":"TAG1,TAG2","reason":"one or two sentences explaining the judgment"}}\n'
-        f"\"neither\" winner means both models missed the real issue — set final_tags to "
-        f"what the right tags should be. No markdown, no text outside JSON."
+        f"\"neither\" means both analysts missed the real issue — set final_tags to the right tags. "
+        f"No markdown, no text outside JSON."
     )
 
     t0 = time.time()
@@ -1481,25 +1496,25 @@ def debate_adjudicate():
     raw = re.sub(r"\n?```$",       "", raw)
     current_app.logger.debug(f"[Adjudicate] raw output for event#{ev_id}: {raw[:300]}")
 
-    winner = ""; score_a = None; score_b = None
+    winner_alias = ""; score_alpha = None; score_beta = None
     final_tags_raw = ""; reason = ""
     try:
         parsed = json.loads(raw)
-        winner         = (parsed.get("winner") or "").upper()
-        score_a        = parsed.get("score_a")
-        score_b        = parsed.get("score_b")
+        winner_alias   = (parsed.get("winner") or "").strip()
+        score_alpha    = parsed.get("score_alpha")
+        score_beta     = parsed.get("score_beta")
         final_tags_raw = parsed.get("final_tags", "") or ""
         reason         = parsed.get("reason", "") or ""
     except Exception:
         # Regex fallback
         m_w = re.search(r'"winner"\s*:\s*"([^"]+)"', raw)
-        m_a = re.search(r'"score_a"\s*:\s*([0-9.]+)', raw)
-        m_b = re.search(r'"score_b"\s*:\s*([0-9.]+)', raw)
+        m_a = re.search(r'"score_alpha"\s*:\s*([0-9.]+)', raw)
+        m_b = re.search(r'"score_beta"\s*:\s*([0-9.]+)', raw)
         m_t = re.search(r'"final_tags"\s*:\s*"([^"]+)"', raw)
         m_r = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
-        winner         = (m_w.group(1) if m_w else "").upper()
-        score_a        = float(m_a.group(1)) if m_a else None
-        score_b        = float(m_b.group(1)) if m_b else None
+        winner_alias   = (m_w.group(1) if m_w else "").strip()
+        score_alpha    = float(m_a.group(1)) if m_a else None
+        score_beta     = float(m_b.group(1)) if m_b else None
         final_tags_raw = m_t.group(1) if m_t else ""
         reason         = m_r.group(1) if m_r else raw[:200]
 
@@ -1512,14 +1527,30 @@ def debate_adjudicate():
         if v is None: return None
         try: return max(0.0, min(10.0, float(v)))
         except Exception: return None
-    score_a = _clamp(score_a)
-    score_b = _clamp(score_b)
+    score_alpha = _clamp(score_alpha)
+    score_beta  = _clamp(score_beta)
 
-    # Normalise winner
+    # Un-swap scores: score_alpha is always for alias_a; alias_a may be model_a or model_b
+    blind_swap = blind_map["A"] != "A"  # True when alias_a→model_b (swapped)
+    if blind_swap:
+        score_a, score_b = score_beta, score_alpha
+    else:
+        score_a, score_b = score_alpha, score_beta
+
+    # Translate alias winner back to canonical "A" / "B" / "NEITHER"
+    alias_upper = winner_alias.upper()
+    if alias_upper == alias_a.upper():
+        winner_blind = "A"
+    elif alias_upper == alias_b.upper():
+        winner_blind = "B"
+    else:
+        winner_blind = "NEITHER"
+    # Apply blind_map to get canonical winner
+    winner = blind_map.get(winner_blind, "NEITHER")
     if winner not in ("A", "B", "NEITHER"):
         winner = "NEITHER"
 
-    # Append phase_4 to transcript
+    # Append phase_4 to transcript (includes blind metadata for audit)
     transcript["phase_4"] = {
         "provider":   cfg["provider"],
         "model":      cfg["model"],
@@ -1529,6 +1560,9 @@ def debate_adjudicate():
         "final_tags": final_tags,
         "reason":     reason,
         "elapsed_ms": elapsed_ms,
+        "blind_swap": blind_swap,
+        "alias_a":    alias_a,
+        "alias_b":    alias_b,
     }
 
     # Persist updated transcript + (if winner) updated error_type

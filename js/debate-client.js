@@ -10,6 +10,45 @@
 // caller continues without debate context.
 // ============================================================
 
+// ── Ollama priority queue (prevents auto-postmortems from blocking user calls) ─
+// Concurrency=1: Ollama is single-threaded — parallel requests double peak RAM.
+// HIGH priority: user-initiated (fetchDebate via UI, manual postmortem).
+// LOW  priority: background auto-postmortem / skill scoring on trade close.
+// HIGH tasks jump ahead of queued LOW tasks but never interrupt a running call.
+const _OQ = {
+  running: false,
+  queue:   [],   // [{ priority: 'HIGH'|'LOW', fn, resolve, reject }]
+};
+
+function _oqEnqueue(fn, priority = 'HIGH') {
+  return new Promise((resolve, reject) => {
+    const task = { priority, fn, resolve, reject };
+    if (priority === 'HIGH') {
+      // Insert before the first LOW task (or at end if all HIGH/empty)
+      const idx = _OQ.queue.findIndex(t => t.priority === 'LOW');
+      if (idx === -1) _OQ.queue.push(task);
+      else            _OQ.queue.splice(idx, 0, task);
+    } else {
+      _OQ.queue.push(task);
+    }
+    _oqDrain();
+  });
+}
+
+async function _oqDrain() {
+  if (_OQ.running || _OQ.queue.length === 0) return;
+  _OQ.running = true;
+  const task = _OQ.queue.shift();
+  try {
+    task.resolve(await task.fn());
+  } catch (e) {
+    task.reject(e);
+  } finally {
+    _OQ.running = false;
+    _oqDrain();
+  }
+}
+
 // ── Status cache (60 s TTL) ───────────────────────────────────────────────────
 let _debateStatus    = null;
 let _debateStatusTs  = 0;
@@ -155,30 +194,35 @@ async function fetchDebate(ticker, signals, opts = {}) {
   const status = await debateStatus();
   if (!status.available) return null;
 
-  const model = opts.model || preferredDebateModel(status.models);
+  const model    = opts.model || preferredDebateModel(status.models);
+  // priority: HIGH for user-initiated calls (UI button, analysis flow)
+  //           LOW  for background batch scans
+  const priority = opts.priority || 'HIGH';
 
-  try {
-    const r = await fetch(`${API}/api/debate`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        ticker, signals, model, timeout: opts.timeout || 45,
-        action: opts.action || 'BUY',  // D7: pass direction for exit-biased prompts
-      }),
-      signal:  AbortSignal.timeout(100_000), // 100 s hard cap
-    });
-    if (r.ok) {
-      const result = await r.json();
-      if (result.ok) {
-        _setCachedDebate(ticker, signals, result);
-        return { ...result, _fromCache: false };
+  return _oqEnqueue(async () => {
+    try {
+      const r = await fetch(`${API}/api/debate`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          ticker, signals, model, timeout: opts.timeout || 45,
+          action: opts.action || 'BUY',  // D7: pass direction for exit-biased prompts
+        }),
+        signal:  AbortSignal.timeout(100_000), // 100 s hard cap
+      });
+      if (r.ok) {
+        const result = await r.json();
+        if (result.ok) {
+          _setCachedDebate(ticker, signals, result);
+          return { ...result, _fromCache: false };
+        }
+        return result;
       }
-      return result;
+      return null;
+    } catch {
+      return null;
     }
-    return null;
-  } catch {
-    return null;
-  }
+  }, priority);
 }
 
 /**
@@ -318,19 +362,23 @@ async function fetchSkillScore(eventId, opts = {}) {
   const status = await debateStatus();
   if (!status.available) return null;
 
-  const model = opts.model || preferredDebateModel(status.models);
-  try {
-    const r = await fetch(`${API}/api/debate/skill`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ id: eventId, model, timeout: opts.timeout || 45 }),
-      signal:  AbortSignal.timeout(80_000),
-    });
-    if (r.ok) return await r.json();
-    return null;
-  } catch {
-    return null;
-  }
+  const model    = opts.model || preferredDebateModel(status.models);
+  const priority = opts.priority || 'LOW';  // auto-triggered on trade close
+
+  return _oqEnqueue(async () => {
+    try {
+      const r = await fetch(`${API}/api/debate/skill`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ id: eventId, model, timeout: opts.timeout || 45 }),
+        signal:  AbortSignal.timeout(80_000),
+      });
+      if (r.ok) return await r.json();
+      return null;
+    } catch {
+      return null;
+    }
+  }, priority);
 }
 
 /**
@@ -351,24 +399,28 @@ async function fetchSkillScore(eventId, opts = {}) {
  */
 async function fetchPostmortemDebate(eventId, modelA, modelB, opts = {}) {
   if (!state.serverOk) return null;
-  try {
-    const r = await fetch(`${API}/api/debate/postmortem-debate`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        id:      eventId,
-        model_a: modelA,
-        model_b: modelB,
-        timeout: opts.timeout || 60,
-      }),
-      // 3× max server timeout: Phase 1 (A) + Phase 1 (B) + Phase 3 + margin
-      signal: AbortSignal.timeout(400_000),
-    });
-    if (r.ok) return await r.json();
-    return null;
-  } catch {
-    return null;
-  }
+  // priority: LOW for auto-triggered postmortems, HIGH for manual button press
+  const priority = opts.priority || 'LOW';
+  return _oqEnqueue(async () => {
+    try {
+      const r = await fetch(`${API}/api/debate/postmortem-debate`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          id:      eventId,
+          model_a: modelA,
+          model_b: modelB,
+          timeout: opts.timeout || 60,
+        }),
+        // 3× max server timeout: Phase 1 (A) + Phase 1 (B) + Phase 3 + margin
+        signal: AbortSignal.timeout(400_000),
+      });
+      if (r.ok) return await r.json();
+      return null;
+    } catch {
+      return null;
+    }
+  }, priority);
 }
 
 // ── Cloud adjudicator (Gemini / Groq) ────────────────────────────────────────
@@ -439,11 +491,14 @@ async function triggerPostmortem(eventId, model) {
   const status = await debateStatus();
   if (!status.available) return;
   const useModel = model || preferredDebateModel(status.models);
-  try {
-    await fetch(`${API}/api/debate/postmortem`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ id: eventId, model: useModel }),
-    });
-  } catch {}
+  // LOW priority: fire-and-forget auto-postmortem; user calls take precedence
+  _oqEnqueue(async () => {
+    try {
+      await fetch(`${API}/api/debate/postmortem`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ id: eventId, model: useModel }),
+      });
+    } catch {}
+  }, 'LOW').catch(() => {});
 }

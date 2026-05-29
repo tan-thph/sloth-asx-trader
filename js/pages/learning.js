@@ -1162,7 +1162,7 @@ async function triggerAdversarialPostmortem(eventId) {
     toast(`⚔️ ${modelA} vs ${modelB} — classifying event #${eventId}… (up to 3 min)`, 'info');
     const t0 = Date.now();
 
-    const result = await fetchPostmortemDebate(eventId, modelA, modelB, { timeout: 90 });
+    const result = await fetchPostmortemDebate(eventId, modelA, modelB, { timeout: 90, priority: 'HIGH' });
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
     if (btn) { btn.disabled = false; btn.textContent = '⚔️'; btn.title = 'Adversarial postmortem debate'; }
