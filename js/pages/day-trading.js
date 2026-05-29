@@ -673,10 +673,10 @@ function _renderDtIntradayTab() {
             <div class="flex-row" style="gap:6px">
               ${livePrice != null
                 ? `<button class="btn btn-sm btn-primary" style="font-size:11px"
-                    onclick="closeIntradayPosition('${pos.id}', ${livePrice.toFixed(3)})">
+                    onclick="_showCloseIntradayDialog('${pos.id}', ${livePrice.toFixed(3)})">
                     Close @ $${livePrice.toFixed(3)}</button>`
                 : `<button class="btn btn-sm" style="font-size:11px"
-                    onclick="prompt('Close price for ${pos.ticker}?') && closeIntradayPosition('${pos.id}', parseFloat(prompt('Close price for ${pos.ticker}?')))">
+                    onclick="_showCloseIntradayDialog('${pos.id}', null)">
                     Close</button>`}
             </div>
           </div>`;
@@ -761,6 +761,80 @@ function _renderDtIntradayTab() {
   `;
 }
 
+// ── Shared trade-confirm dialog ───────────────────────────────────────────────
+// Shows a <dialog> to confirm execution price + brokerage before committing.
+// Used by executeIntradayTrade, _showCloseIntradayDialog, and executeDayTrade.
+// action: 'BUY' | 'SELL'
+function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfirm) {
+  const existing = document.getElementById('trade-confirm-dialog');
+  if (existing) existing.remove();
+
+  const defaultFee  = (state.settings && state.settings.brokerage) || 10;
+  const actionColor = action === 'BUY' ? '#10b981' : '#6366f1';
+  const priceLabel  = action === 'BUY' ? 'Entry price ($)' : 'Close price ($)';
+  const btnLabel    = action === 'BUY' ? '⚡ Confirm BUY' : '✓ Confirm SELL';
+
+  const dialog = document.createElement('dialog');
+  dialog.id = 'trade-confirm-dialog';
+  dialog.style.cssText = 'border-radius:10px;border:1px solid var(--border-medium);padding:20px 24px;min-width:310px;max-width:390px;background:var(--bg-primary);color:var(--text-primary)';
+  dialog.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <span style="background:${actionColor};color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:5px">${action}</span>
+      <span style="font-size:15px;font-weight:700">${ticker}</span>
+      <span style="font-size:13px;color:var(--text-muted)">&times;${qty} shares</span>
+    </div>
+    <div style="display:grid;gap:10px;margin-bottom:16px">
+      <div>
+        <div class="form-label">${priceLabel}</div>
+        <input id="tcd-price" type="number" step="0.001" value="${Number(defaultPrice).toFixed(3)}" min="0.001" style="width:100%">
+      </div>
+      <div>
+        <div class="form-label">Brokerage fee ($)</div>
+        <input id="tcd-fee" type="number" step="1" value="${defaultFee}" min="0" style="width:100%">
+      </div>
+      <div id="tcd-cost-line" style="font-size:12px;color:var(--text-muted);padding:6px 8px;background:var(--bg-secondary);border-radius:5px"></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-sm" onclick="document.getElementById('trade-confirm-dialog')?.remove()">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="tcd-confirm"
+        style="background:${actionColor};border-color:${actionColor}">${btnLabel}</button>
+    </div>`;
+
+  document.body.appendChild(dialog);
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
+
+  const priceEl  = dialog.querySelector('#tcd-price');
+  const feeEl    = dialog.querySelector('#tcd-fee');
+  const costLine = dialog.querySelector('#tcd-cost-line');
+
+  const _upd = () => {
+    const p = parseFloat(priceEl.value) || 0;
+    const f = parseFloat(feeEl.value)   || 0;
+    const gross = qty * p;
+    const net   = action === 'BUY' ? gross + f : gross - f;
+    const label = action === 'BUY'
+      ? `Cost: $${net.toFixed(2)} (${qty} × $${p.toFixed(3)} + $${f.toFixed(2)} brokerage)`
+      : `Proceeds: $${(gross - f).toFixed(2)} (${qty} × $${p.toFixed(3)} − $${f.toFixed(2)} brokerage)`;
+    costLine.textContent = label;
+  };
+  priceEl.addEventListener('input', _upd);
+  feeEl.addEventListener('input', _upd);
+  _upd();
+
+  dialog.querySelector('#tcd-confirm').onclick = () => {
+    const price = parseFloat(priceEl.value);
+    const fee   = parseFloat(feeEl.value);
+    if (!price || price <= 0)  { toast('Enter a valid price', 'error');          priceEl.focus(); return; }
+    if (isNaN(fee) || fee < 0) { toast('Enter a valid brokerage fee', 'error'); feeEl.focus();   return; }
+    dialog.remove();
+    onConfirm(price, fee);
+  };
+
+  dialog.showModal();
+  priceEl.focus();
+  priceEl.select();
+}
+
 // ── Execute an intraday trade ─────────────────────────────────────────────────
 
 function executeIntradayTrade(recId) {
@@ -773,45 +847,67 @@ function executeIntradayTrade(recId) {
     toast('Max intraday positions reached', 'error'); return;
   }
 
-  const entryPrice = rec.priceRange[0];
-  const brokerage  = (state.settings && state.settings.brokerage) || 10;
-  const cost = rec.qty * entryPrice + brokerage;
-  if (cost > state.cash) { toast('Insufficient cash for this trade', 'error'); return; }
+  _showTradeDialog({
+    ticker: rec.ticker,
+    action: 'BUY',
+    qty:    rec.qty,
+    defaultPrice: rec.priceRange[0],
+  }, (entryPrice, brokerage) => {
+    const cost = rec.qty * entryPrice + brokerage;
+    if (cost > state.cash) { toast('Insufficient cash for this trade', 'error'); return; }
 
-  if (!state.intraday.openPositions) state.intraday.openPositions = [];
-  state.intraday.openPositions.push({
-    id:         rec.id,
-    ticker:     rec.ticker,
-    qty:        rec.qty,
-    entryPrice,
-    target:     rec.target,
-    stop:       rec.stopLoss,
-    enteredAt:  nowSydney(),
+    if (!state.intraday.openPositions) state.intraday.openPositions = [];
+    state.intraday.openPositions.push({
+      id:         rec.id,
+      ticker:     rec.ticker,
+      qty:        rec.qty,
+      entryPrice,
+      entryFees:  brokerage,   // stored so close P&L uses actual round-trip cost
+      target:     rec.target,
+      stop:       rec.stopLoss,
+      enteredAt:  nowSydney(),
+    });
+
+    state.cash -= cost;
+    rec.status = 'executed';
+
+    scheduleSave();
+    if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
+    toast(`⚡ Intraday BUY: ${rec.ticker} × ${rec.qty} @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
+    renderPage();
   });
-
-  state.cash -= cost;
-  rec.status = 'executed';
-
-  scheduleSave();
-  if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
-  toast(`⚡ Intraday BUY: ${rec.ticker} × ${rec.qty} @ $${entryPrice.toFixed(3)}`, 'success');
-  renderPage();
 }
 
-// ── Close an intraday position ────────────────────────────────────────────────
+// ── Show close dialog, then close the position ────────────────────────────────
 
-function closeIntradayPosition(posId, closePrice) {
+function _showCloseIntradayDialog(posId, suggestedPrice) {
+  if (!state.intraday) return;
+  const pos = (state.intraday.openPositions || []).find(p => p.id === posId);
+  if (!pos) return;
+
+  _showTradeDialog({
+    ticker: pos.ticker,
+    action: 'SELL',
+    qty:    pos.qty,
+    defaultPrice: suggestedPrice || pos.target || pos.entryPrice,
+  }, (closePrice, brokerage) => {
+    closeIntradayPosition(posId, closePrice, brokerage);
+  });
+}
+
+function closeIntradayPosition(posId, closePrice, brokerage) {
   if (!state.intraday || !closePrice || isNaN(closePrice)) return;
   const pos = (state.intraday.openPositions || []).find(p => p.id === posId);
   if (!pos) return;
 
-  const brokerage = (state.settings && state.settings.brokerage) || 10;
-  const gross = (closePrice - pos.entryPrice) * pos.qty;
-  const net   = gross - brokerage * 2;
+  const sellFee   = (brokerage != null && !isNaN(brokerage)) ? brokerage : ((state.settings && state.settings.brokerage) || 10);
+  const buyFee    = (pos.entryFees != null) ? pos.entryFees : ((state.settings && state.settings.brokerage) || 10);
+  const gross     = (closePrice - pos.entryPrice) * pos.qty;
+  const net       = gross - sellFee - buyFee;   // net P&L after both legs of brokerage
 
   if (!state.intraday.todayPnl) state.intraday.todayPnl = 0;
   state.intraday.todayPnl += net;
-  state.cash += pos.qty * closePrice - brokerage;
+  state.cash += pos.qty * closePrice - sellFee;
 
   // Log to trade journal
   if (!state.tradeJournal) state.tradeJournal = [];
@@ -823,7 +919,7 @@ function closeIntradayPosition(posId, closePrice) {
     qty:         pos.qty,
     entryPrice:  pos.entryPrice,
     exitPrice:   closePrice,
-    fees:        brokerage * 2,
+    fees:        sellFee + buyFee,
     pnl:         net,
     status:      'closed',
     notes:       'Intraday same-day close',
@@ -835,7 +931,7 @@ function closeIntradayPosition(posId, closePrice) {
   scheduleSave();
   if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
   const sign = net >= 0 ? '+' : '';
-  toast(`Closed ${pos.ticker}: ${sign}$${net.toFixed(2)}`, net >= 0 ? 'success' : 'warning');
+  toast(`Closed ${pos.ticker}: ${sign}$${net.toFixed(2)} (buy $${buyFee} + sell $${sellFee} fees)`, net >= 0 ? 'success' : 'warning');
   renderPage();
 }
 

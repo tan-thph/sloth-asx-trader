@@ -127,6 +127,7 @@ async function saveStateToDb() {
         macroDate: state.macroDate,
         analysisLastSummary: state.analysisLastSummary,
         dayTrading: state.dayTrading,
+        intraday: state.intraday,
         priceAlerts: state.priceAlerts,
         watchlist: state.watchlist,
         savedScreeners: state.savedScreeners,
@@ -208,6 +209,11 @@ async function loadStateFromDb() {
       // Reset transient fields
       state.dayTrading.analysisRunning = false;
       state.dayTrading.scanProgress = null;
+    }
+    if (data.intraday != null) {
+      state.intraday = { ...(state.intraday || {}), ...data.intraday };
+      // Reset transient scan flag — scan must be manually re-triggered
+      if (state.intraday) state.intraday.scanRunning = false;
     }
     if (Array.isArray(data.priceAlerts)) state.priceAlerts = data.priceAlerts;
     if (Array.isArray(data.watchlist)) state.watchlist = data.watchlist;

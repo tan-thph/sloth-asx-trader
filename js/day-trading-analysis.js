@@ -155,37 +155,49 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
   });
 }
 
-// Execute a day trade rec — adds to journal and marks executed
+// Execute a day trade rec — shows price+brokerage dialog, then adds to journal
 function executeDayTrade(recId) {
   const rec = state.dayTrading.recommendations.find(r => r.id === recId);
   if (!rec) return;
-  const entryPrice = rec.priceRange ? ((rec.priceRange[0] + rec.priceRange[1]) / 2) : rec.target;
-  const cost = rec.qty * entryPrice + (state.settings.brokerage || 10);
-  if (cost > state.cash) { toast('Insufficient cash', 'error'); return; }
 
-  const entry = {
-    id: Date.now(),
-    date: todayStr(),
-    timestamp: nowSydney(),
+  const defaultPrice = rec.priceRange
+    ? ((rec.priceRange[0] + rec.priceRange[1]) / 2)
+    : (rec.target || 0);
+
+  // _showTradeDialog is defined in pages/day-trading.js (loads after this file)
+  _showTradeDialog({
     ticker: rec.ticker,
     action: 'BUY',
-    qty: rec.qty,
-    entryPrice: parseFloat(entryPrice.toFixed(3)),
-    exitPrice: null,
-    fees: state.settings.brokerage || 10,
-    pnl: null,
-    status: 'open',
-    recId: rec.id,
-    recExecuted: true,
-    notes: `SwingTrade | Target:$${rec.target} | Stop:$${rec.stopLoss} | R:R ${rec.rrRatio?.toFixed(1)}x | Hold:${rec.holdDays}d`,
-  };
-  state.tradeJournal.unshift(entry);
-  state.cash -= cost;
-  rec.status = 'executed';
-  scheduleSave();
-  pushCashToDb(state.cash);
-  toast(`Executed ${rec.ticker} swing trade — ${rec.qty} shares @ $${entryPrice.toFixed(3)}`, 'success');
-  renderPage();
+    qty:    rec.qty,
+    defaultPrice,
+  }, (entryPrice, brokerage) => {
+    const cost = rec.qty * entryPrice + brokerage;
+    if (cost > state.cash) { toast('Insufficient cash', 'error'); return; }
+
+    const entry = {
+      id:          Date.now(),
+      date:        todayStr(),
+      timestamp:   nowSydney(),
+      ticker:      rec.ticker,
+      action:      'BUY',
+      qty:         rec.qty,
+      entryPrice:  parseFloat(entryPrice.toFixed(3)),
+      exitPrice:   null,
+      fees:        brokerage,
+      pnl:         null,
+      status:      'open',
+      recId:       rec.id,
+      recExecuted: true,
+      notes:       `SwingTrade | Target:$${rec.target} | Stop:$${rec.stopLoss} | R:R ${rec.rrRatio?.toFixed(1)}x | Hold:${rec.holdDays}d`,
+    };
+    state.tradeJournal.unshift(entry);
+    state.cash -= cost;
+    rec.status = 'executed';
+    scheduleSave();
+    pushCashToDb(state.cash);
+    toast(`Executed ${rec.ticker} swing trade — ${rec.qty} shares @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
+    renderPage();
+  });
 }
 
 function dismissDayTradeRec(recId) {

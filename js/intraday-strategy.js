@@ -141,7 +141,11 @@ async function runIntradayScan() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
 
-    state.intraday.recommendations = _buildIntradayRecs(data);
+    // Preserve already-executed recs so open positions remain visible;
+    // replace only pending ones with fresh scan results.
+    const newPending = _buildIntradayRecs(data);
+    const prevExecuted = (state.intraday.recommendations || []).filter(r => r.status === 'executed');
+    state.intraday.recommendations = [...prevExecuted, ...newPending];
     const passed = Object.values(data).filter(d => d.passes).length;
     state.intraday.lastScan = {
       date:        todayStr(),
