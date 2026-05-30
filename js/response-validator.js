@@ -8,6 +8,124 @@
 //   → calls callClaude() up to maxAttempts times, validating each response
 // ============================================================
 
+// ── SELL/TRIM decision-tagging taxonomy ───────────────────────────────────────
+// Three orthogonal dimensions required on every SELL/TRIM rec.
+// Validated by validateSellTags(); error messages fed into the repair prompt.
+
+const SELL_PRIMARY_DRIVERS = new Set([
+  'thesis_broken',       // core reason for buying no longer holds
+  'target_reached',      // price hit or exceeded the entry target
+  'stop_triggered',      // price hit the stop loss
+  'technical_breakdown', // SMA200 lost, BB upper rejection, MACD bearish cross + volume
+  'regime_change',       // macro/sector regime that supported the trade has shifted
+  'better_opportunity',  // capital better deployed elsewhere (requires alternativeTicker)
+  'time_stop',           // hold window elapsed with no progress toward target
+  'risk_management',     // position/sector oversized or portfolio risk metric breached
+  'tax_optimisation',    // tax-loss harvest or CGT discount window
+]);
+
+const SELL_SECONDARY_FACTORS = new Set([
+  'earnings_approaching',   // catalyst risk within hold window
+  'sector_rotation',        // capital rotating out of the sector
+  'franking_captured',      // dividend + franking already received this cycle
+  'unrealised_loss_large',  // loss large enough to consider harvesting (>$500 rule)
+  'held_over_12m',          // CGT discount window active
+  'held_11_to_12m',         // CGT discount window approaching — flag for review
+  'sector_concentration',   // single sector >30% of portfolio
+  'position_oversized',     // single position >15-20% of portfolio
+  'negative_news_flow',     // recent announcements or news sentiment turned negative
+  'peer_outperformance',    // sector peers materially outperforming this name
+  'volume_decline',         // sustained volume drying up — institutional exit signal
+  'dividend_at_risk',       // dividend coverage ratio deteriorating
+]);
+
+const SELL_URGENCY = new Set(['immediate', 'routine', 'monitor']);
+
+// Forbidden combinations — logical contradictions that indicate confused reasoning.
+const SELL_FORBIDDEN_COMBOS = [
+  ['target_reached', 'stop_triggered'],   // can't hit both simultaneously
+  ['time_stop',      'target_reached'],   // time stop implies target NOT hit
+];
+
+// Certain primary drivers require at least one specific secondary tag to be grounded.
+const SELL_REQUIRED_SECONDARY = {
+  tax_optimisation: ['unrealised_loss_large', 'held_over_12m', 'held_11_to_12m'],
+  risk_management:  ['sector_concentration', 'position_oversized'],
+};
+
+/**
+ * validateSellTags — validates the three SELL/TRIM tagging dimensions.
+ * Called from validateRec() for every SELL or TRIM rec.
+ * Returns { ok, errors[] } — errors feed into the auto-repair prompt.
+ */
+function validateSellTags(rec) {
+  const errors = [];
+  const action = (rec.action || '').toUpperCase();
+  if (action !== 'SELL' && action !== 'TRIM') return { ok: true, errors };
+
+  // ── primary_driver: required, must be in closed vocabulary ─────────────────
+  if (!rec.primary_driver) {
+    errors.push('SELL/TRIM requires primary_driver — choose one of: ' + [...SELL_PRIMARY_DRIVERS].join(', '));
+  } else if (!SELL_PRIMARY_DRIVERS.has(rec.primary_driver)) {
+    errors.push(`primary_driver "${rec.primary_driver}" is not in the allowed list. Valid: ${[...SELL_PRIMARY_DRIVERS].join(', ')}`);
+  }
+
+  // ── secondary_factors: optional array, max 3, all from closed vocabulary ───
+  const secondary = Array.isArray(rec.secondary_factors) ? rec.secondary_factors : [];
+  if (secondary.length > 3) {
+    errors.push(`secondary_factors has ${secondary.length} entries — maximum is 3. Remove the least specific tags.`);
+  }
+  for (const tag of secondary) {
+    if (!SELL_SECONDARY_FACTORS.has(tag)) {
+      errors.push(`secondary_factors "${tag}" not in allowed list. Valid: ${[...SELL_SECONDARY_FACTORS].join(', ')}`);
+    }
+  }
+
+  // ── urgency: required, must be in closed vocabulary ────────────────────────
+  if (!rec.urgency) {
+    errors.push('SELL/TRIM requires urgency — one of: immediate, routine, monitor');
+  } else if (!SELL_URGENCY.has(rec.urgency)) {
+    errors.push(`urgency "${rec.urgency}" must be one of: immediate, routine, monitor`);
+  }
+
+  // ── forbidden combinations ─────────────────────────────────────────────────
+  const allTags = new Set([rec.primary_driver, ...secondary]);
+  for (const [a, b] of SELL_FORBIDDEN_COMBOS) {
+    if (allTags.has(a) && allTags.has(b)) {
+      errors.push(`forbidden combination: "${a}" and "${b}" cannot both apply — choose the causally upstream one`);
+    }
+  }
+
+  // ── required secondary for certain primaries ───────────────────────────────
+  if (rec.primary_driver && SELL_REQUIRED_SECONDARY[rec.primary_driver]) {
+    const needed = SELL_REQUIRED_SECONDARY[rec.primary_driver];
+    if (!needed.some(t => secondary.includes(t))) {
+      errors.push(`primary_driver "${rec.primary_driver}" requires at least one of: ${needed.join(', ')} in secondary_factors`);
+    }
+  }
+
+  // ── better_opportunity requires an alternativeTicker ──────────────────────
+  if (rec.primary_driver === 'better_opportunity') {
+    if (!rec.alternativeTicker) {
+      errors.push('primary_driver "better_opportunity" requires alternativeTicker — specify the ticker to redeploy capital into');
+    } else if (!/^[A-Z0-9]{2,5}(\.AX)?$/.test(rec.alternativeTicker)) {
+      errors.push(`alternativeTicker "${rec.alternativeTicker}" is not a valid ASX ticker (2-5 uppercase alphanumeric, optional .AX)`);
+    }
+  }
+
+  // ── rationale must reference the primary_driver ────────────────────────────
+  if (rec.primary_driver && rec.reasoning) {
+    const rat    = rec.reasoning.toLowerCase();
+    const needle = rec.primary_driver.replace(/_/g, ' ');
+    const needleRaw = rec.primary_driver;
+    if (!rat.includes(needle) && !rat.includes(needleRaw)) {
+      errors.push(`reasoning must explicitly mention the primary_driver ("${rec.primary_driver}") — currently it does not`);
+    }
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
 // Fields required for actionable recs (BUY/SELL/TRIM/TOP_UP).
 // HOLD recs skip target/stop/qty/priceRange since they describe no trade.
 const REC_SCHEMA = {
@@ -178,6 +296,15 @@ function validateRec(rec) {
       } else {
         allFixed = false;
       }
+    }
+  }
+
+  // SELL/TRIM structured tagging — required dimensions (primary_driver, secondary_factors, urgency)
+  if (action === 'SELL' || action === 'TRIM') {
+    const { ok: sellOk, errors: sellErrors } = validateSellTags(fixed);
+    if (!sellOk) {
+      errors.push(...sellErrors);
+      allFixed = false;   // tag errors require model regeneration, not client-side fix
     }
   }
 

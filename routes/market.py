@@ -722,13 +722,15 @@ def earnings_calendar():
             revenue_growth = safe_float(info.get("revenueGrowth"))
             earnings_quarterly = []
             try:
-                eq = stk.quarterly_earnings
-                if eq is not None and not eq.empty:
-                    for dt, row in eq.tail(4).iterrows():
+                # yfinance ≥0.2.x: earnings_history has epsActual / epsEstimate columns.
+                # quarterly_earnings / earnings were deprecated (fundamentals.py:33 warning).
+                eh = stk.earnings_history
+                if eh is not None and not eh.empty:
+                    for dt, row in eh.tail(4).iterrows():
                         earnings_quarterly.append({
                             "date": str(dt)[:10] if hasattr(dt, '__str__') else str(dt),
-                            "actual": safe_float(row.get("Reported EPS") or row.get("actual")),
-                            "estimate": safe_float(row.get("Estimated EPS") or row.get("estimate")),
+                            "actual":   safe_float(row.get("epsActual")   or row.get("Reported EPS")  or row.get("actual")),
+                            "estimate": safe_float(row.get("epsEstimate") or row.get("Estimated EPS") or row.get("estimate")),
                         })
             except Exception:
                 pass

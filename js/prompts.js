@@ -84,7 +84,45 @@ const ANALYSIS_SYSTEM_PROMPT =
           to compensate for the missing risk metric.
         - If only 3 independent factors are available for a watchlist BUY, cap confidence at 0.65.
 
-  SECTION 2 — ANTI-CHURN RULES
+  SECTION 2 — SELL/TRIM DECISION TAGGING
+
+  Every SELL or TRIM rec MUST include three structured tag fields.
+  These are set at generation time so the learning loop can track which decision
+  drivers actually predict good exits. Claude evaluates the trade rationale and
+  assigns the most causally accurate tags — this is NOT retrospective labelling.
+
+  1. primary_driver (exactly one — the causally upstream reason):
+     thesis_broken       | target_reached      | stop_triggered    | technical_breakdown
+     regime_change       | better_opportunity  | time_stop         | risk_management
+     tax_optimisation
+
+  2. secondary_factors (array of 0–3 from this list):
+     earnings_approaching | sector_rotation    | franking_captured  | unrealised_loss_large
+     held_over_12m        | held_11_to_12m     | sector_concentration | position_oversized
+     negative_news_flow   | peer_outperformance | volume_decline    | dividend_at_risk
+
+  3. urgency (exactly one):
+     immediate — execute today; meaningful risk of waiting
+     routine   — within the next few sessions; no time pressure
+     monitor   — TRIM only; conditions forming but not yet crystallised
+
+  TAGGING RULES:
+  - primary_driver must be the causally upstream reason. If thesis is broken AND target
+    is reached, primary is target_reached ONLY if the thesis is still intact.
+  - secondary_factors capped at 3. More than 3 signals poor signal hygiene.
+  - FORBIDDEN combinations (validation will reject):
+      target_reached + stop_triggered (logically contradictory)
+      time_stop + target_reached (time_stop implies target was NOT hit)
+  - REQUIRED secondary for certain primaries:
+      tax_optimisation → must include one of: unrealised_loss_large, held_over_12m, held_11_to_12m
+      risk_management  → must include one of: sector_concentration, position_oversized
+  - better_opportunity → requires alternativeTicker field (the ticker to redeploy into)
+  - reasoning field must explicitly mention the primary_driver word or phrase.
+  - Use ONLY tags from the lists above. Invented tags will fail validation.
+
+  ─────────────────────────────────────────────────────────────────────────────
+
+  SECTION 2B — ANTI-CHURN RULES
 
   1. If a BUY or TOP_UP was recommended on a ticker within the last 7 calendar days (check RECENT RECOMMENDATION HISTORY), you MUST NOT recommend SELL or TRIM on that same ticker now.
      CATASTROPHE is defined as ONE of the following, with explicit public disclosure:
@@ -276,7 +314,11 @@ const ANALYSIS_SYSTEM_PROMPT =
                               (BUY/TOP_UP: show cash comparison arithmetic per Section 7;
                                SELL/TRIM: (priceRange[0] - holding.avgPrice) x qty - brokerage),
     "taxBenefitEstimate":    number (optional — tax-loss harvest recs only),
-    "grossedUpYield":        number (optional — income recs only, annualised after franking gross-up)
+    "grossedUpYield":        number (optional — income recs only, annualised after franking gross-up),
+    "primary_driver":        string (SELL/TRIM only — required; one of the nine primary drivers),
+    "secondary_factors":     string[] (SELL/TRIM only — 0-3 secondary tags from the allowed list),
+    "urgency":               "immediate" | "routine" | "monitor" (SELL/TRIM only — required),
+    "alternativeTicker":     string (SELL/TRIM only — required when primary_driver = better_opportunity)
   }
   Note: conviction (1–10) is derived client-side as round(confidence × 10) — do NOT include in output.
 

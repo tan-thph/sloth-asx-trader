@@ -238,6 +238,10 @@ _LE_MIGRATIONS = [
     # Sprint 15: Learning Loop Intelligence
     ("success_tags",       "TEXT"),   # comma-sep win tags: catalyst_capture,regime_aligned,confluence_entry,disciplined_hold
     ("checklist_bypasses", "TEXT"),   # comma-sep pre-trade checklist items bypassed at execution
+    # Sprint 29: Structured SELL/TRIM decision tagging (set by Claude at generation time)
+    ("sell_primary_driver",    "TEXT"),  # exactly one: thesis_broken|target_reached|stop_triggered|...
+    ("sell_secondary_factors", "TEXT"),  # 0-3 comma-sep: earnings_approaching|sector_rotation|...
+    ("sell_urgency",           "TEXT"),  # immediate|routine|monitor
 ]
 
 

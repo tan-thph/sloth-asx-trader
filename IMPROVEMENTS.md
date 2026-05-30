@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-29 (Sprints 17–18 shipped)
+**Last Updated:** 2026-05-29 (Sprints 17–27 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -11,7 +11,31 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 
 ---
 
-## 0. Shipped — 2026-05 sprints (through Sprint 18)
+## 0. Shipped — 2026-05 sprints (through Sprint 27)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **Ollama structured outputs (format_schema)** | AI Quality (Sprint 23) | All 6 JSON-producing Ollama endpoints now pass `format_schema` via Ollama's native `format` parameter. Engine constrains token generation at grammar level — valid JSON guaranteed without regex fallback. Schemas: `_SCHEMA_POSTMORTEM`, `_SCHEMA_WIN_TAG`, `_SCHEMA_SYNTHESIS`, `_SCHEMA_EXIT_SYNTHESIS`, `_SCHEMA_PM_SYNTHESIS`, `_SCHEMA_SKILL`. |
+| **ESS calibration gates** | Accuracy (Sprint 23) | All `n≥3` raw count guards replaced with Kish ESS≥2.5. `_ess(subset) = (Σwi)²/Σwi²`. Low-ESS subsets emit warning tokens instead of confidence nudges. Prevents a 4-trade sample dominated by 3 stale 90-day-old entries from appearing statistically reliable. |
+| **Signal flattening for postmortem/skill** | AI Quality (Sprint 23) | `_flatten_entry_signals()` helper — 12 key diagnostic fields in compact pipe-separated format. Reduces postmortem prompt overhead ~200 tokens vs raw JSON dump; improves small-model extraction accuracy. |
+| **Cloud adjudicator provider picker** | UX (Sprint 22) | User can select Gemini, Groq, or Claude API explicitly for adjudication. Provider picker modal when multiple keys configured. Auto-detect still available (Gemini → Groq → Claude). |
+| **Blind adjudication** | AI Quality (Sprint 24) | Random alias swap ("Analyst Alpha"/"Analyst Beta") before building cloud adjudicator prompt. Prevents halo-effect bias where cloud models prefer certain model families by name. `score_alpha`/`score_beta` fields; winner un-swapped via `blind_map`; `blind_swap`/`alias_a`/`alias_b` stored in `phase_4` for audit. |
+| **JS Ollama priority queue** | Reliability (Sprint 24) | `_oqEnqueue(fn, priority)` in `debate-client.js`. HIGH lane for user-initiated calls; LOW lane for auto-triggers. Prevents background auto-postmortems from blocking user's next manual debate call for minutes. |
+| **Skill-weight centering at 5** | Accuracy (Sprint 24) | `_weight()` formula: `max(0.2, min(1.8, sk/5.0))`. Old formula centered at 10 — a skill=8 trade was penalised vs unscored. Now unscored=1.0, neutral skill=1.0, high skill amplified up to 1.8×. |
+| **Hierarchical regime fallbacks** | Accuracy (Sprint 24) | Calibration falls through: specific regime → macro group (bearish/bullish/neutral) → all trades when ESS<2.5. Prevents freshly-transitioned regimes from getting no calibration signal at all. |
+| **Volatility-adaptive half-life** | Accuracy (Sprint 25) | `_HL_MAP` in `_calib_compute()`: panic=20d, bearVolatile=25d, riskOff=30d, sideways=60d, default=45d. Non-default hl shown in calibration block header (`hl=Nd`). |
+| **SQLite startup maintenance** | Reliability (Sprint 25) | `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` in `init_db()`. Non-blocking; prevents index-stat decay and WAL file growth under heavy JSON blob accumulation. |
+| **Phase 6: Calibration quality debate card** | AI Quality (Sprint 26) | `GET /api/debate/calib-quality`. Backend pre-computes binomial SE + Z-scores (`_norm_cdf` via `math.erfc`, no scipy). Prompt presents statistical verdict as immutable fact — model constrained to qualitative failure-tag analysis only. Traffic-light badges (🟢/🟡/🔴) on Learning page. Auto-triggered once daily via `triggerCalibQualityIfStale()` (LOW priority queue). |
+| **Success Patterns UI card** | Analytics (Sprint 27) | Learning page card showing dominant win tags with count, win rate bars, and calibration nudge explanation. Backed by step 6b in `_calib_compute()` and `success_patterns` field in `/api/learning/stats`. 5 supported tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`. |
+| **Success tag calibration nudge** | Accuracy (Sprint 27) | Step 6b in `_calib_compute()` mirrors L2 dominant error check for wins. Emits `✓tag(N/Mwins,ESS=X.X)→lean into this` when ≥33% of tagged wins share a tag and ESS≥2.5. |
+| **Walk-forward backtesting engine** | Accuracy (Sprint 20) | Rolling train/test split + per-fold parameter grid-search. `POST /api/backtest/walk-forward`. Walk-Forward tab in Backtest page. Fold-by-fold table + stitched OOS equity curve + B&H benchmark. |
+| **Factor stability / overfitting guard** | Accuracy (Sprint 21) | K-fold cross-validation of 8 `_score_ticker` signal factors. Information Coefficient (Spearman) in-sample vs OOS. `POST /api/scanner/factor-stability`. Factor Stability tab in Market Scanner. |
+| **Security hygiene** | Reliability (Sprint 21) | gunicorn binds `127.0.0.1:5000` (was `0.0.0.0`). CORS restricted to localhost origins. Security headers: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` added to every response. |
+| **Vitest JS test suite** | Reliability (Sprint 19) | 122 JS unit tests for pure engine files (`quant-engine`, `regime-engine`, `response-validator`, `_detectExitReason`). `npm run test:js`. |
+
+---
+
+## 0a. Shipped — 2026-05 sprints (through Sprint 18)
 
 | Fix / Feature | Area | Detail |
 |---|---|---|
@@ -252,10 +276,9 @@ interface for when yfinance is completely down.
 ### ✓ 3.2 Automated local backups — `S` · ★★★ **SHIPPED**
 Daily backup on startup + daemon thread. Keeps last 7. See §0.
 
-### 3.3 Real frontend tests — `M` · ★★
-The suite only `node --check`s syntax — it can't catch a logic regression like the exit-reason bug.
-Add **Vitest** unit tests for the pure engines (`quant-engine`, `regime-engine`, `response-validator`,
-`learning-loop`, `_detectExitReason`).
+### ✓ 3.3 Real frontend tests — `M` · ★★ **SHIPPED Sprint 19**
+122 Vitest unit tests for pure engine files (`quant-engine`, `regime-engine`, `response-validator`,
+`_detectExitReason` in both `recommendations.js` and `performance.js`). `npm run test:js`. See §0.
 
 ### 3.4 Performance / responsiveness — `S` · ★★
 Several endpoints are slow (macro/polymarket/earnings 3–5 s — see `SLOW` log lines). Parallelise
@@ -304,7 +327,16 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 11. ✓ **Sprint 14 shipped:** signals page candlestick chart, journal monthly P&L bar chart, portfolio sector sidebar (replaced canvas donut), numpy.bool_ JSON serialization fix, Learning Loop table alignment + dark-theme button colors — **all done**.
 12. ✓ **Sprint 17 shipped:** monthly seasonality card (Signals page detail), CGT split auto-adjust with one-click Apply button (Portfolio) — **all done**.
 13. ✓ **Sprint 18 shipped:** `_retryBtn`/`_emptyCard` utils helpers, risk.js error banner + retry, performance.js equity-curve error card, portfolio first-run empty state — **all done**.
-14. **Polish:** §3.3 Vitest tests, §4 UX (mobile/PWA), §3.7 types/modules.
+14. ✓ **Sprint 19 shipped:** Vitest JS test suite (122 tests, `npm run test:js`), `_detectExitReason` cross-file test coverage — **all done**.
+15. ✓ **Sprint 20 shipped:** Walk-forward backtesting engine (`POST /api/backtest/walk-forward`, Walk-Forward tab, fold-by-fold table + OOS equity curve) — **all done**.
+16. ✓ **Sprint 21 shipped:** Factor stability / overfitting guard (`POST /api/scanner/factor-stability`, Factor Stability tab), security hygiene (localhost bind, CORS, security headers) — **all done**.
+17. ✓ **Sprint 22 shipped:** Cloud adjudicator provider picker (Gemini/Groq/Claude, picker modal) — **all done**.
+18. ✓ **Sprint 23 shipped:** Ollama structured outputs (`format_schema`), ESS calibration gates, signal flattening, SQLite timeout 10→30s, Phase 3 docs corrected — **all done**.
+19. ✓ **Sprint 24 shipped:** Blind adjudication, JS Ollama priority queue, skill-weight centering at 5, hierarchical regime fallbacks — **all done**.
+20. ✓ **Sprint 25 shipped:** Volatility-adaptive half-life, SQLite startup maintenance, Phase 6 design spec — **all done**.
+21. ✓ **Sprint 26 shipped:** Phase 6 calibration quality debate card (`GET /api/debate/calib-quality`, traffic-light UI, `triggerCalibQualityIfStale`) — **all done**.
+22. ✓ **Sprint 27 shipped:** Success tag calibration nudge (step 6b in `_calib_compute`), `success_patterns` in stats, Success Patterns UI card — **all done**.
+23. **Polish:** §4 UX (mobile/PWA), §3.7 types/modules, virtual outcomes for skipped recs.
 
 ---
 

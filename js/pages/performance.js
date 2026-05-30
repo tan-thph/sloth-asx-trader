@@ -839,7 +839,14 @@ async function syncClosedTradesToLearningLoop() {
         }),
       });
       const res = await resp.json();
-      if (res.id) { r._learningId = res.id; logged++; }
+      if (res.id) {
+        r._learningId = res.id;
+        // Persist _learningId back onto the original state.recHistory entry so
+        // scheduleSave() writes it and the next Sync doesn't re-log the same trade.
+        const orig = (state.recHistory || []).find(x => x.id === r.id);
+        if (orig) orig._learningId = res.id;
+        logged++;
+      }
     } catch (_) {}
   }
 

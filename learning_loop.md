@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** May 2026 (Sprint 25)
-**Status:** Phases 1–5, 7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–25 improvements applied · Phase 6 & 8 Planned
+**Last Updated:** May 2026 (Sprint 29)
+**Status:** Phases 1–7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–29 improvements applied · Phase 8 Planned
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -83,6 +83,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 3. **Trade Closed** (`performance.js` → `syncClosedTradesToLearningLoop()`)
    - Reconciles journal against `rec_history` and patches outcome for closed trades
    - `exit_reason` also auto-detected here via `_detectExitReason()` (Stage 1)
+   - **After logging a new event, `_learningId` is written back to the original `state.recHistory` entry** (not just the spread copy) before `scheduleSave()` — prevents the same trade from being re-logged as a new event on every subsequent Sync. *(Fixed Sprint 29)*
 
 4. **Manual Trades** — Supported via Branch B (full record creation on SELL/TRIM)
 
@@ -189,26 +190,21 @@ weight = time_decay × sf
 ```
 Centering at 5 means unscored events (`skill_score=NULL`) fall back to `sf=1.0` — identical to a neutral-scored trade. A high-skill trade (score=8) gets `sf=1.6`, amplifying its calibration signal; a low-skill trade (score=2) gets `sf=0.4`, down-weighting lucky wins. The old formula (`max(0.2, skill/10)`) centred at 10 and penalised all scored trades vs unscored, which was backwards. Phase 8 is fully realised once ~20+ scored events exist; the formula is already live (Sprint 24).
 
-**Phase 6: Calibration quality debate — design spec (not yet implemented)**
-A local Ollama model will interpret calibration band deltas (e.g. "target 80%, actual 61%W over 12 trades") and assess whether this represents systemic bias or normal statistical noise.
+**Phase 6: Calibration quality debate card** ✅ *(Sprint 26)*
+`GET /api/debate/calib-quality` — backend pre-calculates binomial SE + Z-scores per confidence band, builds a constrained prompt, calls the local Ollama model, returns per-band verdicts and qualitative analysis. Result cached in `blob_store` key `calib_quality_latest` with date; `force=1` bypasses cache.
 
-*Guard against statistical hallucination:* LLMs, particularly 4B–9B parameter models, cannot reliably assess statistical significance from raw numbers — they will invent plausible-sounding causal narratives for deviations that are pure random variance. The prompt must pre-calculate the noise boundary and present it as an immutable fact:
+*Statistical hallucination guard:* Small local models (4B–9B) invent causal narratives for deviations that are pure random variance. The backend pre-computes significance programmatically (`_norm_cdf(x) = 0.5 × erfc(-x/√2)`) and presents the verdict as an immutable fact. The model cannot override the pre-verdict — it only provides qualitative root-cause analysis:
 
 ```python
-# Backend pre-calculation (Python, not LLM)
-import math
-p_expected = 0.75          # calibrated target win rate
-n = 12                     # trades in band
-se = math.sqrt(p_expected * (1 - p_expected) / n)   # ≈ 0.125 (12.5%)
-actual_wr = 0.63
-z = (actual_wr - p_expected) / se                    # ≈ -0.96
-prob_noise = 2 * (1 - norm_cdf(abs(z)))              # ~34%
+se = math.sqrt(p_exp * (1 - p_exp) / n)
+z  = (actual_wr - p_exp) / se
+p_noise = 2 * (1 - _norm_cdf(abs(z)))   # two-tailed
+# verdict: "noise" if p_noise > 0.15, "signal" if p_noise < 0.05, else "uncertain"
 ```
 
-Prompt template:
-> "The system expected a 75% win rate but achieved 63% over 12 trades. Programmatic analysis shows a 34% probability this 12pp underperformance is pure statistical noise (Z = -0.96, SE = 12.5%). Do NOT attempt to identify a systemic cause if the deviation is within one standard error. Instead, focus only on whether the specific failure tags of the N losses share a common mechanism."
+Prompt instructs: *"Programmatic analysis shows p_noise=34% — do NOT identify a systemic cause. Focus only on whether the specific failure tags of the N losses share a common mechanism."*
 
-This constrains the model to *qualitative root-cause analysis of actual errors*, not arithmetic it will get wrong. Implementation: `GET /api/debate/calib-quality` — backend calculates Z-scores per band, builds the constrained prompt, calls local model.
+Auto-triggered once per day via `triggerCalibQualityIfStale(regime)` in `debate-client.js` (LOW priority) — fires after every Claude analysis call. Cached in `localStorage` by date to prevent redundant backend calls. Manual Refresh button on the Learning page card forces a fresh run (`force=1`).
 
 **Confidence → position sizing (deferred)**
 The quant engine already binds Claude's calibrated confidence to Kelly position sizing via `winProb: r.confidence`. When the calibration block instructs Claude to adjust confidence (e.g. -8pp nudge), that adjusted value flows directly into the Kelly fraction and thus the share count. Adding a second linear multiplier on top would double-discount. Deferred until empirical evidence shows Kelly alone is insufficient to transmit calibration feedback into execution sizes.
@@ -228,6 +224,7 @@ When calibration suppresses Claude's confidence in a regime and recs are skipped
 5. Low-ESS subsets emit a warning token rather than a calibration nudge (Sprint 23)
 6. Warns on low-ESS same-regime data rather than silently omitting (L1 + Sprint 23)
 7. Dominant error type threshold: 33% of losses, min 3 losses (L2, lowered from 40%/4)
+7b. **Dominant success tag nudge** *(Sprint 27):* mirrors L2 for wins. If ≥33% of tagged wins share a success tag and ESS≥2.5, emits `✓tag_name(N/Mwins,ESS=X.X)→lean into this` so Claude can reinforce winning patterns, not just avoid losing ones. Threshold: ≥33% of tagged wins, min 3 wins. Supported tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`.
 8. Per-ticker stats: emits `per-ticker:BHP.AX:62%(Δ+14pp,ESS=3.2)✓strong` for portfolio tickers with >15pp delta vs overall WR (Stage 2 + Sprint 23)
 9. Returns a block labelled with date range + regime for Claude context
 10. Auto-expire (events >120 days old → `expired`) runs on write path only, not on this GET (L3)
@@ -257,6 +254,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 | `GET  /api/debate/adjudicator-status` | Read   | Is a cloud adjudicator configured? Used by UI to enable/disable 🧑‍⚖️ button |
 | `POST /api/debate/staleness`          | Write  | Freshness check for pending recs ≥ 2 days old |
 | `POST /api/debate/skill`              | Write  | Score closed trade outcome quality 0–10 |
+| `GET  /api/debate/calib-quality`      | Read   | Calibration quality debate: pre-computes Z-scores per band, calls Ollama for qualitative root-cause, returns per-band verdicts. Cached in `blob_store.calib_quality_latest`; `?force=1` bypasses cache. *(Sprint 26)* |
 
 ---
 
@@ -265,8 +263,10 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 **Key Sections:**
 - Summary cards (overall win rate, high-confidence WR, prompt version)
 - Calibration accuracy table (per confidence band, decay-weighted, n<5 warnings)
+- **Calibration Quality card** *(Sprint 26):* shows per-band verdict (🟢 noise / 🟡 uncertain / 🔴 signal) with statistical significance badges (Z-score, p_noise, ESS). Ollama's qualitative analysis shown per band. Refresh button forces `force=1` re-run. Auto-triggered once daily after analysis calls via `triggerCalibQualityIfStale()`
 - Regime performance table
 - Prompt version history
+- **Success Patterns card** *(Sprint 27):* two-column layout — left: tag chips with count + win rate bars (color-coded per tag type); right: calibration nudge explanation when a dominant tag was injected into the last calibration block. Tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`
 - Failure Patterns (exit reason distribution + error tag counts, shock excluded)
 - Recent Events table (30 most recent) — features:
   - `outcomeChip` + 🛡 badge if `protective_stop`, 🛡? button if `stop_hit` loss
@@ -300,7 +300,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 
 ## Internal Debate System (Ollama)
 
-**Status:** Phases 1–5, 7 implemented. D1–D7 improvements applied May 2026.
+**Status:** Phases 1–7 implemented. D1–D7 improvements + Sprint 23–27 applied May 2026.
 
 ### Implemented
 - Bull/Bear pre-analysis injected into Claude user message (4h signal-hash cache, keyed on 10 signal fields including 5d/20d returns and ATR%)
@@ -316,8 +316,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 - Debate Engine UI card (primary model, **opposition model**, aggression=none/light/full, Test Debate)
 
 ### Future
-- Phase 6: Calibration quality debate — local model interprets calibration band deltas ("Is this underperformance signal or noise?")
-- Phase 8: Skill-weighted calibration (needs ~20+ scored events to validate weights)
+- Phase 8: Skill-weighted calibration (needs ~20+ scored events to validate weights; formula already live since Sprint 24)
 
 ### Ollama stability rules
 - Bull and bear calls are **sequential** (not concurrent) to avoid VRAM spikes
@@ -327,7 +326,8 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 - **`format_schema` (Sprint 23):** All JSON-producing Ollama calls now pass a JSON Schema via Ollama's native `format` parameter. The inference engine constrains token selection at the grammar level — valid JSON is guaranteed without relying on regex fallback parsers. Schemas: `_SCHEMA_POSTMORTEM`, `_SCHEMA_WIN_TAG`, `_SCHEMA_SYNTHESIS`, `_SCHEMA_EXIT_SYNTHESIS`, `_SCHEMA_PM_SYNTHESIS`, `_SCHEMA_SKILL`. Cloud callers (Groq/Gemini/Claude) are not affected — they receive schema guidance via prompt text.
 - No retry on timeout — fail immediately, caller switches to smaller model
 - Batch concurrency always 1 — Ollama queues internally; external concurrency wastes VRAM
-- **JS priority queue (Sprint 24):** `_oqEnqueue(fn, priority)` in `debate-client.js` enforces a HIGH/LOW semaphore on all Ollama backend calls. HIGH tasks (user-initiated: `fetchDebate`, manual postmortem button) insert before queued LOW tasks. LOW tasks (auto-triggered: `triggerPostmortem`, `fetchSkillScore`, auto `fetchPostmortemDebate`) are queued in arrival order. A running call is never interrupted — the priority only determines insertion point in the waiting queue.
+- **JS priority queue (Sprint 24):** `_oqEnqueue(fn, priority)` in `debate-client.js` enforces a HIGH/LOW semaphore on all Ollama backend calls. HIGH tasks (user-initiated: `fetchDebate`, manual postmortem button) insert before queued LOW tasks. LOW tasks (auto-triggered: `triggerPostmortem`, `fetchSkillScore`, auto `fetchPostmortemDebate`, `triggerCalibQualityIfStale`) are queued in arrival order. A running call is never interrupted — the priority only determines insertion point in the waiting queue.
+- **Auto calibration quality trigger (Sprint 26):** `triggerCalibQualityIfStale(regime)` in `debate-client.js` fires after every `analysis.js` `logRecsToLearningLoop()` call. Checks `localStorage._calibQualityDate` — skips if already run today. Fires `GET /api/debate/calib-quality` as a LOW-priority queued task. Sets the date key on success so it runs at most once per calendar day.
 
 ### Model priority (Auto selection)
 `preferredDebateModel()` selects from pulled models in this order:
@@ -588,6 +588,11 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | SQLite `PRAGMA optimize` + `wal_checkpoint(PASSIVE)` on startup | Accumulating JSON blobs (debate transcripts, call logs) degrade query planner statistics and grow the WAL file. Both pragmas are non-blocking and complete in ms — zero runtime cost |
 | Phase 6 pre-calculates Z-scores before LLM prompt | Small local models invent causal narratives for deviations that are pure noise. Pre-computing binomial SE and presenting the significance verdict as a fact constrains the model to qualitative analysis of actual failure tags |
 | Confidence → Kelly binding (not a second multiplier) | `winProb: r.confidence` already feeds calibrated confidence into Kelly sizing. A second linear multiplier would double-discount and over-suppress trades. Kelly alone transmits calibration feedback mechanically |
+| Combined skill + success-tag call (Sprint 28) | Running two sequential Ollama calls for wins (skill score + tag-win) doubles the LOW-priority queue depth. The model sees the same trade context for both tasks; combining into one call with `success_tags` as optional JSON field is equivalent quality at half the cost |
+| Regime-specific decay interpretation (Sprint 28) | Global decay could be driven entirely by poor performance in non-current regimes. If the current regime is stable (|delta|<8pp vs all-time), Claude should not apply a blanket 30% size reduction — that would penalise a strategy that's actually working in the present conditions |
+| SELL/TRIM tags provided by Claude at generation time (Sprint 29) | Post-hoc LLM tagging creates self-justification bias: the model reads its own closed trade and rationalises it. Tagging at generation time (before the outcome is known) forces honest causal attribution. Ollama remains the postmortem agent for closed trades — it reads outcomes without prior knowledge of the original rationale |
+| Closed tag vocabularies for SELL/TRIM (Sprint 29) | Open-ended strings would produce inconsistent tags (e.g. "target reached" vs "price hit target" vs "hit my target"). Closed sets allow reliable GROUP BY queries on `sell_primary_driver` to answer: *which exit reasons actually predict good exits?* |
+| `better_opportunity` requires `alternativeTicker` (Sprint 29) | An opportunity claim that names no alternative is unverifiable and untrackable. Requiring the ticker lets the learning loop later cross-check whether the "better" ticker actually performed better post-sell |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
 | Lessons Database deferred | Needs proper design: what is a "lesson"? How injected? Until defined, premature to implement. |
 
@@ -619,6 +624,21 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **SQLite startup maintenance:** `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` added to `init_db()` in `db.py`; runs non-blocking on every server start
   - **Phase 6 design spec documented:** binomial SE pre-calculation as statistical hallucination guard; prompt template constraining model to qualitative failure-tag analysis only
   - **Confidence → sizing analysis:** Kelly already binds calibrated confidence to position size via `winProb`; second multiplier deferred as double-discount risk
+- **Sprint 26 (May 2026):**
+  - **Phase 6 implemented:** `GET /api/debate/calib-quality` in `routes/debate.py`. `_norm_cdf(x)` using `math.erfc` (no scipy). `_calib_bands_raw(regime, days)` fetches recent bands. `_calib_quality_prompt(bands)` builds constrained prompt with pre-computed Z-scores, p_noise, immutable verdict facts. `_SCHEMA_CALIB_QUALITY` JSON schema enforces Ollama output. Result cached to `blob_store.calib_quality_latest`. `force=1` query param bypasses cache
+  - **Learning page Calibration Quality card:** `renderCalibQualityCard()` async function; traffic-light badges (🟢/🟡/🔴); Refresh button wired to `._force()` call; auto-called in `renderLearningPage`
+  - **Auto-trigger:** `triggerCalibQualityIfStale(regime)` added to `debate-client.js`; called from `analysis.js` after `logRecsToLearningLoop()`; LOW priority queue; localStorage date guard prevents >1 run/day
+- **Sprint 27 (May 2026):**
+  - **Success tag calibration nudge:** Step 6b in `_calib_compute()`. Queries `success_tags` from closed win events. If ≥33% of tagged wins share a tag and ESS≥2.5, emits `✓tag(N/Mwins,ESS=X.X)→lean into this` in the calibration block
+  - **`success_patterns` in stats:** `/api/learning/stats` now returns `success_patterns: {tag: {wins, total, win_rate}}` for all 5 supported tags with ≥1 win
+  - **Success Patterns UI card:** inserted between Failure Patterns and Recent Events in Learning page; two-column layout (tag chips + bar chart left, calibration nudge explanation right); 5 tags with distinct colors from `WIN_TAG_META`
+- **Sprint 28 (May 2026):**
+  - **Combined skill + success-tag call:** `debate_skill()` now also populates `success_tags` for wins in the same Ollama call. `_SCHEMA_SKILL` extended with optional `success_tags` property. Prompt conditionally adds tag guidance + example only when `outcome == 'win'`. Tags validated against `VALID_WIN_TAGS` before DB write. Saves one Ollama round-trip vs the separate `tag-win` endpoint
+  - **Regime-specific decay interpretation:** Section 4 of `_calib_compute()` now sub-checks the current regime when global decay (`Δ<-15pp`) is detected. If ≥3 recent same-regime trades exist and |regime_delta|<8pp, emits `...but {regime}:XX%stable→likely-regime-exposure(not universal decay)` instead of the generic reduce-posn instruction. Helps Claude distinguish a universal strategy breakdown from under-performance concentrated in other regimes
+- **Sprint 29 (May 2026):**
+  - **SELL/TRIM structured decision tagging:** Three new DB columns (`sell_primary_driver`, `sell_secondary_factors`, `sell_urgency`) added via `_LE_MIGRATIONS`. Claude declares tags at SELL/TRIM generation time — before outcome is known — to avoid self-justification bias. 9 primary drivers (closed vocabulary), 12 secondary factors (0–3), 3 urgency levels. `validateSellTags()` added to `response-validator.js` and wired into `validateRec()` for SELL/TRIM; enforces forbidden combos, required-secondary rules, and `alternativeTicker` presence for `better_opportunity`. Tags logged to backend via `logRecsToLearningLoop()` and rendered as a colour-coded strip on SELL/TRIM rec cards. Ollama postmortem remains the separate agent for closed-trade analysis
+  - **Sync to Learning Loop duplicate fix:** `syncClosedTradesToLearningLoop()` was setting `r._learningId = res.id` on a spread copy of the `recHistory` entry, not the original. `scheduleSave()` then persisted the unchanged original (still lacking `_learningId`), causing every subsequent Sync to re-log the same trades as new events and inflate calibration stats. Fixed by also writing `_learningId` back to the matching `state.recHistory` entry before `scheduleSave()`
+  - **`quarterly_earnings` deprecation fix:** `routes/market.py` earnings calendar switched from deprecated `stk.quarterly_earnings` to `stk.earnings_history` (yfinance ≥0.2.x). Column name mapping updated: `epsActual`/`epsEstimate` (new) with `Reported EPS`/`Estimated EPS` as fallbacks
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
 - **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
 - **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.
@@ -641,6 +661,6 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 ## Next Milestones
 
 1. Accumulate ~20+ `skill_score` values — skill-weighted calibration formula is already live; full coverage needed for it to differentiate meaningfully (Phase 8)
-2. Phase 6: Calibration quality debate card — implement `GET /api/debate/calib-quality`; backend pre-calculates binomial SE + Z-scores per band, builds constrained prompt, calls local model; spec documented above
-3. Virtual outcomes for skipped recs — paper-trade `was_executed=0` events to break potential pessimism loops (deferred Sprint)
+2. ✅ Phase 6: Calibration quality debate card — implemented Sprint 26. `GET /api/debate/calib-quality` live; Z-scores pre-computed server-side; Learning page card with traffic-light verdicts; auto-triggered daily
+3. Virtual outcomes for skipped recs — paper-trade `was_executed=0` events to break potential pessimism loops (deferred)
 4. Structured Trade Checklist UI form (currently documented as reference only)

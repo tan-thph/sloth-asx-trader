@@ -24,11 +24,27 @@ sloth-asx-trader/
 ├── asx_trading.html        # Single-page app entry point
 ├── asx_trading.css         # All styles
 │
-├── asx_server.py           # Flask backend — routes, DB I/O, market data
-├── indicators.py           # All technical indicator functions + analyse_ticker()
+├── asx_server.py           # Flask bootstrap — blueprint registration, middleware. No routes itself
+├── core.py                 # Shared infra: ttl_cache, fetch_with_retry, HTTP session, constants
+├── db.py                   # SQLite schema, get_db(), init_db(), migrations, backup
+├── indicators.py           # All technical indicators + analyse_ticker() + _score_ticker()
 ├── announcement_engine.py  # ASX announcement fetching, PDF parsing, Gemini scoring
 ├── announcement_routes.py  # Blueprint: /api/announcements/*
 ├── news_engine.py          # News RSS fetching, dedup, LLM classification
+│
+├── routes/
+│   ├── portfolio.py        # /api/cash, /api/db/*, /api/tax/eofy-pack, splits-check
+│   ├── market.py           # /api/analyse, /api/quote, /api/macro, /api/risk, /api/earnings-calendar
+│   ├── learning.py         # /api/learning/* — calibration, stats, outcomes
+│   ├── debate.py           # /api/debate/* — Ollama bull/bear, postmortem, skill, calib-quality
+│   ├── backtest.py         # /api/backtest, /api/backtest/walk-forward, /api/backtest/ai-replay
+│   ├── scanner.py          # /api/market/scan*, /api/scanner/factor-stability
+│   ├── intraday.py         # /api/intraday/* — 5m intraday day-trade strategy
+│   ├── dividends.py        # /api/dividends/*
+│   ├── news.py             # /api/news/*, /api/groq/models, /api/google/models
+│   ├── alerts.py           # /api/alerts/telegram — Telegram bot integration
+│   ├── claude.py           # /api/claude/* — Anthropic proxy (opt-in)
+│   └── import_csv.py       # /api/import/csv — CommSec/SelfWealth CSV parser
 │
 ├── requirements.txt
 │
@@ -265,12 +281,17 @@ Classifies the current market regime from macro data and gates strategy executio
 
 ## `js/learning-loop.js`
 
-Calibration analytics computed client-side from `state.recHistory`. Output is injected into the Claude user message as a deterministic instruction block.
+Client-side calibration wrapper. Calls `GET /api/learning/calibration` for a server-computed, decay-weighted calibration block and injects it into every Claude user message.
 
-- **`computeCalibrationStats()`** — hit rate by confidence band (0.60–0.69, 0.70–0.79, 0.80–0.89, 0.90+), with suggested confidence adjustment per band
-- **`computeRegimePerformance()`** — win rate and avg P&L per market regime (requires `regime` field on closed trades)
-- **`detectStrategyDecay()`** — compares recent 30-day win rate vs all-time; flags decay if delta < −15% with ≥ 5 recent trades
-- **`buildCalibrationPromptBlock()`** — formats all of the above into a Claude-ready instruction string
+- **`fetchCalibrationBlock(regime, sectors, tickers)`** — pulls compact calibration string (30–60 tokens) from backend. Block includes: confidence-band win rates with ESS-gated adjustments, dominant error-type warning, dominant success-tag nudge (Sprint 27), per-ticker stats for portfolio holdings, date range and regime label.
+- Backend (`routes/learning.py`) uses exponential time-decay with volatility-adaptive half-life (panic=20d → calm=60d), Kish ESS≥2.5 gates, and hierarchical regime fallbacks.
+
+## `js/debate-client.js`
+
+Ollama debate, postmortem, skill scoring, and calibration quality wrappers.
+
+- All Ollama calls go through `_oqEnqueue(fn, priority)` — single-concurrency drain with HIGH/LOW priority lanes
+- `triggerCalibQualityIfStale(regime)` — fires `GET /api/debate/calib-quality` once per day (localStorage date guard); LOW priority
 
 ---
 
@@ -321,11 +342,12 @@ Schema + business rule validation on every Claude response. Runs after `parseCla
 - **Recommendations** — BUY / TOP_UP / SELL / TRIM with confidence, rationale, CGT and franking awareness, anti-churn rules
 - **Regime gate** — classifies market regime before every analysis run; blocks new positions in panic markets
 - **Quant engine post-processing** — AI confidence drives Kelly sizing; deterministic code computes final qty/stop/EV
-- **Calibration feedback** — hit rate by confidence band computed from trade history and injected as adjustment instructions
+- **Learning Loop** — every recommendation logged to `ai_learning_events`; calibration feedback (decay-weighted win rates, ESS-gated, regime-adaptive half-life) injected into every user message; success pattern nudge reinforces winning trade setups
+- **Calibration Quality debate** — `GET /api/debate/calib-quality` pre-computes Z-scores per confidence band and sends a statistically-constrained prompt to Ollama; result shown on Learning page with traffic-light verdicts
 - **Dynamic prompt assembly** — core rules cached; optional modules (harvest window, reporting season, high-vol) added per call
-- Prompt caching (`anthropic-beta: prompt-caching-2024-07-31`) for intraday cache hits on static system prompts
+- Prompt caching for intraday cache hits on static system prompts
 - Exponential backoff retry (1 s / 2 s / 4 s) on HTTP 429 / 529 from Anthropic
-- AI response logging to `ai_responses/` directory for debugging
+- AI call logging to `ai_call_log` DB table — full prompt + response browsable via Settings → Recent AI Calls
 
 ### Rules UI (no code editing required)
 - **Recommendations → Rules tab** — all analysis thresholds editable at runtime: confidence floors, R:R ratio, position limits, anti-churn window, CGT months, VaR thresholds, and more

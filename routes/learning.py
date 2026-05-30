@@ -73,8 +73,9 @@ def learning_log():
                      actual_entry_price, actual_exit_price, sector,
                      skill_score, debate_summary, prompt_hash, error_type_source,
                      entry_signals_json, debate_synthesis_winner,
-                     tags, trade_thesis)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     tags, trade_thesis,
+                     sell_primary_driver, sell_secondary_factors, sell_urgency)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -107,6 +108,9 @@ def learning_log():
                 data.get("debate_synthesis_winner"),
                 data.get("tags"),
                 data.get("trade_thesis"),
+                data.get("sell_primary_driver"),
+                data.get("sell_secondary_factors"),
+                data.get("sell_urgency"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -304,7 +308,8 @@ def learning_stats():
                        was_executed, suggested_stop, suggested_target, rr_ratio,
                        holding_period_days, exit_reason, rationale_summary,
                        error_type, error_type_source, debate_summary, skill_score,
-                       postmortem_debate, success_tags, checklist_bypasses
+                       postmortem_debate, success_tags, checklist_bypasses,
+                       sell_primary_driver, sell_secondary_factors, sell_urgency
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
 
@@ -776,12 +781,41 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                 parts.append(f"{sector}:{wr*100:.0f}%(n={len(s_rows)}) ✓strong")
 
         # 4. Strategy decay — recent 30d vs full window; only if clearly decaying (Δ<-15pp, n≥5)
+        # Regime-specific sub-check: if global decay detected, compare current-regime recent trades.
+        # If current regime is stable (|reg_delta|<8pp), the decay is likely regime-exposure
+        # (under-performance in other regimes) rather than a universal strategy breakdown.
         recent_rows = [r for r in rows if r["timestamp"] >= cutoff_30]
         if len(recent_rows) >= 5 and n >= 10:
-            all_wr = _wwr(rows)
-            rec_wr = _wwr(recent_rows)
-            if (rec_wr - all_wr) < -0.15:
-                parts.append(f"⚠decay:{rec_wr*100:.0f}%recent/{all_wr*100:.0f}%all(Δ{(rec_wr-all_wr)*100:+.0f}pp)→reduce posn 30%")
+            all_wr       = _wwr(rows)
+            rec_wr       = _wwr(recent_rows)
+            global_delta = rec_wr - all_wr
+            if global_delta < -0.15:
+                interpretation_appended = False
+                if regime:
+                    reg_recent = [r for r in recent_rows if (r.get("regime") or "") == regime]
+                    if len(reg_recent) >= 3:
+                        reg_wr    = _wwr(reg_recent)
+                        reg_delta = reg_wr - all_wr
+                        if abs(reg_delta) < 0.08:
+                            parts.append(
+                                f"⚠decay:{rec_wr*100:.0f}%recent/{all_wr*100:.0f}%all"
+                                f"(Δ{global_delta*100:+.0f}pp)"
+                                f" but {regime}:{reg_wr*100:.0f}%stable"
+                                f"→likely-regime-exposure(not universal decay)"
+                            )
+                        else:
+                            parts.append(
+                                f"⚠decay:{rec_wr*100:.0f}%recent/{all_wr*100:.0f}%all"
+                                f"(Δ{global_delta*100:+.0f}pp)"
+                                f",{regime}:{reg_wr*100:.0f}%(Δ{reg_delta*100:+.0f}pp)"
+                                f"→reduce posn 30%"
+                            )
+                        interpretation_appended = True
+                if not interpretation_appended:
+                    parts.append(
+                        f"⚠decay:{rec_wr*100:.0f}%recent/{all_wr*100:.0f}%all"
+                        f"(Δ{global_delta*100:+.0f}pp)→reduce posn 30%"
+                    )
 
         # 5. R:R accuracy — n≥5 high-R:R with clear underperformance
         hi_rr = [r for r in rows if (r["rr_ratio"] or 0) >= 2.0]

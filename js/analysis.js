@@ -984,6 +984,13 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         debate_summary:           _debateSummary,
         entry_signals_json,
         debate_synthesis_winner,
+        // Sprint 29: SELL/TRIM structured decision tags (set by Claude at generation time)
+        ...(r.action === 'SELL' || r.action === 'TRIM' ? {
+          sell_primary_driver:    r.primary_driver    ?? null,
+          sell_secondary_factors: Array.isArray(r.secondary_factors)
+            ? r.secondary_factors.join(',') : (r.secondary_factors ?? null),
+          sell_urgency:           r.urgency           ?? null,
+        } : {}),
       };
       const resp = await fetch(`${API}/api/learning/log`, {
         method:  'POST',

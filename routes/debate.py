@@ -90,8 +90,9 @@ _SCHEMA_PM_SYNTHESIS = {
 _SCHEMA_SKILL = {
     "type": "object",
     "properties": {
-        "score":  {"type": "number"},
-        "reason": {"type": "string"},
+        "score":        {"type": "number"},
+        "reason":       {"type": "string"},
+        "success_tags": {"type": "string"},   # only populated for wins; empty string for losses/breakeven
     },
     "required": ["score", "reason"],
 }
@@ -543,7 +544,9 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "  For SELL/TRIM → target is set BELOW entry (price falling = thesis confirmed, take profit).\n"
         "  If the summary shows stop BELOW entry for this SELL, the price was stored incorrectly —\n"
         "  do NOT tag 'stop_too_tight' or compute R:R based on that wrong-direction stop.\n"
-        "  R:R for SELL = (entry − target) / (stop − entry) [both distances must be positive].\n\n"
+        "  R:R for SELL = (entry − target) / (stop − entry) [both distances must be positive].\n"
+        "  REGIME CHECK: if the trade summary shows a risk-on or bullish regime, consider whether\n"
+        "  a bearish/exit thesis was appropriate — this is the primary indicator of regime_mismatch.\n\n"
     ) if is_exit else (
         "DIRECTION: This is a BUY/TOP_UP (long) trade.\n"
         "  Stop loss is BELOW entry; target is ABOVE entry.\n"
@@ -822,26 +825,39 @@ def _pm_sanity_check_tags(final_tags: str, row, ev_id: int, label: str = "") -> 
     Post-classification logical-consistency check.
 
     Strips tags that contradict the actual trade numbers:
-      - 'stop_too_tight' is invalid when stop distance from entry > 15% of price.
-        A 43%-from-entry stop is wide, not tight, regardless of what the model said.
-      - 'poor_rr' is invalid when actual R:R ratio >= 2.0. The trade was set up
-        with adequate reward potential; it failed for another reason.
 
-    This catches model self-contradictions (e.g. qwen3.5 calling a 43%-distance
-    stop "too tight" while simultaneously noting the 43% distance in its reason).
+    stop_too_tight
+      • Stripped when stop distance from entry > 15% of price (wide ≠ tight).
+      • Also stripped for SELL/TRIM when stop is BELOW entry — that is a
+        wrong-direction data issue, not a tight-stop error.
+
+    poor_rr
+      • Stripped when R:R ratio >= 2.0 (healthy setup, not a poor-R:R failure).
+      • Stripped when R:R is NULL/uncomputed — tagging poor_rr without a ratio
+        is outcome-bias reasoning, not process analysis.
+
+    overconfident
+      • Stripped when ai_confidence < 0.65.  55% stated confidence is already
+        conservative; calling a low-conviction call "overconfident" is circular
+        (loss ↔ overconfidence).  The threshold is the lower edge of the
+        "high confidence" band in calibration.
 
     Direction-aware: uses absolute stop distance so SELL/BUY both work.
-    Silently no-op when fields are missing.
+    Silently no-ops when fields are missing.
     """
     if not final_tags:
         return final_tags
-    tags  = set(t.strip() for t in final_tags.split(",") if t.strip())
-    entry = row["actual_entry_price"]
-    stop  = row["suggested_stop"]
-    rr    = row["rr_ratio"]
+    tags   = set(t.strip() for t in final_tags.split(",") if t.strip())
+    entry  = row["actual_entry_price"]
+    stop   = row["suggested_stop"]
+    rr     = row["rr_ratio"]
+    conf   = row["ai_confidence"]
+    action = (row["recommendation"] or "BUY").upper()
+    is_exit = action in ("SELL", "TRIM")
 
     stripped = []
 
+    # ── stop_too_tight ────────────────────────────────────────────────────────
     if "stop_too_tight" in tags and entry and stop:
         stop_dist_pct = abs(entry - stop) / entry
         if stop_dist_pct > 0.15:
@@ -849,10 +865,29 @@ def _pm_sanity_check_tags(final_tags: str, row, ev_id: int, label: str = "") -> 
             stripped.append(
                 f"stop_too_tight (stop is {stop_dist_pct:.0%} from entry — wide, not tight)"
             )
+        elif is_exit and stop < entry:
+            # SELL/TRIM: stop should be above entry. Stop below entry is a
+            # data direction error — not a tight-stop problem.
+            tags.discard("stop_too_tight")
+            stripped.append(
+                "stop_too_tight (SELL/TRIM stop is BELOW entry — wrong direction, not tight)"
+            )
 
-    if "poor_rr" in tags and rr is not None and rr >= 2.0:
-        tags.discard("poor_rr")
-        stripped.append(f"poor_rr (R:R={rr:.1f} is healthy, not poor)")
+    # ── poor_rr ───────────────────────────────────────────────────────────────
+    if "poor_rr" in tags:
+        if rr is not None and rr >= 2.0:
+            tags.discard("poor_rr")
+            stripped.append(f"poor_rr (R:R={rr:.1f} is healthy, not poor)")
+        elif rr is None:
+            tags.discard("poor_rr")
+            stripped.append("poor_rr (R:R not computed — cannot assert poor R:R)")
+
+    # ── overconfident ─────────────────────────────────────────────────────────
+    if "overconfident" in tags and conf is not None and conf < 0.65:
+        tags.discard("overconfident")
+        stripped.append(
+            f"overconfident (ai_confidence={conf:.0%} is already conservative — outcome bias)"
+        )
 
     if stripped:
         current_app.logger.info(
@@ -1315,14 +1350,18 @@ def debate_postmortem_debate():
             "No markdown, no explanation outside JSON."
         )
 
-        res_synth = _call_model_any(model_a, synthesis_prompt, timeout=tout,
+        # Run synthesis through model_b (the non-incumbent).
+        # Model A already committed to a position in Phase 1 — asking it to
+        # "neutrally" reconcile is structurally biased toward its own prior.
+        # Model B sees both positions cold and has no prior stake in the outcome.
+        res_synth = _call_model_any(model_b, synthesis_prompt, timeout=tout,
                                     format_schema=_SCHEMA_PM_SYNTHESIS)
         current_app.logger.info(
             f"[PostMortemDebate] event#{ev_id} Phase 3 done ({int((time.time()-t2)*1000)}ms)"
         )
 
         transcript["phase_3"] = {
-            "synthesis_model": model_a,
+            "synthesis_model": model_b,
             "raw": (res_synth.get("text", "")[:600] if res_synth["ok"] else res_synth.get("error", "")),
         }
 
@@ -1798,6 +1837,25 @@ def debate_skill():
 
     entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
 
+    is_win = (outcome == "win")
+
+    win_tag_block = (
+        "\n"
+        "Since this is a WIN, also assign 1-2 success_tags that best describe what went right:\n"
+        "  catalyst_capture  - trade captured a planned earnings/news/dividend event\n"
+        "  regime_aligned    - entry timing was well-matched to the active macro regime\n"
+        "  confluence_entry  - multiple independent indicators aligned cleanly at entry\n"
+        "  disciplined_hold  - held through normal volatility; thesis validated\n"
+        "  good_sizing       - position size was appropriate for conviction and risk\n"
+        '  none              - ONLY if the win appears primarily luck-driven\n'
+    ) if is_win else ""
+
+    json_example = (
+        '{"score":7,"reason":"one sentence","success_tags":"regime_aligned,confluence_entry"}'
+        if is_win else
+        '{"score":7,"reason":"one sentence","success_tags":""}'
+    )
+
     prompt = (
         f"ASX closed trade: {summary}\n"
         + (f"Original AI reasoning: {rationale}\n" if rationale else "")
@@ -1808,8 +1866,8 @@ def debate_skill():
         "  0 = pure luck / random market movement\n"
         "  5 = mixed — analysis was reasonable but luck played a role\n"
         " 10 = outcome fully explained by the signals and thesis\n"
-        "\n"
-        'Reply with JSON only: {"skill_score":7,"reason":"one sentence"}\n'
+        + win_tag_block
+        + f"\nReply with JSON only: {json_example}\n"
         "No markdown."
     )
 
@@ -1827,14 +1885,19 @@ def debate_skill():
     raw = re.sub(r"\n?```$",       "", raw)
     try:
         parsed     = json.loads(raw)
-        skill_raw  = parsed.get("skill_score")
+        skill_raw  = parsed.get("skill_score") or parsed.get("score")
         reason     = parsed.get("reason", "")
+        stags_raw  = parsed.get("success_tags", "") if is_win else ""
     except Exception:
         # Fallback 1: JSON field anywhere in text
         m         = re.search(r'"skill_score"\s*:\s*([0-9.]+)', raw)
+        if not m:
+            m     = re.search(r'"score"\s*:\s*([0-9.]+)', raw)
         skill_raw = float(m.group(1)) if m else None
         m2        = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
         reason    = m2.group(1) if m2 else ""
+        ms        = re.search(r'"success_tags"\s*:\s*"([^"]*)"', raw)
+        stags_raw = ms.group(1) if (ms and is_win) else ""
         # Fallback 2: prose forms — "7/10", "7 out of 10", "score: 7"
         if skill_raw is None:
             m3 = re.search(r'\b(\d+(?:\.\d+)?)\s*/\s*10\b', raw)
@@ -1853,25 +1916,40 @@ def debate_skill():
         return jsonify({"ok": False,
                         "error": f"Could not parse skill_score from model output: {raw[:120]!r}"})
 
+    # Validate and clean any success tags returned for wins
+    success_tags_str: str | None = None
+    if is_win and stags_raw:
+        raw_tags = [t.strip() for t in stags_raw.replace(";", ",").split(",") if t.strip()]
+        valid    = [t for t in raw_tags if t in VALID_WIN_TAGS and t != "none"]
+        success_tags_str = ",".join(valid) if valid else None
+
     try:
         with get_db() as conn:
-            conn.execute(
-                "UPDATE ai_learning_events SET skill_score=? WHERE id=?",
-                (round(skill_score, 1), ev_id)
-            )
+            if success_tags_str:
+                conn.execute(
+                    "UPDATE ai_learning_events SET skill_score=?, success_tags=? WHERE id=?",
+                    (round(skill_score, 1), success_tags_str, ev_id)
+                )
+            else:
+                conn.execute(
+                    "UPDATE ai_learning_events SET skill_score=? WHERE id=?",
+                    (round(skill_score, 1), ev_id)
+                )
+        log_suffix = (f" | tags:{success_tags_str}" if success_tags_str else "") + \
+                     (f" | {reason[:60]}" if reason else "")
         current_app.logger.info(
-            f"[Skill] event#{ev_id} ({row['ticker']}) → {skill_score:.1f}/10 via {model}"
-            + (f" | {reason[:60]}" if reason else "")
+            f"[Skill] event#{ev_id} ({row['ticker']}) → {skill_score:.1f}/10 via {model}{log_suffix}"
         )
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
 
     return jsonify({
-        "ok":          True,
-        "id":          ev_id,
-        "skill_score": round(skill_score, 1),
-        "reason":      reason,
-        "model":       model,
+        "ok":           True,
+        "id":           ev_id,
+        "skill_score":  round(skill_score, 1),
+        "reason":       reason,
+        "success_tags": success_tags_str or "",
+        "model":        model,
     })
 
 

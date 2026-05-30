@@ -406,6 +406,30 @@ function renderPendingRecs(recs) {
         <span class="text-xs">${qtyLine}</span>
       </div>
 
+      <!-- SELL/TRIM decision tags (primary_driver · secondary_factors · urgency) -->
+      ${isReducing && r.primary_driver ? (() => {
+        const URGENCY_STYLE = {
+          immediate: 'background:#fef2f2;color:#dc2626;border:1px solid #fca5a5',
+          routine:   'background:#f0fdf4;color:#16a34a;border:1px solid #86efac',
+          monitor:   'background:#fefce8;color:#ca8a04;border:1px solid #fde047',
+        };
+        const urgencyStyle = URGENCY_STYLE[r.urgency] || 'background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border-light)';
+        const secondaryChips = (r.secondary_factors || []).map(t =>
+          `<span style="font-size:10px;padding:2px 7px;background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:3px;color:var(--text-secondary)">${t.replace(/_/g,' ')}</span>`
+        ).join('');
+        const altTickerBadge = r.alternativeTicker
+          ? `<span style="font-size:10px;padding:2px 7px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:3px;color:#1d4ed8" title="Redeploy into ${r.alternativeTicker}">→ ${r.alternativeTicker}</span>`
+          : '';
+        return `
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:7px 10px;background:var(--bg-secondary);border-radius:var(--radius-md);margin-bottom:8px;border-left:3px solid #f59e0b">
+          <span style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-right:2px">Sell reason</span>
+          <span style="font-size:11px;font-weight:600;padding:2px 8px;background:#fff7ed;border:1px solid #fed7aa;border-radius:3px;color:#c2410c">${r.primary_driver.replace(/_/g,' ')}</span>
+          ${secondaryChips}
+          ${altTickerBadge}
+          <span style="margin-left:auto;font-size:10px;font-weight:600;padding:2px 8px;border-radius:3px;${urgencyStyle}">${r.urgency || '?'}</span>
+        </div>`;
+      })() : ''}
+
       <!-- Reasoning -->
       <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md);font-size:13px;line-height:1.65;margin-bottom:8px">
         <strong>Reasoning:</strong> ${escapeHTML(r.reasoning)}

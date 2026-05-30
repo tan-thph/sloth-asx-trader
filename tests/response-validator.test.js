@@ -36,11 +36,15 @@ describe('validateRec — valid recs pass', () => {
 
   it('passes a clean SELL rec', () => {
     const { valid } = validateRec(makeRec({
-      action:     'SELL',
-      priceRange: [44.00, 44.50],
-      target:     42.00,   // below entry for SELL
-      stopLoss:   45.50,   // above entry for SELL
-      rrRatio:    1.5,     // R:R check only applies to BUY/TOP_UP
+      action:           'SELL',
+      priceRange:       [44.00, 44.50],
+      target:           42.00,   // below entry for SELL
+      stopLoss:         45.50,   // above entry for SELL
+      rrRatio:          1.5,     // R:R check only applies to BUY/TOP_UP
+      primary_driver:   'thesis_broken',
+      secondary_factors: ['negative_news_flow'],
+      urgency:          'immediate',
+      reasoning:        'thesis broken — guidance cut and multiple downgrades',
     }));
     expect(valid).toBe(true);
   });
@@ -65,10 +69,14 @@ describe('validateRec — valid recs pass', () => {
 
   it('passes a TRIM rec', () => {
     const { valid } = validateRec(makeRec({
-      action:     'TRIM',
-      target:     42.00,
-      stopLoss:   45.50,
-      rrRatio:    1.5,
+      action:           'TRIM',
+      target:           42.00,
+      stopLoss:         45.50,
+      rrRatio:          1.5,
+      primary_driver:   'target_reached',
+      secondary_factors: ['position_oversized'],
+      urgency:          'routine',
+      reasoning:        'target reached — position is oversized, trim to rebalance',
     }));
     expect(valid).toBe(true);
   });
@@ -170,10 +178,14 @@ describe('validateRec — business rules', () => {
 
   it('does NOT apply rrRatio check to SELL/TRIM', () => {
     const { valid } = validateRec(makeRec({
-      action:   'SELL',
-      target:   42.00,
-      stopLoss: 45.50,
-      rrRatio:  1.5,    // < 2.0 but rule only applies to BUY/TOP_UP
+      action:          'SELL',
+      target:          42.00,
+      stopLoss:        45.50,
+      rrRatio:         1.5,    // < 2.0 but rule only applies to BUY/TOP_UP
+      primary_driver:  'thesis_broken',
+      secondary_factors: [],
+      urgency:         'immediate',
+      reasoning:       'thesis broken — downgrade and earnings miss',
     }));
     expect(valid).toBe(true);
   });

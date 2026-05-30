@@ -2852,7 +2852,8 @@ class TestSprint19VitestInfrastructure(unittest.TestCase):
         import subprocess, sys
         result = subprocess.run(
             "npm run test:js",
-            capture_output=True, text=True, cwd=ROOT, shell=True
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=ROOT, shell=True
         )
         self.assertEqual(result.returncode, 0,
             f"Vitest suite failed:\n{result.stdout[-3000:]}\n{result.stderr[-1000:]}")
@@ -3008,6 +3009,357 @@ class TestPhase6CalibQuality(unittest.TestCase):
             src = f.read()
         self.assertIn("triggerCalibQualityIfStale", src)
         self.assertIn("LOW", src)
+
+
+class TestSanityCheckHardening(unittest.TestCase):
+    """_pm_sanity_check_tags — new guards for overconfident, poor_rr(null), SELL/TRIM stop direction."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+
+    def setUp(self):
+        # _pm_sanity_check_tags calls current_app.logger — needs app context
+        self._ctx = asx_server.app.app_context()
+        self._ctx.push()
+        from routes.debate import _pm_sanity_check_tags
+        self._check = _pm_sanity_check_tags
+
+    def tearDown(self):
+        self._ctx.pop()
+
+    def _row(self, **kwargs):
+        base = {
+            "actual_entry_price": 85.50,
+            "suggested_stop":     76.00,
+            "rr_ratio":           None,
+            "ai_confidence":      0.55,
+            "recommendation":     "TRIM",
+        }
+        base.update(kwargs)
+        return base
+
+    # overconfident at low confidence ─────────────────────────────────────────
+
+    def test_overconfident_stripped_below_065(self):
+        row = self._row(ai_confidence=0.55, recommendation="BUY",
+                        actual_entry_price=10.0, suggested_stop=9.0)
+        result = self._check("overconfident,poor_entry", row, 1)
+        self.assertNotIn("overconfident", result)
+        self.assertIn("poor_entry", result)
+
+    def test_overconfident_kept_above_065(self):
+        row = self._row(ai_confidence=0.80, recommendation="BUY",
+                        actual_entry_price=10.0, suggested_stop=9.5, rr_ratio=1.5)
+        result = self._check("overconfident", row, 2)
+        self.assertIn("overconfident", result)
+
+    def test_overconfident_kept_when_conf_missing(self):
+        """If ai_confidence is None, do not strip (can't assert it's low)."""
+        row = self._row(ai_confidence=None, recommendation="BUY",
+                        actual_entry_price=10.0, suggested_stop=9.5)
+        result = self._check("overconfident", row, 3)
+        self.assertIn("overconfident", result)
+
+    # poor_rr when rr_ratio is NULL ───────────────────────────────────────────
+
+    def test_poor_rr_stripped_when_rr_null(self):
+        row = self._row(rr_ratio=None, recommendation="BUY",
+                        actual_entry_price=10.0, suggested_stop=9.5)
+        result = self._check("poor_rr,poor_entry", row, 4)
+        self.assertNotIn("poor_rr", result)
+        self.assertIn("poor_entry", result)
+
+    def test_poor_rr_kept_when_rr_below_2(self):
+        row = self._row(rr_ratio=1.2, recommendation="BUY",
+                        actual_entry_price=10.0, suggested_stop=9.5)
+        result = self._check("poor_rr", row, 5)
+        self.assertIn("poor_rr", result)
+
+    # SELL/TRIM stop below entry suppresses stop_too_tight ───────────────────
+
+    def test_stop_too_tight_stripped_for_sell_stop_below_entry(self):
+        """SELL/TRIM with stop below entry → wrong direction, not tight."""
+        row = self._row(recommendation="TRIM",
+                        actual_entry_price=85.50, suggested_stop=76.00)  # stop < entry
+        result = self._check("stop_too_tight", row, 6)
+        self.assertNotIn("stop_too_tight", result)
+
+    def test_stop_too_tight_kept_for_sell_stop_above_entry(self):
+        """SELL with stop correctly above entry and distance ≤15% → tag valid."""
+        row = self._row(recommendation="SELL",
+                        actual_entry_price=85.50, suggested_stop=90.00)  # stop > entry, ~5%
+        result = self._check("stop_too_tight", row, 7)
+        self.assertIn("stop_too_tight", result)
+
+    def test_stop_too_tight_stripped_for_buy_wide_stop(self):
+        """BUY with stop 20% away → still stripped (existing rule)."""
+        row = self._row(recommendation="BUY",
+                        actual_entry_price=10.0, suggested_stop=8.0)  # 20% away
+        result = self._check("stop_too_tight", row, 8)
+        self.assertNotIn("stop_too_tight", result)
+
+    # SELL/TRIM regime_mismatch hint in prompt ────────────────────────────────
+
+    def test_pm_build_prompt_includes_regime_check_for_sell(self):
+        """_pm_build_prompt must include regime_mismatch hint for SELL/TRIM."""
+        from routes.debate import _pm_build_prompt
+        prompt = _pm_build_prompt("TRIM WES LOSS | regime=riskOn", "", "", action="TRIM")
+        self.assertIn("REGIME CHECK", prompt)
+        self.assertIn("risk-on or bullish regime", prompt)
+        self.assertIn("regime_mismatch", prompt)
+
+    def test_pm_build_prompt_no_regime_hint_for_buy(self):
+        """BUY/TOP_UP prompts must not include SELL-specific regime hint."""
+        from routes.debate import _pm_build_prompt
+        prompt = _pm_build_prompt("BUY BHP LOSS | regime=riskOn", "", "", action="BUY")
+        self.assertNotIn("REGIME CHECK", prompt)
+
+    # Phase 3 synthesis runs through model_b ──────────────────────────────────
+
+    def test_phase3_synthesis_uses_model_b(self):
+        """Phase 3 synthesis must call model_b (non-incumbent) not model_a."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Find the Phase 3 section — use a large enough window to cover the call site
+        phase3_idx = src.index("Phase 3: Neutral synthesis")
+        phase3_src = src[phase3_idx:phase3_idx + 2500]
+        # synthesis call and transcript label must both use model_b
+        self.assertIn("_call_model_any(model_b, synthesis_prompt", phase3_src)
+        self.assertIn('"synthesis_model": model_b', phase3_src)
+        # model_a must NOT be used for the synthesis _call_ (it still appears in prompt text)
+        # Check specifically the call line
+        self.assertNotIn("_call_model_any(model_a, synthesis_prompt", phase3_src)
+
+
+class TestSprint28(unittest.TestCase):
+    """Sprint 28 — combined skill+tag call + regime-specific decay interpretation."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+
+    # ── Skill schema includes success_tags ──────────────────────────────────
+
+    def test_schema_skill_has_success_tags_property(self):
+        """_SCHEMA_SKILL must include success_tags as an optional property."""
+        from routes.debate import _SCHEMA_SKILL
+        self.assertIn("success_tags", _SCHEMA_SKILL["properties"])
+        # success_tags must NOT be in required (it's optional — empty for losses)
+        self.assertNotIn("success_tags", _SCHEMA_SKILL.get("required", []))
+
+    def test_skill_prompt_includes_win_tag_guidance_for_wins(self):
+        """debate_skill prompt must ask for success_tags when outcome is win."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # The win_tag_block must include the tag options
+        self.assertIn("catalyst_capture", src)
+        self.assertIn("good_sizing", src)
+        # Combined example must show success_tags key
+        self.assertIn('"success_tags"', src)
+        # Prompt must guard win-only section behind is_win check
+        self.assertIn("is_win", src)
+
+    def test_skill_endpoint_returns_success_tags_field(self):
+        """/api/debate/skill jsonify call must include success_tags key."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # The jsonify return dict must include success_tags
+        self.assertIn('"success_tags":', src)
+        # Specifically the return from debate_skill (not just tag-win endpoint)
+        # Verify it appears after the skill_score key in the source
+        skill_fn_idx = src.index("def debate_skill()")
+        skill_fn_src = src[skill_fn_idx:skill_fn_idx + 3000]
+        self.assertIn('"success_tags":', skill_fn_src)
+
+    def test_skill_db_write_stores_success_tags_for_wins(self):
+        """debate_skill must write success_tags to DB when they are non-empty."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # DB write for wins must include success_tags= column
+        self.assertIn("SET skill_score=?, success_tags=? WHERE id=?", src)
+        # Validation must use VALID_WIN_TAGS to filter returned tags
+        self.assertIn("VALID_WIN_TAGS", src)
+
+    # ── Regime-specific decay interpretation ────────────────────────────────
+
+    def test_calib_decay_regime_exposure_branch_exists(self):
+        """_calib_compute must emit 'likely-regime-exposure' when global decay
+        is detected but the current regime is stable."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("likely-regime-exposure", src)
+        self.assertIn("not universal decay", src)
+
+    def test_calib_decay_regime_stable_threshold(self):
+        """Regime stability threshold must be abs(reg_delta) < 0.08."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("abs(reg_delta) < 0.08", src)
+
+    def test_calib_decay_fallback_when_no_regime(self):
+        """When regime is None, decay message must not include regime-exposure text."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # The fallback (no regime) path must still emit the reduce-posn message
+        self.assertIn("reduce posn 30%", src)
+        # The fallback must be gated: 'if not interpretation_appended'
+        self.assertIn("interpretation_appended", src)
+
+    def test_calib_decay_requires_3_regime_trades_for_interpretation(self):
+        """Regime sub-check must require at least 3 recent same-regime trades."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("len(reg_recent) >= 3", src)
+
+
+class TestSprint29SellTrimTagging(unittest.TestCase):
+    """Sprint 29 — structured SELL/TRIM decision tagging."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+
+    # ── DB schema ────────────────────────────────────────────────────────────
+
+    def test_db_columns_exist(self):
+        """sell_primary_driver / sell_secondary_factors / sell_urgency must exist in DB."""
+        from db import get_db
+        with get_db() as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_learning_events)").fetchall()}
+        self.assertIn("sell_primary_driver",    cols)
+        self.assertIn("sell_secondary_factors", cols)
+        self.assertIn("sell_urgency",           cols)
+
+    # ── Learning log endpoint accepts new fields ──────────────────────────────
+
+    def test_log_endpoint_accepts_sell_tags(self):
+        """POST /api/learning/log must store sell_primary_driver for a SELL event."""
+        r = self.client.post("/api/learning/log", json={
+            "event_type":         "recommendation",
+            "ticker":             "CSL.AX",
+            "recommendation":     "SELL",
+            "ai_confidence":      0.65,
+            "regime":             "riskOn",
+            "sell_primary_driver":    "thesis_broken",
+            "sell_secondary_factors": "negative_news_flow,earnings_approaching",
+            "sell_urgency":           "immediate",
+        })
+        data = json.loads(r.data)
+        self.assertTrue(data["ok"])
+        ev_id = data["id"]
+        # Verify stored
+        from db import get_db
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT sell_primary_driver, sell_secondary_factors, sell_urgency FROM ai_learning_events WHERE id=?",
+                (ev_id,)
+            ).fetchone()
+        self.assertEqual(row["sell_primary_driver"],    "thesis_broken")
+        self.assertEqual(row["sell_secondary_factors"], "negative_news_flow,earnings_approaching")
+        self.assertEqual(row["sell_urgency"],           "immediate")
+
+    # ── JS validator constants ────────────────────────────────────────────────
+
+    def test_validator_defines_sell_constants(self):
+        """response-validator.js must define the three sell tag constants."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("SELL_PRIMARY_DRIVERS",    src)
+        self.assertIn("SELL_SECONDARY_FACTORS",  src)
+        self.assertIn("SELL_URGENCY",            src)
+        self.assertIn("SELL_FORBIDDEN_COMBOS",   src)
+        self.assertIn("SELL_REQUIRED_SECONDARY", src)
+
+    def test_validator_defines_validateSellTags(self):
+        """validateSellTags must be defined and wired into validateRec."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function validateSellTags", src)
+        # Must be called from validateRec
+        validate_rec_idx = src.index("function validateRec")
+        validate_rec_body = src[validate_rec_idx:validate_rec_idx + 1500]
+        self.assertIn("validateSellTags", validate_rec_body)
+
+    def test_validator_taxonomy_completeness(self):
+        """All nine primary drivers from the spec must be in the validator."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        for driver in ['thesis_broken', 'target_reached', 'stop_triggered',
+                       'technical_breakdown', 'regime_change', 'better_opportunity',
+                       'time_stop', 'risk_management', 'tax_optimisation']:
+            self.assertIn(driver, src, f"Primary driver '{driver}' missing from validator")
+
+    def test_validator_forbidden_combos(self):
+        """Forbidden combinations must be present."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("target_reached", src)
+        self.assertIn("stop_triggered", src)
+        self.assertIn("time_stop",      src)
+        self.assertIn("SELL_FORBIDDEN_COMBOS", src)
+
+    def test_validator_required_secondary_for_tax_optimisation(self):
+        """tax_optimisation must require one of the CGT/harvest secondary tags."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("tax_optimisation", src)
+        self.assertIn("unrealised_loss_large", src)
+        self.assertIn("held_over_12m",         src)
+        self.assertIn("held_11_to_12m",        src)
+
+    def test_validator_better_opportunity_requires_alternative_ticker(self):
+        """better_opportunity must require alternativeTicker."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("better_opportunity", src)
+        self.assertIn("alternativeTicker",  src)
+
+    # ── Prompt includes SELL/TRIM tagging section ─────────────────────────────
+
+    def test_prompt_includes_sell_tagging_section(self):
+        """ANALYSIS_SYSTEM_PROMPT must include the SELL/TRIM decision tagging rules."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("SELL/TRIM DECISION TAGGING", src)
+        self.assertIn("primary_driver",    src)
+        self.assertIn("secondary_factors", src)
+        self.assertIn("urgency",           src)
+        # Forbidden combos documented in prompt
+        self.assertIn("FORBIDDEN", src)
+        # JSON schema updated
+        self.assertIn('"primary_driver"',    src)
+        self.assertIn('"secondary_factors"', src)
+        self.assertIn('"urgency"',           src)
+
+    # ── analysis.js passes sell fields to learning log ────────────────────────
+
+    def test_analysis_passes_sell_fields_to_learning_log(self):
+        """logRecsToLearningLoop must pass sell_primary_driver etc. for SELL/TRIM recs."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("sell_primary_driver",    src)
+        self.assertIn("sell_secondary_factors", src)
+        self.assertIn("sell_urgency",           src)
+        # Must be conditional on SELL/TRIM action
+        self.assertIn("r.action === 'SELL' || r.action === 'TRIM'", src)
+
+    # ── Recommendations page renders sell tags ────────────────────────────────
+
+    def test_recommendations_renders_sell_tags(self):
+        """recommendations.js must render the primary_driver tag strip on SELL/TRIM cards."""
+        with open(os.path.join(ROOT, "js", "pages", "recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("primary_driver",    src)
+        self.assertIn("secondary_factors", src)
+        self.assertIn("Sell reason",       src)
+        self.assertIn("alternativeTicker", src)
+        self.assertIn("urgencyStyle",      src)
 
 
 if __name__ == "__main__":
