@@ -637,6 +637,7 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "current_ratio":          safe_float(info.get("currentRatio")),
         "revenue_growth":         safe_float(info.get("revenueGrowth")),
         "earnings_growth":        safe_float(info.get("earningsGrowth")),
+        "free_cashflow":          safe_float(info.get("freeCashflow")),
         "gross_margin":           safe_float(info.get("grossMargins")),
         "operating_margin":       safe_float(info.get("operatingMargins")),
         "net_margin":             safe_float(info.get("profitMargins")),

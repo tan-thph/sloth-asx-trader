@@ -71,11 +71,15 @@ async function runAnalysis() {
           const d = await r.json();
           state.macroData = {...d, _source:'live'};
           const lines = [];
-          if(d.sp500)   lines.push(`S&P500: ${fmt(d.sp500.value)} (${fmtp(d.sp500.change_pct)})`);
-          if(d.asx200)  lines.push(`ASX200: ${fmt(d.asx200.value)} (${fmtp(d.asx200.change_pct)})`);
-          if(d.gold)    lines.push(`Gold: ${fmt(d.gold.value)} (${fmtp(d.gold.change_pct)})`);
-          if(d.aud_usd) lines.push(`AUD/USD: ${fmt(d.aud_usd.value,4)} (${fmtp(d.aud_usd.change_pct)})`);
-          if(d.vix)     lines.push(`VIX: ${fmt(d.vix.value)}`);
+          if(d.sp500)    lines.push(`S&P500: ${fmt(d.sp500.value)} (${fmtp(d.sp500.change_pct)})`);
+          if(d.asx200)   lines.push(`ASX200: ${fmt(d.asx200.value)} (${fmtp(d.asx200.change_pct)})`);
+          if(d.gold)     lines.push(`Gold: ${fmt(d.gold.value)} (${fmtp(d.gold.change_pct)})`);
+          if(d.aud_usd)  lines.push(`AUD/USD: ${fmt(d.aud_usd.value,4)} (${fmtp(d.aud_usd.change_pct)})`);
+          if(d.vix)      lines.push(`VIX: ${fmt(d.vix.value)}`);
+          if(d.iron_ore) lines.push(`Iron ore: ${fmt(d.iron_ore.value)} (${fmtp(d.iron_ore.change_pct)})`);
+          if(d.oil)      lines.push(`Oil: ${fmt(d.oil.value)} (${fmtp(d.oil.change_pct)})`);
+          if(d.us10y)    lines.push(`US10Y: ${fmt(d.us10y.value,3)}%`);
+          if(d.copper)   lines.push(`Copper: ${fmt(d.copper.value)} (${fmtp(d.copper.change_pct)})`);
           liveCtx = lines.join(' | ');
         }
       }
@@ -151,7 +155,7 @@ async function runAnalysis() {
   Volume: Today=${s.volume_today?.toLocaleString()}, Avg20=${s.volume_avg_20?.toLocaleString()}, Ratio=${s.volume_ratio?.toFixed(2)}x, OBV=${s.obv_trend}, VWAP20=$${s.vwap_20d?.toFixed(3)} (price ${s.price_vs_vwap})
   S/R Pivots: R2=$${sr.r2?.toFixed(3)}, R1=$${sr.r1?.toFixed(3)}, Pivot=$${sr.pivot?.toFixed(3)}, S1=$${sr.s1?.toFixed(3)}, S2=$${sr.s2?.toFixed(3)}
   Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%
-  Fundamentals: PE=${f.pe_ratio?.toFixed(1)||'n/a'}, FwdPE=${f.forward_pe?.toFixed(1)||'n/a'}, PB=${f.pb_ratio?.toFixed(2)||'n/a'}, DivYield=${f.dividend_yield?(f.dividend_yield*100).toFixed(2)+'%':'n/a'}, Beta=${f.beta?.toFixed(2)||'n/a'}, ROE=${f.roe?(f.roe*100).toFixed(1)+'%':'n/a'}
+  Fundamentals: PE=${f.pe_ratio?.toFixed(1)||'n/a'}, FwdPE=${f.forward_pe?.toFixed(1)||'n/a'}, PB=${f.pb_ratio?.toFixed(2)||'n/a'}, DivYield=${f.dividend_yield?(f.dividend_yield*100).toFixed(2)+'%':'n/a'}, Beta=${f.beta?.toFixed(2)||'n/a'}, ROE=${f.roe?(f.roe*100).toFixed(1)+'%':'n/a'}, OpMgn=${f.operating_margin!=null?(f.operating_margin*100).toFixed(1)+'%':'n/a'}, D/E=${f.debt_to_equity?.toFixed(1)||'n/a'}, RevGrowth=${f.revenue_growth!=null?(f.revenue_growth*100).toFixed(1)+'%':'n/a'}, FCFYield=${(f.free_cashflow&&f.market_cap)?((f.free_cashflow/f.market_cap)*100).toFixed(1)+'%':'n/a'}
   52W: High=$${f['52w_high']?.toFixed(3)||'n/a'}, Low=$${f['52w_low']?.toFixed(3)||'n/a'}, FromHigh=${f.pct_from_52w_high?.toFixed(1)||'n/a'}%, Analyst=${f.analyst_recommendation||'n/a'} (target $${f.analyst_target?.toFixed(2)||'n/a'})
   BuySignals: ${(s.buy_signals||[]).join(', ')||'none'} | SellSignals: ${(s.sell_signals||[]).join(', ')||'none'}`;
     }).join('\n');
@@ -217,9 +221,27 @@ async function runAnalysis() {
   const _m = state.macroData;
   // Macro context: omit verbose analysis prose — keyDrivers is sufficient and avoids
   // double-counting narrative already in the cached system prompt. Saves ~300-400 tokens/run.
+  const _macroMktLines = (() => {
+    if (!_m) return '';
+    const fmtp2 = v => v != null ? (v >= 0 ? `+${v.toFixed(1)}%` : `${v.toFixed(1)}%`) : '';
+    const parts = [];
+    if (_m.iron_ore) parts.push(`IronOre=$${fmt(_m.iron_ore.value)}(${fmtp2(_m.iron_ore.change_pct)})`);
+    if (_m.oil)      parts.push(`Oil=$${fmt(_m.oil.value)}(${fmtp2(_m.oil.change_pct)})`);
+    if (_m.copper)   parts.push(`Copper=$${fmt(_m.copper.value)}(${fmtp2(_m.copper.change_pct)})`);
+    if (_m.us10y)    parts.push(`US10Y=${fmt(_m.us10y.value,3)}%`);
+    return parts.length ? `\nCommodities/Rates: ${parts.join(' | ')}` : '';
+  })();
+  const _macroSectorLines = (() => {
+    if (!_m || !_m.sectors) return '';
+    const fmtp2 = v => v != null ? (v >= 0 ? `+${v.toFixed(1)}%` : `${v.toFixed(1)}%`) : '?';
+    const parts = Object.values(_m.sectors).map(s =>
+      `${s.label}:${fmtp2(s.change_1d)}(5d${fmtp2(s.return_5d)})`
+    );
+    return parts.length ? `\nASX Sectors(1D/5D): ${parts.join(' | ')}` : '';
+  })();
   const macroCtx = _m ? `\n\nTODAY'S MACRO BRIEF (${state.macroDate||todayStr()}):
 Sentiment: ${_m.sentiment||'n/a'} | Bullish: ${_m.bullish!=null?_m.bullish+'/100':'n/a'} | Conf: ${_m.sentimentConf!=null?Math.round(_m.sentimentConf*100)+'%':'n/a'}
-Key drivers: ${(_m.keyDrivers||'n/a').slice(0,200)}` : '';
+Key drivers: ${(_m.keyDrivers||'n/a').slice(0,200)}${_macroMktLines}${_macroSectorLines}` : '';
 
 
   // ── News signals — compact tiered block ─────────────────────────────────────
@@ -327,7 +349,18 @@ ${riskRows}`;
       const epsGrowthStr = e.epsGrowth != null ? `epsGrowth=${(e.epsGrowth*100).toFixed(0)}%` : '';
       const revGrowthStr = e.revenueGrowth != null ? `revGrowth=${(e.revenueGrowth*100).toFixed(0)}%` : '';
       const urgencyFlag = Math.abs(daysAway) <= 14 ? ' ⚡IMMINENT' : daysAway < 0 ? ' (past)' : '';
-      return `  ${t}: nextEarnings=${e.nextEarningsDate} (${daysAway}d)${urgencyFlag} | ${[epsStr,epsGrowthStr,revGrowthStr].filter(Boolean).join(' | ')} | analyst=${e.analystRec||'n/a'} target=$${e.analystTarget?.toFixed(2)||'n/a'}`;
+      // Beat/miss history: show actual-vs-estimate delta for last 4 quarters
+      const beatMiss = (() => {
+        const q = e.quarterlyEarnings || [];
+        if (!q.length) return '';
+        const results = q.slice(0, 4).map(r => {
+          if (r.actual == null || r.estimate == null) return '?';
+          const d = r.actual - r.estimate;
+          return d >= 0 ? `+${d.toFixed(2)}` : d.toFixed(2);
+        });
+        return ` | EPSvEst(4Q):[${results.join(',')}]`;
+      })();
+      return `  ${t}: nextEarnings=${e.nextEarningsDate} (${daysAway}d)${urgencyFlag} | ${[epsStr,epsGrowthStr,revGrowthStr].filter(Boolean).join(' | ')} | analyst=${e.analystRec||'n/a'} target=$${e.analystTarget?.toFixed(2)||'n/a'}${beatMiss}`;
     });
   const earningsCtx = earningsLines.length ? `\n\nEARNINGS CALENDAR (use for catalyst timing and pre-earnings positioning):\n${earningsLines.join('\n')}` : '';
 

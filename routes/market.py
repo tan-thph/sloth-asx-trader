@@ -209,6 +209,12 @@ def _macro_payload() -> dict:
         "us10y":    ("^TNX",     "5d"),
         "iron_ore": ("TIO=F",    "1mo"),
         "copper":   ("HG=F",     "5d"),
+        # ASX sector ETFs (SPDR series) — 1mo for 5d return
+        "xmj":      ("XMJ.AX",  "1mo"),   # Materials
+        "xfj":      ("XFJ.AX",  "1mo"),   # Financials
+        "xhj":      ("XHJ.AX",  "1mo"),   # Healthcare
+        "xej":      ("XEJ.AX",  "1mo"),   # Energy
+        "xrj":      ("XRJ.AX",  "1mo"),   # Real Estate
     }
     macro_data = {}
     _histories: dict = {}
@@ -306,6 +312,31 @@ def _macro_payload() -> dict:
             macro_data[field] = round(float((h["Close"].iloc[-1] / h["Close"].iloc[-6] - 1) * 100), 2)
         else:
             macro_data[field] = None
+
+    # ── ASX sector ETF summaries (1D change + 5D return) ─────────────────────
+    _SECTOR_ETF_LABELS = {
+        "xmj": "Materials",
+        "xfj": "Financials",
+        "xhj": "Healthcare",
+        "xej": "Energy",
+        "xrj": "RealEstate",
+    }
+    sectors_out = {}
+    for sk, label in _SECTOR_ETF_LABELS.items():
+        h    = _histories.get(sk)
+        sm   = macro_data.pop(sk, None)   # remove raw key; replace with structured block
+        if h is not None and sm:
+            ret5d = None
+            if len(h) >= 6:
+                ret5d = round(float((h["Close"].iloc[-1] / h["Close"].iloc[-6] - 1) * 100), 2)
+            sectors_out[sk] = {
+                "label":      label,
+                "value":      sm["value"],
+                "change_1d":  sm["change_pct"],
+                "return_5d":  ret5d,
+            }
+    if sectors_out:
+        macro_data["sectors"] = sectors_out
 
     # Advance/decline breadth: populated from the most recent market scan's
     # universe breadth (% of ASX tickers above 20-day SMA). Falls back to None

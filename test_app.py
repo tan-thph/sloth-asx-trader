@@ -3362,5 +3362,125 @@ class TestSprint29SellTrimTagging(unittest.TestCase):
         self.assertIn("urgencyStyle",      src)
 
 
+class TestSprint30DataEnhancements(unittest.TestCase):
+    """Sprint 30 — three highest-value data additions to Claude's context."""
+
+    # ── Addition 1: earnings beat/miss history ────────────────────────────────
+
+    def test_earnings_beat_miss_in_analysis_js(self):
+        """analysis.js earningsCtx must include beat/miss history from quarterlyEarnings."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("EPSvEst(4Q)", src,
+                      "analysis.js earningsCtx must include EPSvEst(4Q) beat/miss block")
+        self.assertIn("quarterlyEarnings", src,
+                      "analysis.js must read quarterlyEarnings for beat/miss")
+        self.assertIn("beatMiss", src,
+                      "analysis.js must define beatMiss variable")
+
+    # ── Addition 2: sector ETF performance in macro ───────────────────────────
+
+    def test_macro_payload_has_sector_etfs(self):
+        """_macro_payload source must fetch XMJ/XFJ/XHJ/XEJ/XRJ sector ETFs."""
+        with open(os.path.join(ROOT, "routes", "market.py"), encoding="utf-8") as f:
+            src = f.read()
+        for sym in ("XMJ.AX", "XFJ.AX", "XHJ.AX", "XEJ.AX", "XRJ.AX"):
+            self.assertIn(sym, src, f"_macro_payload must include {sym} sector ETF")
+
+    def test_macro_payload_builds_sectors_key(self):
+        """_macro_payload must build a 'sectors' key from fetched ETF data."""
+        with open(os.path.join(ROOT, "routes", "market.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"sectors"', src,
+                      "_macro_payload must produce macro_data['sectors'] dict")
+        self.assertIn("change_1d", src,
+                      "sector summary must include change_1d field")
+        self.assertIn("return_5d", src,
+                      "sector summary must include return_5d field")
+        self.assertIn("_SECTOR_ETF_LABELS", src,
+                      "_macro_payload must define _SECTOR_ETF_LABELS mapping")
+
+    def test_analysis_js_includes_sector_line_in_macro_ctx(self):
+        """analysis.js macroCtx must include the ASX sector ETF performance line."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("ASX Sectors(1D/5D)", src,
+                      "analysis.js macroCtx must include ASX sector line")
+        self.assertIn("_macroSectorLines", src,
+                      "analysis.js must define _macroSectorLines")
+        self.assertIn("_m.sectors", src,
+                      "analysis.js must read state.macroData.sectors")
+
+    def test_analysis_js_includes_commodity_rates_line(self):
+        """analysis.js macroCtx must forward iron ore, oil, copper, US10Y to Claude."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_macroMktLines", src,
+                      "analysis.js must define _macroMktLines")
+        self.assertIn("Commodities/Rates", src,
+                      "analysis.js must label the commodity/rates line")
+        # Verify all four are forwarded
+        for field in ("iron_ore", "oil", "copper", "us10y"):
+            self.assertIn(f"_m.{field}", src,
+                          f"analysis.js _macroMktLines must reference _m.{field}")
+
+    # ── Addition 3: key missing fundamentals ─────────────────────────────────
+
+    def test_indicators_py_has_free_cashflow(self):
+        """indicators.py fundamentals dict must include free_cashflow field."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"free_cashflow"', src,
+                      "indicators.py fundamentals must include free_cashflow")
+        self.assertIn("freeCashflow", src,
+                      "indicators.py must read freeCashflow from yfinance info")
+
+    def test_indicator_ctx_includes_operating_margin(self):
+        """analysis.js indicatorCtx must show operating margin (OpMgn)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("OpMgn", src,
+                      "analysis.js indicatorCtx must include OpMgn (operating margin)")
+
+    def test_indicator_ctx_includes_debt_to_equity(self):
+        """analysis.js indicatorCtx must show debt/equity ratio (D/E)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("D/E", src,
+                      "analysis.js indicatorCtx must include D/E (debt to equity)")
+        self.assertIn("debt_to_equity", src,
+                      "analysis.js must reference debt_to_equity signal field")
+
+    def test_indicator_ctx_includes_revenue_growth(self):
+        """analysis.js indicatorCtx must show revenue growth (RevGrowth)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("RevGrowth", src,
+                      "analysis.js indicatorCtx must include RevGrowth")
+
+    def test_indicator_ctx_includes_fcf_yield(self):
+        """analysis.js indicatorCtx must show FCF yield computed from free_cashflow/market_cap."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("FCFYield", src,
+                      "analysis.js indicatorCtx must include FCFYield")
+        self.assertIn("free_cashflow", src,
+                      "analysis.js must reference f.free_cashflow for FCFYield")
+        self.assertIn("market_cap", src,
+                      "analysis.js must reference f.market_cap for FCFYield")
+
+    def test_liveCtx_macro_brief_includes_commodities(self):
+        """analysis.js liveCtx (macro brief input) must forward iron ore, oil, and US10Y."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        # The liveCtx block is in the macroPromise closure — verify fields are added
+        self.assertIn("Iron ore", src,
+                      "analysis.js liveCtx must include Iron ore for macro brief")
+        self.assertIn("d.iron_ore", src,
+                      "analysis.js liveCtx must check d.iron_ore before pushing")
+        self.assertIn("US10Y", src,
+                      "analysis.js liveCtx must include US10Y yield")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
