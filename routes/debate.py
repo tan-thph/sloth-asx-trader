@@ -546,8 +546,13 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "DIRECTION: This is a SELL/TRIM (exit/bearish) trade.\n"
         "  For SELL/TRIM → stop loss is set ABOVE entry (price rising = wrong direction, cut loss).\n"
         "  For SELL/TRIM → target is set BELOW entry (price falling = thesis confirmed, take profit).\n"
-        "  If the summary shows stop BELOW entry for this SELL, the price was stored incorrectly —\n"
-        "  do NOT tag 'stop_too_tight' or compute R:R based on that wrong-direction stop.\n"
+        "  If the summary shows stop BELOW entry for this SELL, the stop was stored incorrectly —\n"
+        "  do NOT tag 'stop_too_tight' or 'poor_rr' based on this wrong-direction stop.\n"
+        "  ⚠ WRONG-DIRECTION STOP WARNING: A stop stored on the wrong side of entry is a DATA\n"
+        "  ENTRY ERROR, NOT a trade error. It does NOT mean the trade setup was poor.\n"
+        "  If the stop is wrong direction, IGNORE IT ENTIRELY and classify based on P&L and\n"
+        "  price direction ONLY. A -20% or -30% loss on a SELL means the stock ROSE — that is\n"
+        "  thesis_broken regardless of how the stop was stored.\n"
         "  R:R for SELL = (entry − target) / (stop − entry) [both distances must be positive].\n"
         "  REGIME CHECK: if the trade summary shows a risk-on or bullish regime, consider whether\n"
         "  a bearish/exit thesis was appropriate — this is the primary indicator of regime_mismatch.\n"
@@ -977,9 +982,29 @@ def _pm_sanity_check_tags(final_tags: str, row, ev_id: int, label: str = "") -> 
             f"overconfident (ai_confidence={conf:.0%} is already conservative — outcome bias)"
         )
 
+    # ── rescue: thesis_broken for large directional failures ─────────────────────
+    # When all model-generated tags have been stripped AND the P&L shows a large
+    # directional failure (> 10%), inject thesis_broken deterministically.
+    #
+    # This handles a specific blind spot: wrong-direction stops (stop stored on the
+    # wrong side of entry) cause rr_ratio=NULL, which strips poor_rr. At the same
+    # time, confidence near 65% strips overconfident. The models fixated on the broken
+    # setup rather than the P&L direction — but for a SELL that lost 28%+ because the
+    # stock ROSE, the classification is unambiguous without any model judgment.
+    #
+    # Threshold: 10% — below that a manual exit can be noise; above it the directional
+    # failure is clear regardless of setup anomalies.
+    pnl = row["realized_pnl_pct"]
+    if not tags and pnl is not None and abs(pnl) >= 10.0:
+        tags.add("thesis_broken")
+        stripped.append(
+            f"[rescue→thesis_broken] all model tags stripped but |P&L|={abs(pnl):.1f}% "
+            f"indicates a clear directional failure — thesis_broken injected deterministically"
+        )
+
     if stripped:
         current_app.logger.info(
-            f"[PostMortem{label}] event#{ev_id} sanity-check stripped: {stripped}"
+            f"[PostMortem{label}] event#{ev_id} sanity-check stripped/rescued: {stripped}"
         )
 
     return ",".join(sorted(tags)) if tags else ""

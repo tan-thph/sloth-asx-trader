@@ -3036,6 +3036,7 @@ class TestSanityCheckHardening(unittest.TestCase):
             "rr_ratio":           None,
             "ai_confidence":      0.55,
             "recommendation":     "TRIM",
+            "realized_pnl_pct":   None,
         }
         base.update(kwargs)
         return base
@@ -3099,6 +3100,83 @@ class TestSanityCheckHardening(unittest.TestCase):
                         actual_entry_price=10.0, suggested_stop=8.0)  # 20% away
         result = self._check("stop_too_tight", row, 8)
         self.assertNotIn("stop_too_tight", result)
+
+    # ── Rescue rule: thesis_broken for large directional failures ────────────
+
+    def test_rescue_thesis_broken_for_large_sell_loss_all_stripped(self):
+        """When all tags stripped and SELL/TRIM has |pnl| >= 10%, rescue with thesis_broken."""
+        # AMC #190 scenario: poor_rr + overconfident both stripped → rescue fires
+        row = self._row(
+            recommendation="SELL",
+            actual_entry_price=76.299,
+            suggested_stop=58.840,   # wrong direction (below entry for SELL)
+            rr_ratio=None,           # NULL — wrong-direction stop so backfill skipped
+            ai_confidence=0.62,      # below 0.65 → overconfident stripped
+            realized_pnl_pct=-28.8,  # large directional loss
+        )
+        result = self._check("poor_rr,overconfident", row, 99)
+        self.assertIn("thesis_broken", result,
+                      "Rescue rule must inject thesis_broken when all tags stripped and |pnl| >= 10%")
+
+    def test_rescue_does_not_fire_for_small_loss(self):
+        """Rescue must NOT fire when |pnl| < 10% (could be noise/commission)."""
+        row = self._row(
+            recommendation="SELL",
+            actual_entry_price=10.0,
+            suggested_stop=9.0,
+            rr_ratio=None,
+            ai_confidence=0.62,
+            realized_pnl_pct=-3.0,
+        )
+        result = self._check("poor_rr", row, 98)
+        self.assertNotIn("thesis_broken", result,
+                         "Rescue must not inject thesis_broken for small losses")
+        self.assertEqual(result, "",
+                         "Small loss with all tags stripped should return empty (none)")
+
+    def test_rescue_does_not_fire_when_valid_tags_remain(self):
+        """Rescue must NOT fire when at least one valid tag survived stripping."""
+        row = self._row(
+            recommendation="SELL",
+            actual_entry_price=10.0,
+            suggested_stop=9.0,
+            rr_ratio=None,
+            ai_confidence=0.80,
+            realized_pnl_pct=-28.0,
+        )
+        # overconfident survives (conf >= 0.65), poor_rr stripped — rescue must not add thesis_broken on top
+        result = self._check("poor_rr,overconfident", row, 97)
+        self.assertIn("overconfident", result)
+        self.assertNotIn("thesis_broken", result,
+                         "Rescue must not fire when overconfident survived stripping")
+
+    def test_rescue_fires_for_large_buy_loss(self):
+        """Rescue also applies to BUY trades where stock fell > 10% — thesis_broken."""
+        row = self._row(
+            recommendation="BUY",
+            actual_entry_price=50.0,
+            suggested_stop=None,
+            rr_ratio=None,
+            ai_confidence=0.55,
+            realized_pnl_pct=-15.0,
+        )
+        result = self._check("poor_rr,overconfident", row, 96)
+        self.assertIn("thesis_broken", result,
+                      "Rescue must fire for BUY with large loss when all tags stripped")
+
+    def test_sanity_check_wrong_direction_stop_note_in_prompt(self):
+        """Prompt must warn models to ignore wrong-direction stop and focus on P&L."""
+        from routes.debate import _pm_build_prompt
+        prompt = _pm_build_prompt(
+            summary="SELL AMC LOSS | entry=76.3 | stop=58.8 [⚠ wrong dir] | PnL=-28.8%",
+            rationale="",
+            exit_hint="manual",
+            action="SELL",
+            pnl_pct=-28.8,
+        )
+        self.assertIn("WRONG-DIRECTION STOP WARNING", prompt)
+        self.assertIn("DATA\n  ENTRY ERROR", prompt)
+        self.assertIn("IGNORE IT ENTIRELY", prompt)
 
     # SELL/TRIM regime_mismatch hint in prompt ────────────────────────────────
 
