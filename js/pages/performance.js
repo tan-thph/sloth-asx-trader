@@ -794,12 +794,22 @@ async function syncClosedTradesToLearningLoop() {
 
   for (const r of toUpdate) {
     try {
+      // Backfill rr_ratio for legacy synced records that had it as NULL
+      const _rrE2 = r._entryPrice ?? (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
+      const _rrS2 = r.stopLoss ?? null;
+      const _rrT2 = r.target   ?? null;
+      let _rr2 = null;
+      if (_rrE2 && _rrS2 && _rrT2 && _rrE2 !== _rrS2) {
+        const raw2 = Math.abs((_rrT2 - _rrE2) / (_rrE2 - _rrS2));
+        if (isFinite(raw2) && raw2 > 0) _rr2 = +raw2.toFixed(2);
+      }
       const resp = await fetch(`${API}/api/learning/outcome`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: r._learningId,
           outcome_status:      r.outcome,
           was_executed:        r.executed,
+          rr_ratio:            _rr2,   // backfill for legacy NULL records
           realized_pnl_aud:    r.actualProfit != null ? +r.actualProfit.toFixed(2) : null,
           realized_pnl_pct:    r._pnlPct != null ? +r._pnlPct.toFixed(2) : null,
           holding_period_days: r._holdDays ?? null,
@@ -815,18 +825,39 @@ async function syncClosedTradesToLearningLoop() {
 
   for (const r of toLog) {
     try {
+      // Compute R:R from stored prices — the original log call skipped this.
+      // Works for both BUY (stop below entry) and SELL/TRIM (stop above entry)
+      // because Math.abs handles both sign combinations.
+      const _rrEntry = r._entryPrice ?? (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
+      const _rrStop  = r.stopLoss ?? null;
+      const _rrTgt   = r.target   ?? null;
+      let _rrRatio   = null;
+      if (_rrEntry && _rrStop && _rrTgt && _rrEntry !== _rrStop) {
+        const raw = Math.abs((_rrTgt - _rrEntry) / (_rrEntry - _rrStop));
+        if (isFinite(raw) && raw > 0) _rrRatio = +raw.toFixed(2);
+      }
+      // Rationale: join array to string if needed (old recs stored as array)
+      const _rationale = (() => {
+        if (!r.reasoning) return null;
+        if (typeof r.reasoning === 'string') return r.reasoning.slice(0, 400);
+        if (Array.isArray(r.reasoning)) return r.reasoning.join(' ').slice(0, 400);
+        return null;
+      })();
+
       const resp = await fetch(`${API}/api/learning/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           event_type:          'recommendation',
           ticker:              r.ticker,
           prompt_version:      pv,
+          agent_type:          'portfolio-scanner-sync',
           ai_confidence:       r.confidence ?? null,
           ensemble_confidence: r.ensembleConfidence ?? null,
           recommendation:      r.action,
-          rationale_summary:   r.reasoning ? r.reasoning.slice(0, 400) : null,
+          rationale_summary:   _rationale,
           suggested_stop:      r.stopLoss ?? null,
           suggested_target:    r.target ?? null,
+          rr_ratio:            _rrRatio,
           was_executed:        true,
           outcome_status:      r.outcome,
           realized_pnl_aud:    r.actualProfit != null ? +r.actualProfit.toFixed(2) : null,

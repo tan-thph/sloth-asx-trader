@@ -3788,29 +3788,15 @@ class TestPostmortemTagFixes(unittest.TestCase):
     """
 
     def test_call_model_any_accepts_num_predict(self):
-        """_call_model_any must accept and forward num_predict to _call_ollama."""
+        """_call_model_any must accept num_predict and default to 1024."""
         import inspect
         import routes.debate as deb
         sig = inspect.signature(deb._call_model_any)
         self.assertIn("num_predict", sig.parameters,
                       "_call_model_any must have a num_predict parameter")
-        # Default should be 200 (backward-compatible)
-        self.assertEqual(sig.parameters["num_predict"].default, 200)
-
-    def test_postmortem_endpoint_uses_num_predict_300(self):
-        """Single-model postmortem must call _call_model_any with num_predict=300."""
-        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
-            src = f.read()
-        # Find the postmortem endpoint's call to _call_model_any
-        # (there should be at least one with num_predict=300 near _SCHEMA_POSTMORTEM)
-        import re
-        matches = re.findall(
-            r"_call_model_any\([^)]*_SCHEMA_POSTMORTEM[^)]*num_predict\s*=\s*(\d+)", src
-        )
-        self.assertTrue(
-            any(int(v) >= 300 for v in matches),
-            "At least one postmortem _call_model_any must use num_predict >= 300"
-        )
+        # Default must be high enough to never truncate a postmortem reason field
+        self.assertGreaterEqual(sig.parameters["num_predict"].default, 1024,
+                                "_call_model_any default num_predict must be >= 1024")
 
     def test_postmortem_stores_none_in_db(self):
         """Single-model postmortem must UPDATE error_type='none' when model returns none."""
@@ -3854,24 +3840,154 @@ class TestPostmortemTagFixes(unittest.TestCase):
         self.assertIn('tag != "none"', src,
                       'learning_stats type_counts must filter out "none" tags')
 
-    def test_adversarial_debate_phase1_num_predict_300(self):
-        """Adversarial debate Phase 1A and 1B must use num_predict=300."""
+    def test_adversarial_debate_phase1_no_explicit_num_predict(self):
+        """Adversarial debate Phase 1A/1B must use default num_predict (no override needed)."""
         with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
             src = f.read()
         import re
-        # Count occurrences of _call_model_any with SCHEMA_POSTMORTEM and num_predict=300
+        # Old approach was explicit num_predict=300; now uses the 1024 default
         matches = re.findall(
             r"_call_model_any\([^)]*_SCHEMA_POSTMORTEM[^)]*num_predict\s*=\s*300", src
         )
-        self.assertGreaterEqual(len(matches), 2,
-                                "Both Phase 1A and 1B must use num_predict=300")
+        self.assertEqual(len(matches), 0,
+                         "Phase 1 no longer needs explicit num_predict=300; default 1024 covers it")
 
-    def test_synthesis_call_num_predict_250(self):
-        """Adversarial debate Phase 3 synthesis must use num_predict=250."""
+    def test_synthesis_no_explicit_num_predict(self):
+        """Phase 3 synthesis must use default num_predict (no 250 override needed)."""
         with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("_SCHEMA_PM_SYNTHESIS, num_predict=250", src,
-                      "Phase 3 synthesis must pass num_predict=250")
+        self.assertNotIn("num_predict=250", src,
+                         "Phase 3 synthesis no longer needs explicit num_predict=250")
+
+
+class TestPostmortemBatchAndSyncFixes(unittest.TestCase):
+    """Sprint 33 — batch classify button, sync rr_ratio fix, think=None, num_predict=1024."""
+
+    # ── _call_model_any defaults ──────────────────────────────────────────────
+
+    def test_call_model_any_default_num_predict_1024(self):
+        """_call_model_any default num_predict must be 1024 (no truncation)."""
+        import inspect, routes.debate as deb
+        sig = inspect.signature(deb._call_model_any)
+        self.assertEqual(sig.parameters["num_predict"].default, 1024,
+                         "_call_model_any default num_predict must be 1024")
+
+    def test_call_model_any_uses_think_none(self):
+        """_call_model_any must pass think=None so reasoning models can think freely."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Extract the full _call_model_any function body
+        import re
+        ma_idx = src.index("def _call_model_any(")
+        # Find the next top-level function/class def to bound the window
+        next_def = re.search(r'\ndef [a-z_]', src[ma_idx + 50:])
+        end_idx  = ma_idx + 50 + next_def.start() if next_def else ma_idx + 2000
+        window   = src[ma_idx:end_idx]
+        self.assertNotIn("think=False", window,
+                         "_call_model_any must not force think=False")
+        self.assertIn("think=None", window,
+                      "_call_model_any must pass think=None")
+
+    def test_postmortem_no_explicit_num_predict_override(self):
+        """Single-model postmortem must not override num_predict (uses 1024 default)."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # The old fix added num_predict=300 — this should be gone now
+        self.assertNotIn("num_predict=300", src,
+                         "num_predict=300 override should be removed — default 1024 is sufficient")
+
+    # ── /api/learning/untagged endpoint ──────────────────────────────────────
+
+    def test_untagged_endpoint_exists(self):
+        """GET /api/learning/untagged must be defined in routes/learning.py."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("/api/learning/untagged", src)
+        self.assertIn("def learning_untagged", src)
+
+    def test_untagged_endpoint_returns_200(self):
+        """/api/learning/untagged must return 200 with ok and events keys."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+        resp = client.get("/api/learning/untagged")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("ok", body)
+        self.assertIn("events", body)
+        self.assertIn("count", body)
+
+    def test_untagged_filters_none_tagged(self):
+        """GET /api/learning/untagged must exclude events where error_type='none'."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("error_type IS NULL OR error_type = ''", src,
+                      "untagged query must exclude already-tagged events including error_type='none'")
+
+    # ── rr_ratio in sync function ─────────────────────────────────────────────
+
+    def test_sync_computes_rr_ratio(self):
+        """syncClosedTradesToLearningLoop must compute and send rr_ratio."""
+        with open(os.path.join(ROOT, "js", "pages", "performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_rrRatio", src,
+                      "syncClosedTradesToLearningLoop must compute _rrRatio")
+        self.assertIn("rr_ratio:", src,
+                      "sync toLog payload must include rr_ratio field")
+
+    def test_sync_sends_agent_type(self):
+        """syncClosedTradesToLearningLoop must set agent_type to identify synced records."""
+        with open(os.path.join(ROOT, "js", "pages", "performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("portfolio-scanner-sync", src,
+                      "sync function must tag records with agent_type portfolio-scanner-sync")
+
+    def test_sync_toUpdate_backfills_rr_ratio(self):
+        """toUpdate path must also send rr_ratio to patch legacy NULL records."""
+        with open(os.path.join(ROOT, "js", "pages", "performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("rr_ratio:            _rr2", src,
+                      "toUpdate path must backfill rr_ratio via _rr2 variable")
+
+    def test_outcome_patch_accepts_rr_ratio(self):
+        """/api/learning/outcome must accept rr_ratio in the patchable columns list."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"rr_ratio"', src,
+                      "learning_outcome patchable columns must include rr_ratio")
+
+    # ── Classify All button ───────────────────────────────────────────────────
+
+    def test_classify_all_button_in_learning_js(self):
+        """learning.js must render the Classify All Untagged button."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("classify-all-btn", src)
+        self.assertIn("classifyAllPostmortems()", src)
+        self.assertIn("Classify All Untagged", src)
+
+    def test_classify_all_function_defined(self):
+        """classifyAllPostmortems() must be defined in learning.js."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function classifyAllPostmortems()", src)
+        self.assertIn("classify-all-progress", src)
+        self.assertIn("/api/learning/untagged", src)
+
+    def test_classify_all_uses_60s_timeout(self):
+        """classifyAllPostmortems must pass timeout: 60 per event."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("timeout: 60", src,
+                      "classifyAllPostmortems must pass timeout:60 per postmortem call")
+
+    def test_sync_rationale_handles_array(self):
+        """Sync rationale must join array reasoning instead of calling Array.slice."""
+        with open(os.path.join(ROOT, "js", "pages", "performance.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("Array.isArray(r.reasoning)", src,
+                      "sync must detect array reasoning and join it to a string")
 
 
 if __name__ == "__main__":

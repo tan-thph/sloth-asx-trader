@@ -478,8 +478,15 @@ function _renderLearningContent(d, brier) {
     <div class="card section-gap">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div class="card-title" style="margin:0">Recent Events (${events.length})</div>
-        <span class="text-xs text-muted">Tag failures on closed trades · ✕ removes outliers from calibration</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="text-xs text-muted">Tag failures on closed trades · ✕ removes outliers from calibration</span>
+          <button class="btn btn-sm" id="classify-all-btn"
+            onclick="classifyAllPostmortems()"
+            title="Run postmortem on every untagged loss/breakeven event using the current local model"
+            style="white-space:nowrap">🤖 Classify All Untagged</button>
+        </div>
       </div>
+      <div id="classify-all-progress" style="display:none;margin-bottom:8px;padding:8px 10px;background:var(--bg-secondary);border-radius:5px;font-size:12px"></div>
       ${events.length ? `
         <div style="overflow-x:auto">
           <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:620px">
@@ -1115,6 +1122,101 @@ async function triggerDebatePostmortem(eventId) {
     if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
   }
 }
+
+// ── Batch: classify ALL untagged loss/breakeven events ───────────────────────
+// Fetches untagged events from backend, then runs the single-event postmortem
+// sequentially (Ollama can only run one at a time). Shows inline progress.
+async function classifyAllPostmortems() {
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  const btn      = document.getElementById('classify-all-btn');
+  const progress = document.getElementById('classify-all-progress');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Fetching…'; }
+
+  try {
+    // 1. Check Ollama is reachable
+    const status = await debateStatus();
+    if (!status.available) {
+      toast('Ollama is not running — start it first', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🤖 Classify All Untagged'; }
+      return;
+    }
+    const model = typeof preferredDebateModel === 'function'
+      ? preferredDebateModel(status.models) : 'qwen3:9b';
+
+    // 2. Fetch untagged events list
+    const listResp = await fetch(`${API}/api/learning/untagged?limit=50`);
+    const listData = await listResp.json();
+    const events   = listData.events || [];
+
+    if (!events.length) {
+      toast('No untagged loss/breakeven events found', 'info');
+      if (btn) { btn.disabled = false; btn.textContent = '🤖 Classify All Untagged'; }
+      return;
+    }
+
+    if (progress) progress.style.display = 'block';
+    const total   = events.length;
+    let tagged = 0, noneCount = 0, failed = 0;
+
+    const updateProgress = (i) => {
+      if (!progress) return;
+      const done = i + 1;
+      const pct  = Math.round(done / total * 100);
+      progress.innerHTML =
+        `<strong>Classifying ${done}/${total}</strong> (${model}) &nbsp;·&nbsp; ` +
+        `🏷 ${tagged} tagged &nbsp;·&nbsp; ⬜ ${noneCount} no error &nbsp;·&nbsp; ❌ ${failed} failed` +
+        `<div style="margin-top:4px;height:4px;background:var(--border);border-radius:2px">` +
+        `<div style="width:${pct}%;height:100%;background:#3b82f6;border-radius:2px;transition:width 0.3s"></div>` +
+        `</div>`;
+    };
+
+    if (btn) btn.textContent = `⏳ 0/${total}`;
+
+    // 3. Process one at a time — Ollama is single-threaded
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      updateProgress(i);
+      if (btn) btn.textContent = `⏳ ${i+1}/${total}`;
+      try {
+        const r = await fetch(`${API}/api/debate/postmortem`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ id: ev.id, model, timeout: 60 }),
+          signal:  AbortSignal.timeout(130_000),
+        });
+        const result = await r.json();
+        if (result.ok) {
+          if (result.error_type && result.error_type !== 'none') tagged++;
+          else noneCount++;
+        } else {
+          failed++;
+        }
+      } catch (_) {
+        failed++;
+      }
+    }
+
+    // 4. Final summary
+    if (progress) {
+      progress.innerHTML =
+        `<strong>✅ Done — ${total} events processed</strong> &nbsp;·&nbsp; ` +
+        `🏷 ${tagged} tagged &nbsp;·&nbsp; ⬜ ${noneCount} no systematic error &nbsp;·&nbsp; ❌ ${failed} failed` +
+        `<button class="btn btn-sm" style="margin-left:8px" onclick="document.getElementById('classify-all-progress').style.display='none';showPage('learning')">Refresh</button>`;
+    }
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🤖 Classify All Untagged';
+    }
+    toast(`Batch classify done: ${tagged} tagged, ${noneCount} no error, ${failed} failed`, 'success');
+
+  } catch (e) {
+    toast('Batch classify error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '🤖 Classify All Untagged'; }
+    if (progress) progress.style.display = 'none';
+  }
+}
+
 
 // ── Score a closed event's outcome quality (skill vs luck) via local model ────
 async function triggerSkillScore(eventId) {

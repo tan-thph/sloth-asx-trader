@@ -212,7 +212,7 @@ def learning_outcome():
                         "holding_period_days", "exit_reason", "error_type", "notes",
                         "actual_entry_price", "actual_exit_price", "sector",
                         "skill_score", "debate_summary", "prompt_hash",
-                        "tags", "trade_thesis",
+                        "tags", "trade_thesis", "rr_ratio",
                         "success_tags", "checklist_bypasses"):
                 if col in data:
                     fields.append(f"{col}=?")
@@ -247,6 +247,35 @@ def learning_delete_event(event_id):
         if rows == 0:
             return jsonify({"ok": False, "error": "Event not found"}), 404
         return jsonify({"ok": True, "deleted": event_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/untagged")
+def learning_untagged():
+    """Return loss/breakeven events with no error_type set (error_type IS NULL).
+
+    Used by the Learning page 'Classify All Untagged' button to build the
+    batch postmortem queue.  Events already tagged 'none' are excluded —
+    they have been reviewed and found to have no systematic error.
+
+    Query params:
+        limit (int, default 50): max events to return
+    """
+    limit = min(int(request.args.get("limit", 50)), 200)
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT id, ticker, recommendation, outcome_status,
+                       ai_confidence, realized_pnl_pct, timestamp
+                FROM ai_learning_events
+                WHERE outcome_status IN ('loss', 'breakeven')
+                  AND (error_type IS NULL OR error_type = '')
+                  AND was_executed = 1
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+        return jsonify({"ok": True, "events": [dict(r) for r in rows], "count": len(rows)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

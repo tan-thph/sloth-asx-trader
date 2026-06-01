@@ -786,7 +786,7 @@ def _get_cloud_keys() -> dict:
 
 def _call_model_any(model_name: str, prompt: str, timeout: int,
                     format_schema: dict | None = None,
-                    num_predict: int = 200) -> dict:
+                    num_predict: int = 1024) -> dict:
     """
     Unified model dispatcher for postmortem debate phases.
 
@@ -813,7 +813,10 @@ def _call_model_any(model_name: str, prompt: str, timeout: int,
             return {"ok": False, "error": "Google API key not configured (add it in News Scanner settings)"}
         return _call_gemini_json(keys["gemini_key"], actual or keys["gemini_model"], prompt, timeout=timeout)
 
-    return _call_ollama(model_name, prompt, timeout=timeout, retries=0, think=False,
+    # think=None: let each model use its default reasoning behaviour.
+    # Thinking models (qwen3.5:9b) will reason before answering; non-thinking
+    # models (gemma4:26b) are unaffected. The timeout= hard-caps total wall time.
+    return _call_ollama(model_name, prompt, timeout=timeout, retries=0, think=None,
                         format_schema=format_schema, num_predict=num_predict)
 
 
@@ -1120,10 +1123,9 @@ def debate_postmortem():
     action = (row["recommendation"] or "BUY").upper()
     prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str, action=action)
 
-    # num_predict=300: the reason field can be 100-200 tokens; 200 truncates mid-JSON
-    # causing regex fallback to extract partial tags that the sanity check then strips.
-    result = _call_model_any(model, prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM,
-                             num_predict=300)
+    # Default 1024 num_predict (set in _call_model_any) and timeout=60 give the model
+    # enough room to think and produce a complete JSON reason without truncation.
+    result = _call_model_any(model, prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 
@@ -1246,14 +1248,12 @@ def debate_postmortem_debate():
     # ── Phase 1: Independent classification ───────────────────────────────────
     t0    = time.time()
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1A — {model_a}…")
-    res_a = _call_model_any(model_a, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM,
-                            num_predict=300)
+    res_a = _call_model_any(model_a, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1A done ({int((time.time()-t0)*1000)}ms)")
 
     t1 = time.time()
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1B — {model_b}…")
-    res_b = _call_model_any(model_b, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM,
-                            num_predict=300)
+    res_b = _call_model_any(model_b, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1B done ({int((time.time()-t1)*1000)}ms)")
 
     if not res_a["ok"]:
@@ -1378,7 +1378,7 @@ def debate_postmortem_debate():
         # "neutrally" reconcile is structurally biased toward its own prior.
         # Model B sees both positions cold and has no prior stake in the outcome.
         res_synth = _call_model_any(model_b, synthesis_prompt, timeout=tout,
-                                    format_schema=_SCHEMA_PM_SYNTHESIS, num_predict=250)
+                                    format_schema=_SCHEMA_PM_SYNTHESIS)
         current_app.logger.info(
             f"[PostMortemDebate] event#{ev_id} Phase 3 done ({int((time.time()-t2)*1000)}ms)"
         )
