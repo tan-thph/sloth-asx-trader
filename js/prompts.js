@@ -303,7 +303,8 @@ const ANALYSIS_SYSTEM_PROMPT =
   LIQUIDITY: qty must be ≤ 5% of volume_avg_20 (20-day average daily share volume).
     Equivalent dollar check: qty × entryPrice ≤ 5% of (volume_avg_20 × currentPrice).
     If this is exceeded, reduce qty or split into tranches across multiple sessions.
-    If bid-ask spread > 0.5%, flag: "wide spread — use limit order only".
+    If volume_avg_20 < 150,000 shares/day, flag: "thin liquidity — use limit order only; consider tranching across sessions".
+    Do not attempt to calculate or estimate bid-ask spread — this field is not in the live signals payload.
 
   SIZING GUIDANCE:
     Strong Accumulate (+3–5% weight): use maximum position size allowed by Rule 1.4.
@@ -394,7 +395,7 @@ const ANALYSIS_SYSTEM_PROMPT =
                                "bear": {"p": number, "ret": number} },
     "expectedTimeToTarget":  number (days),
     "factorsUsed":           string[] (>=3 entries; each must cite a specific data point,
-                               e.g. "EPS revision: +4.2% over 30d", "Macro: RBA easing benefits REITs",
+                               e.g. "EPS momentum: 3 consecutive beats (upward revision proxy)", "Macro: RBA easing benefits REITs",
                                "Valuation: fwdPE 12.4 vs sector 16.8x"),
     "reasoning":             string (MAX 150 chars; cite top 2-3 factors; no RSI/MACD as primary),
     "risks":                 string (MAX 100 chars; #1 macro or fundamental risk, not just volatility),
@@ -446,7 +447,7 @@ const ANALYSIS_SYSTEM_PROMPT =
         "confidence": 0.74,
         "scenarios": { "bull": {"p": 0.30, "ret": 0.12}, "base": {"p": 0.50, "ret": 0.07}, "bear": {"p": 0.20, "ret": -0.04} },
         "expectedTimeToTarget": 45,
-        "factorsUsed": ["EPS revision: +3.1% over 30d", "Macro: AUD/USD weak — benefits unhedged exporter", "Valuation: fwdPE 10.2 vs sector 13.5x"],
+        "factorsUsed": ["EPS momentum: 2Q beat trend (proxy — true 30d revision unavailable)", "Macro: AUD/USD weak — benefits unhedged exporter", "Valuation: fwdPE 10.2 vs sector 13.5x"],
         "reasoning": "Iron ore supply discipline + weak AUD drive EPS upgrade cycle. Technicals confirm.",
         "risks": "Iron ore price collapse below $95/t would break thesis.",
         "catalysts": "RBA cut Jun25; FY result Aug25 with guidance update.",

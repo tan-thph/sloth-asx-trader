@@ -4246,5 +4246,236 @@ class TestPostmortemPromptQuality(unittest.TestCase):
                                 "Both single-model and adversarial debate must pass exit_reason")
 
 
+class TestFix16Phase8GoodLossExclusion(unittest.TestCase):
+    """Fix #16 — Phase 8 gate must exclude protective_stop + external_shock losses."""
+
+    def test_is_good_loss_function_exists(self):
+        """routes/learning.py must define _is_good_loss helper at module level."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _is_good_loss(", src)
+
+    def test_is_good_loss_protective_stop(self):
+        """_is_good_loss must return True for exit_reason='protective_stop'."""
+        import routes.learning as rl
+        self.assertTrue(rl._is_good_loss({"exit_reason": "protective_stop", "error_type": None}))
+
+    def test_is_good_loss_external_shock(self):
+        """_is_good_loss must return True when error_type contains 'external_shock'."""
+        import routes.learning as rl
+        self.assertTrue(rl._is_good_loss({"exit_reason": "stop_hit", "error_type": "external_shock"}))
+        self.assertTrue(rl._is_good_loss({"exit_reason": "manual", "error_type": "overconfident,external_shock"}))
+
+    def test_is_good_loss_regular_loss(self):
+        """_is_good_loss must return False for ordinary analytical losses."""
+        import routes.learning as rl
+        self.assertFalse(rl._is_good_loss({"exit_reason": "stop_hit", "error_type": "overconfident"}))
+        self.assertFalse(rl._is_good_loss({"exit_reason": "manual", "error_type": None}))
+        self.assertFalse(rl._is_good_loss({"exit_reason": None, "error_type": None}))
+
+    def test_compute_phase8_meta_excludes_good_losses(self):
+        """_compute_phase8_meta must activate when wins > analytical losses even if good-loss
+        scores are high (i.e. protective_stop trades with 9/10 must not inflate mean_loss)."""
+        import routes.learning as rl
+        # 3 wins scoring 8.0 avg; 1 protective-stop scoring 9.0 (should be excluded);
+        # 1 analytical loss scoring 3.0 — wins (8.0) > analytical_losses (3.0) → active
+        rows = [
+            {"outcome_status": "win", "skill_score": "8.0", "exit_reason": None, "error_type": None},
+            {"outcome_status": "win", "skill_score": "8.0", "exit_reason": None, "error_type": None},
+            {"outcome_status": "win", "skill_score": "8.0", "exit_reason": None, "error_type": None},
+            {"outcome_status": "win", "skill_score": "7.0", "exit_reason": None, "error_type": None},
+            {"outcome_status": "win", "skill_score": "7.0", "exit_reason": None, "error_type": None},
+            {"outcome_status": "loss", "skill_score": "9.0", "exit_reason": "protective_stop", "error_type": None},
+            {"outcome_status": "loss", "skill_score": "9.0", "exit_reason": "protective_stop", "error_type": None},
+            {"outcome_status": "loss", "skill_score": "3.0", "exit_reason": "stop_hit", "error_type": "overconfident"},
+            {"outcome_status": "loss", "skill_score": "3.0", "exit_reason": "stop_hit", "error_type": "poor_entry"},
+            {"outcome_status": "loss", "skill_score": "3.0", "exit_reason": "manual", "error_type": None},
+        ]
+        result = rl._compute_phase8_meta(rows)
+        self.assertTrue(result["active"],
+                        "Phase 8 must be active — wins (7.8 avg) > analytical losses (3.0), "
+                        "protective_stop losses (9.0) must be excluded")
+        self.assertEqual(result["n_good_losses_excluded"], 2)
+
+    def test_compute_phase8_meta_returns_n_good_losses_excluded(self):
+        """_compute_phase8_meta return dict must include n_good_losses_excluded field."""
+        import routes.learning as rl
+        rows = [
+            {"outcome_status": "win", "skill_score": "7.0", "exit_reason": None, "error_type": None},
+        ] * 8 + [
+            {"outcome_status": "loss", "skill_score": "4.0", "exit_reason": "stop_hit", "error_type": None},
+        ] * 2
+        result = rl._compute_phase8_meta(rows)
+        self.assertIn("n_good_losses_excluded", result)
+
+    def test_phase8_gate_uses_is_good_loss_in_calib_compute(self):
+        """_calib_compute must reference _is_good_loss in the inline Phase 8 check."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Both the module-level _compute_phase8_meta and inline _calib_compute check must use it
+        self.assertGreaterEqual(src.count("_is_good_loss("), 3,
+                                "_is_good_loss must be called in _compute_phase8_meta and inline Phase 8 check")
+
+    def test_learning_js_phase8_note_shows_exclusion_count(self):
+        """learning.js phase8Note must conditionally display good-loss exclusion count."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("n_good_losses_excluded", src)
+        self.assertIn("good-loss", src)
+
+
+class TestFix17PromptDataGapFixes(unittest.TestCase):
+    """Fix #17 — Remove data-gap mismatches in ANALYSIS_SYSTEM_PROMPT."""
+
+    def test_eps_revision_30d_example_removed_from_factors_used(self):
+        """factorsUsed example must not cite 'EPS revision: +N% over 30d' (field not in payload)."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("EPS revision: +4.2% over 30d", src)
+        self.assertNotIn("EPS revision: +3.1% over 30d", src)
+
+    def test_eps_momentum_proxy_example_present(self):
+        """factorsUsed examples must use EPS momentum proxy phrasing instead."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("EPS momentum:", src)
+
+    def test_bid_ask_rule_removed(self):
+        """bid-ask spread rule must be replaced — field is not in the live signals payload."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("bid-ask spread > 0.5%", src)
+
+    def test_volume_based_liquidity_flag_present(self):
+        """volume_avg_20 < 150,000 liquidity flag must replace the bid-ask rule."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("volume_avg_20 < 150,000", src)
+        self.assertIn("thin liquidity", src)
+
+
+class TestFix19RegressionDetectorEvaluating(unittest.TestCase):
+    """Fix #19 — Regression detector must return 'evaluating' state, not None, for new
+    prompt versions below ESS floor (prevents silent false-negative on UI)."""
+
+    def test_evaluating_state_when_new_version_below_floor(self):
+        """_check_prompt_regression must return evaluating dict (not None) when current
+        version has fewer than min_n closed trades."""
+        import routes.learning as rl
+        versions = [{"version": "2026-06-v7", "closed": 5, "win_rate": 60.0}]
+        result = rl._check_prompt_regression(versions, min_n=10)
+        self.assertIsNotNone(result, "Must not return None when new version is below ESS floor")
+        self.assertEqual(result["status"], "evaluating")
+        self.assertEqual(result["current_version"], "2026-06-v7")
+        self.assertEqual(result["n_current"], 5)
+        self.assertEqual(result["min_n_required"], 10)
+        self.assertIn("se_pp", result)
+
+    def test_returns_none_when_no_data_at_all(self):
+        """_check_prompt_regression must return None when no versions have any closed trades."""
+        import routes.learning as rl
+        versions = [{"version": "v1", "closed": 0, "win_rate": None}]
+        self.assertIsNone(rl._check_prompt_regression(versions, min_n=10))
+
+    def test_regression_dict_has_status_field(self):
+        """Regression dicts must include 'status' field (distinguishes from evaluating)."""
+        import routes.learning as rl
+        versions = [
+            {"version": "v2", "closed": 30, "win_rate": 40.0},
+            {"version": "v1", "closed": 30, "win_rate": 65.0},
+        ]
+        result = rl._check_prompt_regression(versions)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "regression")
+
+    def test_improvement_still_returns_none(self):
+        """_check_prompt_regression must still return None when current is same or better."""
+        import routes.learning as rl
+        versions = [
+            {"version": "v2", "closed": 20, "win_rate": 65.0},
+            {"version": "v1", "closed": 20, "win_rate": 55.0},
+        ]
+        self.assertIsNone(rl._check_prompt_regression(versions))
+
+    def test_learning_js_evaluating_banner_present(self):
+        """learning.js regressionBanner must render an evaluating state (⏳ chip)."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("status === 'evaluating'", src)
+        self.assertIn("⏳", src)
+        self.assertIn("min_n_required", src)
+
+
+class TestFix18VirtualOutcomes(unittest.TestCase):
+    """Fix #18 — Virtual outcomes via lazy OHLC resolution in _calib_compute()."""
+
+    def test_db_virtual_outcome_column_in_migrations(self):
+        """db.py _LE_MIGRATIONS must include virtual_outcome and virtual_pnl_pct columns."""
+        with open(os.path.join(ROOT, "db.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"virtual_outcome"', src)
+        self.assertIn('"virtual_pnl_pct"', src)
+
+    def test_resolve_virtual_outcomes_function_exists(self):
+        """routes/learning.py must define _resolve_virtual_outcomes helper."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _resolve_virtual_outcomes(", src)
+
+    def test_resolve_called_in_calib_compute(self):
+        """_calib_compute must call _resolve_virtual_outcomes at the start of the DB block."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_resolve_virtual_outcomes(conn)", src)
+
+    def test_virtual_rows_merged_into_rows_all(self):
+        """_calib_compute must merge real and virtual rows into rows_all for calibration."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("rows_all", src)
+        self.assertIn("virtual_rows", src)
+
+    def test_weight_function_applies_virtual_discount(self):
+        """_weight() inside _calib_compute must apply 0.75× discount for virtual rows."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("0.75", src)
+        self.assertIn("is_virtual", src)
+
+    def test_calibration_header_includes_virtual_count(self):
+        """Calibration block header must show Nv when virtual outcomes are included."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("n_virtual", src)
+        self.assertIn("virt_note", src)
+
+    def test_recent_events_query_includes_virtual_outcome(self):
+        """learning_stats() recent events SQL must select virtual_outcome column."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Should appear in both recent events SELECT and virtual rows SELECT
+        self.assertGreaterEqual(src.count("virtual_outcome"), 3)
+
+    def test_learning_js_virtual_chip_rendered(self):
+        """learning.js recent events must render a virtual outcome chip (~W or ~L)."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("virtualChip", src)
+        self.assertIn("virtual_outcome", src)
+        self.assertIn("virtual_win", src)
+        # Chip content is a template literal: ">~${...}" — check tilde prefix and W/L labels
+        self.assertIn(">~${", src)
+        self.assertIn("? 'W' : 'L'", src)
+
+    def test_resolve_direction_aware_sell_trim(self):
+        """_resolve_virtual_outcomes must invert target/stop check for SELL/TRIM."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Direction-aware check: SELL/TRIM frame — Low <= target → win; High >= stop → loss
+        self.assertIn("is_exit", src)
+        self.assertIn("virtual_win", src)
+        self.assertIn("virtual_loss", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

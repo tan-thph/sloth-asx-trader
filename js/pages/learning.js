@@ -197,6 +197,25 @@ function _renderLearningContent(d, brier) {
   // ── Gap 5: Prompt regression banner ──────────────────────────────────────
   const regressionBanner = (() => {
     if (!promptRegression) return '';
+
+    // Fix #19: evaluating state — new prompt, insufficient data for comparison.
+    // Previously returned nothing (null → silent false-negative on the UI).
+    if (promptRegression.status === 'evaluating') {
+      return `
+        <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;
+                    padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;align-items:flex-start">
+          <span style="font-size:18px;line-height:1.2">⏳</span>
+          <div style="flex:1">
+            <strong style="font-size:13px">Evaluating ${promptRegression.current_version}</strong>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px">
+              ${promptRegression.n_current} / ${promptRegression.min_n_required} closed trades
+              &nbsp;·&nbsp; SE&nbsp;=&nbsp;${promptRegression.se_pp}pp — too wide for reliable comparison
+              &nbsp;·&nbsp; No action needed, monitoring.
+            </div>
+          </div>
+        </div>`;
+    }
+
     const sig  = promptRegression.significant;
     const bg   = sig ? '#fef2f2' : '#fef3c7';
     const bdr  = sig ? '#fca5a5' : '#fde68a';
@@ -222,8 +241,12 @@ function _renderLearningContent(d, brier) {
   const phase8Note = (() => {
     if (!phase8) return '';
     const icon  = phase8.active ? '✅' : '⏸️';
+    // Fix #16: show excluded good-loss count when non-zero
+    const excl  = phase8.n_good_losses_excluded > 0
+      ? ` · ${phase8.n_good_losses_excluded} good-loss${phase8.n_good_losses_excluded > 1 ? 'es' : ''} excluded from gate`
+      : '';
     const label = phase8.active
-      ? `Phase 8 skill-weighting active (n=${phase8.n_scored} — mean_wins=${phase8.mean_skill_wins} > losses=${phase8.mean_skill_losses})`
+      ? `Phase 8 skill-weighting active (n=${phase8.n_scored} — mean_wins=${phase8.mean_skill_wins} > losses=${phase8.mean_skill_losses}${excl})`
       : `Phase 8 skill-weighting paused — ${phase8.reason}`;
     const color = phase8.active ? '#16a34a' : '#d97706';
     return `<div style="font-size:11px;color:${color};margin-bottom:8px">${icon} ${label}</div>`;
@@ -609,6 +632,16 @@ function _renderLearningContent(d, brier) {
                      >${skillScore.toFixed(1)}</span>`
                   : `<span id="skill-badge-${ev.id}"></span>`;
 
+                // Fix #18: virtual outcome chip — shows for unexecuted rows with resolved OHLC outcome
+                const virtualChip = (!ev.was_executed && ev.virtual_outcome && ev.virtual_outcome !== 'virtual_open')
+                  ? `<span title="Virtual outcome (skipped rec): OHLC scan found ${ev.virtual_outcome === 'virtual_win' ? 'target hit' : 'stop hit'} — included at 0.75× weight in calibration"
+                       style="font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600;margin-left:3px;cursor:default;
+                              background:${ev.virtual_outcome === 'virtual_win' ? '#f0fdf4' : '#fef2f2'};
+                              color:${ev.virtual_outcome === 'virtual_win' ? '#15803d' : '#dc2626'};
+                              border:1px solid ${ev.virtual_outcome === 'virtual_win' ? '#86efac' : '#fca5a5'}"
+                     >~${ev.virtual_outcome === 'virtual_win' ? 'W' : 'L'}</span>`
+                  : '';
+
                 // Fixed-slot button helpers — each slot is a flex cell of constant width
                 const _slot = (w, html) =>
                   `<span style="width:${w}px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">${html}</span>`;
@@ -625,7 +658,7 @@ function _renderLearningContent(d, brier) {
                   <td style="padding:3px 6px">${ev.recommendation||'—'}</td>
                   <td style="padding:3px 6px;text-align:right">${ev.ai_confidence != null ? (ev.ai_confidence*100).toFixed(0)+'%' : '—'}</td>
                   <td style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
-                  <td style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}</td>
+                  <td style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}${virtualChip}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
                   <td style="padding:3px 6px">${ev.outcome_status === 'win' && successTagsEl
                     ? successTagsEl

@@ -242,6 +242,11 @@ _LE_MIGRATIONS = [
     ("sell_primary_driver",    "TEXT"),  # exactly one: thesis_broken|target_reached|stop_triggered|...
     ("sell_secondary_factors", "TEXT"),  # 0-3 comma-sep: earnings_approaching|sector_rotation|...
     ("sell_urgency",           "TEXT"),  # immediate|routine|monitor
+    # Sprint 36: Virtual outcomes for skipped/unexecuted recs (Fix #18)
+    # Lazy-resolved in _calib_compute() by scanning OHLC for target/stop hits.
+    # virtual_win | virtual_loss | virtual_open (neither hit yet) | NULL (unresolved)
+    ("virtual_outcome",        "TEXT"),  # virtual_win|virtual_loss|virtual_open|NULL
+    ("virtual_pnl_pct",        "REAL"),  # reserved — NULL until entry price is known
 ]
 
 

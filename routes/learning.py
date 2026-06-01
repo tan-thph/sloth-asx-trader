@@ -28,6 +28,24 @@ _CALIB_TTL = 300
 bp = Blueprint("learning", __name__)
 
 
+def _is_good_loss(r: dict) -> bool:
+    """Returns True for losses/breakevenents that reflect disciplined execution,
+    not analytical error — must be excluded from Phase 8's skill-gate.
+
+    Mirrors the _is_shock() exclusion logic used for confidence-band calibration.
+    Two cases qualify:
+      - exit_reason = 'protective_stop': deliberate capital-protection exit; the
+        model correctly identified risk and acted; Ollama should (and does) score
+        these 8–9/10 for good execution. Including them in loss_skills inflates
+        mean_loss and can keep the Phase 8 gate permanently locked.
+      - error_type contains 'external_shock': black-swan events outside the
+        model's control — including them punishes correct analysis for bad luck.
+    """
+    et = (r.get("error_type") or "")
+    er = (r.get("exit_reason") or "")
+    return er == "protective_stop" or "external_shock" in et.split(",")
+
+
 def _compute_phase8_meta(skill_rows: list) -> dict:
     """Gap 2 — Phase 8 validation gate.
 
@@ -44,20 +62,31 @@ def _compute_phase8_meta(skill_rows: list) -> dict:
         return {"active": False, "n_scored": n,
                 "reason": f"insufficient scored events (need 10, have {n})"}
     win_skills  = [float(r["skill_score"]) for r in skill_rows if r["outcome_status"] == "win"]
-    loss_skills = [float(r["skill_score"]) for r in skill_rows if r["outcome_status"] in ("loss", "breakeven")]
+    # Fix #16: exclude protective_stop + external_shock losses from the gate.
+    # These reflect disciplined execution or unforeseeable events — including their
+    # (correctly high) skill scores in loss_skills inflates mean_loss and can keep
+    # Phase 8 permanently locked even when analysis genuinely predicts outcomes.
+    good_loss_rows      = [r for r in skill_rows
+                           if r["outcome_status"] in ("loss", "breakeven") and _is_good_loss(r)]
+    analytical_loss_rows = [r for r in skill_rows
+                            if r["outcome_status"] in ("loss", "breakeven") and not _is_good_loss(r)]
+    loss_skills = [float(r["skill_score"]) for r in analytical_loss_rows]
+    n_good_excl = len(good_loss_rows)
     if not win_skills or not loss_skills:
-        return {"active": False, "n_scored": n,
-                "reason": "no wins or no losses among scored events"}
+        return {"active": False, "n_scored": n, "n_good_losses_excluded": n_good_excl,
+                "reason": "no wins or no analytical losses among scored events"}
     mean_win  = round(sum(win_skills)  / len(win_skills),  2)
     mean_loss = round(sum(loss_skills) / len(loss_skills), 2)
     active = mean_win > mean_loss
     return {
-        "active":            active,
-        "n_scored":          n,
-        "mean_skill_wins":   mean_win,
-        "mean_skill_losses": mean_loss,
+        "active":                  active,
+        "n_scored":                n,
+        "n_good_losses_excluded":  n_good_excl,
+        "mean_skill_wins":         mean_win,
+        "mean_skill_losses":       mean_loss,
         "reason": (
-            f"scores predict outcomes (mean wins={mean_win} > losses={mean_loss})"
+            f"scores predict outcomes (mean wins={mean_win} > losses={mean_loss}"
+            + (f"; {n_good_excl} good-loss excluded)" if n_good_excl else ")")
             if active else
             f"skill scores do NOT predict wins (wins={mean_win} ≤ losses={mean_loss}) — sf=1.0 applied"
         ),
@@ -72,19 +101,46 @@ def _check_prompt_regression(version_list: list, min_n: int = 10) -> dict | None
     Uses binomial SE (50/50 worst-case) as the significance threshold:
       - drop > 1×SE → early warning (flag for monitoring)
       - drop > 2×SE → significant (flag for action)
+
+    Fix #19: when a new version exists but is below the ESS floor, returns an
+    "evaluating" dict instead of None — prevents silent false-negative on UI.
+    None is now reserved for "no versions with any data at all".
     """
     eligible = [v for v in version_list
                 if (v.get("closed") or 0) >= min_n and v.get("win_rate") is not None]
+
+    # Fix #19: current version exists but below ESS floor — return evaluating, not None
+    all_with_closes = [v for v in version_list if (v.get("closed") or 0) > 0]
+    if len(eligible) < 2 and all_with_closes:
+        current = all_with_closes[0]
+        n = current.get("closed", 0)
+        if n < min_n:
+            se_pp = round(math.sqrt(0.25 / max(n, 1)) * 100, 1)
+            return {
+                "status":          "evaluating",
+                "current_version": current["version"],
+                "n_current":       n,
+                "min_n_required":  min_n,
+                "se_pp":           se_pp,
+                "reason": (
+                    f"Only {n}/{min_n} closed trades on {current['version']} — "
+                    f"SE={se_pp}pp is too wide for reliable comparison. "
+                    "No action needed; monitoring."
+                ),
+            }
+
     if len(eligible) < 2:
-        return None
+        return None  # No versions with data at all — nothing to report
+
     current, prior = eligible[0], eligible[1]
     curr_wr = current["win_rate"] / 100
     prev_wr = prior["win_rate"]  / 100
     drop    = prev_wr - curr_wr
     if drop <= 0:
-        return None  # no regression — current is same or better
+        return None  # no regression — current is same or better; silent green is correct
     se = math.sqrt(0.25 / current["closed"])
     return {
+        "status":           "regression",
         "current_version":  current["version"],
         "prior_version":    prior["version"],
         "current_win_rate": round(curr_wr * 100, 1),
@@ -407,7 +463,8 @@ def learning_stats():
                        holding_period_days, exit_reason, rationale_summary,
                        error_type, error_type_source, debate_summary, skill_score,
                        postmortem_debate, success_tags, checklist_bypasses,
-                       sell_primary_driver, sell_secondary_factors, sell_urgency
+                       sell_primary_driver, sell_secondary_factors, sell_urgency,
+                       virtual_outcome
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
 
@@ -465,8 +522,10 @@ def learning_stats():
             ).fetchall()
 
             # Gap 2: Phase 8 skill-weighting validation
+            # Fix #16: include exit_reason and error_type so _is_good_loss() can filter them
             skill_rows_raw = conn.execute("""
-                SELECT skill_score, outcome_status FROM ai_learning_events
+                SELECT skill_score, outcome_status, exit_reason, error_type
+                FROM ai_learning_events
                 WHERE skill_score IS NOT NULL
                   AND outcome_status IN ('win','loss','breakeven')
             """).fetchall()
@@ -707,6 +766,89 @@ def learning_calibration_stats():
         return jsonify({"error": str(e)}), 500
 
 
+def _resolve_virtual_outcomes(conn) -> int:
+    """Lazy-evaluate skipped/unexecuted trades for virtual calibration signal.
+
+    Called at the start of _calib_compute() on every calibration fetch.
+    Safe to call frequently: capped at 10 resolutions per call; the 5-min TTL
+    on _calib_compute() prevents excessive yfinance round-trips.
+
+    Algorithm per unresolved skipped event:
+      1. Fetch daily OHLC from event timestamp to today via yfinance.
+      2. Scan bar-by-bar: check if Daily High reached target or Daily Low reached stop.
+      3. For SELL/TRIM: inverted frame — target is BELOW entry, stop is ABOVE entry.
+      4. Write virtual_outcome = 'virtual_win' | 'virtual_loss' | 'virtual_open'.
+
+    virtual_open means neither level was hit yet — event stays eligible for future
+    resolution on the next calibration fetch.
+
+    Returns the number of events resolved this call (for debug logging).
+    """
+    cutoff = (datetime.now() - timedelta(days=10)).isoformat()
+    try:
+        rows = conn.execute("""
+            SELECT id, ticker, recommendation, suggested_stop, suggested_target, timestamp
+            FROM ai_learning_events
+            WHERE was_executed = 0
+              AND suggested_stop IS NOT NULL AND suggested_target IS NOT NULL
+              AND virtual_outcome IS NULL
+              AND outcome_status IN ('open', 'skipped')
+              AND timestamp < ?
+            ORDER BY timestamp DESC LIMIT 10
+        """, (cutoff,)).fetchall()
+    except Exception:
+        return 0
+
+    if not rows:
+        return 0
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+
+    resolved = 0
+    for row in rows:
+        try:
+            stop    = float(row["suggested_stop"])
+            target  = float(row["suggested_target"])
+        except (TypeError, ValueError):
+            continue
+        is_exit = (row["recommendation"] or "BUY").upper() in ("SELL", "TRIM")
+        ticker  = row["ticker"] or ""
+        yf_sym  = ticker if ticker.endswith(".AX") else ticker + ".AX"
+        start   = row["timestamp"][:10]  # YYYY-MM-DD
+
+        try:
+            hist = yf.Ticker(yf_sym).history(start=start, interval="1d")
+            if hist.empty:
+                conn.execute(
+                    "UPDATE ai_learning_events SET virtual_outcome='virtual_open' WHERE id=?",
+                    (row["id"],))
+                resolved += 1
+                continue
+        except Exception:
+            continue
+
+        outcome = "virtual_open"
+        for _, bar in hist.iterrows():
+            if is_exit:
+                # SELL/TRIM: falling price = thesis confirmed (target below entry)
+                if bar["Low"]  <= target: outcome = "virtual_win";  break
+                if bar["High"] >= stop:   outcome = "virtual_loss"; break
+            else:
+                # BUY: rising price = thesis confirmed (target above entry)
+                if bar["High"] >= target: outcome = "virtual_win";  break
+                if bar["Low"]  <= stop:   outcome = "virtual_loss"; break
+
+        conn.execute(
+            "UPDATE ai_learning_events SET virtual_outcome=? WHERE id=?",
+            (outcome, row["id"]))
+        resolved += 1
+
+    return resolved
+
+
 def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -> dict:
     """
     Pure calibration computation. Returns a plain dict.
@@ -746,7 +888,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             return 1.0
 
     def _weight(r, half_life=None):
-        """Skill-weighted time-decay: weight = time_decay × skill_factor.
+        """Skill-weighted time-decay: weight = time_decay × skill_factor × virtual_discount.
 
         Skill factor is centred at 5/10 = 1.0 (neutral).
           skill=0  → 0.0 → clamped to 0.2  (lucky/random noise, heavily discounted)
@@ -757,6 +899,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         Unscored trades (skill_score IS NULL) default to 1.0 — the neutral centre.
         This avoids the old discontinuity where an outstanding scored trade (8/10 → 0.8)
         was penalised relative to an unscored trade (→ 1.0).
+
+        Fix #18: virtual outcomes (skipped recs resolved via OHLC scan) receive an
+        additional 0.75× discount — they break pessimism loops caused by calibration
+        suppression, but are synthetic; real outcomes always outweigh them.
         """
         half_life = hl if half_life is None else half_life
         td = _decay(r["timestamp"], half_life)
@@ -764,7 +910,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         # Phase 8 gate: only apply skill amplification when scores predict outcomes.
         # _phase8_active is resolved at call time (closure over outer scope variable).
         sf = max(0.2, min(1.8, float(sk) / 5.0)) if (sk is not None and _phase8_active) else 1.0
-        return td * sf
+        base = td * sf
+        # Fix #18: virtual rows get 0.75× multiplier (is_virtual=1 in DB query)
+        return base * 0.75 if r.get("is_virtual") else base
 
     def _ess(subset):
         """Kish's effective sample size for weighted samples.
@@ -793,6 +941,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
 
     try:
         with get_db() as conn:
+            # Fix #18: lazy-resolve skipped trades — capped at 10, fast, idempotent.
+            # Failures degrade gracefully (yfinance timeout → marks virtual_open, skipped).
+            _resolve_virtual_outcomes(conn)
+
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
                        realized_pnl_pct, rr_ratio, timestamp,
@@ -801,6 +953,25 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                 WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
                 ORDER BY timestamp DESC LIMIT 300
             """, (cutoff,)).fetchall()
+
+            # Fix #18: fetch resolved virtual outcomes to supplement calibration at 0.75× weight.
+            # Maps virtual_win → 'win', virtual_loss → 'loss' so all downstream logic is unchanged.
+            v_rows_raw = conn.execute("""
+                SELECT ai_confidence,
+                       CASE virtual_outcome WHEN 'virtual_win' THEN 'win' ELSE 'loss' END AS outcome_status,
+                       regime, sector, ticker,
+                       NULL AS realized_pnl_pct, rr_ratio, timestamp,
+                       error_type, exit_reason, skill_score, success_tags,
+                       1 AS is_virtual
+                FROM ai_learning_events
+                WHERE was_executed = 0
+                  AND virtual_outcome IN ('virtual_win', 'virtual_loss')
+                  AND timestamp >= ?
+                  AND ai_confidence IS NOT NULL
+                LIMIT 100
+            """, (cutoff,)).fetchall()
+            virtual_rows = [dict(r) for r in v_rows_raw]
+            n_virtual    = len(virtual_rows)
 
         # Gate: personalised calibration nudges require n ≥ 30 to avoid chasing noise.
         # Below that, return an ASX base-rate prior so the user message still has a
@@ -823,6 +994,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         n = len(rows)
         parts = []
 
+        # Fix #18: merge virtual outcomes (0.75× weight) into rows for all downstream calcs.
+        # Virtual rows don't count toward `n` (the real-data gate) — only toward weighted stats.
+        rows_all = [dict(r) for r in rows] + virtual_rows
+
         # ── Phase 8 gate: activate skill weighting only when scores predict outcomes ──
         # Python closures read names at call time, so assigning _phase8_active here
         # (in the same function scope as the earlier `_phase8_active = False`)
@@ -830,12 +1005,16 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         _scored_rows = [r for r in rows if r["skill_score"] is not None]
         if len(_scored_rows) >= 10:
             _win_sk  = [float(r["skill_score"]) for r in _scored_rows if r["outcome_status"] == "win"]
-            _loss_sk = [float(r["skill_score"]) for r in _scored_rows if r["outcome_status"] in ("loss", "breakeven")]
+            # Fix #16: exclude good losses (protective_stop + external_shock) from gate comparison
+            _loss_sk = [float(r["skill_score"]) for r in _scored_rows
+                        if r["outcome_status"] in ("loss", "breakeven") and not _is_good_loss(r)]
             if _win_sk and _loss_sk:
                 _phase8_active = (sum(_win_sk) / len(_win_sk)) > (sum(_loss_sk) / len(_loss_sk))  # noqa: F841
 
-        calib_rows = [r for r in rows if not _is_shock(r)]
-        n_excluded = n - len(calib_rows)
+        # calib_rows built from rows_all (real + virtual) so virtual outcomes
+        # participate in conf-band/regime/sector calibration at their 0.75× weight.
+        calib_rows = [r for r in rows_all if not _is_shock(r)]
+        n_excluded = n - len([r for r in rows if not _is_shock(r)])
 
         _ESS_MIN = 2.5  # Kish ESS threshold — suppresses calibration when decay renders
                         # sample statistically unreliable (e.g. 1 fresh + 3 very stale trades)
@@ -874,7 +1053,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             return None
 
         if regime:
-            reg = [r for r in rows if r["regime"] == regime]
+            reg = [r for r in rows_all if r["regime"] == regime]
             ess_reg = _ess(reg) if reg else 0.0
             if ess_reg >= _ESS_MIN:
                 # Level 1: specific regime — reliable data
@@ -884,7 +1063,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             else:
                 # Specific regime is thin — try macro-group fallback
                 macro = _regime_macro(regime)
-                macro_rows = [r for r in rows if _regime_macro(r["regime"] or "") == macro] if macro else []
+                macro_rows = [r for r in rows_all if _regime_macro(r["regime"] or "") == macro] if macro else []
                 ess_macro  = _ess(macro_rows) if macro_rows else 0.0
                 if macro and ess_macro >= _ESS_MIN:
                     wr   = _wwr(macro_rows)
@@ -896,8 +1075,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                 else:
                     # No usable macro data either — fall back to all trades at 0.7× discount
                     # Represent as a warning so Claude knows specificity is low
-                    if rows:
-                        wr_all = _wwr(rows)
+                    if rows_all:
+                        wr_all = _wwr(rows_all)
                         parts.append(
                             f"{regime}⚠thin(ESS={ess_reg:.1f})→allRegimes:{wr_all*100:.0f}%W"
                             f"(n={n},discount0.7×)⚠low-specificity"
@@ -907,7 +1086,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
 
         # 3. Relevant sectors — ESS≥2.5 AND notable rate
         for sector in sectors:
-            s_rows = [r for r in rows if r["sector"] == sector]
+            s_rows = [r for r in rows_all if r["sector"] == sector]
             if not s_rows:
                 continue
             if _ess(s_rows) < _ESS_MIN:
@@ -922,9 +1101,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         # Regime-specific sub-check: if global decay detected, compare current-regime recent trades.
         # If current regime is stable (|reg_delta|<8pp), the decay is likely regime-exposure
         # (under-performance in other regimes) rather than a universal strategy breakdown.
-        recent_rows = [r for r in rows if r["timestamp"] >= cutoff_30]
+        recent_rows = [r for r in rows_all if r["timestamp"] >= cutoff_30]
         if len(recent_rows) >= 5 and n >= 10:
-            all_wr       = _wwr(rows)
+            all_wr       = _wwr(rows_all)
             rec_wr       = _wwr(recent_rows)
             global_delta = rec_wr - all_wr
             if global_delta < -0.15:
@@ -956,7 +1135,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                     )
 
         # 5. R:R accuracy — n≥5 high-R:R with clear underperformance
-        hi_rr = [r for r in rows if (r["rr_ratio"] or 0) >= 2.0]
+        hi_rr = [r for r in rows_all if (r["rr_ratio"] or 0) >= 2.0]
         if len(hi_rr) >= 5:
             hi_wr = _wwr(hi_rr)
             if hi_wr < 0.50:
@@ -995,7 +1174,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
 
         # 6b. Dominant success tag — mirror of L2 dominant error check
         # Only emit when ESS of wins is high enough to trust the pattern.
-        wins_tagged = [r for r in rows if r["outcome_status"] == "win"
+        wins_tagged = [r for r in rows_all if r["outcome_status"] == "win"
                        and r.get("success_tags") and r["success_tags"] not in ("", "none")]
         if len(wins_tagged) >= 3:
             win_ess = _ess(wins_tagged)
@@ -1079,8 +1258,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         regime_tag = f",{regime}" if regime else ""
         excl_note  = f",{n_excluded}excl" if n_excluded > 0 else ""
         hl_note    = f",hl={hl}d" if hl != 45 else ""
+        # Fix #18: include virtual count in header so Claude knows some data is synthetic
+        virt_note  = f",{n_virtual}v" if n_virtual > 0 else ""
         block = (
-            f"CALIBRATION({n}cls,{date_from}→{date_to}{regime_tag}{excl_note}{hl_note}): "
+            f"CALIBRATION({n}cls{virt_note},{date_from}→{date_to}{regime_tag}{excl_note}{hl_note}): "
             + block_body + "."
         )
         return {"available": True, "block": block, "sample": n}
