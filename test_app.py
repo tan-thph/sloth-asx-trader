@@ -4014,9 +4014,8 @@ class TestPostmortemPromptQuality(unittest.TestCase):
                       "_pm_build_prompt must accept pnl_pct parameter")
 
     def test_pm_prompt_includes_loss_direction_hint_for_sell_loss(self):
-        """_pm_build_prompt must inject LOSS DIRECTION hint for SELL/TRIM with pnl_pct < 0."""
+        """_pm_build_prompt must inject LOSS DIRECTION hint for large SELL/TRIM losses (> 5%)."""
         import routes.debate as deb
-        # Minimal summary for a SELL at a loss
         prompt = deb._pm_build_prompt(
             summary="SELL XYZ @ $100 | Outcome: LOSS (-20%)",
             rationale="",
@@ -4025,12 +4024,55 @@ class TestPostmortemPromptQuality(unittest.TestCase):
             pnl_pct=-20.0,
         )
         self.assertIn("LOSS DIRECTION", prompt,
-                      "Prompt must include LOSS DIRECTION note for SELL loss")
+                      "Prompt must include LOSS DIRECTION note for large SELL loss")
         self.assertIn("thesis_broken", prompt)
-        self.assertIn("stock price ROSE", prompt)
+
+    def test_pm_prompt_small_loss_guides_none(self):
+        """_pm_build_prompt must guide toward 'none' for sub-2% SELL/TRIM losses."""
+        import routes.debate as deb
+        prompt = deb._pm_build_prompt(
+            summary="SELL XYZ @ $100 | Outcome: LOSS (-1.5%)",
+            rationale="",
+            exit_hint="manual",
+            action="SELL",
+            pnl_pct=-1.5,
+        )
+        self.assertIn("none", prompt, "Small loss prompt must mention 'none'")
+        self.assertIn("sub-2%", prompt, "Must warn against thesis_broken for sub-2% losses")
+        self.assertNotIn("LOSS DIRECTION", prompt,
+                         "Sub-2% loss should use LOSS NOTE, not LOSS DIRECTION")
+
+    def test_pm_prompt_stop_hit_guides_stop_too_tight(self):
+        """_pm_build_prompt must suggest stop_too_tight as primary for stop_hit exits."""
+        import routes.debate as deb
+        prompt = deb._pm_build_prompt(
+            summary="SELL XYZ @ $100 | Outcome: LOSS (-3%)",
+            rationale="",
+            exit_hint="",
+            action="SELL",
+            pnl_pct=-3.0,
+            exit_reason="stop_hit",
+        )
+        self.assertIn("stop_too_tight", prompt,
+                      "stop_hit exit prompt must suggest stop_too_tight as candidate")
+        self.assertIn("stop_hit", prompt)
+
+    def test_pm_prompt_medium_loss_offers_multiple_options(self):
+        """2–5% loss prompt must offer thesis_broken, poor_entry, AND none as candidates."""
+        import routes.debate as deb
+        prompt = deb._pm_build_prompt(
+            summary="SELL XYZ @ $100 | Outcome: LOSS (-3.5%)",
+            rationale="",
+            exit_hint="manual",
+            action="SELL",
+            pnl_pct=-3.5,
+        )
+        self.assertIn("thesis_broken", prompt)
+        self.assertIn("poor_entry", prompt)
+        self.assertIn("none", prompt)
 
     def test_pm_prompt_no_loss_hint_for_sell_win(self):
-        """_pm_build_prompt must NOT inject LOSS DIRECTION hint when pnl_pct >= 0."""
+        """_pm_build_prompt must NOT inject loss guidance when pnl_pct >= 0."""
         import routes.debate as deb
         prompt = deb._pm_build_prompt(
             summary="SELL XYZ @ $100 | Outcome: WIN (+5%)",
@@ -4040,20 +4082,36 @@ class TestPostmortemPromptQuality(unittest.TestCase):
             pnl_pct=5.0,
         )
         self.assertNotIn("LOSS DIRECTION", prompt)
+        self.assertNotIn("LOSS NOTE", prompt)
 
     def test_thesis_broken_description_mentions_direction(self):
         """thesis_broken tag description must mention wrong directional movement."""
         import routes.debate as deb
         prompt = deb._pm_build_prompt("summary", "", "", action="BUY")
-        self.assertIn("trade direction was fundamentally wrong", prompt,
+        self.assertIn("fundamental directional call was wrong", prompt,
                       "thesis_broken description must reference directional failure")
 
-    def test_pm_prompt_footnote_for_sell_trim(self):
-        """Prompt must have a footnote guiding away from poor_rr for SELL/TRIM losses."""
+    def test_pm_prompt_poor_rr_requires_computable_ratio(self):
+        """poor_rr tag description must state it requires a computable rr_ratio."""
         import routes.debate as deb
         prompt = deb._pm_build_prompt("summary", "", "", action="SELL", pnl_pct=-10.0)
-        self.assertIn("thesis_broken", prompt)
-        self.assertIn("do NOT use poor_rr unless you can compute a specific ratio", prompt)
+        self.assertIn("poor_rr", prompt)
+        self.assertIn("REQUIRES a computable rr_ratio", prompt)
+
+    def test_pm_prompt_none_criteria_are_explicit(self):
+        """none tag description must state the concrete criteria (< 2% or unforeseeable)."""
+        import routes.debate as deb
+        prompt = deb._pm_build_prompt("summary", "", "", action="BUY")
+        self.assertIn("none", prompt)
+        self.assertIn("2%", prompt,
+                      "none criteria must mention < 2% threshold")
+
+    def test_pm_build_prompt_accepts_exit_reason(self):
+        """_pm_build_prompt must accept exit_reason parameter."""
+        import inspect, routes.debate as deb
+        sig = inspect.signature(deb._pm_build_prompt)
+        self.assertIn("exit_reason", sig.parameters,
+                      "_pm_build_prompt must accept exit_reason parameter")
 
     # ── rr_ratio backfill in init_db ──────────────────────────────────────────
 
@@ -4095,6 +4153,15 @@ class TestPostmortemPromptQuality(unittest.TestCase):
         matches = re.findall(r'_pm_build_prompt\([^)]*pnl_pct\s*=', src)
         self.assertGreaterEqual(len(matches), 2,
                                 "Both single-model and adversarial debate must pass pnl_pct")
+
+    def test_both_postmortem_callsites_pass_exit_reason(self):
+        """Both _pm_build_prompt call sites must pass exit_reason from the row."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        import re
+        matches = re.findall(r'_pm_build_prompt\([^)]*exit_reason\s*=', src)
+        self.assertGreaterEqual(len(matches), 2,
+                                "Both single-model and adversarial debate must pass exit_reason")
 
 
 if __name__ == "__main__":

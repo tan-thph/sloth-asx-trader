@@ -87,38 +87,129 @@ const ANALYSIS_SYSTEM_PROMPT =
   SECTION 2 — SELL/TRIM DECISION TAGGING
 
   Every SELL or TRIM rec MUST include three structured tag fields.
-  These are set at generation time so the learning loop can track which decision
-  drivers actually predict good exits. Claude evaluates the trade rationale and
-  assigns the most causally accurate tags — this is NOT retrospective labelling.
+  These are set AT GENERATION TIME so the learning loop can track which decision
+  drivers actually predict good exits. Assign the most causally accurate tags based
+  on the evidence NOW — this is NOT retrospective labelling of what happened after.
 
   1. primary_driver (exactly one — the causally upstream reason):
      thesis_broken       | target_reached      | stop_triggered    | technical_breakdown
      regime_change       | better_opportunity  | time_stop         | risk_management
      tax_optimisation
 
-  2. secondary_factors (array of 0–3 from this list):
-     earnings_approaching | sector_rotation    | franking_captured  | unrealised_loss_large
-     held_over_12m        | held_11_to_12m     | sector_concentration | position_oversized
-     negative_news_flow   | peer_outperformance | volume_decline    | dividend_at_risk
+  CRITERIA FOR EACH primary_driver:
+
+    thesis_broken
+      The core investment thesis is now demonstrably wrong. The stock has moved materially
+      against the original predicted direction, or new fundamental information has invalidated
+      the basis of the original call. Use when the analysis itself was incorrect, not just
+      the timing or setup mechanics.
+      → Apply: stock has risen significantly against a SELL thesis; earnings/fundamentals
+        have materially deteriorated against a BUY thesis.
+      → NOT for: price hitting a mechanical stop (use stop_triggered); technical pattern
+        failure without fundamental change (use technical_breakdown).
+
+    target_reached
+      The price has reached or exceeded the original price target from the recommendation.
+      The thesis is STILL INTACT — this is a mechanical exit at the pre-set objective.
+      → Apply: price is at or within 1% of the original target level AND the investment
+        thesis has not materially changed since the recommendation.
+      → NOT for: thesis has simultaneously broken (use thesis_broken); stop was hit instead
+        (logically contradictory — forbidden combination).
+
+    stop_triggered
+      The price has reached or breached the stop-loss level set at recommendation time.
+      The risk management rule has mechanically fired.
+      → Apply: current price is at or below (for BUY) / above (for SELL) the stop-loss level.
+      → NOT for: target was hit (forbidden combination with target_reached); manual discretionary
+        exit at a different level (use thesis_broken or risk_management).
+
+    technical_breakdown
+      Price action and technical structure have deteriorated materially, but the fundamental
+      investment thesis is still valid. The technical signal is the proximate reason for exit.
+      → Apply: death cross (50DMA crosses below 200DMA), sustained break below key support,
+        RSI divergence at overbought with volume confirmation, OBV diverging from price.
+      → Requires at least 2 independent technical signals (not just one indicator).
+      → NOT for: fundamental thesis change (use thesis_broken); single indicator signal (use
+        technical_breakdown only with confluence).
+
+    regime_change
+      The macro/market regime has shifted materially SINCE the recommendation, and now
+      directly opposes the trade's original thesis direction.
+      → Apply: RBA rate decision that reprices the sector (e.g. hike crushing REITs);
+        macro data causing a confirmed riskOff shift affecting the stock's sector;
+        AUD/USD move exceeding 3% that materially changes exporter/importer economics.
+      → NOT for: regime was already unfavourable at recommendation time (that is thesis_broken
+        or an oversight); minor daily regime fluctuations.
+
+    better_opportunity
+      A more attractive risk-adjusted opportunity has been identified, and redeploying the
+      capital into the named alternative is the primary reason for the exit.
+      → Apply: you have identified a specific ticker with superior expected return, lower
+        current risk, or a catalyst that makes it clearly preferable at this moment.
+      → REQUIRES: alternativeTicker field (the specific ticker to redeploy into).
+      → NOT for: general portfolio cleanup or size reduction without a named destination
+        (use risk_management); wishful diversification without a clear better entry.
+
+    time_stop
+      The position has been held beyond the expected time horizon without the thesis playing
+      out, and there is no clear near-term catalyst to justify continued holding.
+      → Apply: position has been open for ≥ 2× the original expected holding period with
+        price essentially flat (< 5% gain) and no upcoming catalyst identified.
+      → NOT for: target was hit (forbidden combination); thesis has actively broken (use
+        thesis_broken); position is being held deliberately for dividend/franking.
+
+    risk_management
+      Proactive risk reduction driven by portfolio construction concerns, not by thesis
+      failure or mechanical stop/target mechanics.
+      → Apply: position has grown to > 15% of portfolio value (concentration risk); sector
+        weighting exceeds 25% after recent gains; overall portfolio beta reduction ahead of
+        a known risk event (RBA meeting, reporting season cluster).
+      → REQUIRES secondary factor: sector_concentration OR position_oversized.
+      → NOT for: thesis-driven exits (use thesis_broken); stop triggered (use stop_triggered).
+
+    tax_optimisation
+      Exit is primarily driven by Australian tax strategy — crystallising a loss for
+      tax offset, or timing for CGT discount purposes.
+      → Apply: unrealised loss > $500 and within the May–June EOFY window; OR position
+        approaching or past 12-month mark and a TRIM is timed for CGT discount eligibility.
+      → REQUIRES secondary factor: unrealised_loss_large OR held_over_12m OR held_11_to_12m.
+      → Only valid during May–June EOFY window or when loss > $500 is the explicit driver.
+
+  2. secondary_factors (array of 0–3 — add only when they genuinely contributed):
+
+    earnings_approaching  — earnings announcement within 7 calendar days; creates binary risk
+    sector_rotation       — institutional capital visibly rotating OUT of this sector (breadth data)
+    franking_captured     — dividend + franking credits already received; yield support reduced
+    unrealised_loss_large — position has > $500 unrealised loss eligible for EOFY crystallisation
+    held_over_12m         — position > 12 months; CGT discount applies to any replacement BUY
+    held_11_to_12m        — approaching 12-month threshold; timing the exit to optimise CGT discount
+    sector_concentration  — this holding represents > 20% of portfolio's sector exposure
+    position_oversized    — this holding represents > 15% of total portfolio value
+    negative_news_flow    — material adverse news flow since recommendation (not catastrophic)
+    peer_outperformance   — sector peers materially outperforming this stock on relative strength
+    volume_decline        — sustained ADV decline over 10+ days suggesting institutional distribution
+    dividend_at_risk      — payout ratio > 100% OR earnings trend threatens the next dividend
 
   3. urgency (exactly one):
-     immediate — execute today; meaningful risk of waiting
-     routine   — within the next few sessions; no time pressure
-     monitor   — TRIM only; conditions forming but not yet crystallised
+     immediate — execute today; meaningful risk of further loss or missed exit if delayed
+     routine   — within the next 1-3 sessions; no acute time pressure
+     monitor   — TRIM only; conditions are forming but thesis not yet confirmed; watch and wait
 
   TAGGING RULES:
-  - primary_driver must be the causally upstream reason. If thesis is broken AND target
-    is reached, primary is target_reached ONLY if the thesis is still intact.
-  - secondary_factors capped at 3. More than 3 signals poor signal hygiene.
+  - primary_driver must be the causally UPSTREAM reason. If thesis is breaking AND price
+    is approaching a target, primary is target_reached ONLY if the thesis is still intact.
+  - secondary_factors capped at 3. More than 3 signals poor signal hygiene — be selective.
   - FORBIDDEN combinations (validation will reject):
-      target_reached + stop_triggered (logically contradictory)
-      time_stop + target_reached (time_stop implies target was NOT hit)
+      target_reached + stop_triggered (logically contradictory — price cannot hit both)
+      time_stop + target_reached (time_stop implies the target was NOT hit)
   - REQUIRED secondary for certain primaries:
       tax_optimisation → must include one of: unrealised_loss_large, held_over_12m, held_11_to_12m
       risk_management  → must include one of: sector_concentration, position_oversized
-  - better_opportunity → requires alternativeTicker field (the ticker to redeploy into)
-  - reasoning field must explicitly mention the primary_driver word or phrase.
-  - Use ONLY tags from the lists above. Invented tags will fail validation.
+  - better_opportunity → requires alternativeTicker field (the specific ticker to redeploy into)
+  - reasoning field must explicitly reference the primary_driver word or concept.
+  - Use ONLY tags from the lists above. Invented tags fail validation.
+  - DO NOT assign thesis_broken defensively when uncertain. If the evidence is ambiguous,
+    use technical_breakdown or regime_change and state the uncertainty in reasoning.
 
   ─────────────────────────────────────────────────────────────────────────────
 

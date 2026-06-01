@@ -536,8 +536,9 @@ def _pm_exit_hint(exit_reason: str) -> str:
 
 def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
                      entry_signals_str: str = "", action: str = "BUY",
-                     pnl_pct: float | None = None) -> str:
-    """Full postmortem classification prompt. D5: entry_signals_str. D6: action + pnl_pct."""
+                     pnl_pct: float | None = None,
+                     exit_reason: str = "") -> str:
+    """Full postmortem classification prompt. D5: entry_signals_str. D6: action + pnl_pct + exit_reason."""
     is_exit = action.upper() in ("SELL", "TRIM")
 
     # Direction preamble — prevents models from defaulting to BUY framing on SELL/TRIM trades.
@@ -556,18 +557,50 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "  R:R = (target − entry) / (entry − stop).\n"
     )
 
-    # For SELL/TRIM exits: if the trade resulted in a loss, the stock price ROSE
-    # against the bearish recommendation. Make this explicit so models can correctly
-    # identify thesis_broken instead of falling back to poor_rr / overconfident.
+    # Magnitude-tiered loss guidance for SELL/TRIM — prevents blanket thesis_broken assignment.
+    # Three tiers:
+    #   < 2%        → likely noise/commission; lean toward none unless clear process error
+    #   stop_hit    → stop fired before thesis played out; stop_too_tight is primary candidate
+    #   2–5%        → modest directional failure; consider thesis_broken or poor_entry or none
+    #   > 5%        → meaningful directional failure; thesis_broken is primary candidate
     if is_exit and pnl_pct is not None and pnl_pct < 0:
-        direction_note += (
-            f"  LOSS DIRECTION: This SELL/TRIM recorded a {abs(pnl_pct):.1f}% LOSS, meaning "
-            f"the stock price ROSE after the recommendation (the bearish thesis was WRONG).\n"
-            f"  The primary error is most likely 'thesis_broken' — the prediction of price "
-            f"decline was incorrect, not a setup flaw.\n"
-            f"  Only use poor_rr / stop_too_tight / overconfident if there is a clear "
-            f"SETUP flaw that exists INDEPENDENT of whether the price went up or down.\n"
-        )
+        loss = abs(pnl_pct)
+        if loss < 2.0:
+            direction_note += (
+                f"  LOSS NOTE: Very small {loss:.1f}% loss — within commission/slippage range.\n"
+                f"  Use 'none' unless you can identify a specific, repeatable process error.\n"
+                f"  Do NOT use thesis_broken for sub-2% losses.\n"
+            )
+        elif exit_reason == "stop_hit":
+            direction_note += (
+                f"  LOSS NOTE: {loss:.1f}% loss via stop_hit — the stop was triggered before "
+                f"the thesis had time to play out.\n"
+                f"  Primary candidates:\n"
+                f"    stop_too_tight — if stop distance from entry was < 3% (tight for ASX stocks)\n"
+                f"      or stop was within the stock's normal daily volatility range.\n"
+                f"    thesis_broken  — if the adverse move was large and sustained (not a "
+                f"volatility spike), AND the loss significantly exceeds the stop distance.\n"
+                f"  Check entry vs stop distance in the summary. Prefer stop_too_tight for "
+                f"small stop distances; prefer thesis_broken for sustained multi-day adverse moves.\n"
+            )
+        elif loss > 5.0:
+            direction_note += (
+                f"  LOSS DIRECTION: {loss:.1f}% loss — stock price moved materially against "
+                f"the {'bearish SELL/TRIM' if is_exit else 'bullish BUY'} thesis.\n"
+                f"  Primary candidate: thesis_broken (directional call was wrong).\n"
+                f"  Also evaluate: overconfident (if confidence ≥ 0.75 with insufficient evidence),\n"
+                f"  regime_mismatch (if regime shown in summary was bullish/risk-on),\n"
+                f"  missed_catalyst (if a known event like earnings was not factored in).\n"
+                f"  Do NOT use poor_rr as a substitute — it requires a computed R:R ratio.\n"
+            )
+        else:  # 2–5%
+            direction_note += (
+                f"  LOSS NOTE: {loss:.1f}% loss — modest {'adverse move for SELL/TRIM' if is_exit else 'decline for BUY'}.\n"
+                f"  Consider the root cause carefully:\n"
+                f"    thesis_broken — if the directional analysis was clearly wrong\n"
+                f"    poor_entry    — if timing was off but the direction was broadly correct\n"
+                f"    none          — if no clear process error is identifiable at this loss size\n"
+            )
     direction_note += "\n"
 
     return (
@@ -581,25 +614,55 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "confidence level, R:R ratio, entry/stop/target prices, and entry signals to reason — "
         "do NOT base the tag solely on the exit method.\n"
         "\n"
-        "Select 1-2 error tags:\n"
-        "  overconfident   - AI confidence was too high given the actual risk\n"
-        "  missed_catalyst - key event (earnings/news/macro) was not accounted for\n"
-        "  regime_mismatch - wrong strategy for the market regime at the time\n"
-        "  poor_entry      - entry timing or price was suboptimal\n"
-        "  stop_too_tight  - stop was hit by normal volatility before the move played out\n"
-        "  poor_rr         - reward:risk ratio was too low from the start to justify the trade\n"
-        "  external_shock  - outcome driven by unpredictable external event (policy change, black swan)\n"
-        "  thesis_broken   - the trade direction was fundamentally wrong: for SELL/TRIM the\n"
-        "                    stock rose instead of falling; for BUY the stock fell instead of rising\n"
-        "  none            - ONLY if the loss was genuinely unforeseeable with the available data\n"
+        "Select 1-2 error tags (STRICT criteria — only assign if the evidence clearly supports it):\n"
         "\n"
-        "Tag guidance — prefer the ROOT CAUSE, not its downstream consequence:\n"
-        "  If stop_too_tight explains poor_rr (tight stop forced a bad R:R setup), "
-        "use stop_too_tight only.\n"
-        "  overconfident and poor_rr are independent — both can apply together.\n"
-        "  Use none ONLY if no systematic error is identifiable; do not use it alongside other tags.\n"
-        "  For SELL/TRIM that lost because the stock rose: the answer is almost always "
-        "thesis_broken — do NOT use poor_rr unless you can compute a specific ratio.\n"
+        "  overconfident   - AI confidence was ≥ 0.75 but the analysis lacked sufficient evidence;\n"
+        "                    NOT valid simply because the trade lost; requires confidence ≥ 0.65\n"
+        "                    (will be auto-stripped if ai_confidence shown is < 0.65)\n"
+        "\n"
+        "  missed_catalyst - a known upcoming event (earnings, macro release, news) was present\n"
+        "                    but was not factored into the analysis; NOT for unpredictable shocks\n"
+        "\n"
+        "  regime_mismatch - the market regime at entry time directly opposed the trade direction;\n"
+        "                    e.g. SELL rec during a confirmed risk-on/bullish/trend regime;\n"
+        "                    check the 'regime' field in the trade summary\n"
+        "\n"
+        "  poor_entry      - entry timing was suboptimal: entered on a spike, at key resistance,\n"
+        "                    or ahead of a known risk event within 1-2 trading days\n"
+        "\n"
+        "  stop_too_tight  - stop was placed within normal daily volatility (< 2-3% for most ASX\n"
+        "                    stocks, < 1.5× ATR from entry), causing it to be hit by noise before\n"
+        "                    the thesis had time to play out; ONLY valid when exit=stop_hit;\n"
+        "                    NOT valid when stop > 15% from entry (wide, not tight)\n"
+        "\n"
+        "  poor_rr         - the reward:risk ratio was < 1.5 from setup, making the trade\n"
+        "                    unjustifiable from a position-sizing perspective;\n"
+        "                    REQUIRES a computable rr_ratio — if RR not shown, do NOT use this tag\n"
+        "\n"
+        "  external_shock  - outcome driven by an event that could NOT reasonably have been\n"
+        "                    foreseen with publicly available information at entry time;\n"
+        "                    examples: surprise central bank decision, geopolitical shock,\n"
+        "                    accounting fraud revelation; NOT for earnings misses (usually foreseeable)\n"
+        "\n"
+        "  thesis_broken   - the fundamental directional call was wrong: for SELL/TRIM the stock\n"
+        "                    rose significantly instead of falling; for BUY the stock fell;\n"
+        "                    requires a MEANINGFUL loss (> 2%); for stop_hit exits, first check\n"
+        "                    whether stop_too_tight is a better explanation\n"
+        "\n"
+        "  none            - use ONLY when: (a) loss < 2% with no clear process error, OR\n"
+        "                    (b) the adverse outcome was genuinely unforeseeable;\n"
+        "                    mutually exclusive — do NOT combine with other tags\n"
+        "\n"
+        "DECISION RULES — prefer the ROOT CAUSE, not its downstream consequence:\n"
+        "  stop_too_tight vs thesis_broken: if stop_hit AND stop was < 3% from entry → stop_too_tight;\n"
+        "    if the stock moved far beyond the stop level → thesis_broken.\n"
+        "  stop_too_tight vs poor_rr: if stop_too_tight explains poor_rr (tight stop forced bad R:R),\n"
+        "    use stop_too_tight ONLY.\n"
+        "  overconfident vs thesis_broken: these are independent and can combine; overconfident\n"
+        "    means the confidence LEVEL was wrong; thesis_broken means the DIRECTION was wrong.\n"
+        "  regime_mismatch vs thesis_broken: regime_mismatch = external environment was wrong for\n"
+        "    the trade; thesis_broken = the individual stock analysis itself was wrong.\n"
+        "  none is the correct answer for near-breakeven losses (< 2%) with no process error.\n"
         "\n"
         'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"2-3 sentences explaining '
         'the root cause with specific numbers from the trade (entry, stop, target, P&L, confidence)"}\n'
@@ -1143,7 +1206,8 @@ def debate_postmortem():
     entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
     action = (row["recommendation"] or "BUY").upper()
     prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str,
-                             action=action, pnl_pct=row["realized_pnl_pct"])
+                             action=action, pnl_pct=row["realized_pnl_pct"],
+                             exit_reason=row["exit_reason"] or "")
 
     # Default 1024 num_predict (set in _call_model_any) and timeout=60 give the model
     # enough room to think and produce a complete JSON reason without truncation.
@@ -1266,7 +1330,8 @@ def debate_postmortem_debate():
     entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
     action      = (row["recommendation"] or "BUY").upper()
     base_prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str,
-                                  action=action, pnl_pct=row["realized_pnl_pct"])
+                                  action=action, pnl_pct=row["realized_pnl_pct"],
+                                  exit_reason=row["exit_reason"] or "")
 
     # ── Phase 1: Independent classification ───────────────────────────────────
     t0    = time.time()
