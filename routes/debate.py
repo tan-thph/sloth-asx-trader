@@ -162,8 +162,12 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1,
                 "stream":     False,
                 "keep_alive": "10m",        # keep model in VRAM between calls
                 "options": {
-                    "num_predict": num_predict,
-                    "temperature": 0.3,     # lower temp → more deterministic classification
+                    "num_predict":   num_predict,
+                    "temperature":   0.3,     # lower temp → more deterministic classification
+                    "repeat_penalty": 1.1,    # penalise recent-token repetition;
+                                              # prevents "trade_type_type_type_" loops
+                                              # that appear in gemma4/llama at temp=0.3
+                    "repeat_last_n":  64,     # context window for repeat penalty check
                 },
             }
             if think is not None:
@@ -531,13 +535,12 @@ def _pm_exit_hint(exit_reason: str) -> str:
 
 
 def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
-                     entry_signals_str: str = "", action: str = "BUY") -> str:
-    """Full postmortem classification prompt. D5: entry_signals_str. D6: action for direction."""
+                     entry_signals_str: str = "", action: str = "BUY",
+                     pnl_pct: float | None = None) -> str:
+    """Full postmortem classification prompt. D5: entry_signals_str. D6: action + pnl_pct."""
     is_exit = action.upper() in ("SELL", "TRIM")
 
     # Direction preamble — prevents models from defaulting to BUY framing on SELL/TRIM trades.
-    # Without this, models misread the stop/target position (e.g. call a correctly-set
-    # SELL target "below entry — wrong" when that is exactly correct for a short thesis).
     direction_note = (
         "DIRECTION: This is a SELL/TRIM (exit/bearish) trade.\n"
         "  For SELL/TRIM → stop loss is set ABOVE entry (price rising = wrong direction, cut loss).\n"
@@ -546,12 +549,26 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "  do NOT tag 'stop_too_tight' or compute R:R based on that wrong-direction stop.\n"
         "  R:R for SELL = (entry − target) / (stop − entry) [both distances must be positive].\n"
         "  REGIME CHECK: if the trade summary shows a risk-on or bullish regime, consider whether\n"
-        "  a bearish/exit thesis was appropriate — this is the primary indicator of regime_mismatch.\n\n"
+        "  a bearish/exit thesis was appropriate — this is the primary indicator of regime_mismatch.\n"
     ) if is_exit else (
         "DIRECTION: This is a BUY/TOP_UP (long) trade.\n"
         "  Stop loss is BELOW entry; target is ABOVE entry.\n"
-        "  R:R = (target − entry) / (entry − stop).\n\n"
+        "  R:R = (target − entry) / (entry − stop).\n"
     )
+
+    # For SELL/TRIM exits: if the trade resulted in a loss, the stock price ROSE
+    # against the bearish recommendation. Make this explicit so models can correctly
+    # identify thesis_broken instead of falling back to poor_rr / overconfident.
+    if is_exit and pnl_pct is not None and pnl_pct < 0:
+        direction_note += (
+            f"  LOSS DIRECTION: This SELL/TRIM recorded a {abs(pnl_pct):.1f}% LOSS, meaning "
+            f"the stock price ROSE after the recommendation (the bearish thesis was WRONG).\n"
+            f"  The primary error is most likely 'thesis_broken' — the prediction of price "
+            f"decline was incorrect, not a setup flaw.\n"
+            f"  Only use poor_rr / stop_too_tight / overconfident if there is a clear "
+            f"SETUP flaw that exists INDEPENDENT of whether the price went up or down.\n"
+        )
+    direction_note += "\n"
 
     return (
         direction_note
@@ -572,7 +589,8 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "  stop_too_tight  - stop was hit by normal volatility before the move played out\n"
         "  poor_rr         - reward:risk ratio was too low from the start to justify the trade\n"
         "  external_shock  - outcome driven by unpredictable external event (policy change, black swan)\n"
-        "  thesis_broken   - thesis was invalidated by new information that emerged after entry\n"
+        "  thesis_broken   - the trade direction was fundamentally wrong: for SELL/TRIM the\n"
+        "                    stock rose instead of falling; for BUY the stock fell instead of rising\n"
         "  none            - ONLY if the loss was genuinely unforeseeable with the available data\n"
         "\n"
         "Tag guidance — prefer the ROOT CAUSE, not its downstream consequence:\n"
@@ -580,6 +598,8 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "use stop_too_tight only.\n"
         "  overconfident and poor_rr are independent — both can apply together.\n"
         "  Use none ONLY if no systematic error is identifiable; do not use it alongside other tags.\n"
+        "  For SELL/TRIM that lost because the stock rose: the answer is almost always "
+        "thesis_broken — do NOT use poor_rr unless you can compute a specific ratio.\n"
         "\n"
         'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence citing specific numbers"}\n'
         "No markdown, no explanation outside JSON."
@@ -1121,7 +1141,8 @@ def debate_postmortem():
     exit_hint = _pm_exit_hint(row["exit_reason"] or "")
     entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
     action = (row["recommendation"] or "BUY").upper()
-    prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str, action=action)
+    prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str,
+                             action=action, pnl_pct=row["realized_pnl_pct"])
 
     # Default 1024 num_predict (set in _call_model_any) and timeout=60 give the model
     # enough room to think and produce a complete JSON reason without truncation.
@@ -1243,7 +1264,8 @@ def debate_postmortem_debate():
     exit_hint         = _pm_exit_hint(row["exit_reason"] or "")
     entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
     action      = (row["recommendation"] or "BUY").upper()
-    base_prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str, action=action)
+    base_prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str,
+                                  action=action, pnl_pct=row["realized_pnl_pct"])
 
     # ── Phase 1: Independent classification ───────────────────────────────────
     t0    = time.time()

@@ -3990,5 +3990,112 @@ class TestPostmortemBatchAndSyncFixes(unittest.TestCase):
                       "sync must detect array reasoning and join it to a string")
 
 
+class TestPostmortemPromptQuality(unittest.TestCase):
+    """Sprint 34 — prompt/model fixes for correct tagging of SELL/TRIM losses."""
+
+    # ── repeat_penalty in _call_ollama ────────────────────────────────────────
+
+    def test_call_ollama_has_repeat_penalty(self):
+        """_call_ollama must send repeat_penalty to Ollama to prevent repetition loops."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"repeat_penalty"', src,
+                      "_call_ollama options must include repeat_penalty")
+        self.assertIn('"repeat_last_n"', src,
+                      "_call_ollama options must include repeat_last_n context window")
+
+    # ── _pm_build_prompt thesis_broken guidance ───────────────────────────────
+
+    def test_pm_prompt_accepts_pnl_pct(self):
+        """_pm_build_prompt must accept pnl_pct parameter."""
+        import inspect, routes.debate as deb
+        sig = inspect.signature(deb._pm_build_prompt)
+        self.assertIn("pnl_pct", sig.parameters,
+                      "_pm_build_prompt must accept pnl_pct parameter")
+
+    def test_pm_prompt_includes_loss_direction_hint_for_sell_loss(self):
+        """_pm_build_prompt must inject LOSS DIRECTION hint for SELL/TRIM with pnl_pct < 0."""
+        import routes.debate as deb
+        # Minimal summary for a SELL at a loss
+        prompt = deb._pm_build_prompt(
+            summary="SELL XYZ @ $100 | Outcome: LOSS (-20%)",
+            rationale="",
+            exit_hint="manual",
+            action="SELL",
+            pnl_pct=-20.0,
+        )
+        self.assertIn("LOSS DIRECTION", prompt,
+                      "Prompt must include LOSS DIRECTION note for SELL loss")
+        self.assertIn("thesis_broken", prompt)
+        self.assertIn("stock price ROSE", prompt)
+
+    def test_pm_prompt_no_loss_hint_for_sell_win(self):
+        """_pm_build_prompt must NOT inject LOSS DIRECTION hint when pnl_pct >= 0."""
+        import routes.debate as deb
+        prompt = deb._pm_build_prompt(
+            summary="SELL XYZ @ $100 | Outcome: WIN (+5%)",
+            rationale="",
+            exit_hint="target_hit",
+            action="SELL",
+            pnl_pct=5.0,
+        )
+        self.assertNotIn("LOSS DIRECTION", prompt)
+
+    def test_thesis_broken_description_mentions_direction(self):
+        """thesis_broken tag description must mention wrong directional movement."""
+        import routes.debate as deb
+        prompt = deb._pm_build_prompt("summary", "", "", action="BUY")
+        self.assertIn("trade direction was fundamentally wrong", prompt,
+                      "thesis_broken description must reference directional failure")
+
+    def test_pm_prompt_footnote_for_sell_trim(self):
+        """Prompt must have a footnote guiding away from poor_rr for SELL/TRIM losses."""
+        import routes.debate as deb
+        prompt = deb._pm_build_prompt("summary", "", "", action="SELL", pnl_pct=-10.0)
+        self.assertIn("thesis_broken", prompt)
+        self.assertIn("do NOT use poor_rr unless you can compute a specific ratio", prompt)
+
+    # ── rr_ratio backfill in init_db ──────────────────────────────────────────
+
+    def test_init_db_backfills_rr_ratio(self):
+        """init_db must run the rr_ratio backfill SQL for records with correct-direction stops."""
+        with open(os.path.join(ROOT, "db.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("rr_ratio IS NULL", src,
+                      "db.py init_db must include rr_ratio backfill UPDATE")
+        # Use regex-free check that's whitespace-tolerant
+        self.assertIn("suggested_stop", src,
+                      "backfill must reference suggested_stop column")
+        self.assertIn("actual_entry_price", src,
+                      "backfill must reference actual_entry_price column")
+        # Both BUY and SELL/TRIM direction conditions must be present
+        self.assertIn("recommendation IN ('BUY','TOP_UP')", src,
+                      "backfill must handle BUY/TOP_UP direction")
+        self.assertIn("recommendation IN ('SELL','TRIM')", src,
+                      "backfill must handle SELL/TRIM direction")
+        self.assertIn("wrong-direction stops stay NULL", src,
+                      "backfill must document that wrong-direction stops are excluded")
+
+    def test_init_db_backfill_runs_without_error(self):
+        """rr_ratio backfill SQL must execute cleanly on an empty in-memory DB."""
+        _install_in_memory_db()
+        # init_db() includes the backfill — if it raises, the test fails
+        try:
+            asx_server.init_db()
+        except Exception as e:
+            self.fail(f"init_db() raised unexpectedly: {e}")
+
+    # ── Both call sites pass pnl_pct ──────────────────────────────────────────
+
+    def test_both_postmortem_callsites_pass_pnl_pct(self):
+        """Both _pm_build_prompt call sites must pass pnl_pct from the row."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        import re
+        matches = re.findall(r'_pm_build_prompt\([^)]*pnl_pct\s*=', src)
+        self.assertGreaterEqual(len(matches), 2,
+                                "Both single-model and adversarial debate must pass pnl_pct")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

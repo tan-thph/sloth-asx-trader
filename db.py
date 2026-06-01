@@ -275,6 +275,36 @@ def init_db():
         conn.execute("PRAGMA optimize")
         conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
+        # ── One-time backfill: compute rr_ratio for records where it is NULL
+        # but entry/stop/target are all present with correct directional setup.
+        # Only fills records where stop is on the correct side of entry so the
+        # computed R:R is meaningful (wrong-direction stops stay NULL — R:R would
+        # be undefined or negative and would mislead the sanity check).
+        #   BUY/TOP_UP: stop below entry, target above entry
+        #   SELL/TRIM:  stop above entry, target below entry
+        conn.execute("""
+            UPDATE ai_learning_events
+            SET rr_ratio = ROUND(
+                ABS(
+                    (CAST(suggested_target    AS REAL) - CAST(actual_entry_price AS REAL)) /
+                    (CAST(actual_entry_price  AS REAL) - CAST(suggested_stop     AS REAL))
+                ), 2)
+            WHERE rr_ratio IS NULL
+              AND actual_entry_price IS NOT NULL
+              AND suggested_stop     IS NOT NULL
+              AND suggested_target   IS NOT NULL
+              AND actual_entry_price != suggested_stop
+              AND (
+                  (recommendation IN ('BUY','TOP_UP')
+                   AND suggested_stop   < actual_entry_price
+                   AND suggested_target > actual_entry_price)
+                  OR
+                  (recommendation IN ('SELL','TRIM')
+                   AND suggested_stop   > actual_entry_price
+                   AND suggested_target < actual_entry_price)
+              )
+        """)
+
 
 def backup_db(keep: int = 7) -> str | None:
     """Copy DB to a dated backup file; prune oldest if > keep copies exist.
