@@ -27,6 +27,48 @@
 // postmortem_debate JSON blob without re-fetching from the server.
 let _learningEventsById = {};
 
+// ── Batch classify state — persists across page re-renders ───────────────────
+// renderLearningPage() calls _syncClassifyUI() after every re-render so the
+// progress bar survives scheduleSave() / refreshPrices() re-render cycles.
+window._classifyAllState = null;   // null = idle
+
+function _syncClassifyUI() {
+  const s    = window._classifyAllState;
+  const btn  = document.getElementById('classify-all-btn');
+  const prog = document.getElementById('classify-all-progress');
+
+  if (!s) {
+    if (btn)  { btn.disabled = false; btn.textContent = '🤖 Classify All Untagged'; }
+    if (prog) prog.style.display = 'none';
+    return;
+  }
+
+  const pct = s.total > 0 ? Math.round(s.done / s.total * 100) : 0;
+  const statusLine =
+    `🏷 ${s.tagged} tagged &nbsp;·&nbsp; ⬜ ${s.noneCount} no error &nbsp;·&nbsp; ❌ ${s.failed} failed`;
+
+  if (btn) {
+    btn.disabled  = s.running;
+    btn.textContent = s.running ? `⏳ ${s.done}/${s.total}` : '🤖 Classify All Untagged';
+  }
+
+  if (prog) {
+    prog.style.display = 'block';
+    if (s.running) {
+      prog.innerHTML =
+        `<strong>Classifying ${s.done}/${s.total}</strong> (${s.model}) &nbsp;·&nbsp; ${statusLine}` +
+        `<div style="margin-top:4px;height:4px;background:var(--border);border-radius:2px">` +
+        `<div style="width:${pct}%;height:100%;background:#3b82f6;border-radius:2px;transition:width 0.3s"></div>` +
+        `</div>`;
+    } else {
+      prog.innerHTML =
+        `<strong>✅ Done — ${s.total} processed</strong> &nbsp;·&nbsp; ${statusLine}` +
+        `<button class="btn btn-sm" style="margin-left:8px"` +
+        ` onclick="window._classifyAllState=null;_syncClassifyUI();showPage('learning')">Refresh</button>`;
+    }
+  }
+}
+
 async function renderLearningPage(gen) {
   const el = document.getElementById('main-content');
   if (state._renderGen !== gen) return;
@@ -60,6 +102,10 @@ async function renderLearningPage(gen) {
   if (state._renderGen !== gen) return;
 
   el.innerHTML = _renderLearningContent(data, brierData);
+
+  // Restore batch-classify progress bar if a run is in progress or just finished.
+  // Must happen immediately after innerHTML is set so the newly-created DOM elements exist.
+  _syncClassifyUI();
 
   // Async: load debate engine status without blocking the main render
   if (typeof debateStatus === 'function') {
@@ -1124,60 +1170,48 @@ async function triggerDebatePostmortem(eventId) {
 }
 
 // ── Batch: classify ALL untagged loss/breakeven events ───────────────────────
-// Fetches untagged events from backend, then runs the single-event postmortem
-// sequentially (Ollama can only run one at a time). Shows inline progress.
+// State lives in window._classifyAllState so it survives renderPage() re-renders.
+// _syncClassifyUI() is called after every state change and after every re-render
+// so the progress bar re-binds to freshly created DOM elements automatically.
 async function classifyAllPostmortems() {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+  if (window._classifyAllState?.running) return;  // already running
 
-  const btn      = document.getElementById('classify-all-btn');
-  const progress = document.getElementById('classify-all-progress');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Fetching…'; }
+  // Initial state — shows spinner immediately even before fetch completes
+  window._classifyAllState = { running: true, total: 0, done: 0, tagged: 0, noneCount: 0, failed: 0, model: '…' };
+  _syncClassifyUI();
 
   try {
-    // 1. Check Ollama is reachable
+    // 1. Check Ollama
     const status = await debateStatus();
     if (!status.available) {
       toast('Ollama is not running — start it first', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = '🤖 Classify All Untagged'; }
+      window._classifyAllState = null;
+      _syncClassifyUI();
       return;
     }
     const model = typeof preferredDebateModel === 'function'
       ? preferredDebateModel(status.models) : 'qwen3:9b';
 
-    // 2. Fetch untagged events list
-    const listResp = await fetch(`${API}/api/learning/untagged?limit=50`);
-    const listData = await listResp.json();
+    // 2. Fetch untagged list
+    const listData = await fetch(`${API}/api/learning/untagged?limit=50`).then(r => r.json());
     const events   = listData.events || [];
 
     if (!events.length) {
       toast('No untagged loss/breakeven events found', 'info');
-      if (btn) { btn.disabled = false; btn.textContent = '🤖 Classify All Untagged'; }
+      window._classifyAllState = null;
+      _syncClassifyUI();
       return;
     }
 
-    if (progress) progress.style.display = 'block';
-    const total   = events.length;
-    let tagged = 0, noneCount = 0, failed = 0;
+    // Update state with full count and model
+    Object.assign(window._classifyAllState, { total: events.length, model });
+    _syncClassifyUI();
 
-    const updateProgress = (i) => {
-      if (!progress) return;
-      const done = i + 1;
-      const pct  = Math.round(done / total * 100);
-      progress.innerHTML =
-        `<strong>Classifying ${done}/${total}</strong> (${model}) &nbsp;·&nbsp; ` +
-        `🏷 ${tagged} tagged &nbsp;·&nbsp; ⬜ ${noneCount} no error &nbsp;·&nbsp; ❌ ${failed} failed` +
-        `<div style="margin-top:4px;height:4px;background:var(--border);border-radius:2px">` +
-        `<div style="width:${pct}%;height:100%;background:#3b82f6;border-radius:2px;transition:width 0.3s"></div>` +
-        `</div>`;
-    };
+    // 3. Process sequentially — Ollama is single-threaded
+    for (const ev of events) {
+      if (!window._classifyAllState) break;  // user dismissed
 
-    if (btn) btn.textContent = `⏳ 0/${total}`;
-
-    // 3. Process one at a time — Ollama is single-threaded
-    for (let i = 0; i < events.length; i++) {
-      const ev = events[i];
-      updateProgress(i);
-      if (btn) btn.textContent = `⏳ ${i+1}/${total}`;
       try {
         const r = await fetch(`${API}/api/debate/postmortem`, {
           method:  'POST',
@@ -1187,33 +1221,35 @@ async function classifyAllPostmortems() {
         });
         const result = await r.json();
         if (result.ok) {
-          if (result.error_type && result.error_type !== 'none') tagged++;
-          else noneCount++;
+          if (result.error_type && result.error_type !== 'none')
+            window._classifyAllState.tagged++;
+          else
+            window._classifyAllState.noneCount++;
         } else {
-          failed++;
+          window._classifyAllState.failed++;
         }
       } catch (_) {
-        failed++;
+        if (window._classifyAllState) window._classifyAllState.failed++;
+      }
+
+      if (window._classifyAllState) {
+        window._classifyAllState.done++;
+        _syncClassifyUI();
       }
     }
 
-    // 4. Final summary
-    if (progress) {
-      progress.innerHTML =
-        `<strong>✅ Done — ${total} events processed</strong> &nbsp;·&nbsp; ` +
-        `🏷 ${tagged} tagged &nbsp;·&nbsp; ⬜ ${noneCount} no systematic error &nbsp;·&nbsp; ❌ ${failed} failed` +
-        `<button class="btn btn-sm" style="margin-left:8px" onclick="document.getElementById('classify-all-progress').style.display='none';showPage('learning')">Refresh</button>`;
+    // 4. Mark done
+    if (window._classifyAllState) {
+      window._classifyAllState.running = false;
+      _syncClassifyUI();
+      const s = window._classifyAllState;
+      toast(`Batch done: ${s.tagged} tagged, ${s.noneCount} no error, ${s.failed} failed`, 'success');
     }
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = '🤖 Classify All Untagged';
-    }
-    toast(`Batch classify done: ${tagged} tagged, ${noneCount} no error, ${failed} failed`, 'success');
 
   } catch (e) {
     toast('Batch classify error: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = '🤖 Classify All Untagged'; }
-    if (progress) progress.style.display = 'none';
+    window._classifyAllState = null;
+    _syncClassifyUI();
   }
 }
 

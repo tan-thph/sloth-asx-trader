@@ -601,7 +601,8 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "  For SELL/TRIM that lost because the stock rose: the answer is almost always "
         "thesis_broken — do NOT use poor_rr unless you can compute a specific ratio.\n"
         "\n"
-        'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"one clear sentence citing specific numbers"}\n'
+        'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"2-3 sentences explaining '
+        'the root cause with specific numbers from the trade (entry, stop, target, P&L, confidence)"}\n'
         "No markdown, no explanation outside JSON."
     )
 
