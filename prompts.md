@@ -1,0 +1,641 @@
+# Sloth ASX Trader — Prompt Architecture Reference
+
+**Last Updated:** June 2026 (Sprint 32)
+**Model:** `claude-sonnet-4-6` · all calls via `callClaude()` in `js/claude-client.js`
+
+This document is the authoritative reference for every Claude API call in the application:
+what triggers it, what data it receives, what it must return, and how the response is used.
+
+---
+
+## Architecture Overview
+
+```
+User action / scheduler
+        │
+        ▼
+callClaude(agentType, userMessage, options)    ← js/claude-client.js
+        │
+        ├── Resolves system prompt from agentType (_resolveSystemPrompt)
+        ├── Applies prompt-caching headers (ephemeral) unless noCache=true
+        ├── Retries on 429/529 with exponential backoff (0s → 1s → 2s → 4s)
+        ├── Logs full call (system + user + response) to /api/log/ai_response
+        │
+        ▼
+  Anthropic API → response text
+        │
+        ├── Portfolio: JSON → parseClaudeJSON → quant engine → validator → regime gate → UI
+        ├── Macro:     JSON → state.macroData → injected into next portfolio call
+        ├── DayTrade:  JSON → validator → quant engine → state.dayTrading.recommendations
+        ├── Assistant: plain text → rendered directly in chat / digest card
+        └── Briefing:  plain text → window._morningBrief → Dashboard card
+```
+
+### Caching strategy
+
+| Agent | Cached | Rationale |
+|---|---|---|
+| `portfolio` | ✅ yes (`ephemeral`) | Same static system prompt all day; dynamic content in user message only |
+| `analyst` | ✅ yes | Static system prompt |
+| `pm` | ✅ yes | Static system prompt |
+| `dayTrade` | ✅ yes | System prompt embeds only brokerage (rarely changes) |
+| `universe` | ✅ yes | Same as dayTrade |
+| `macro` | ❌ no (`noCache`) | Short, cheap, varies with live data |
+| `assistant` | ❌ no | Multi-turn; context varies every call |
+| `briefing` | ❌ no | Short, one-shot, daily freshness needed |
+
+The `portfolio` system prompt is the only one worth optimising for cache stability — it's the most expensive (~2,800 tokens) and called multiple times per trading day. All dynamic state lives in the user message; the system prompt contains zero interpolations.
+
+---
+
+## 1. Portfolio Analysis — `'portfolio'`
+
+**File:** `js/analysis.js → runAnalysis()`
+**Trigger:** "Run Analysis" button · max 6,000 output tokens
+**System prompt:** `ANALYSIS_SYSTEM_PROMPT` (static, cached) + optional regime/date modules from `buildSystemArray()` (uncached second block)
+
+### System prompt structure (8 sections)
+
+| Section | Content |
+|---|---|
+| **1 — Hard Rules** (Rules 1–16) | Non-negotiable constraints: profitable entry, real-data-only, R:R ≥ 2:1, position sizing, conviction threshold, SELL/TRIM validity, watchlist handling, cash-as-position, sector concentration cap, ex-div protection, tax-aware trimming, macro override, CGT window, mandatory SELL escalation, risk-adjusted sizing, Sharpe context |
+| **2 — SELL/TRIM Decision Tagging** | Closed taxonomy for `primary_driver` (9 values), `secondary_factors` (12 values, 0–3), `urgency` (3 values). Forbidden combos, required-secondary rules, `alternativeTicker` requirement |
+| **2B — Anti-Churn** | 7-day BUY→SELL block; catastrophe override definition; minimum hold 1 day; churn threshold ($100 or 2%) |
+| **3 — Multi-Factor Framework** | Priority 1: Earnings/revisions → Priority 2: Macro regime → Priority 3: Sector flows → Priority 4: Relative valuation → Priority 5: Technicals (confirming only, one indicator per independent category) |
+| **4 — Income & Tax** | Franking credit grossed-up yield formula; tax-loss harvest activation window; reporting season cluster risk |
+| **5 — Execution** | Liquidity cap (≤5% of volume_avg_20); sizing guidance; order types |
+| **6 — Learning from History** | Calibration algorithm; debate block interpretation; rec history review |
+| **7 — Pre-flight Checks** | Cash comparison test with worked arithmetic examples; 6 validation checks (a)–(f) |
+| **8 — Output Format** | Full JSON schema with worked example (BHP BUY + CSL TRIM) |
+
+### Optional modules (injected as second uncached system block)
+
+These are assembled by `buildSystemArray()` in `prompt-modules.js` based on date and portfolio state:
+
+| Module | Activation condition |
+|---|---|
+| `TAX_LOSS_HARVEST` | Month = May or June |
+| `CGT_DISCOUNT_WINDOW` | Any holding has `daysHeld` between 330–365 |
+| `REPORTING_SEASON` | Month = February or August |
+| `MINING_SECTOR` | Portfolio contains BHP, RIO, FMG, or MIN |
+| `REIT_SECTOR` | Portfolio contains REITs (sector = Real Estate) |
+| `HIGH_VOL_REGIME` | Active regime = `highVol` or `bearVolatile` |
+
+### User message — all injected by `analysis.js`
+
+```
+Date: {YYYY-MM-DD} | Time: {HH:MM AEST} | TAX_LOSS_HARVEST_ACTIVE: {bool}
+Account settings: brokerage ${n}/trade (round-trip ${2n}) | max {n} trades/day | min trade ${n}
+
+LIVE PORTFOLIO STATE:
+Holdings: [{ticker, sector, shares, avgPrice, currentPrice, value, unrealisedPnl,
+            unrealisedPnlPct, daysHeld, weight}]
+Cash available: ${n} | Total invested: ${n} | Net worth: ${n}
+RBA Cash Rate: {n}% ({source}, {date})
+
+RECENT RECOMMENDATION HISTORY (last 5 + key outcomes):
+{date} {action} {ticker} @ ${price} → target ${t} | conf={n}% | outcome={o} | actualPnL={p}
+
+{__CALIBRATION_PLACEHOLDER__}        ← replaced with GET /api/learning/calibration result
+{LESSONS_BLOCK}                       ← replaced with GET /api/learning/lessons result
+
+TODAY'S MACRO BRIEF ({date}):
+Sentiment: {s} | Bullish: {n}/100 | Conf: {n}%
+Key drivers: {text ≤200 chars}
+Commodities/Rates: IronOre=${n}({pct}) | Oil=${n}({pct}) | Copper=${n}({pct}) | US10Y={n}%
+ASX Sectors(1D/5D): Materials:{pct}(5d{pct}) | Financials:{pct}... [5 SPDR ETFs]
+
+NEWS SIGNALS (LLM-classified, last 3d):
+Holdings directly covered: • {signal line per article}
+Market-wide signals: • {signal line per high-impact article}
+
+ASX ANNOUNCEMENT FILINGS (last 3d):
+⚡ Price-sensitive: • {TICKER [Type|sentiment|impact|⚡PS] Headline (date)}
+Routine filings: • {same format}
+
+INVESTOR MARKET VIEW & INSTRUCTIONS (when set):
+{free text from state.analysisConfig.marketView}
+
+ADDITIONAL WATCHLIST TICKERS: {comma list}
+
+DIVIDEND SCHEDULE & HISTORY:
+  {TICKER}: yield={n}% | annual=${n}/yr | nextEst=${n} | exDiv={date} |
+            freq={s} | payoutRatio={n}% | recent=[{date}:${amt}, ...]
+
+EARNINGS CALENDAR:
+  {TICKER}: nextEarnings={date} ({n}d){⚡IMMINENT?} | fwdEPS=${n} | epsGrowth={n}% |
+            revGrowth={n}% | analyst={rec} target=${n} | EPSvEst(4Q):[+0.05,-0.02,...]
+
+PORTFOLIO RISK METRICS (90-day):
+Composite risk score: {n}/100 ({label}) | Weighted: Vol={n}%ann | Beta={n} |
+                       VaR1d={n}% | AvgMaxDD={n}% | Sharpe={n}
+Per-ticker:
+  {TICKER}: Vol={n}%ann | Beta={n} | Sharpe={n} | VaR1d={n}%{⚠?} |
+            CVaR={n}% | MaxDD90d={n}%{⚠?}
+
+PORTFOLIO SECTOR ALLOCATION: {Sector}={n}%, ...
+
+LIVE TECHNICAL DATA (yfinance, real-time):
+
+[{TICKER}]{★WATCHLIST★?}
+  Price=${n} | Signal={BUY/SELL/HOLD} ({n}% conf) | Trend={dir}({n}/{n}signals) | ADX={n} ({strength})
+  Momentum: RSI14={n}, RSI9={n}, MACDhist={n}{↑expanding/↓contracting},
+            ROC10={n}% ROC21={n}%, Stoch%K={n}/%D={n}, CCI={n}, MFI={n}, WillR={n}
+  Trend: SMA20=${n}, SMA50=${n}, SMA200=${n}, EMA12=${n}, EMA26=${n}
+  Bollinger: Upper=${n}, Mid=${n}, Lower=${n}, %B={n}%, Width={n}%, DonchPos={n}%
+  Volatility: ATR=${n} ({n}%), HistVol20d={n}%ann 60d:{n}% regime:{ELEVATED/COMPRESSED/NORMAL},
+              Keltner={n}-{n}
+  Volume: Today={n}, Avg20={n}, Ratio={n}x, VZ={n}σ, OBV={rising/falling},
+          VWAP20=${n} (price {above/below})
+  S/R Pivots: R2=${n}, R1=${n}, Pivot=${n}, S1=${n}, S2=${n}
+  Returns: 1D={n}%, 5D={n}%, 20D={n}%, 60D={n}%, 90D={n}%
+           vs.ASX200:{±n}pp vs.Sector:{±n}pp
+  Fundamentals: PE={n}, FwdPE={n}, PB={n}, DivYield={n}%, Beta={n}, ROE={n}%,
+                OpMgn={n}%, D/E={n}, RevGrowth={n}%, FCFYield={n}%, Short={n}%float
+  52W: High=${n}, Low=${n}, FromHigh={n}%, AnalystUpside:{±n}%, Analyst={rec} (target ${n})
+  BuySignals: {list} | SellSignals: {list}
+  WeeklyCls(10wk,old→new): ${n} ${n}↑ ${n}↓ ... | VolTrend5w:{±n}%
+
+ACTIVE RULE OVERRIDES: {all configurable thresholds from state.analysisConfig.rules}
+
+ACTIVE_REGIME: {regime} (confidence: {n}%)
+
+--- Local Debate [{model}]: {TICKER} ---    ← Ollama bull/bear pre-debate (if enabled)
+BULL: {text}
+BEAR: {text}
+SYNTHESIS: {winner} | {key_pivot}
+---
+```
+
+### Expected output
+
+```json
+{
+  "recs": [{
+    "ticker":                "BHP",
+    "action":                "BUY" | "SELL" | "TRIM" | "TOP_UP",
+    "sector":                "Materials",
+    "isWatchlist":           false,
+    "priceRange":            [44.20, 44.80],
+    "target":                49.50,
+    "stopLoss":              42.10,
+    "qty":                   50,
+    "tranches":              1,
+    "orderType":             "LIMIT",
+    "limitPrice":            44.50,
+    "confidence":            0.74,
+    "scenarios":             {"bull":{"p":0.30,"ret":0.12},"base":{"p":0.50,"ret":0.07},"bear":{"p":0.20,"ret":-0.04}},
+    "expectedTimeToTarget":  45,
+    "factorsUsed":           ["EPS revision: +3.1% over 30d", "Macro: weak AUD", "Valuation: fwdPE 10.2 vs sector 13.5x"],
+    "reasoning":             "≤150 chars: top 2–3 factors; no RSI/MACD as primary",
+    "risks":                 "≤100 chars: #1 macro or fundamental risk",
+    "catalysts":             "≤120 chars: specific events e.g. RBA cut Jun25",
+    "signals":               ["RSI14: 44 rising", "OBV: uptrend"],
+    "invalidationCondition": "≤80 chars: must contain a measurable value",
+    "bearCase":              "≤100 chars: BUY/TOP_UP with conf ≥ 0.70 only",
+    "weightGuidance":        "Accumulate (+1-2%)",
+    "expectedProfit":        367.50,
+    "netProfit":             329.30,
+    "taxBenefitEstimate":    null,
+    "grossedUpYield":        null,
+    "primary_driver":        "thesis_broken",   // SELL/TRIM only
+    "secondary_factors":     ["negative_news_flow"],  // SELL/TRIM only
+    "urgency":               "immediate",        // SELL/TRIM only
+    "alternativeTicker":     null               // required when primary_driver=better_opportunity
+  }],
+  "summary":  "≤400 chars plain text — recs, macro, cash stance",
+  "dataGaps": [{"ticker": "XYZ", "missingField": "signals absent"}]
+}
+```
+
+### Post-processing pipeline (client-side, after response)
+
+1. **JSON parse** — `parseClaudeJSON()` with brace-depth recovery on truncation
+2. **Quant engine** — `computeTradeParams()` replaces AI-computed `qty / stopLoss / rrRatio / riskAUD / rewardAUD` for BUY/TOP_UP with deterministic Kelly + volatility-scalar + multi-constraint sizing
+3. **ATR floor** — SELL/TRIM stop loss floored at `entry + 2.5×ATR` (prevents near-zero stop distance)
+4. **Regime modifiers** — `applyRegimeModifiers()` applies size multipliers; `panic` blocks all recs
+5. **P&L recompute** — SELL/TRIM `netProfit` recalculated from actual `holding.avgPrice`
+6. **Confidence floor** — recs below `minConfidence` (default 0.62) are dropped
+7. **Correlation adjustment** — correlation matrix from `/api/risk`; BUY qty −30% if `|corr|>0.70` with existing holding, −50% if `>0.85`
+8. **Same-day conflict guard** — drops SELL if BUY already logged today for same ticker (and vice versa)
+9. **Daily dedup** — suppresses duplicate TRIM/TOP_UP for same ticker on same day
+10. **Daily cap** — trims to `maxTradesPerDay` by descending confidence
+11. **Validator** — `validateRec()` + `validateSellTags()` + auto-repair loop (≤2 retries via `getValidatedAnalysisWithRepair`)
+12. **Learning loop** — `logRecsToLearningLoop()` fires asynchronously
+
+---
+
+## 2. Macro Brief — `'macro'`
+
+Two call sites with different system prompts and inputs.
+
+### 2a. Auto daily brief (`analysis.js`)
+
+**Trigger:** Once per trading day inside `runAnalysis()`, runs in parallel with signal fetch
+**System prompt:** `MACRO_SYSTEM_PROMPT` (static, 1 sentence)
+**Max tokens:** 1,000 · `noCache: true`
+
+**System prompt:**
+```
+You are a macro analyst for Australian equity markets. Return ONLY valid JSON, no markdown.
+Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,
+         "keyDrivers":"2-3 sentence summary of key market drivers today"}
+```
+
+**User message:**
+```
+Provide current macro analysis for ASX morning brief. Today: {YYYY-MM-DD}.
+Live market data: S&P500:{n}({pct}) | ASX200:{n}({pct}) | Gold:{n}({pct}) |
+                  AUD/USD:{n} ({pct}) | VIX:{n} | Iron ore:{n}({pct}) |
+                  Oil:{n}({pct}) | US10Y:{n}% | Copper:{n}({pct})
+Return only JSON.
+```
+
+**Expected output:**
+```json
+{
+  "sentiment":    "risk-on" | "risk-off" | "bullish" | "bearish",
+  "sentimentConf": 0.82,
+  "bullish":      68,
+  "keyDrivers":   "RBA easing cycle intact..."
+}
+```
+
+**Usage:** Merged into `state.macroData` and injected as `TODAY'S MACRO BRIEF` in the portfolio analysis user message (same run).
+
+---
+
+### 2b. Manual Macro page refresh (`pages/macro.js`)
+
+**Trigger:** "Run AI Analysis" button on the Macro page
+**System prompt:** Inline string (not cached; includes `analysis` + `keyDrivers` fields)
+**Max tokens:** 1,000 · `noCache: true`
+
+**Additional inputs vs 2a:**
+- Polymarket prediction market probabilities (if `state.includePolymarket` enabled): appended as `| Prediction market probabilities (Manifold Markets): {label}:{n}%...`
+
+**Expected output:**
+```json
+{
+  "sentiment":    "risk-on" | "risk-off",
+  "sentimentConf": 0.75,
+  "bullish":      62,
+  "analysis":     "Three paragraph written analysis...",
+  "keyDrivers":   "Short summary of key drivers"
+}
+```
+
+**Usage:** Displayed on the Macro page; `analysis` field rendered as prose. `bullish` and `sentiment` feed into regime classification.
+
+---
+
+## 3. Day Trade Portfolio Scan — `'dayTrade'`
+
+**File:** `js/day-trading-analysis.js → runDayTradeAnalysis()`
+**Trigger:** "Run Swing Scan" button on Day Trading page · max 4,000 output tokens
+
+### Pre-filter (client-side, before the API call)
+
+`_dtPreFilterWithStats()` applies four hard gates and discards tickers that fail:
+- `F1 LIQUIDITY`: `adv_20 > minAdvAud` (default $1.5M)
+- `F2 TREND`: `current_price ≥ sma_200` (or within 1.5% + `return_5d > 0`)
+- `F3 REGIME`: `adx < maxAdx` (default 30) — mean-reversion fails in strong trends
+- `F4 CATALYST`: no earnings within 5 trading days
+
+Only passing tickers are sent to Claude.
+
+### System prompt: `getDayTradeSystemPrompt()`
+
+Returned by a function (not a constant) so it can embed `state.settings.brokerage` at call time.
+
+**Strategy:** Orthogonal 5-signal confluence (each measures a different dimension):
+- Signal #1 BB Reclaim (**MANDATORY**): `bb_pct_b ≤ 0.05`
+- Signal #2 RSI Recovery: `rsi_14 < 40 AND return_5d > return_20d`
+- Signal #3 Volume Z-Score: `volume_z_score > 1.50`
+- Signal #4 Fibonacci Zone: `return_60d` between −20% and −5%
+- Signal #5 OBV Divergence (bonus): `obv_trend = "rising"` while `return_5d < 0`
+
+Minimum: Signal #1 + ≥2 of Signals #2–#5.
+
+**Sizing:** `stop = entry − 2.5×ATR` · `qty = floor(riskPerTrade / stop_distance)` · max 20% of allocatedCash · R:R ≥ 2.0
+
+**User message (per ticker, after pre-filter):**
+```
+Swing allocation: ${allocatedCash} | riskPerTrade: ${riskPerTrade}
+Open positions: [{ticker, qty, entryPrice, currentPnl}]
+Pending recs: [{ticker, action, priceRange, status}]
+Signals for passing tickers:
+  {TICKER}: {full indicator block — same fields as portfolio analysis}
+```
+
+**Expected output:**
+```json
+{
+  "recs": [{
+    "ticker":     "BHP",
+    "action":     "BUY",
+    "priceRange": [44.20, 44.80],
+    "target":     49.50,
+    "stopLoss":   42.10,
+    "qty":        50,
+    "confidence": 0.60,
+    "holdDays":   10,
+    "signalsHit": ["BB Primary", "RSI Recovery", "Vol Z-Score"],
+    "filtersPass":{"liquidityOk":true,"aboveSMA200":true,"adxOk":true,"noCatalyst":true},
+    "reasoning":  "≤100 chars",
+    "stopReason": "≤80 chars",
+    "riskAUD":    150,
+    "rewardAUD":  340,
+    "rrRatio":    2.27
+  }],
+  "summary": "≤150 chars"
+}
+```
+
+**Post-processing:** Quant engine recalculates sizing; `applyRegimeModifiers()` applies modifiers.
+
+---
+
+## 4. Day Trade Universe Scan — `'universe'`
+
+**File:** `js/day-trading-analysis.js → runUniverseScan()`
+**Trigger:** "Scan Universe" button · max 4,000 output tokens
+**System prompt:** `getDayTradeUniverseScanPrompt()` — leaner variant of the day trade prompt for bulk scanning
+
+**Difference from `'dayTrade'`:** The universe scan processes up to 200 ASX tickers (asx20/50/100/200 universe, selectable) in batches through the client-side pre-filter, then sends only passing tickers to Claude. The system prompt is simplified — no open-position context, focused purely on signal-stack confirmation.
+
+**Output schema:** Same as `'dayTrade'` with identical fields. Post-processed identically.
+
+---
+
+## 5. Analyst — `'analyst'`
+
+**System prompt:** `ANALYST_SYSTEM_PROMPT` (static, cached)
+**Max tokens:** 3,000
+
+**Purpose:** Phase 1 of the intended 3-phase pipeline (Analyst → Quant Engine → PM). Provides per-ticker qualitative conviction assessment without computing any trade math.
+
+**Constraint:** Explicitly told: *"Do NOT compute stops, position sizes, qty, EV, or R:R — those are handled deterministically downstream."*
+
+**Expected output:**
+```json
+{
+  "assessments": [{
+    "ticker":                 "BHP",
+    "winProb":                0.72,
+    "expectedTimeToTarget":   12,
+    "conviction":             0.68,
+    "keyFactors":             ["EPS revision +3.1%", "weak AUD tailwind", "iron ore supply discipline"],
+    "risks":                  ["China demand slowdown", "USD strengthening"],
+    "macroFit":               "tailwind",
+    "valuation":              "cheap",
+    "technicalConfirmation":  true
+  }],
+  "skipped": [{"ticker": "XYZ", "reason": "insufficient data for 3 factors"}]
+}
+```
+
+**Note:** The analyst/PM two-phase pipeline is defined and tested but the main `runAnalysis()` flow calls `'portfolio'` directly (single-phase). The analyst and PM prompts are available for explicit use via `callClaude('analyst', ...)` / `callClaude('pm', ...)` in custom analysis flows.
+
+---
+
+## 6. Portfolio Manager — `'pm'`
+
+**System prompt:** `PM_SYSTEM_PROMPT` (static, cached)
+**Max tokens:** 3,000
+
+**Purpose:** Phase 3 of the pipeline. Receives pre-sized trade proposals from the quant engine and applies portfolio-level rules to approve/reject/rank.
+
+**Constraint:** Explicitly told: *"Do NOT recompute or second-guess sizing, stops, EV, or R:R — those are deterministic."*
+
+**Portfolio rules applied (in order):**
+- P1: Sector concentration ≤ 30%
+- P2: Anti-churn (7-day BUY→SELL block)
+- P3: CGT discount window flag
+- P4: Macro override (bearish + bullish<35)
+- P5: Portfolio risk score >80 → no new BUYs
+- P6: Ex-dividend protection
+- P7: Cash minimum 10%
+- P8: Ranking by EV + R:R + sector concentration
+
+**Expected output:**
+```json
+{
+  "recs": [{
+    "ticker":     "BHP",
+    "action":     "BUY",
+    "approved":   true,
+    "rejectReason": null,
+    "rank":       1,
+    "priceRange": [44.20, 44.80],
+    "target":     49.50,
+    "stopLoss":   42.10,
+    "qty":        50,
+    "confidence": 0.74,
+    "rrRatio":    2.27,
+    "riskAUD":    150,
+    "rewardAUD":  340,
+    "evNet":      180,
+    "holdDays":   45,
+    "netProfit":  329.30,
+    "reasoning":  ["EPS upgrade cycle intact", "Macro tailwind from weak AUD"],
+    "bearCase":   "China demand shock → iron ore $80/t",
+    "invalidationCondition": "Close below $42.10 or iron ore < $95/t for 5 sessions",
+    "scenarios":  [{"label":"bull","prob":0.30,"outcome":"+12%"},{"label":"base","prob":0.50,"outcome":"+7%"},{"label":"bear","prob":0.20,"outcome":"-4%"}],
+    "factorsUsed": ["EPS revision: +3.1%", "Macro: AUD/USD weak", "Valuation: fwdPE 10.2 vs sector 13.5x"]
+  }],
+  "summary":  "≤200 chars",
+  "dataGaps": []
+}
+```
+
+---
+
+## 7. Assistant — `'assistant'`
+
+Two distinct call sites with different system prompts, both `noCache: true`.
+
+### 7a. Chat interface (`pages/assistant.js`)
+
+**Trigger:** User sends a message in the Assistant chat tab
+**Max tokens:** 1,200 · multi-turn (full `messages` array passed)
+
+**System prompt (dynamic, built per call):**
+```
+You are an expert ASX quantitative analyst and trading coach...
+
+PORTFOLIO CONTEXT ({date in AEST}):
+Portfolio value: ${n} | Net worth: ${n} | Unrealised P&L: {±${n}} ({±n}%)
+Cash: ${n} | RBA: {n}% | Brokerage: ${n}/trade | Max trades/day: {n}
+
+Holdings:
+  {TICKER}: {shares}sh @ avg${n} → now ${n} | {±n}% | Sector: {s}
+
+{LIVE INDICATORS (subset per ticker)} — rsi_14, bb_pct_b, adx, atr_14, sma_200,
+  return_5d, return_20d, obv_trend, volume_ratio, current_price
+
+{ANNOUNCEMENTS (last 3d per holding)}
+{PENDING RECS}
+{RECENT NEWS}
+{REGIME}
+
+RESPONSE FRAMEWORK:
+• Indicators: interpret in context, cross-reference ≥3
+• Trade setups: entry range, target, stop (ATR-based), position size, R:R ≥ 2:1
+• Portfolio: sector concentration, correlation, cash deployment
+• Dividends: income, yield-on-cost, ex-div timing
+• Risk: quantify downside in dollars
+• Always cite actual indicator values; never invent numbers
+```
+
+**Expected output:** Free-form plain text response (no JSON). Multi-turn conversation history maintained in `state.chatHistory`.
+
+### 7b. Learning postmortem digest (`pages/learning.js`)
+
+**Trigger:** "Generate Digest" button on the Learning page
+**Max tokens:** 600 · single-turn · `noCache: true`
+
+**System prompt:** None (uses `ASSISTANT_SYSTEM_PROMPT` resolved by `_resolveSystemPrompt`)
+
+**User message:**
+```
+You are reviewing my ASX trading learning loop. Here is a summary of my recent performance:
+
+Overall win rate: {n}% ({total} closed trades)
+Error type distribution: {tag: count, ...}
+Exit reason distribution: {reason: count, ...}
+Regime performance: {regime: {wins/total/wr}, ...}
+
+Recent losses/breakevens (up to 10):
+  {date} {action} {ticker} conf={n}% outcome={o} pnl=${n} error={tags} [{rationale}]
+
+Please write a concise postmortem digest (under 250 words) in plain text:
+1. The 1-2 most recurring failure patterns you see
+2. One or two specific adjustments I should make
+3. The regime(s) where performance is weakest and what that suggests
+```
+
+**Expected output:** Plain text digest under 250 words. Stored in `state.digestHistory`.
+
+---
+
+## 8. Morning Briefing — `'briefing'`
+
+**File:** `js/pages/dashboard.js → generateMorningBrief()`
+**Trigger:** "Generate Brief" button on Dashboard
+**Max tokens:** 600 · `noCache: false` (cached — same prompt structure each morning)
+
+**System prompt:** `MORNING_BRIEFING_SYSTEM_PROMPT`
+```
+You are a concise ASX trading briefing assistant. You receive portfolio and market data
+and write a brief morning session note. Plain text only — no JSON, no markdown headers,
+no bullet symbols. Use numbered sections. Be specific and actionable. Under 220 words total.
+```
+
+**User message:**
+```
+Date: {full date including weekday}
+{macroLine}: ASX200: {n}, AUD/USD: {n}, sentiment: {s} ({n}% bullish)
+{regimeLine}: Regime: {regime} ({n}% confidence)
+RBA cash rate: {n}%
+Portfolio: ${holdings value} holdings + ${cash} cash = ${net worth} net worth
+Pending recs: {n}
+
+Holdings:
+  {TICKER}: {n}sh @ ${n} | now ${n} | {pct} unrealised | Sector: {s} | Signals: {buy/sell list}
+
+Write a morning briefing covering:
+1. Market regime and macro context (1-2 sentences)
+2. Key risks or events to watch today (1-2 sentences)
+3. Any holdings that stand out based on their signals or recent price action (1-2 sentences)
+4. One suggested focus for the session (1 sentence)
+```
+
+**Expected output:** Numbered plain-text sections, ≤220 words. Stored in `window._morningBrief` and rendered in the Dashboard brief card.
+
+---
+
+## Data Fields Reference
+
+### What `analysis.js` guarantees to provide per run
+
+| Category | Fields | Source |
+|---|---|---|
+| **Account** | brokerage, maxTradesPerDay, minTradeSize, rbaRate, cash, portfolioValue | `state.settings`, `state.cash` |
+| **Context flags** | TAX_LOSS_HARVEST_ACTIVE, date/time | Computed from date |
+| **Macro** | sentiment, bullish, keyDrivers, iron_ore, oil, copper, us10y, asx200_5d_return, sectors{} | `/api/macro` |
+| **Holdings** | ticker, sector, shares, avgPrice, currentPrice, value, unrealisedPnl, daysHeld, weight | `mergedPortfolio()` |
+| **Rec history** | Last 5 + 3 with P&L + 2 with feedback | `state.recHistory` |
+| **Calibration** | Compact calibration block (≤400 chars, budget-gated) | `/api/learning/calibration` |
+| **Lessons** | Scoped trading lessons (≤4, ~15–25 tokens each) | `/api/learning/lessons` |
+| **News** | LLM-classified articles, last 3 days | `/api/news/brief` |
+| **Announcements** | ASX filings, last 3 days | `/api/announcements/brief` |
+| **Dividends** | Yield, ex-div date, payout ratio, history | `/api/dividends` |
+| **Earnings** | Next date + EPS beat/miss history (4Q) | `/api/earnings-calendar` |
+| **Risk metrics** | Per-ticker VaR/CVaR/MaxDD/Beta/Sharpe + portfolio composite | `/api/risk` |
+| **Signals** | Full indicator pack per ticker (Sprint 32: 30+ fields) | `/api/analyse/batch` |
+| **Sector allocation** | Portfolio sector weights (%) | Computed from holdings |
+| **Debate** | Ollama bull/bear synthesis (if Ollama enabled) | `/api/debate` |
+| **Regime** | Active regime + confidence | `fetchAndClassifyRegime()` |
+
+### Fields the system prompt references that require verification
+
+| Field referenced in prompt | Provided? | Notes |
+|---|---|---|
+| `nextEarningsDate` | ✅ when available | Via `/api/earnings-calendar`; yfinance coverage varies |
+| `frankingPct` | ⚠️ partial | In `dividendData`; default 0% when absent (conservative) |
+| `volume_avg_20` | ✅ | In signals payload |
+| `Sharpe (90d)` | ✅ | In risk metrics block from `/api/risk` |
+| `MaxDD90d` | ✅ | In risk metrics block |
+| `composite risk score` | ✅ | Computed in `analysis.js` from risk metrics |
+| `rs_5d_alpha` | ✅ (Sprint 32) | Derived: `return_5d − asx200_5d_return` |
+| `eps_revision_30d` | ❌ | Not in yfinance; referenced in Priority 1 but must be inferred from beat/miss history |
+| `bid-ask spread` | ❌ | Not provided; spread rule only fires from live data during market hours |
+| `high_60d / low_60d` | ⚠️ | Referenced in day-trade Fib calc; approximated by `return_60d` range |
+
+### Fields not sent despite being available
+
+These exist in `state.liveSignals[t]` but are not currently included in any prompt context:
+
+| Field | Reason not sent |
+|---|---|
+| `roa` | Low incremental value vs ROE already sent |
+| `current_ratio` | Sector-specific relevance; noise for general analysis |
+| `macd_line / macd_signal` | Histogram + direction already sent; line/signal redundant |
+| `ema_50` | SMA50 already sent; EMA50 adds marginal information |
+| `donchian_upper / lower` (raw) | Replaced by derived `DonchPos` percentage |
+| `pct_from_52w_low` | 52W high and FromHigh already sent; low adds marginal context |
+
+---
+
+## Prompt Versioning
+
+`PROMPT_VERSION = '2026-05-v5'` in `js/prompts.js`.
+
+Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. The version is:
+- Stored on every `ai_learning_events` row at log time
+- Shown in the Learning page Prompt Versions table with Δ vs prior version hit rate
+- Monitored by `_check_prompt_regression()` in `routes/learning.py` for automated regression detection
+
+**Version history:**
+| Version | Key changes |
+|---|---|
+| `2026-05-v5` | Calibration algorithm in prompt; debate-block usage rule; Stage 3–4 |
+| `2026-05-v4` | Sprint 23: ESS gates; Ollama structured outputs |
+| `2026-05-v3` | Sprint 22: adversarial debate + cloud adjudicator |
+| `2026-05-v2` | Stage 1–2: entry_signals_json; direction-aware postmortem |
+| `2026-05-v1` | Initial system prompt with hard rules + output schema |
+
+---
+
+## Known Gaps (prompt references data that may be absent)
+
+1. **`eps_revision_30d`** — Priority 1 asks for consensus EPS revision direction. The `EPSvEst(4Q)` beat/miss history provides a proxy but is not the same as 30-day analyst revision data. yfinance does not provide this. Requires a paid data source or daily snapshot storage to compute the delta.
+
+2. **`bid-ask spread`** — Rule 5 execution says "if bid-ask spread > 0.5%, flag wide spread". Spread is not in the signals payload (yfinance doesn't reliably provide it for ASX). Rule effectively never fires from data; Claude must infer from liquidity signals.
+
+3. **`high_60d / low_60d`** — Day trade Signal #4 references explicit 60-day high/low for Fibonacci retracement. The current payload only has `return_60d`. The signal is approximated using the return value; true Fib levels require storing the 60d high and low separately.
+
+4. **Duplicate Rule 16** — `ANALYSIS_SYSTEM_PROMPT` has two rules numbered 16 (RISK-ADJUSTED SIZING and RISK-REWARD CONTEXT). The second should be renumbered Rule 17. Tracked as a pending fix.
+
+5. **`monitor` urgency for SELL** — Section 2 vocabulary says `monitor — TRIM only` but the forbidden combinations list doesn't explicitly block `SELL + urgency:monitor`. Validator and prompt both need this restriction added.
