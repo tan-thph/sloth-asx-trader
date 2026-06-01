@@ -897,11 +897,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_bumped_to_v5(self):
-        """PROMPT_VERSION must be bumped to v5 after Stage 3 changes."""
+        """PROMPT_VERSION must be bumped to v6 after FIXES.md changes."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-05-v5'", src,
-                      "PROMPT_VERSION must be bumped to 2026-05-v5")
+        self.assertIn("PROMPT_VERSION = '2026-06-v6'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v6 after FIXES.md sprint")
 
     def test_calibration_algorithm_in_system_prompt(self):
         """System prompt must prescribe the calibration algorithm (confidence += adj, clamped)."""
@@ -3838,23 +3838,22 @@ class TestSprint32DataQuality(unittest.TestCase):
 
     # ── Weekly compressed price history ──────────────────────────────────────
 
-    def test_weekly_history_in_indicator_ctx(self):
-        """analysis.js must include compressed 10-week price history per ticker."""
+    def test_weekly_history_replaced_by_pivot_proximity(self):
+        """analysis.js must use NearPivot proximity flag instead of raw WeeklyCls series."""
         with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("weeklyHistory", src)
-        self.assertIn("WeeklyCls", src)
-        self.assertIn("chart_data", src,
-                      "analysis.js must read s.chart_data for weekly history")
-        self.assertIn("VolTrend5w", src)
-
-    def test_weekly_history_aggregates_5_bar_windows(self):
-        """analysis.js weekly history must use 5-bar windows (trading week)."""
-        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
-            src = f.read()
-        # The aggregation loop steps back 5 bars at a time
-        self.assertIn("i -= 5", src)
-        self.assertIn("weeks.length < 10", src)
+        # Raw pivot line and 10-week close series removed — replaced with compact proximity flag
+        self.assertNotIn("WeeklyCls", src,
+                         "Raw 10-week close series removed (too verbose, ~150 tokens)")
+        self.assertNotIn("VolTrend5w", src,
+                         "VolTrend5w removed along with WeeklyCls")
+        self.assertNotIn("S/R Pivots: R2=", src,
+                         "Raw S/R pivot values removed — replaced with NearPivot flag")
+        # Replaced by compact proximity flag
+        self.assertIn("NearPivot", src,
+                      "NearPivot proximity flag must be present in indicator block")
+        self.assertIn("nearPivot", src,
+                      "nearPivot variable must be computed in indicatorCtx builder")
 
 
 class TestPostmortemTagFixes(unittest.TestCase):

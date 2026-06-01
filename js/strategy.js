@@ -10,7 +10,9 @@
 const DT_FILTER = {
   maxBbPctB:    0.20,   // BB %B must be ≤ this (price near or below lower band)
   minAdvAud: 1_500_000, // minimum 20-day average daily value (AUD)
-  sma200Floor:  0.985,  // price must be ≥ SMA200 × this (or SMA50 if SMA200 unavailable)
+  sma200Floor:  0.985,  // price must be ≥ SMA200 × this (within ~1.5% of long-term trend)
+  sma50Floor:   0.970,  // fallback floor when SMA200 unavailable (stocks < 200 days old)
+                        // 3% from SMA50 compensates for SMA50 being much closer to price
   maxAdx:        35,    // ADX ceiling — skip stocks already in a strong rip
 };
 
@@ -38,9 +40,12 @@ function _dtPreFilter(tickers) {
     // Liquidity filter — ADV > threshold AUD
     if ((s.adv_20 ?? 0) < fp.minAdvAud) return false;
 
-    // Trend floor — SMA200 preferred; SMA50 used for stocks < 200 days old (intentionally more lenient for newer listings).
+    // Trend floor — SMA200 preferred; SMA50 is the fallback for stocks < 200 days old.
+    // Uses a tighter floor for SMA50 (0.970 vs 0.985) because SMA50 is naturally much
+    // closer to the current price, so a 1.5% floor would be almost meaningless.
     const ref = s.sma_200 ?? s.sma_50;
-    if (ref && s.current_price < ref * fp.sma200Floor) return false;
+    const trendFloor = s.sma_200 ? fp.sma200Floor : (fp.sma50Floor ?? 0.970);
+    if (ref && s.current_price < ref * trendFloor) return false;
 
     // Regime filter — skip stocks already in a strong uptrend (DI+ > DI- confirms direction).
     if ((s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus) return false;

@@ -61,6 +61,8 @@ const state = {
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary
   currentRegime: null,         // { regime, confidence, signals[], fetchedAt } — set by regime-engine.js
+  lastKnownRegime:   null,     // previous regime string before the most recent transition
+  regimeChangedAt:   null,     // Date.now() ms when the last regime transition was detected
   serverOk: false,
   rbaRate: 4.35,               // auto-fetched from /api/rba-rate on init
   rbaRateSource: 'fallback',   // 'live-rba' | 'cached' | 'fallback'

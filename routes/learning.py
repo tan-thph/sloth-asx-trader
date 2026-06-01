@@ -802,13 +802,22 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                 ORDER BY timestamp DESC LIMIT 300
             """, (cutoff,)).fetchall()
 
-        # Gate: suppress calibration nudges when sample is too small (n < 30)
-        # to avoid chasing randomness in early-stage data.
+        # Gate: personalised calibration nudges require n ≥ 30 to avoid chasing noise.
+        # Below that, return an ASX base-rate prior so the user message still has a
+        # calibration anchor — Claude won't start from scratch for early-stage accounts.
         if len(rows) < 30:
+            regime_note = f",regime={regime}" if regime else ""
             return {
-                "available": False,
-                "block": None,
-                "gate_reason": f"Insufficient data — need 30+ closed trades, have {len(rows)}",
+                "available":          True,
+                "calibration_active": False,
+                "block": (
+                    f"CALIBRATION(prior,n={len(rows)}{regime_note}): "
+                    "Insufficient personal data for personalised calibration. "
+                    "ASX historical base rates: bull-regime BUY win-rate≈54%, "
+                    "bear≈36%, sideways≈48%. "
+                    "Apply conservative sizing (max 50% of normal qty) until n≥30 closed trades. "
+                    "Do not override these priors with high confidence."
+                ),
             }
 
         n = len(rows)
@@ -1023,6 +1032,32 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                     )
             if ticker_parts:
                 parts.append("per-ticker:" + ",".join(ticker_parts))
+
+        # 8. Sector × current regime interaction — most actionable for ASX sector rotation.
+        # Only fires when current regime is known (passed in), ESS≥2.5, and win-rate
+        # differs from the overall by >12pp. Capped at 2 entries to stay within budget.
+        if regime and len(calib_rows) >= 10:
+            overall_wr = _wwr(calib_rows) if "overall_wr" not in dir() else overall_wr
+            sx_rows = [r for r in calib_rows if r["regime"] == regime and r["sector"]]
+            sx_groups: dict = {}
+            for r in sx_rows:
+                sx_groups.setdefault(r["sector"], []).append(r)
+            sx_parts = []
+            for sector, s_rows in sx_groups.items():
+                sx_ess = _ess(s_rows)
+                if sx_ess < _ESS_MIN:
+                    continue
+                sx_wr  = _wwr(s_rows)
+                delta  = sx_wr - overall_wr
+                if abs(delta) >= 0.12:
+                    direction = "✓" if delta > 0 else "⚠"
+                    sx_parts.append(
+                        f"{sector}:{sx_wr*100:.0f}%(Δ{delta*100:+.0f}pp,ESS={sx_ess:.1f}){direction}"
+                    )
+            if sx_parts:
+                # Sort by |delta| descending; keep top 2
+                sx_parts.sort(key=lambda x: abs(float(x.split("Δ")[1].split("pp")[0])), reverse=True)
+                parts.append(f"sector×{regime}:" + ",".join(sx_parts[:2]))
 
         if not parts:
             return {"available": False, "block": None}

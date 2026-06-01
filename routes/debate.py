@@ -1068,12 +1068,17 @@ def _pm_parse(raw: str, ev_id: int, model: str, label: str = ""):
 # ── Win-tagging endpoint (Phase 1B) ──────────────────────────────────────────
 
 VALID_WIN_TAGS = frozenset({
-    "catalyst_capture",   # trade captured a planned earnings/news event
-    "regime_aligned",     # entry timing was perfectly matched to macro regime
-    "confluence_entry",   # multiple indicators aligned at entry (high-quality setup)
-    "disciplined_hold",   # held through normal drawdown; thesis validated by outcome
-    "good_sizing",        # position size was appropriate for the conviction and risk
-    "none",               # win was luck-driven / unforeseeable upside
+    "catalyst_capture",          # trade captured a planned earnings/news/dividend event
+    "regime_aligned",            # entry timing was perfectly matched to macro regime
+    "confluence_entry",          # multiple technical indicators aligned at entry
+    "disciplined_hold",          # held through normal drawdown; thesis validated by outcome
+    "good_sizing",               # position size was appropriate for the conviction and risk
+    # Fundamental / macro success drivers — previously untagged category
+    "fundamental_value_entry",   # bought at cheap valuation (fwdPE/PB vs sector; strong FCF yield)
+    "earnings_revision_driven",  # win driven by beat/miss trend or analyst upgrade momentum
+    "macro_tailwind_aligned",    # regime + commodity/rates directly supportive of sector thesis
+    "contrarian_mean_reversion", # oversold fundamental-quality stock recovered as expected
+    "none",                      # win was luck-driven / unforeseeable upside
 })
 
 
@@ -1085,12 +1090,24 @@ def _win_build_prompt(summary: str, rationale: str) -> str:
         + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "")
         + "\n"
         "Select 1-2 success tags that best describe what went right:\n"
-        "  catalyst_capture  - trade captured a planned earnings/news/dividend event\n"
-        "  regime_aligned    - entry timing was well-matched to the active macro regime\n"
-        "  confluence_entry  - multiple independent indicators aligned cleanly at entry\n"
-        "  disciplined_hold  - held through normal volatility; original thesis validated\n"
-        "  good_sizing       - position size was appropriate for conviction and risk level\n"
-        "  none              - ONLY if the win appears primarily luck-driven or unforeseeable\n"
+        "\n"
+        "Technical / timing drivers:\n"
+        "  catalyst_capture         - trade captured a planned earnings/news/dividend event\n"
+        "  regime_aligned           - entry timing was well-matched to the active macro regime\n"
+        "  confluence_entry         - multiple independent technical indicators aligned at entry\n"
+        "  disciplined_hold         - held through normal volatility; original thesis validated\n"
+        "  good_sizing              - position size was well-calibrated for conviction and risk\n"
+        "\n"
+        "Fundamental / macro drivers (use when technicals were NOT the primary reason):\n"
+        "  fundamental_value_entry  - entered at cheap valuation (fwdPE/PB below sector; strong FCF yield)\n"
+        "  earnings_revision_driven - win driven by beat history / analyst upgrade momentum\n"
+        "  macro_tailwind_aligned   - commodity, rate, or AUD/USD move directly supported the thesis\n"
+        "  contrarian_mean_reversion- oversold quality stock recovered as expected (value + patience)\n"
+        "\n"
+        "  none                     - ONLY if the win appears primarily luck-driven or unforeseeable\n"
+        "\n"
+        "RULE: choose the tag that describes the PRIMARY driver — do not choose both a technical and a\n"
+        "fundamental tag unless both genuinely drove the outcome independently.\n"
         "\n"
         'Reply with JSON only: {"success_tags":"TAG1,TAG2","reason":"one clear sentence"}\n'
         "No markdown, no explanation outside JSON."

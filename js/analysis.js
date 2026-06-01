@@ -208,32 +208,24 @@ async function runAnalysis() {
       const analystUpside = (f.analyst_target && s.current_price)
         ? ((f.analyst_target / s.current_price - 1) * 100).toFixed(1) : null;
 
-      // ── Weekly price history (10 weeks, aggregated from daily chart_data) ────
-      // Gives Claude pattern context: is current RSI level a breakout or a top?
-      const weeklyHistory = (() => {
-        const cd = s.chart_data;
-        if (!cd || cd.length < 10) return '';
-        const weeks = [];
-        for (let i = cd.length - 1; i >= 0 && weeks.length < 10; i -= 5) {
-          const bars = cd.slice(Math.max(0, i - 4), i + 1);
-          if (!bars.length) break;
-          weeks.unshift({
-            c: bars[bars.length - 1].close,
-            h: Math.max(...bars.map(b => b.high)),
-            l: Math.min(...bars.map(b => b.low)),
-          });
-        }
-        // Volume trend: recent 5 weeks vs prior 5 weeks
-        const volNew = cd.slice(-25).reduce((a, b) => a + (b.volume || 0), 0) / 25;
-        const volOld = cd.slice(-50, -25).reduce((a, b) => a + (b.volume || 0), 0) / 25;
-        const volTrend = volOld > 0
-          ? ((volNew / volOld - 1) * 100).toFixed(0) + '%' : 'n/a';
-        const closes = weeks.map((w, i) => {
-          const arrow = i > 0
-            ? (w.c > weeks[i-1].c ? '↑' : w.c < weeks[i-1].c ? '↓' : '→') : '';
-          return `$${w.c.toFixed(2)}${arrow}`;
-        });
-        return `\n  WeeklyCls(10wk,old→new): ${closes.join(' ')} | VolTrend5w:${volTrend}`;
+      // ── Nearest S/R pivot proximity flag ────────────────────────────────────
+      // Raw pivot levels (R2/R1/Pivot/S1/S2) are ~50 tokens each and not well
+      // interpreted by LLMs as chart zones. Pre-compute the nearest level and
+      // its distance from current price instead (~15 tokens, high signal quality).
+      const nearPivot = (() => {
+        const price = s.current_price;
+        if (!price || !sr) return '';
+        const levels = [
+          { name: 'R2', v: sr.r2 }, { name: 'R1', v: sr.r1 },
+          { name: 'Pivot', v: sr.pivot },
+          { name: 'S1', v: sr.s1 }, { name: 'S2', v: sr.s2 },
+        ].filter(l => l.v != null);
+        if (!levels.length) return '';
+        const nearest = levels.reduce((best, l) =>
+          Math.abs(l.v - price) < Math.abs(best.v - price) ? l : best
+        );
+        const pct = ((nearest.v - price) / price * 100).toFixed(1);
+        return `, NearPivot:${nearest.name}(${pct > 0 ? '+' : ''}${pct}%)`;
       })();
 
       return `\n[${t}]${inPortfolio?'':' ★WATCHLIST★'}
@@ -242,12 +234,11 @@ async function runAnalysis() {
   Trend: SMA20=$${s.sma_20?.toFixed(3)}, SMA50=${s.sma_50?'$'+s.sma_50.toFixed(3):'n/a'}, SMA200=${s.sma_200?'$'+s.sma_200.toFixed(3):'n/a'}, EMA12=$${s.ema_12?.toFixed(3)}, EMA26=$${s.ema_26?.toFixed(3)}
   Bollinger: Upper=$${s.bb_upper?.toFixed(3)}, Mid=$${s.bb_mid?.toFixed(3)}, Lower=$${s.bb_lower?.toFixed(3)}, %B=${s.bb_pct_b!=null?(s.bb_pct_b*100).toFixed(0)+'%':'n/a'}, Width=${s.bb_bandwidth?.toFixed(1)}%${donchRange!=null?`, DonchPos=${donchRange.toFixed(0)}%`:''}
   Volatility: ATR=$${s.atr_14?.toFixed(3)} (${s.atr_pct?.toFixed(1)}%), HistVol20d=${s.hist_vol_20?.toFixed(1)}%ann${s.hist_vol_60?` 60d:${s.hist_vol_60.toFixed(1)}% regime:${volRegime}`:''}, Keltner=${s.keltner_lower?.toFixed(3)}-${s.keltner_upper?.toFixed(3)}
-  Volume: Today=${s.volume_today?.toLocaleString()}, Avg20=${s.volume_avg_20?.toLocaleString()}, Ratio=${s.volume_ratio?.toFixed(2)}x, VZ=${s.volume_z_score?.toFixed(1)}σ, OBV=${s.obv_trend}, VWAP20=$${s.vwap_20d?.toFixed(3)} (price ${s.price_vs_vwap})
-  S/R Pivots: R2=$${sr.r2?.toFixed(3)}, R1=$${sr.r1?.toFixed(3)}, Pivot=$${sr.pivot?.toFixed(3)}, S1=$${sr.s1?.toFixed(3)}, S2=$${sr.s2?.toFixed(3)}
+  Volume: Today=${s.volume_today?.toLocaleString()}, Avg20=${s.volume_avg_20?.toLocaleString()}, Ratio=${s.volume_ratio?.toFixed(2)}x, VZ=${s.volume_z_score?.toFixed(1)}σ, OBV=${s.obv_trend}, VWAP20=$${s.vwap_20d?.toFixed(3)} (price ${s.price_vs_vwap})${nearPivot}
   Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%${s.return_90d!=null?` 90D:${s.return_90d.toFixed(2)}%`:''}${rsAlpha!=null?` vs.ASX200:${rsAlpha>0?'+':''}${rsAlpha}pp`:''}${sectorAlpha!=null?` vs.Sector:${sectorAlpha>0?'+':''}${sectorAlpha}pp`:''}
   Fundamentals: PE=${f.pe_ratio?.toFixed(1)||'n/a'}, FwdPE=${f.forward_pe?.toFixed(1)||'n/a'}, PB=${f.pb_ratio?.toFixed(2)||'n/a'}, DivYield=${f.dividend_yield?(f.dividend_yield*100).toFixed(2)+'%':'n/a'}, Beta=${f.beta?.toFixed(2)||'n/a'}, ROE=${f.roe?(f.roe*100).toFixed(1)+'%':'n/a'}, OpMgn=${f.operating_margin!=null?(f.operating_margin*100).toFixed(1)+'%':'n/a'}, D/E=${f.debt_to_equity?.toFixed(1)||'n/a'}, RevGrowth=${f.revenue_growth!=null?(f.revenue_growth*100).toFixed(1)+'%':'n/a'}, FCFYield=${(f.free_cashflow&&f.market_cap)?((f.free_cashflow/f.market_cap)*100).toFixed(1)+'%':'n/a'}${f.short_pct_float!=null?`, Short=${(f.short_pct_float*100).toFixed(1)}%float`:''}
   52W: High=$${f['52w_high']?.toFixed(3)||'n/a'}, Low=$${f['52w_low']?.toFixed(3)||'n/a'}, FromHigh=${f.pct_from_52w_high?.toFixed(1)||'n/a'}%${analystUpside!=null?`, AnalystUpside=${analystUpside>0?'+':''}${analystUpside}%`:''}, Analyst=${f.analyst_recommendation||'n/a'} (target $${f.analyst_target?.toFixed(2)||'n/a'})
-  BuySignals: ${(s.buy_signals||[]).join(', ')||'none'} | SellSignals: ${(s.sell_signals||[]).join(', ')||'none'}${weeklyHistory}`;
+  BuySignals: ${(s.buy_signals||[]).join(', ')||'none'} | SellSignals: ${(s.sell_signals||[]).join(', ')||'none'}`;
     }).join('\n');
   }
 
@@ -611,9 +602,30 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     ? buildSystemArray({ regime: _activeRegime, portfolio: mergedPortfolio() })
     : [{ type: 'text', text: ANALYSIS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
 
+  // ── Regime transition detection ───────────────────────────────────────────
+  // Track when the regime last changed so Claude can discount calibration data
+  // that predates the transition (it may come from a prior market cycle).
+  if (_activeRegime && _activeRegime !== 'unknown') {
+    const prev = state.lastKnownRegime;
+    if (prev && prev !== _activeRegime) {
+      // Regime just changed — record the transition timestamp
+      state.lastKnownRegime = _activeRegime;
+      state.regimeChangedAt = Date.now();
+    } else if (!prev) {
+      state.lastKnownRegime = _activeRegime;
+    }
+  }
+
   // Inject calibration, regime, and (optional) debate into the final user message
+  const _regimeDaysAgo = state.regimeChangedAt
+    ? Math.floor((Date.now() - state.regimeChangedAt) / 86_400_000) : null;
+  const _regimeTransitionNote =
+    (state.lastKnownRegime && state.lastKnownRegime !== _activeRegime &&
+     _regimeDaysAgo !== null && _regimeDaysAgo <= 7)
+      ? ` [TRANSITION: ${state.lastKnownRegime}→${_activeRegime} ${_regimeDaysAgo}d ago — calibration data for ${_activeRegime} may be from prior cycle]`
+      : '';
   const regimeCtx = _activeRegime && _activeRegime !== 'unknown'
-    ? `\nACTIVE_REGIME: ${_activeRegime} (confidence: ${(_regimeResult.confidence * 100).toFixed(0)}%)`
+    ? `\nACTIVE_REGIME: ${_activeRegime} (confidence: ${(_regimeResult.confidence * 100).toFixed(0)}%)${_regimeTransitionNote}`
     : '';
 
   const fullUserMessage = userMessage

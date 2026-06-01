@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-05-v5';
+const PROMPT_VERSION = '2026-06-v6';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ const ANALYSIS_SYSTEM_PROMPT =
       - Ticker MaxDD90d > 25% (flagged ⚠HIGH-DD): mandatory stop-loss note at 1.5×ATR in reasoning[].
       - If portfolio composite risk score > 67 (High): raise minimum confidence threshold to 0.75 for all BUYs.
       - If portfolio composite risk score > 80: issue NO new BUY positions. TOP_UP on existing winners only if confidence ≥ 0.80. Explain in summary.
-  16. RISK-REWARD CONTEXT: When reporting factorsUsed[], always include one entry citing the ticker's Sharpe ratio and whether it justifies the expected return vs the RBA risk-free rate. A negative Sharpe (< 0) requires explicit justification for any BUY rec.
+  17. RISK-REWARD CONTEXT: When reporting factorsUsed[], always include one entry citing the ticker's Sharpe ratio and whether it justifies the expected return vs the RBA risk-free rate. A negative Sharpe (< 0) requires explicit justification for any BUY rec.
       SHARPE PROXY RULE: For watchlist tickers (isWatchlist = true) absent from the PORTFOLIO RISK METRICS table,
       do NOT substitute the portfolio composite Sharpe as a proxy — it reflects the existing portfolio's
       risk distribution, not the new ticker's expected return distribution. Instead:
@@ -202,6 +202,7 @@ const ANALYSIS_SYSTEM_PROMPT =
   - FORBIDDEN combinations (validation will reject):
       target_reached + stop_triggered (logically contradictory — price cannot hit both)
       time_stop + target_reached (time_stop implies the target was NOT hit)
+      SELL + urgency:monitor (monitor means "conditions forming" — only valid for TRIM; use immediate or routine for SELL)
   - REQUIRED secondary for certain primaries:
       tax_optimisation → must include one of: unrealised_loss_large, held_over_12m, held_11_to_12m
       risk_management  → must include one of: sector_concentration, position_oversized
@@ -237,8 +238,15 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   Evaluate every holding in this priority order. Do not skip levels.
 
-  PRIORITY 1 — FORWARD EARNINGS & REVISIONS (highest signal quality)
-    Consensus EPS revision direction (upgrades > downgrades = bullish). Earnings surprise history.
+  PRIORITY 1 — EARNINGS MOMENTUM (highest signal quality)
+    Available data: EPSvEst(4Q) beat/miss history — actual minus estimate for the last 4 quarters.
+    This is a PROXY for revision direction, not true 30-day analyst consensus revision data
+    (which is unavailable from yfinance). Interpret it as follows:
+      3+ consecutive beats = positive revision signal (analysts likely revising up)
+      2+ consecutive misses = negative revision signal (analysts likely revising down)
+      Mixed beats/misses = neutral; do not over-weight
+    Note: a stock can have a strong beat history yet deteriorating forward consensus — state
+    uncertainty explicitly when EPSvEst trend is stale (> 2 quarters old) or inconsistent.
     Forward PE vs sector benchmark and vs own 3-year history. Earnings momentum outweighs macro.
 
   PRIORITY 2 — MACRO REGIME

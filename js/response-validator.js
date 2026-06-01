@@ -86,6 +86,10 @@ function validateSellTags(rec) {
     errors.push('SELL/TRIM requires urgency — one of: immediate, routine, monitor');
   } else if (!SELL_URGENCY.has(rec.urgency)) {
     errors.push(`urgency "${rec.urgency}" must be one of: immediate, routine, monitor`);
+  } else if (rec.action === 'SELL' && rec.urgency === 'monitor') {
+    // "monitor" means "conditions forming but not yet crystallised" — only valid for TRIM
+    // where a partial exit can wait. SELL is an immediate/routine decisive exit.
+    errors.push('urgency "monitor" is only valid for TRIM — use "immediate" or "routine" for SELL');
   }
 
   // ── forbidden combinations ─────────────────────────────────────────────────

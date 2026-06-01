@@ -425,11 +425,17 @@ function _renderLearningContent(d, brier) {
 
   // ── Success patterns ───────────────────────────────────────────────────────
   const WIN_TAG_META = {
-    catalyst_capture: { label: 'Catalyst Capture',  color: '#3b82f6', tip: 'Trade captured a planned earnings/news/dividend event' },
-    regime_aligned:   { label: 'Regime Aligned',    color: '#8b5cf6', tip: 'Entry timing matched the active macro regime' },
-    confluence_entry: { label: 'Confluence Entry',  color: '#0891b2', tip: 'Multiple independent indicators aligned at entry' },
-    disciplined_hold: { label: 'Disciplined Hold',  color: '#059669', tip: 'Held through normal volatility; original thesis validated' },
-    good_sizing:      { label: 'Good Sizing',        color: '#d97706', tip: 'Position size was appropriate for conviction and risk' },
+    // Technical / timing drivers
+    catalyst_capture:          { label: 'Catalyst Capture',       color: '#3b82f6', tip: 'Trade captured a planned earnings/news/dividend event' },
+    regime_aligned:            { label: 'Regime Aligned',         color: '#8b5cf6', tip: 'Entry timing matched the active macro regime' },
+    confluence_entry:          { label: 'Confluence Entry',       color: '#0891b2', tip: 'Multiple independent technical indicators aligned at entry' },
+    disciplined_hold:          { label: 'Disciplined Hold',       color: '#059669', tip: 'Held through normal volatility; original thesis validated' },
+    good_sizing:               { label: 'Good Sizing',            color: '#d97706', tip: 'Position size was well-calibrated for conviction and risk' },
+    // Fundamental / macro drivers
+    fundamental_value_entry:   { label: 'Value Entry',            color: '#16a34a', tip: 'Entered at cheap valuation — fwdPE/PB below sector; strong FCF yield' },
+    earnings_revision_driven:  { label: 'Earnings Revision',      color: '#0369a1', tip: 'Win driven by beat/miss trend or analyst upgrade momentum' },
+    macro_tailwind_aligned:    { label: 'Macro Tailwind',         color: '#7c3aed', tip: 'Commodity, rate, or AUD/USD move directly supported the sector thesis' },
+    contrarian_mean_reversion: { label: 'Contrarian Reversion',   color: '#be185d', tip: 'Oversold quality stock recovered as expected — value + patience' },
   };
   const successTypes = Object.entries(successPats.by_success_type || {})
     .sort((a, b) => b[1] - a[1]);
