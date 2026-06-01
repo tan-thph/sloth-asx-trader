@@ -3635,5 +3635,149 @@ class TestSprint30DataEnhancements(unittest.TestCase):
                       "analysis.js liveCtx must include US10Y yield")
 
 
+class TestSprint32DataQuality(unittest.TestCase):
+    """Sprint 32 — Tier 1 + Tier 2 data quality enhancements + short interest."""
+
+    # ── indicators.py ─────────────────────────────────────────────────────────
+
+    def test_indicators_has_short_pct_float(self):
+        """indicators.py fundamentals must include short_pct_float from yfinance."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"short_pct_float"', src)
+        self.assertIn("shortPercentOfFloat", src)
+
+    # ── Portfolio sector allocation ───────────────────────────────────────────
+
+    def test_sector_alloc_ctx_in_analysis_js(self):
+        """analysis.js must build a portfolio sector allocation summary."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("sectorAllocCtx", src)
+        self.assertIn("PORTFOLIO SECTOR ALLOCATION", src)
+
+    # ── Trend signal alignment count ─────────────────────────────────────────
+
+    def test_trend_signal_count_in_indicator_ctx(self):
+        """analysis.js indicatorCtx must show trend signal alignment count (X/Y signals)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("trend_signals", src,
+                      "analysis.js must read s.trend_signals for alignment count")
+        self.assertIn("tsBull", src)
+        self.assertIn("tsTotal", src)
+        self.assertIn("tsLabel", src)
+
+    # ── MACD histogram direction ──────────────────────────────────────────────
+
+    def test_macd_direction_in_indicator_ctx(self):
+        """analysis.js must show MACD histogram direction (expanding/contracting)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("macdDir", src)
+        self.assertIn("macd_hist_prev", src)
+        self.assertIn("expanding", src)
+        self.assertIn("contracting", src)
+
+    # ── Volatility regime ─────────────────────────────────────────────────────
+
+    def test_vol_regime_in_indicator_ctx(self):
+        """analysis.js must include volatility regime from hist_vol_20/hist_vol_60 ratio."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("volRegime", src)
+        self.assertIn("hist_vol_60", src)
+        self.assertIn("ELEVATED", src)
+        self.assertIn("COMPRESSED", src)
+
+    # ── Donchian position in range ────────────────────────────────────────────
+
+    def test_donchian_pos_in_indicator_ctx(self):
+        """analysis.js must show Donchian channel position-in-range (DonchPos)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("DonchPos", src)
+        self.assertIn("donchian_upper", src)
+        self.assertIn("donchian_lower", src)
+
+    # ── Volume z-score ────────────────────────────────────────────────────────
+
+    def test_volume_zscore_in_indicator_ctx(self):
+        """analysis.js Volume line must include volume_z_score (VZ)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("VZ=", src)
+        self.assertIn("volume_z_score", src)
+
+    # ── Relative strength vs ASX200 ───────────────────────────────────────────
+
+    def test_rs_alpha_vs_asx200_in_indicator_ctx(self):
+        """analysis.js Returns line must include relative strength vs ASX200."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("vs.ASX200", src)
+        self.assertIn("rsAlpha", src)
+        self.assertIn("asx200_5d_return", src)
+
+    # ── Relative strength vs sector ETF ──────────────────────────────────────
+
+    def test_sector_alpha_in_indicator_ctx(self):
+        """analysis.js Returns line must include relative strength vs sector ETF."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("vs.Sector", src)
+        self.assertIn("sectorAlpha", src)
+        self.assertIn("_SECTOR_TO_ETF", src)
+
+    # ── Analyst upside % ─────────────────────────────────────────────────────
+
+    def test_analyst_upside_in_indicator_ctx(self):
+        """analysis.js 52W line must include analyst consensus upside/downside %."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("AnalystUpside", src)
+        self.assertIn("analystUpside", src)
+        self.assertIn("analyst_target", src)
+
+    # ── Short interest ────────────────────────────────────────────────────────
+
+    def test_short_pct_float_in_indicator_ctx(self):
+        """analysis.js Fundamentals line must include short_pct_float when available."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("short_pct_float", src)
+        self.assertIn("Short=", src)
+        self.assertIn("%float", src)
+
+    # ── ROC21 for medium-term momentum ────────────────────────────────────────
+
+    def test_roc21_in_indicator_ctx(self):
+        """analysis.js Momentum line must include ROC21 (21-day rate of change)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("roc_21", src)
+        self.assertIn("ROC21", src)
+
+    # ── Weekly compressed price history ──────────────────────────────────────
+
+    def test_weekly_history_in_indicator_ctx(self):
+        """analysis.js must include compressed 10-week price history per ticker."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("weeklyHistory", src)
+        self.assertIn("WeeklyCls", src)
+        self.assertIn("chart_data", src,
+                      "analysis.js must read s.chart_data for weekly history")
+        self.assertIn("VolTrend5w", src)
+
+    def test_weekly_history_aggregates_5_bar_windows(self):
+        """analysis.js weekly history must use 5-bar windows (trading week)."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        # The aggregation loop steps back 5 bars at a time
+        self.assertIn("i -= 5", src)
+        self.assertIn("weeks.length < 10", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

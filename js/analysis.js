@@ -137,27 +137,117 @@ async function runAnalysis() {
     } catch { /* non-fatal — analysis continues without risk data */ }
   }
 
+  // ── Portfolio sector allocation summary ──────────────────────────────────
+  // Computed here so it sits just above the per-ticker indicator block.
+  const sectorAllocCtx = (() => {
+    const smap = {};
+    const pv = portfolioValue();
+    if (!pv) return '';
+    for (const h of mergedPortfolio()) {
+      const sec = h.sector || 'Other';
+      smap[sec] = (smap[sec] || 0) + h.shares * (h.currentPrice || 0);
+    }
+    if (!Object.keys(smap).length) return '';
+    const parts = Object.entries(smap)
+      .sort((a, b) => b[1] - a[1])
+      .map(([sec, val]) => `${sec}=${(val / pv * 100).toFixed(0)}%`);
+    return `\n\nPORTFOLIO SECTOR ALLOCATION: ${parts.join(', ')}`;
+  })();
+
+  // Sector ETF key lookup for relative-strength computation
+  const _SECTOR_TO_ETF = {
+    'Materials': 'xmj', 'Financials': 'xfj',
+    'Health Care': 'xhj', 'Healthcare': 'xhj',
+    'Energy': 'xej', 'Real Estate': 'xrj', 'RealEstate': 'xrj',
+  };
+
   // Build indicator context (full detail per ticker)
   let indicatorCtx = '';
   const loaded = allTickers.filter(t=>state.liveSignals[t]&&!state.liveSignals[t].error);
   if(loaded.length) {
-    indicatorCtx = '\n\nLIVE TECHNICAL DATA (yfinance, real-time):\n' + loaded.map(t=>{
-      const s = state.liveSignals[t];
-      const f = s.fundamentals || {};
+    // ASX200 5d return for relative-strength baseline (from macro data)
+    const _asx200_5d = _m?.asx200_5d_return ?? null;
+
+    indicatorCtx = sectorAllocCtx + '\n\nLIVE TECHNICAL DATA (yfinance, real-time):\n' + loaded.map(t=>{
+      const s  = state.liveSignals[t];
+      const f  = s.fundamentals || {};
       const sr = s.support_resistance || {};
       const inPortfolio = portfolioTickers.includes(t);
+
+      // ── Trend signal alignment (5/7 = 5 of 7 signals bullish) ──────────────
+      const tsVals  = Object.values(s.trend_signals || {});
+      const tsBull  = tsVals.filter(v => v === true).length;
+      const tsTotal = tsVals.filter(v => v !== null && v !== undefined).length;
+      const tsLabel = tsTotal > 0 ? `(${tsBull}/${tsTotal}signals)` : '';
+
+      // ── MACD histogram direction ─────────────────────────────────────────────
+      const macdDir = s.macd_hist_prev != null
+        ? (s.macd_hist > s.macd_hist_prev ? '↑expanding' : '↓contracting')
+        : '';
+
+      // ── Volatility regime: current 20d vol vs 60d baseline ──────────────────
+      const volRatio  = (s.hist_vol_20 && s.hist_vol_60)
+        ? s.hist_vol_20 / s.hist_vol_60 : null;
+      const volRegime = volRatio == null ? '' :
+        volRatio > 1.2 ? 'ELEVATED' : volRatio < 0.8 ? 'COMPRESSED' : 'NORMAL';
+
+      // ── Donchian channel position in range (0%=20d low, 100%=20d high) ──────
+      const donchRange = (s.donchian_upper && s.donchian_lower && s.donchian_upper !== s.donchian_lower)
+        ? (s.current_price - s.donchian_lower) / (s.donchian_upper - s.donchian_lower) * 100
+        : null;
+
+      // ── Relative strength vs ASX200 and sector ETF ──────────────────────────
+      const rsAlpha = (s.return_5d != null && _asx200_5d != null)
+        ? (s.return_5d - _asx200_5d).toFixed(1) : null;
+      const sectorKey = _SECTOR_TO_ETF[f.sector || ''] || null;
+      const sectorRet5d = sectorKey ? (_m?.sectors?.[sectorKey]?.return_5d ?? null) : null;
+      const sectorAlpha = (s.return_5d != null && sectorRet5d != null)
+        ? (s.return_5d - sectorRet5d).toFixed(1) : null;
+
+      // ── Analyst upside/downside vs current price ─────────────────────────────
+      const analystUpside = (f.analyst_target && s.current_price)
+        ? ((f.analyst_target / s.current_price - 1) * 100).toFixed(1) : null;
+
+      // ── Weekly price history (10 weeks, aggregated from daily chart_data) ────
+      // Gives Claude pattern context: is current RSI level a breakout or a top?
+      const weeklyHistory = (() => {
+        const cd = s.chart_data;
+        if (!cd || cd.length < 10) return '';
+        const weeks = [];
+        for (let i = cd.length - 1; i >= 0 && weeks.length < 10; i -= 5) {
+          const bars = cd.slice(Math.max(0, i - 4), i + 1);
+          if (!bars.length) break;
+          weeks.unshift({
+            c: bars[bars.length - 1].close,
+            h: Math.max(...bars.map(b => b.high)),
+            l: Math.min(...bars.map(b => b.low)),
+          });
+        }
+        // Volume trend: recent 5 weeks vs prior 5 weeks
+        const volNew = cd.slice(-25).reduce((a, b) => a + (b.volume || 0), 0) / 25;
+        const volOld = cd.slice(-50, -25).reduce((a, b) => a + (b.volume || 0), 0) / 25;
+        const volTrend = volOld > 0
+          ? ((volNew / volOld - 1) * 100).toFixed(0) + '%' : 'n/a';
+        const closes = weeks.map((w, i) => {
+          const arrow = i > 0
+            ? (w.c > weeks[i-1].c ? '↑' : w.c < weeks[i-1].c ? '↓' : '→') : '';
+          return `$${w.c.toFixed(2)}${arrow}`;
+        });
+        return `\n  WeeklyCls(10wk,old→new): ${closes.join(' ')} | VolTrend5w:${volTrend}`;
+      })();
+
       return `\n[${t}]${inPortfolio?'':' ★WATCHLIST★'}
-  Price=$${s.current_price} | Signal=${s.composite_signal} (${(s.confidence*100).toFixed(0)}% conf) | Trend=${s.trend_direction} | ADX=${s.adx?.toFixed(1)} (${s.trend_strength})
-  Momentum: RSI14=${s.rsi_14?.toFixed(1)}, RSI9=${s.rsi_9?.toFixed(1)}, MACDhist=${s.macd_hist?.toFixed(4)}, Stoch%K=${s.stoch_k?.toFixed(1)}/%D=${s.stoch_d?.toFixed(1)}, CCI=${s.cci?.toFixed(1)}, MFI=${s.mfi?.toFixed(1)}, WillR=${s.williams_r?.toFixed(1)}, ROC10=${s.roc_10?.toFixed(2)}%
+  Price=$${s.current_price} | Signal=${s.composite_signal} (${(s.confidence*100).toFixed(0)}% conf) | Trend=${s.trend_direction}${tsLabel} | ADX=${s.adx?.toFixed(1)} (${s.trend_strength})
+  Momentum: RSI14=${s.rsi_14?.toFixed(1)}, RSI9=${s.rsi_9?.toFixed(1)}, MACDhist=${s.macd_hist?.toFixed(4)}${macdDir?` ${macdDir}`:''}, ROC10=${s.roc_10?.toFixed(2)}% ROC21=${s.roc_21?.toFixed(2)}%, Stoch%K=${s.stoch_k?.toFixed(1)}/%D=${s.stoch_d?.toFixed(1)}, CCI=${s.cci?.toFixed(1)}, MFI=${s.mfi?.toFixed(1)}, WillR=${s.williams_r?.toFixed(1)}
   Trend: SMA20=$${s.sma_20?.toFixed(3)}, SMA50=${s.sma_50?'$'+s.sma_50.toFixed(3):'n/a'}, SMA200=${s.sma_200?'$'+s.sma_200.toFixed(3):'n/a'}, EMA12=$${s.ema_12?.toFixed(3)}, EMA26=$${s.ema_26?.toFixed(3)}
-  Bollinger: Upper=$${s.bb_upper?.toFixed(3)}, Mid=$${s.bb_mid?.toFixed(3)}, Lower=$${s.bb_lower?.toFixed(3)}, %B=${s.bb_pct_b!=null?(s.bb_pct_b*100).toFixed(0)+'%':'n/a'}, Width=${s.bb_bandwidth?.toFixed(1)}%
-  Volatility: ATR=$${s.atr_14?.toFixed(3)} (${s.atr_pct?.toFixed(1)}%), HistVol20d=${s.hist_vol_20?.toFixed(1)}%ann, Keltner=${s.keltner_lower?.toFixed(3)}-${s.keltner_upper?.toFixed(3)}
-  Volume: Today=${s.volume_today?.toLocaleString()}, Avg20=${s.volume_avg_20?.toLocaleString()}, Ratio=${s.volume_ratio?.toFixed(2)}x, OBV=${s.obv_trend}, VWAP20=$${s.vwap_20d?.toFixed(3)} (price ${s.price_vs_vwap})
+  Bollinger: Upper=$${s.bb_upper?.toFixed(3)}, Mid=$${s.bb_mid?.toFixed(3)}, Lower=$${s.bb_lower?.toFixed(3)}, %B=${s.bb_pct_b!=null?(s.bb_pct_b*100).toFixed(0)+'%':'n/a'}, Width=${s.bb_bandwidth?.toFixed(1)}%${donchRange!=null?`, DonchPos=${donchRange.toFixed(0)}%`:''}
+  Volatility: ATR=$${s.atr_14?.toFixed(3)} (${s.atr_pct?.toFixed(1)}%), HistVol20d=${s.hist_vol_20?.toFixed(1)}%ann${s.hist_vol_60?` 60d:${s.hist_vol_60.toFixed(1)}% regime:${volRegime}`:''}, Keltner=${s.keltner_lower?.toFixed(3)}-${s.keltner_upper?.toFixed(3)}
+  Volume: Today=${s.volume_today?.toLocaleString()}, Avg20=${s.volume_avg_20?.toLocaleString()}, Ratio=${s.volume_ratio?.toFixed(2)}x, VZ=${s.volume_z_score?.toFixed(1)}σ, OBV=${s.obv_trend}, VWAP20=$${s.vwap_20d?.toFixed(3)} (price ${s.price_vs_vwap})
   S/R Pivots: R2=$${sr.r2?.toFixed(3)}, R1=$${sr.r1?.toFixed(3)}, Pivot=$${sr.pivot?.toFixed(3)}, S1=$${sr.s1?.toFixed(3)}, S2=$${sr.s2?.toFixed(3)}
-  Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%
-  Fundamentals: PE=${f.pe_ratio?.toFixed(1)||'n/a'}, FwdPE=${f.forward_pe?.toFixed(1)||'n/a'}, PB=${f.pb_ratio?.toFixed(2)||'n/a'}, DivYield=${f.dividend_yield?(f.dividend_yield*100).toFixed(2)+'%':'n/a'}, Beta=${f.beta?.toFixed(2)||'n/a'}, ROE=${f.roe?(f.roe*100).toFixed(1)+'%':'n/a'}, OpMgn=${f.operating_margin!=null?(f.operating_margin*100).toFixed(1)+'%':'n/a'}, D/E=${f.debt_to_equity?.toFixed(1)||'n/a'}, RevGrowth=${f.revenue_growth!=null?(f.revenue_growth*100).toFixed(1)+'%':'n/a'}, FCFYield=${(f.free_cashflow&&f.market_cap)?((f.free_cashflow/f.market_cap)*100).toFixed(1)+'%':'n/a'}
-  52W: High=$${f['52w_high']?.toFixed(3)||'n/a'}, Low=$${f['52w_low']?.toFixed(3)||'n/a'}, FromHigh=${f.pct_from_52w_high?.toFixed(1)||'n/a'}%, Analyst=${f.analyst_recommendation||'n/a'} (target $${f.analyst_target?.toFixed(2)||'n/a'})
-  BuySignals: ${(s.buy_signals||[]).join(', ')||'none'} | SellSignals: ${(s.sell_signals||[]).join(', ')||'none'}`;
+  Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%${s.return_90d!=null?` 90D:${s.return_90d.toFixed(2)}%`:''}${rsAlpha!=null?` vs.ASX200:${rsAlpha>0?'+':''}${rsAlpha}pp`:''}${sectorAlpha!=null?` vs.Sector:${sectorAlpha>0?'+':''}${sectorAlpha}pp`:''}
+  Fundamentals: PE=${f.pe_ratio?.toFixed(1)||'n/a'}, FwdPE=${f.forward_pe?.toFixed(1)||'n/a'}, PB=${f.pb_ratio?.toFixed(2)||'n/a'}, DivYield=${f.dividend_yield?(f.dividend_yield*100).toFixed(2)+'%':'n/a'}, Beta=${f.beta?.toFixed(2)||'n/a'}, ROE=${f.roe?(f.roe*100).toFixed(1)+'%':'n/a'}, OpMgn=${f.operating_margin!=null?(f.operating_margin*100).toFixed(1)+'%':'n/a'}, D/E=${f.debt_to_equity?.toFixed(1)||'n/a'}, RevGrowth=${f.revenue_growth!=null?(f.revenue_growth*100).toFixed(1)+'%':'n/a'}, FCFYield=${(f.free_cashflow&&f.market_cap)?((f.free_cashflow/f.market_cap)*100).toFixed(1)+'%':'n/a'}${f.short_pct_float!=null?`, Short=${(f.short_pct_float*100).toFixed(1)}%float`:''}
+  52W: High=$${f['52w_high']?.toFixed(3)||'n/a'}, Low=$${f['52w_low']?.toFixed(3)||'n/a'}, FromHigh=${f.pct_from_52w_high?.toFixed(1)||'n/a'}%${analystUpside!=null?`, AnalystUpside=${analystUpside>0?'+':''}${analystUpside}%`:''}, Analyst=${f.analyst_recommendation||'n/a'} (target $${f.analyst_target?.toFixed(2)||'n/a'})
+  BuySignals: ${(s.buy_signals||[]).join(', ')||'none'} | SellSignals: ${(s.sell_signals||[]).join(', ')||'none'}${weeklyHistory}`;
     }).join('\n');
   }
 
