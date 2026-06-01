@@ -902,10 +902,16 @@ def _call_model_any(model_name: str, prompt: str, timeout: int,
             return {"ok": False, "error": "Google API key not configured (add it in News Scanner settings)"}
         return _call_gemini_json(keys["gemini_key"], actual or keys["gemini_model"], prompt, timeout=timeout)
 
-    # think=None: let each model use its default reasoning behaviour.
-    # Thinking models (qwen3.5:9b) will reason before answering; non-thinking
-    # models (gemma4:26b) are unaffected. The timeout= hard-caps total wall time.
-    return _call_ollama(model_name, prompt, timeout=timeout, retries=0, think=None,
+    # think=False: disable extended thinking for all JSON-classification calls.
+    # Thinking models (qwen3.5:9b, deepseek-r1) count thinking tokens against
+    # num_predict. With 1024 tokens, the model exhausts its budget on <think>...</think>
+    # content and is truncated before emitting the JSON — _strip_think_tags() returns ""
+    # (unclosed block → case 3) and _pm_parse() logs "parse failure | raw: ".
+    # JSON classification (pick 1-2 tags from 9 options) gets no quality benefit from
+    # extended reasoning; think=False recovers the full 1024 tokens for the JSON output.
+    # Free-text debate calls (bull/bear/synthesis) use _call_ollama directly with their
+    # own think= settings.
+    return _call_ollama(model_name, prompt, timeout=timeout, retries=0, think=False,
                         format_schema=format_schema, num_predict=num_predict)
 
 
@@ -1297,9 +1303,18 @@ def debate_postmortem():
         )
     else:
         # True parse failure — model output could not be parsed at all.
+        # Diagnose common causes for faster debugging:
+        raw_text = result.get("text", "")
+        if not raw_text:
+            diag = "empty response — model may have hit num_predict limit mid-<think> block (think=False required)"
+        elif "<think>" in raw_text and "</think>" not in raw_text:
+            diag = f"unclosed <think> block — model truncated at {len(raw_text)} chars before emitting JSON (think=False required)"
+        elif raw_text.startswith("<think>"):
+            diag = f"response was entirely inside <think> tags ({len(raw_text)} chars) — no JSON followed"
+        else:
+            diag = f"raw: {raw_text[:120]}"
         current_app.logger.info(
-            f"[PostMortem] event#{ev_id} ({row['ticker']}) → parse failure via {model}"
-            f" | raw: {result['text'][:120]}"
+            f"[PostMortem] event#{ev_id} ({row['ticker']}) → parse failure via {model} | {diag}"
         )
 
     return jsonify({

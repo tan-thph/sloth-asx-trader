@@ -3938,7 +3938,7 @@ class TestPostmortemTagFixes(unittest.TestCase):
 
 
 class TestPostmortemBatchAndSyncFixes(unittest.TestCase):
-    """Sprint 33 — batch classify button, sync rr_ratio fix, think=None, num_predict=1024."""
+    """Sprint 33 — batch classify button, sync rr_ratio fix, think=False for JSON, num_predict=1024."""
 
     # ── _call_model_any defaults ──────────────────────────────────────────────
 
@@ -3949,21 +3949,26 @@ class TestPostmortemBatchAndSyncFixes(unittest.TestCase):
         self.assertEqual(sig.parameters["num_predict"].default, 1024,
                          "_call_model_any default num_predict must be 1024")
 
-    def test_call_model_any_uses_think_none(self):
-        """_call_model_any must pass think=None so reasoning models can think freely."""
+    def test_call_model_any_uses_think_false(self):
+        """_call_model_any must pass think=False to avoid thinking-token budget exhaustion.
+
+        Thinking models (qwen3.5:9b) count <think>...</think> tokens against num_predict.
+        With num_predict=1024, the model exhausts its budget on reasoning and is truncated
+        before emitting JSON. _strip_think_tags() returns '' (unclosed block) causing
+        'parse failure | raw: '. JSON classification gets no quality benefit from extended
+        reasoning — think=False restores the full 1024 tokens for the JSON output.
+        """
         with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
             src = f.read()
-        # Extract the full _call_model_any function body
         import re
         ma_idx = src.index("def _call_model_any(")
-        # Find the next top-level function/class def to bound the window
         next_def = re.search(r'\ndef [a-z_]', src[ma_idx + 50:])
         end_idx  = ma_idx + 50 + next_def.start() if next_def else ma_idx + 2000
         window   = src[ma_idx:end_idx]
-        self.assertNotIn("think=False", window,
-                         "_call_model_any must not force think=False")
-        self.assertIn("think=None", window,
-                      "_call_model_any must pass think=None")
+        self.assertIn("think=False", window,
+                      "_call_model_any must use think=False to prevent thinking-token truncation")
+        self.assertNotIn("think=None", window,
+                         "_call_model_any must not use think=None (causes empty JSON output on thinking models)")
 
     def test_postmortem_no_explicit_num_predict_override(self):
         """Single-model postmortem must not override num_predict (uses 1024 default)."""
