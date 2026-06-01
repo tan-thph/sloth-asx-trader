@@ -28,6 +28,75 @@ _CALIB_TTL = 300
 bp = Blueprint("learning", __name__)
 
 
+def _compute_phase8_meta(skill_rows: list) -> dict:
+    """Gap 2 — Phase 8 validation gate.
+
+    Phase 8 skill-weighting (sf = max(0.2, min(1.8, score/5.0))) is only
+    trustworthy if Ollama's scores actually predict trade outcomes.
+    This function checks whether mean skill score for wins exceeds that for
+    losses/breakevent.  If not — or if n < 10 — Phase 8 is disabled and
+    _weight() falls back to sf=1.0 (neutral, no amplification or suppression).
+
+    Returns a dict suitable for the /api/learning/stats response.
+    """
+    n = len(skill_rows)
+    if n < 10:
+        return {"active": False, "n_scored": n,
+                "reason": f"insufficient scored events (need 10, have {n})"}
+    win_skills  = [float(r["skill_score"]) for r in skill_rows if r["outcome_status"] == "win"]
+    loss_skills = [float(r["skill_score"]) for r in skill_rows if r["outcome_status"] in ("loss", "breakeven")]
+    if not win_skills or not loss_skills:
+        return {"active": False, "n_scored": n,
+                "reason": "no wins or no losses among scored events"}
+    mean_win  = round(sum(win_skills)  / len(win_skills),  2)
+    mean_loss = round(sum(loss_skills) / len(loss_skills), 2)
+    active = mean_win > mean_loss
+    return {
+        "active":            active,
+        "n_scored":          n,
+        "mean_skill_wins":   mean_win,
+        "mean_skill_losses": mean_loss,
+        "reason": (
+            f"scores predict outcomes (mean wins={mean_win} > losses={mean_loss})"
+            if active else
+            f"skill scores do NOT predict wins (wins={mean_win} ≤ losses={mean_loss}) — sf=1.0 applied"
+        ),
+    }
+
+
+def _check_prompt_regression(version_list: list, min_n: int = 10) -> dict | None:
+    """Gap 5 — prompt version regression detector.
+
+    Compares the two most recent prompt versions with enough closed events.
+    Returns a dict if current version shows a lower hit-rate than prior, else None.
+    Uses binomial SE (50/50 worst-case) as the significance threshold:
+      - drop > 1×SE → early warning (flag for monitoring)
+      - drop > 2×SE → significant (flag for action)
+    """
+    eligible = [v for v in version_list
+                if (v.get("closed") or 0) >= min_n and v.get("win_rate") is not None]
+    if len(eligible) < 2:
+        return None
+    current, prior = eligible[0], eligible[1]
+    curr_wr = current["win_rate"] / 100
+    prev_wr = prior["win_rate"]  / 100
+    drop    = prev_wr - curr_wr
+    if drop <= 0:
+        return None  # no regression — current is same or better
+    se = math.sqrt(0.25 / current["closed"])
+    return {
+        "current_version":  current["version"],
+        "prior_version":    prior["version"],
+        "current_win_rate": round(curr_wr * 100, 1),
+        "prior_win_rate":   round(prev_wr * 100, 1),
+        "drop_pp":          round(drop * 100, 1),
+        "se_pp":            round(se   * 100, 1),
+        "significant":      drop > 2 * se,
+        "n_current":        current["closed"],
+        "n_prior":          prior["closed"],
+    }
+
+
 def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
     """Wilson score confidence interval for a proportion.
 
@@ -365,7 +434,18 @@ def learning_stats():
                 "SELECT ticker, error, context, timestamp FROM failed_tickers ORDER BY id DESC LIMIT 20"
             ).fetchall()
 
+            # Gap 2: Phase 8 skill-weighting validation
+            skill_rows_raw = conn.execute("""
+                SELECT skill_score, outcome_status FROM ai_learning_events
+                WHERE skill_score IS NOT NULL
+                  AND outcome_status IN ('win','loss','breakeven')
+            """).fetchall()
+            phase8 = _compute_phase8_meta([dict(r) for r in skill_rows_raw])
+
         oci = overall_ci
+        # Gap 5: prompt regression detector (uses version_list already built above)
+        prompt_regression = _check_prompt_regression(version_list)
+
         return jsonify({
             "total":              total,
             "closed":             closed,
@@ -386,6 +466,8 @@ def learning_stats():
             "failure_patterns":   failure_patterns,
             "success_patterns":   success_patterns,
             "debate_insights":    debate_insights,
+            "phase8":             phase8,           # Gap 2: skill-weighting gate status
+            "prompt_regression":  prompt_regression, # Gap 5: prompt version regression
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -621,6 +703,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
     }
     hl = _HL_MAP.get(regime or "", 45)
 
+    # Phase 8 gate — set to True after rows are fetched if scores predict outcomes.
+    # Captured by closure in _weight() below; Python reads the name at call time.
+    _phase8_active = False
+
     def _decay(ts, half_life=None):
         half_life = hl if half_life is None else half_life
         try:
@@ -645,7 +731,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         half_life = hl if half_life is None else half_life
         td = _decay(r["timestamp"], half_life)
         sk = r["skill_score"]
-        sf = max(0.2, min(1.8, float(sk) / 5.0)) if sk is not None else 1.0
+        # Phase 8 gate: only apply skill amplification when scores predict outcomes.
+        # _phase8_active is resolved at call time (closure over outer scope variable).
+        sf = max(0.2, min(1.8, float(sk) / 5.0)) if (sk is not None and _phase8_active) else 1.0
         return td * sf
 
     def _ess(subset):
@@ -695,6 +783,17 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
 
         n = len(rows)
         parts = []
+
+        # ── Phase 8 gate: activate skill weighting only when scores predict outcomes ──
+        # Python closures read names at call time, so assigning _phase8_active here
+        # (in the same function scope as the earlier `_phase8_active = False`)
+        # makes _weight() see the updated value when first called below.
+        _scored_rows = [r for r in rows if r["skill_score"] is not None]
+        if len(_scored_rows) >= 10:
+            _win_sk  = [float(r["skill_score"]) for r in _scored_rows if r["outcome_status"] == "win"]
+            _loss_sk = [float(r["skill_score"]) for r in _scored_rows if r["outcome_status"] in ("loss", "breakeven")]
+            if _win_sk and _loss_sk:
+                _phase8_active = (sum(_win_sk) / len(_win_sk)) > (sum(_loss_sk) / len(_loss_sk))  # noqa: F841
 
         calib_rows = [r for r in rows if not _is_shock(r)]
         n_excluded = n - len(calib_rows)
@@ -898,6 +997,18 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         if not parts:
             return {"available": False, "block": None}
 
+        # ── Gap 8: token budget — priority-ordered truncation ─────────────────
+        # Parts are appended in priority order (conf bands first, per-ticker last).
+        # Drop from the end (lowest priority) until under the operating budget.
+        # Hard ceiling applied as a safety net after truncation.
+        _CALIB_CHAR_BUDGET  = 400   # ~100 tokens target
+        _CALIB_CHAR_CEILING = 600   # ~150 tokens hard ceiling
+        while len(parts) > 1 and len("; ".join(parts)) > _CALIB_CHAR_BUDGET:
+            parts.pop()
+        block_body = "; ".join(parts)
+        if len(block_body) > _CALIB_CHAR_CEILING:
+            block_body = block_body[:_CALIB_CHAR_CEILING - 1] + "…"
+
         date_from  = cutoff[:7]
         date_to    = datetime.now().strftime("%Y-%m")
         regime_tag = f",{regime}" if regime else ""
@@ -905,7 +1016,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         hl_note    = f",hl={hl}d" if hl != 45 else ""
         block = (
             f"CALIBRATION({n}cls,{date_from}→{date_to}{regime_tag}{excl_note}{hl_note}): "
-            + "; ".join(parts) + "."
+            + block_body + "."
         )
         return {"available": True, "block": block, "sample": n}
     except Exception as e:

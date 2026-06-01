@@ -90,7 +90,9 @@ function _renderLearningContent(d, brier) {
   const failPats        = d.failure_patterns  || {};
   const successPats     = d.success_patterns  || {};
   const debateInsights  = d.debate_insights   || [];
-  const insufficientData = d.insufficient_data ?? (closed < 10);
+  const insufficientData  = d.insufficient_data ?? (closed < 10);
+  const promptRegression  = d.prompt_regression  || null;  // Gap 5
+  const phase8            = d.phase8             || null;  // Gap 2
 
   // Cache events by id so viewStoredDebate() can look up postmortem_debate JSON
   // without an extra HTTP round-trip.
@@ -145,6 +147,41 @@ function _renderLearningContent(d, brier) {
         <div class="metric-sub">n=${brier.n} · 0=perfect · 0.25=random</div>
       </div>` : ''}
     </div>`;
+
+  // ── Gap 5: Prompt regression banner ──────────────────────────────────────
+  const regressionBanner = (() => {
+    if (!promptRegression) return '';
+    const sig  = promptRegression.significant;
+    const bg   = sig ? '#fef2f2' : '#fef3c7';
+    const bdr  = sig ? '#fca5a5' : '#fde68a';
+    const icon = sig ? '⚠️' : '🔔';
+    const label = sig ? 'Significant regression detected' : 'Early warning — possible regression';
+    return `
+      <div style="background:${bg};border:1px solid ${bdr};border-radius:6px;padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;align-items:flex-start">
+        <span style="font-size:18px;line-height:1.2">${icon}</span>
+        <div style="flex:1">
+          <strong style="font-size:13px">${label}: ${promptRegression.current_version} vs ${promptRegression.prior_version}</strong>
+          <div style="font-size:12px;color:var(--text-secondary);margin-top:3px">
+            Win rate dropped <strong>${promptRegression.drop_pp}pp</strong>
+            (${promptRegression.prior_win_rate}% → ${promptRegression.current_win_rate}%)
+            &nbsp;·&nbsp; SE = ${promptRegression.se_pp}pp
+            &nbsp;·&nbsp; n = ${promptRegression.n_current} current / ${promptRegression.n_prior} prior
+            ${sig ? ' &nbsp;·&nbsp; <strong>Review recent prompt changes.</strong>' : ' &nbsp;·&nbsp; Monitor — may be sampling noise.'}
+          </div>
+        </div>
+      </div>`;
+  })();
+
+  // ── Gap 2: Phase 8 skill-weighting status note ────────────────────────────
+  const phase8Note = (() => {
+    if (!phase8) return '';
+    const icon  = phase8.active ? '✅' : '⏸️';
+    const label = phase8.active
+      ? `Phase 8 skill-weighting active (n=${phase8.n_scored} — mean_wins=${phase8.mean_skill_wins} > losses=${phase8.mean_skill_losses})`
+      : `Phase 8 skill-weighting paused — ${phase8.reason}`;
+    const color = phase8.active ? '#16a34a' : '#d97706';
+    return `<div style="font-size:11px;color:${color};margin-bottom:8px">${icon} ${label}</div>`;
+  })();
 
   // ── Calibration table ──────────────────────────────────────────────────────
   const calibCard = `
@@ -679,7 +716,7 @@ function _renderLearningContent(d, brier) {
   // ── Calibration Quality card (async — filled by renderCalibQualityCard()) ──
   const calibQualityPlaceholder = `<div id="ll-calib-quality-card"></div>`;
 
-  return summaryCards + calibCard + calibQualityPlaceholder +
+  return summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard + recentCard + failedCard + debateInsightsCard +
     digestCard + lessonsPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;

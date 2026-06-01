@@ -3362,6 +3362,159 @@ class TestSprint29SellTrimTagging(unittest.TestCase):
         self.assertIn("urgencyStyle",      src)
 
 
+class TestSprint31LearningLoopHardening(unittest.TestCase):
+    """Sprint 31 — Gaps 2, 5, 8 from learning_loop_critics.md."""
+
+    # ── Gap 2: Phase 8 skill-weighting validation gate ───────────────────────
+
+    def test_compute_phase8_meta_function_exists(self):
+        """routes/learning.py must define _compute_phase8_meta helper."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _compute_phase8_meta(", src)
+
+    def test_compute_phase8_meta_inactive_below_n10(self):
+        """_compute_phase8_meta must return active=False when fewer than 10 scored events."""
+        import routes.learning as rl
+        result = rl._compute_phase8_meta([])
+        self.assertFalse(result["active"])
+        result9 = rl._compute_phase8_meta([
+            {"skill_score": 7.0, "outcome_status": "win"} for _ in range(9)
+        ])
+        self.assertFalse(result9["active"])
+
+    def test_compute_phase8_meta_active_when_wins_score_higher(self):
+        """_compute_phase8_meta must return active=True when wins have higher mean skill."""
+        import routes.learning as rl
+        rows = (
+            [{"skill_score": 8.0, "outcome_status": "win"}]     * 6 +
+            [{"skill_score": 4.0, "outcome_status": "loss"}]    * 6
+        )
+        result = rl._compute_phase8_meta(rows)
+        self.assertTrue(result["active"])
+        self.assertGreater(result["mean_skill_wins"], result["mean_skill_losses"])
+
+    def test_compute_phase8_meta_inactive_when_scores_inverted(self):
+        """_compute_phase8_meta must return active=False when losses score higher than wins."""
+        import routes.learning as rl
+        rows = (
+            [{"skill_score": 3.0, "outcome_status": "win"}]     * 6 +
+            [{"skill_score": 7.0, "outcome_status": "loss"}]    * 6
+        )
+        result = rl._compute_phase8_meta(rows)
+        self.assertFalse(result["active"])
+
+    def test_weight_uses_sf1_when_phase8_inactive(self):
+        """_calib_compute must fall back to sf=1.0 when _phase8_active is False."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_phase8_active", src,
+                      "learning.py must define _phase8_active gate variable")
+        self.assertIn("sk is not None and _phase8_active", src,
+                      "learning.py _weight() must gate skill factor on _phase8_active")
+
+    def test_stats_returns_phase8_key(self):
+        """GET /api/learning/stats must return a 'phase8' key."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"phase8"', src,
+                      "learning_stats must include phase8 key in response")
+
+    def test_learning_js_renders_phase8_note(self):
+        """learning.js must render the Phase 8 status note."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("phase8Note", src)
+        self.assertIn("Phase 8 skill-weighting", src)
+
+    # ── Gap 5: Prompt regression detector ────────────────────────────────────
+
+    def test_check_prompt_regression_function_exists(self):
+        """routes/learning.py must define _check_prompt_regression helper."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _check_prompt_regression(", src)
+
+    def test_check_prompt_regression_returns_none_on_improvement(self):
+        """_check_prompt_regression must return None when current version is same or better."""
+        import routes.learning as rl
+        versions = [
+            {"version": "v2", "closed": 20, "win_rate": 65.0},  # current — better
+            {"version": "v1", "closed": 20, "win_rate": 55.0},  # prior
+        ]
+        self.assertIsNone(rl._check_prompt_regression(versions))
+
+    def test_check_prompt_regression_detects_regression(self):
+        """_check_prompt_regression must return a dict when current win rate is lower."""
+        import routes.learning as rl
+        versions = [
+            {"version": "v2", "closed": 30, "win_rate": 45.0},  # current — worse
+            {"version": "v1", "closed": 30, "win_rate": 65.0},  # prior
+        ]
+        result = rl._check_prompt_regression(versions)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["current_version"], "v2")
+        self.assertEqual(result["prior_version"], "v1")
+        self.assertAlmostEqual(result["drop_pp"], 20.0, places=0)
+        self.assertIn("significant", result)
+
+    def test_check_prompt_regression_significant_flag(self):
+        """drop > 2×SE must set significant=True; drop <= 1×SE must leave it False."""
+        import routes.learning as rl, math
+        # SE for n=100 is sqrt(0.25/100) ≈ 0.05 (5pp)
+        big_drop = [
+            {"version": "v2", "closed": 100, "win_rate": 40.0},
+            {"version": "v1", "closed": 100, "win_rate": 65.0},  # 25pp drop >> 2×5pp
+        ]
+        self.assertTrue(rl._check_prompt_regression(big_drop)["significant"])
+        small_drop = [
+            {"version": "v2", "closed": 100, "win_rate": 59.0},
+            {"version": "v1", "closed": 100, "win_rate": 61.0},  # 2pp drop << 2×5pp
+        ]
+        self.assertFalse(rl._check_prompt_regression(small_drop)["significant"])
+
+    def test_stats_returns_prompt_regression_key(self):
+        """GET /api/learning/stats must return a 'prompt_regression' key."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"prompt_regression"', src,
+                      "learning_stats must include prompt_regression key in response")
+
+    def test_learning_js_renders_regression_banner(self):
+        """learning.js must render the prompt regression banner."""
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("regressionBanner", src)
+        self.assertIn("promptRegression", src)
+        self.assertIn("Significant regression detected", src)
+
+    # ── Gap 8: Calibration token budget ──────────────────────────────────────
+
+    def test_calib_char_budget_constant_exists(self):
+        """_calib_compute must define _CALIB_CHAR_BUDGET and _CALIB_CHAR_CEILING."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_CALIB_CHAR_BUDGET", src)
+        self.assertIn("_CALIB_CHAR_CEILING", src)
+
+    def test_calib_budget_truncates_from_end(self):
+        """_calib_compute must pop from parts list when over budget."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Verify the while loop with parts.pop() is present
+        self.assertIn("while len(parts) > 1", src,
+                      "_calib_compute must trim parts while over budget")
+        self.assertIn("parts.pop()", src,
+                      "_calib_compute must pop lowest-priority part to trim")
+
+    def test_calib_ceiling_applied_as_hard_cap(self):
+        """_calib_compute must apply _CALIB_CHAR_CEILING as a hard truncation safety net."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_CALIB_CHAR_CEILING - 1", src,
+                      "_calib_compute must slice block_body at hard ceiling")
+
+
 class TestSprint30DataEnhancements(unittest.TestCase):
     """Sprint 30 — three highest-value data additions to Claude's context."""
 
