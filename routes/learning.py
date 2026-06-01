@@ -406,7 +406,8 @@ def learning_stats():
             for r in fail_type_rows:
                 for tag in (r["error_type"] or "").split(","):
                     tag = tag.strip()
-                    if tag:
+                    # "none" means model found no systematic error — not an error pattern
+                    if tag and tag != "none":
                         type_counts[tag] = type_counts.get(tag, 0) + 1
             failure_patterns = {
                 "by_exit_reason": {r["exit_reason"]: r["cnt"] for r in fail_exit},

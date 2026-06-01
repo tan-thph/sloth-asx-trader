@@ -785,7 +785,8 @@ def _get_cloud_keys() -> dict:
 
 
 def _call_model_any(model_name: str, prompt: str, timeout: int,
-                    format_schema: dict | None = None) -> dict:
+                    format_schema: dict | None = None,
+                    num_predict: int = 200) -> dict:
     """
     Unified model dispatcher for postmortem debate phases.
 
@@ -813,7 +814,7 @@ def _call_model_any(model_name: str, prompt: str, timeout: int,
         return _call_gemini_json(keys["gemini_key"], actual or keys["gemini_model"], prompt, timeout=timeout)
 
     return _call_ollama(model_name, prompt, timeout=timeout, retries=0, think=False,
-                        format_schema=format_schema)
+                        format_schema=format_schema, num_predict=num_predict)
 
 
 def _is_cloud_model(model_name: str) -> bool:
@@ -1119,13 +1120,17 @@ def debate_postmortem():
     action = (row["recommendation"] or "BUY").upper()
     prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str, action=action)
 
-    result = _call_model_any(model, prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
+    # num_predict=300: the reason field can be 100-200 tokens; 200 truncates mid-JSON
+    # causing regex fallback to extract partial tags that the sanity check then strips.
+    result = _call_model_any(model, prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM,
+                             num_predict=300)
     if not result["ok"]:
         return jsonify({"ok": False, "id": ev_id, "error": result["error"]})
 
-    error_type, reason = _pm_parse(result["text"].strip(), ev_id, model)
-    # Logical-consistency check — strip tags that contradict the trade numbers
-    error_type = _pm_sanity_check_tags(error_type, row, ev_id)
+    error_type_raw, reason = _pm_parse(result["text"].strip(), ev_id, model)
+    # Logical-consistency check — strip tags that contradict the trade numbers.
+    # Preserve raw parse result so we can distinguish "sanity stripped" from "never parsed".
+    error_type = _pm_sanity_check_tags(error_type_raw, row, ev_id)
 
     if error_type and error_type != "none":
         try:
@@ -1141,11 +1146,27 @@ def debate_postmortem():
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 500
     elif error_type == "none":
+        # Store "none" so the event is marked as reviewed and auto-trigger won't re-fire.
+        try:
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE ai_learning_events SET error_type='none', error_type_source='auto' WHERE id=?",
+                    (ev_id,)
+                )
+        except Exception:
+            pass
         current_app.logger.info(
             f"[PostMortem] event#{ev_id} ({row['ticker']}) → none (model found no systematic error) via {model}"
             f" | {reason[:80] if reason else ''}"
         )
+    elif error_type_raw:
+        # Parse succeeded but sanity check stripped all tags — distinct from parse failure.
+        current_app.logger.info(
+            f"[PostMortem] event#{ev_id} ({row['ticker']}) → no valid tags after sanity check"
+            f" (stripped: {error_type_raw!r}) via {model}"
+        )
     else:
+        # True parse failure — model output could not be parsed at all.
         current_app.logger.info(
             f"[PostMortem] event#{ev_id} ({row['ticker']}) → parse failure via {model}"
             f" | raw: {result['text'][:120]}"
@@ -1225,12 +1246,14 @@ def debate_postmortem_debate():
     # ── Phase 1: Independent classification ───────────────────────────────────
     t0    = time.time()
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1A — {model_a}…")
-    res_a = _call_model_any(model_a, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
+    res_a = _call_model_any(model_a, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM,
+                            num_predict=300)
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1A done ({int((time.time()-t0)*1000)}ms)")
 
     t1 = time.time()
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} ({row['ticker']}) Phase 1B — {model_b}…")
-    res_b = _call_model_any(model_b, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM)
+    res_b = _call_model_any(model_b, base_prompt, timeout=tout, format_schema=_SCHEMA_POSTMORTEM,
+                            num_predict=300)
     current_app.logger.info(f"[PostMortemDebate] event#{ev_id} Phase 1B done ({int((time.time()-t1)*1000)}ms)")
 
     if not res_a["ok"]:
@@ -1355,7 +1378,7 @@ def debate_postmortem_debate():
         # "neutrally" reconcile is structurally biased toward its own prior.
         # Model B sees both positions cold and has no prior stake in the outcome.
         res_synth = _call_model_any(model_b, synthesis_prompt, timeout=tout,
-                                    format_schema=_SCHEMA_PM_SYNTHESIS)
+                                    format_schema=_SCHEMA_PM_SYNTHESIS, num_predict=250)
         current_app.logger.info(
             f"[PostMortemDebate] event#{ev_id} Phase 3 done ({int((time.time()-t2)*1000)}ms)"
         )
@@ -1399,18 +1422,19 @@ def debate_postmortem_debate():
         f"| final={final_tags or 'none'} in {elapsed_ms}ms"
     )
 
-    # Persist results — only store if we have an actual tag (not 'none' or empty)
-    if final_tags and final_tags != "none":
-        try:
-            with get_db() as conn:
-                conn.execute(
-                    """UPDATE ai_learning_events
-                          SET error_type=?, error_type_source=?, postmortem_debate=?
-                        WHERE id=?""",
-                    (final_tags, final_source, json.dumps(transcript), ev_id)
-                )
-        except Exception as ex:
-            return jsonify({"ok": False, "error": str(ex)}), 500
+    # Always persist the transcript so the 📜 viewer shows debate history.
+    # Store "none" too — marks the event as reviewed and prevents auto-trigger re-firing.
+    store_tags = final_tags if (final_tags and final_tags != "none") else "none"
+    try:
+        with get_db() as conn:
+            conn.execute(
+                """UPDATE ai_learning_events
+                      SET error_type=?, error_type_source=?, postmortem_debate=?
+                    WHERE id=?""",
+                (store_tags, final_source, json.dumps(transcript), ev_id)
+            )
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
 
     return jsonify({
         "ok":                True,

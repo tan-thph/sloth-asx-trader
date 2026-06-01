@@ -3779,5 +3779,100 @@ class TestSprint32DataQuality(unittest.TestCase):
         self.assertIn("weeks.length < 10", src)
 
 
+class TestPostmortemTagFixes(unittest.TestCase):
+    """
+    Regression tests for three postmortem tagging bugs:
+    1. num_predict=200 truncates output → parse failure (fix: 300)
+    2. "none" verdict not stored in DB (fix: store it)
+    3. "parse failure" logged when sanity check strips all tags (fix: distinct log)
+    """
+
+    def test_call_model_any_accepts_num_predict(self):
+        """_call_model_any must accept and forward num_predict to _call_ollama."""
+        import inspect
+        import routes.debate as deb
+        sig = inspect.signature(deb._call_model_any)
+        self.assertIn("num_predict", sig.parameters,
+                      "_call_model_any must have a num_predict parameter")
+        # Default should be 200 (backward-compatible)
+        self.assertEqual(sig.parameters["num_predict"].default, 200)
+
+    def test_postmortem_endpoint_uses_num_predict_300(self):
+        """Single-model postmortem must call _call_model_any with num_predict=300."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Find the postmortem endpoint's call to _call_model_any
+        # (there should be at least one with num_predict=300 near _SCHEMA_POSTMORTEM)
+        import re
+        matches = re.findall(
+            r"_call_model_any\([^)]*_SCHEMA_POSTMORTEM[^)]*num_predict\s*=\s*(\d+)", src
+        )
+        self.assertTrue(
+            any(int(v) >= 300 for v in matches),
+            "At least one postmortem _call_model_any must use num_predict >= 300"
+        )
+
+    def test_postmortem_stores_none_in_db(self):
+        """Single-model postmortem must UPDATE error_type='none' when model returns none."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # The fix: elif error_type == "none": → store "none" in the DB
+        self.assertIn("error_type='none'", src,
+                      "postmortem endpoint must store error_type='none' when model returns none")
+        self.assertIn("error_type_source='auto'", src,
+                      "postmortem endpoint must set error_type_source='auto' on none store")
+
+    def test_adversarial_debate_stores_none_transcript(self):
+        """Adversarial debate must always persist transcript, including when final_tags is none."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Old code: "if final_tags and final_tags != 'none'" — skipped DB write for none
+        # New code: always stores, using "none" as the tag value
+        self.assertNotIn(
+            'if final_tags and final_tags != "none":', src,
+            "adversarial debate must not skip DB write when final_tags is none"
+        )
+        self.assertIn(
+            'store_tags', src,
+            "adversarial debate must use store_tags variable to always persist"
+        )
+
+    def test_sanity_stripped_logged_separately_from_parse_failure(self):
+        """When sanity check strips all tags, log must say 'no valid tags' not 'parse failure'."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("no valid tags after sanity check", src,
+                      "debate.py must log 'no valid tags after sanity check' separately from parse failure")
+        # error_type_raw must be preserved before sanity check for this distinction
+        self.assertIn("error_type_raw", src,
+                      "debate.py must preserve error_type_raw before sanity check")
+
+    def test_none_filtered_from_failure_patterns(self):
+        """learning_stats type_counts must not count 'none' as an error pattern."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('tag != "none"', src,
+                      'learning_stats type_counts must filter out "none" tags')
+
+    def test_adversarial_debate_phase1_num_predict_300(self):
+        """Adversarial debate Phase 1A and 1B must use num_predict=300."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        import re
+        # Count occurrences of _call_model_any with SCHEMA_POSTMORTEM and num_predict=300
+        matches = re.findall(
+            r"_call_model_any\([^)]*_SCHEMA_POSTMORTEM[^)]*num_predict\s*=\s*300", src
+        )
+        self.assertGreaterEqual(len(matches), 2,
+                                "Both Phase 1A and 1B must use num_predict=300")
+
+    def test_synthesis_call_num_predict_250(self):
+        """Adversarial debate Phase 3 synthesis must use num_predict=250."""
+        with open(os.path.join(ROOT, "routes", "debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_SCHEMA_PM_SYNTHESIS, num_predict=250", src,
+                      "Phase 3 synthesis must pass num_predict=250")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
