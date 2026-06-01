@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** May 2026 (Sprint 29)
-**Status:** Phases 1–7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–29 improvements applied · Phase 8 Planned
+**Last Updated:** June 2026 (Sprint 31)
+**Status:** Phases 1–7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–31 improvements applied · Phase 8 Gated (pending outcome-correlation validation)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -593,6 +593,9 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | SELL/TRIM tags provided by Claude at generation time (Sprint 29) | Post-hoc LLM tagging creates self-justification bias: the model reads its own closed trade and rationalises it. Tagging at generation time (before the outcome is known) forces honest causal attribution. Ollama remains the postmortem agent for closed trades — it reads outcomes without prior knowledge of the original rationale |
 | Closed tag vocabularies for SELL/TRIM (Sprint 29) | Open-ended strings would produce inconsistent tags (e.g. "target reached" vs "price hit target" vs "hit my target"). Closed sets allow reliable GROUP BY queries on `sell_primary_driver` to answer: *which exit reasons actually predict good exits?* |
 | `better_opportunity` requires `alternativeTicker` (Sprint 29) | An opportunity claim that names no alternative is unverifiable and untrackable. Requiring the ticker lets the learning loop later cross-check whether the "better" ticker actually performed better post-sell |
+| Phase 8 outcome-correlation gate (Sprint 31) | Raw event count (n≥20) is the wrong activation criterion — a biased scorer with 25 scored events is worse than no scoring. The gate compares mean skill score for wins vs losses: if wins don't score higher, `sf=1.0` regardless of n. Prevents Ollama's potential stop-hit bias from silently amplifying miscalibrated trades |
+| Prompt regression detector using binomial SE (Sprint 31) | A Δ column in the UI requires the user to notice a regression. Automated detection with SE-thresholded significance (1×SE = early warning, 2×SE = significant) surfaces the signal immediately. Displaying SE alongside the drop prevents false alarms from being acted on |
+| Priority-ordered calibration token budget (Sprint 31) | Parts appended in priority order (conf bands first, per-ticker last) means dropping from the end always removes the least critical information. A hard ceiling as safety net prevents mid-sentence truncation even if a single part is unusually long |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
 | Lessons Database deferred | Needs proper design: what is a "lesson"? How injected? Until defined, premature to implement. |
 
@@ -635,6 +638,15 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 - **Sprint 28 (May 2026):**
   - **Combined skill + success-tag call:** `debate_skill()` now also populates `success_tags` for wins in the same Ollama call. `_SCHEMA_SKILL` extended with optional `success_tags` property. Prompt conditionally adds tag guidance + example only when `outcome == 'win'`. Tags validated against `VALID_WIN_TAGS` before DB write. Saves one Ollama round-trip vs the separate `tag-win` endpoint
   - **Regime-specific decay interpretation:** Section 4 of `_calib_compute()` now sub-checks the current regime when global decay (`Δ<-15pp`) is detected. If ≥3 recent same-regime trades exist and |regime_delta|<8pp, emits `...but {regime}:XX%stable→likely-regime-exposure(not universal decay)` instead of the generic reduce-posn instruction. Helps Claude distinguish a universal strategy breakdown from under-performance concentrated in other regimes
+- **Sprint 30 (May 2026):**
+  - **Earnings beat/miss history:** `earnings_history` (yfinance ≥0.2.x) now forwarded to Claude in `earningsCtx` as `EPSvEst(4Q):[+0.05,-0.02,+0.08,+0.03]` — last 4 quarters of actual-minus-estimate per ticker
+  - **ASX sector ETF performance:** 5 SPDR sector ETFs (XMJ/XFJ/XHJ/XEJ/XRJ) added to `_macro_payload()` parallel fetch; `macro_data["sectors"]` returned with 1D change + 5D return; rendered as `ASX Sectors(1D/5D): Materials:+1.2%(5d+3.1%) | ...` in `macroCtx`
+  - **Key missing fundamentals:** `free_cashflow` added to `indicators.py` fundamentals dict; `indicatorCtx` now includes `OpMgn`, `D/E`, `RevGrowth`, `FCFYield` (FCFYield computed client-side as `free_cashflow / market_cap`)
+  - **Commodity/rates forwarding:** `liveCtx` (macro brief input) and `macroCtx` (portfolio analysis) now include iron ore, oil, copper, US10Y — already fetched by `_macro_payload()` but previously dropped before reaching Claude
+- **Sprint 31 (June 2026):**
+  - **Phase 8 outcome-correlation gate (Gap 2):** `_compute_phase8_meta()` helper added to `routes/learning.py`; computes whether mean skill score for wins exceeds losses/breakeven (n≥10 required). `_weight()` in `_calib_compute()` now sets `sf=1.0` when gate fails — activated via closure over `_phase8_active` variable set after rows are fetched. Phase 8 status exposed in `GET /api/learning/stats` as `phase8` key; Learning page renders ✅/⏸️ status line
+  - **Prompt regression detector (Gap 5):** `_check_prompt_regression()` helper compares two most recent versions (n≥10 each); binomial SE used as significance threshold (1×SE = early warning, 2×SE = significant). Result in stats as `prompt_regression`; Learning page renders amber/red banner above calibration card when regression detected
+  - **Calibration token budget (Gap 8):** `_CALIB_CHAR_BUDGET=400` (target) and `_CALIB_CHAR_CEILING=600` (hard ceiling) added to `_calib_compute()`. While loop drops lowest-priority parts (per-ticker last → conf bands first) until under budget; ceiling applied as safety net with `…` truncation. Prevents malformed partial calibration instructions as more parts are added
 - **Sprint 29 (May 2026):**
   - **SELL/TRIM structured decision tagging:** Three new DB columns (`sell_primary_driver`, `sell_secondary_factors`, `sell_urgency`) added via `_LE_MIGRATIONS`. Claude declares tags at SELL/TRIM generation time — before outcome is known — to avoid self-justification bias. 9 primary drivers (closed vocabulary), 12 secondary factors (0–3), 3 urgency levels. `validateSellTags()` added to `response-validator.js` and wired into `validateRec()` for SELL/TRIM; enforces forbidden combos, required-secondary rules, and `alternativeTicker` presence for `better_opportunity`. Tags logged to backend via `logRecsToLearningLoop()` and rendered as a colour-coded strip on SELL/TRIM rec cards. Ollama postmortem remains the separate agent for closed-trade analysis
   - **Sync to Learning Loop duplicate fix:** `syncClosedTradesToLearningLoop()` was setting `r._learningId = res.id` on a spread copy of the `recHistory` entry, not the original. `scheduleSave()` then persisted the unchanged original (still lacking `_learningId`), causing every subsequent Sync to re-log the same trades as new events and inflate calibration stats. Fixed by also writing `_learningId` back to the matching `state.recHistory` entry before `scheduleSave()`
@@ -660,7 +672,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 
 ## Next Milestones
 
-1. Accumulate ~20+ `skill_score` values — skill-weighted calibration formula is already live; full coverage needed for it to differentiate meaningfully (Phase 8)
+1. **Phase 8 activation** — accumulate 10+ scored events where wins score higher than losses; `_compute_phase8_meta()` gate will auto-activate once the outcome-correlation check passes
 2. ✅ Phase 6: Calibration quality debate card — implemented Sprint 26. `GET /api/debate/calib-quality` live; Z-scores pre-computed server-side; Learning page card with traffic-light verdicts; auto-triggered daily
 3. Virtual outcomes for skipped recs — paper-trade `was_executed=0` events to break potential pessimism loops (deferred)
 4. Structured Trade Checklist UI form (currently documented as reference only)
