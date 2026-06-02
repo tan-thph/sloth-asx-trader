@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 import os
@@ -160,6 +160,19 @@ from indicators import (
 )
 
 # ── Flask routes ────────────────────────────────────────────────────────────────
+
+# PWA static assets
+@app.route('/manifest.json')
+def serve_manifest():
+    return send_from_directory('.', 'manifest.json', mimetype='application/manifest+json')
+
+@app.route('/sw.js')
+def serve_sw():
+    return send_from_directory('.', 'sw.js', mimetype='application/javascript')
+
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    return send_from_directory('static', filename)
 
 # health, analyse, macro, rba-rate, polymarket, quote routes live in routes/market.py
 

@@ -2445,4 +2445,114 @@ def debate_calib_quality():
     return jsonify({**payload, "ok": True, "cached": False})
 
 
+# ── Local LLM fallback: lightweight portfolio analysis ───────────────────────
+
+_SCHEMA_QUICK_ANALYSIS = {
+    "type": "object",
+    "properties": {
+        "recs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ticker":     {"type": "string"},
+                    "action":     {"type": "string", "enum": ["BUY", "TOP_UP", "HOLD"]},
+                    "confidence": {"type": "number"},
+                    "priceRange": {"type": "array", "items": {"type": "number"}},
+                    "target":     {"type": "number"},
+                    "stopLoss":   {"type": "number"},
+                    "reasoning":  {"type": "string"},
+                    "risks":      {"type": "string"},
+                },
+                "required": ["ticker", "action", "confidence", "reasoning", "risks"],
+            },
+        },
+        "summary": {"type": "string"},
+    },
+    "required": ["recs"],
+}
+
+_LOCAL_ANALYSIS_SYSTEM = """\
+You are a conservative ASX equity analyst. Analyse the portfolio context below and output
+structured trading recommendations.
+
+RULES:
+- Only output BUY (new position), TOP_UP (add to existing), or HOLD (keep existing) actions.
+  Do NOT output SELL or TRIM — those require manual review.
+- BUY/TOP_UP require all of: priceRange [lo,hi], target (above hi), stopLoss (below lo).
+- stopLoss must be BELOW priceRange[0] for BUY/TOP_UP.
+- target must be ABOVE priceRange[1] for BUY/TOP_UP.
+- confidence: 0.60 = marginal, 0.70 = moderate, 0.80 = strong. Use 0 for HOLD.
+- Output 1-3 recommendations maximum. Prefer HOLD when uncertain.
+- qty is not required — the quant engine will calculate it.
+
+Output only the JSON object. No preamble, no markdown fences.
+"""
+
+
+@bp.route("/api/debate/quick-analysis", methods=["POST"])
+def quick_analysis():
+    """Lightweight portfolio analysis via local Ollama — for the useLocalLLM setting.
+
+    Accepts the assembled user message from analysis.js, prepends a stripped-down
+    system prompt, and calls the local model with structured output constraints.
+
+    SELL/TRIM are excluded — they require the full Claude prompt with structured
+    tagging (sell_primary_driver, sell_secondary_factors, sell_urgency).
+
+    Body:
+        userMessage  str  — assembled portfolio context from analysis.js (truncated to 4000 chars)
+        model        str  — optional model override (default: qwen3:9b)
+
+    Returns:
+        { ok, text: str (JSON matching analysis.js parser), model: str, elapsed_ms: int }
+    """
+    data    = request.get_json(force=True) or {}
+    model   = (data.get("model") or "qwen3:9b").strip()
+    raw_msg = (data.get("userMessage") or "").strip()
+
+    if not raw_msg:
+        return jsonify({"ok": False, "error": "userMessage required"}), 400
+
+    # Truncate to 4000 chars — local models have limited context windows.
+    # The most important context (date, regime, holdings, top signals) is always first.
+    user_ctx = raw_msg[:4000]
+    if len(raw_msg) > 4000:
+        user_ctx += "\n[...context truncated for local model...]"
+
+    prompt = f"{_LOCAL_ANALYSIS_SYSTEM}\n\n{user_ctx}\n\nOutput JSON now:"
+
+    t0 = time.time()
+    result = _call_ollama(
+        model,
+        prompt,
+        timeout=90,
+        think=False,         # disable thinking tokens — they eat num_predict budget
+        num_predict=1500,    # enough for 3 recs with full fields
+        format_schema=_SCHEMA_QUICK_ANALYSIS,
+    )
+    elapsed_ms = int((time.time() - t0) * 1000)
+
+    if not result["ok"]:
+        return jsonify({"ok": False, "error": result["error"]}), 503
+
+    raw = result["text"].strip()
+
+    # Add _source flag to each rec so the frontend can show a badge
+    try:
+        parsed = json.loads(raw)
+        for r in parsed.get("recs", []):
+            r["_source"] = "local"
+        text_out = json.dumps(parsed)
+    except Exception:
+        # If format_schema produced parseable output but json.loads disagrees,
+        # return the raw text — analysis.js brace-depth recovery handles it
+        text_out = raw
+
+    current_app.logger.info(
+        f"[QuickAnalysis] {model} → {len(parsed.get('recs', []) if 'parsed' in dir() else [])} recs "
+        f"in {elapsed_ms}ms"
+    )
+    return jsonify({"ok": True, "text": text_out, "model": model, "elapsed_ms": elapsed_ms})
+
 

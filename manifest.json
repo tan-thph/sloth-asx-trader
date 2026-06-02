@@ -1,0 +1,13 @@
+{
+  "name": "Sloth ASX Trader",
+  "short_name": "SlothASX",
+  "description": "Local-only decision-support tool for Australian equity trading",
+  "start_url": "/asx_trading.html",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#3b82f6",
+  "icons": [
+    { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

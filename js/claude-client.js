@@ -47,7 +47,30 @@ function _resolveSystemPrompt(agentType) {
   }
 }
 
+// ── Local LLM fast-path (opt-in: state.settings.useLocalLLM) ─────────────────
+// Called instead of Claude API when agentType === 'portfolio' and useLocalLLM is on.
+// POSTs the assembled user message to /api/debate/quick-analysis (Ollama backend).
+// Returns the same { text, usage } shape as callClaude() so analysis.js is unaware.
+async function _callLocalAnalysis(userMessage) {
+  const resp = await fetch(`${API}/api/debate/quick-analysis`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userMessage }),
+  });
+  const d = await resp.json();
+  if (!d.ok) throw new Error(d.error || 'Local LLM analysis failed');
+  return { text: d.text, usage: { local: true, model: d.model, elapsed_ms: d.elapsed_ms } };
+}
+
 async function callClaude(agentType, userMessage, options = {}) {
+  // Local LLM fast-path: portfolio analysis only, opt-in via Settings.
+  // SELL/TRIM tagging and calibration injection are Claude-only features;
+  // the local path produces BUY/TOP_UP/HOLD recs through the same validator/quant stack.
+  if (agentType === 'portfolio' && state.settings?.useLocalLLM) {
+    console.log('[callClaude] routing portfolio → local Ollama (useLocalLLM=true)');
+    return _callLocalAnalysis(userMessage);
+  }
+
   // Two modes:
   //   • Direct (default): browser → api.anthropic.com using key from localStorage
   //   • Proxy (opt-in via state.settings.useBackendProxy): browser → /api/claude/proxy

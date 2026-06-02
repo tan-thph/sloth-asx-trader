@@ -794,3 +794,341 @@ Display a `📅 Pre-earnings` badge on the rec card when this adjustment fires.
 **Sprint 38 status:** #7, #9, #12, #14, #15, #16, #17, #18 fixed (2026-06-02). All 18 items closed.
 
 **Sprint 39 status (2026-06-02):** Fixed `_preEarningsAdj` dropped from quant merge (analysis.js); added 4h per-ticker TTL cache to earnings-calendar endpoint (routes/market.py); closed #13 summary table.
+
+---
+
+## Sprint 41 — Planned Fixes and Improvements (2026-06-02)
+
+Issues identified in the Sprint 40 post-ship audit. Grouped by severity and effort.
+
+---
+
+### Bug Fixes
+
+## 19. `db.py` / `routes/learning.py` — `tag_reviews` lacked UNIQUE constraint; INSERT OR REPLACE always inserted ✅ FIXED (Sprint 41)
+
+**Files:** `db.py`, `routes/learning.py`
+**Function:** `submit_tag_review()`
+**Severity:** Medium — agree-rate count could double if the same event was submitted twice
+
+### Problem
+
+`tag_reviews` was defined with `INTEGER PRIMARY KEY AUTOINCREMENT` and no `UNIQUE(event_id)`.
+`INSERT OR REPLACE` in SQLite replaces rows only on primary-key or unique-constraint conflicts.
+With an autoincrement PK and no unique constraint on `event_id`, the replace condition never
+fires — every call creates a new row. The queue endpoint's `NOT IN (SELECT event_id FROM tag_reviews)`
+filter prevented re-reviews through the normal UI, but a rapid double-submit or a parallel
+gunicorn request could produce duplicate rows, skewing `COUNT(*) / SUM(agree)` in `tag_accuracy()`.
+
+### Fix
+
+1. **`db.py`** — added `UNIQUE` to the `event_id` column definition so fresh installs get the constraint:
+   ```sql
+   event_id INTEGER NOT NULL UNIQUE REFERENCES ai_learning_events(id) ON DELETE CASCADE,
+   ```
+   (`CREATE TABLE IF NOT EXISTS` won't recreate the table on existing DBs — see migration note below.)
+
+2. **`routes/learning.py`** — replaced `INSERT OR REPLACE` with an explicit check-then-upsert
+   that is safe on both new and old schemas:
+   ```python
+   existing = conn.execute("SELECT id FROM tag_reviews WHERE event_id=?", (event_id,)).fetchone()
+   if existing:
+       conn.execute(
+           "UPDATE tag_reviews SET verdict=?, corrected_tag=?, reviewed_at=datetime('now','localtime') WHERE event_id=?",
+           (verdict, corrected if verdict == "disagree" else None, event_id)
+       )
+   else:
+       conn.execute(
+           "INSERT INTO tag_reviews (event_id, verdict, corrected_tag, original_tag) VALUES (?, ?, ?, ?)",
+           (event_id, verdict, corrected if verdict == "disagree" else None, row["error_type"])
+       )
+   ```
+
+### Migration note for existing DBs
+
+SQLite cannot add a UNIQUE constraint to an existing column via `ALTER TABLE`. If the app was
+running before this fix and duplicate rows were created, run this once in the SQLite shell:
+
+```sql
+-- Keep only the first review row per event; delete duplicates
+DELETE FROM tag_reviews
+WHERE id NOT IN (
+    SELECT MIN(id) FROM tag_reviews GROUP BY event_id
+);
+-- Then recreate with UNIQUE — requires table rebuild since ALTER TABLE can't add constraints
+```
+
+In practice: because `tag_reviews` is a brand-new table (shipped Sprint 39) with no users having
+data yet, no migration script is needed. The code-level upsert is the correct long-term guard.
+
+---
+
+## 20. `routes/market.py` — `universe_health` has no per-ticker timeout; a hung yfinance call blocks the endpoint
+
+**File:** `routes/market.py`
+**Function:** `universe_health()`
+**Severity:** Low — user-triggered endpoint; yfinance has its own connection timeout as backstop
+**Effort:** S
+
+### Problem
+
+`pool.map(_check, all_tickers)` with 200 tickers and 20 workers has no per-task timeout.
+yfinance normally fails fast on network errors, but a connection that hangs without raising
+(e.g., a firewall silently dropping packets) can stall individual workers indefinitely.
+Because `pool.map` propagates the first unhandled exception and waits for all futures, one
+hung ticker can delay the entire response by minutes.
+
+### Fix
+
+Switch from `pool.map` to `as_completed` with a per-future timeout, matching the pattern
+already used in `routes/intraday.py`:
+
+```python
+stale = []
+with _cf.ThreadPoolExecutor(max_workers=20) as pool:
+    futures = {pool.submit(_check, t): t for t in all_tickers}
+    for fut in _cf.as_completed(futures, timeout=30):  # 30s total wall-clock limit
+        try:
+            result = fut.result(timeout=8)  # 8s per ticker
+            if result:
+                stale.append(result)
+        except (_cf.TimeoutError, Exception):
+            stale.append(futures[fut])  # treat timeout as stale
+```
+
+Add a `timeout` query param so the caller can tune for slow networks:
+`timeout = int(request.args.get("timeout", 8))`
+
+---
+
+### New Features
+
+## 21. Local LLM fallback for portfolio analysis via Ollama
+
+**Files:** `js/claude-client.js`, `js/analysis.js`, `routes/debate.py` (or new `routes/ollama_analysis.py`)
+**Severity:** Enhancement — avoids API spend on routine scans
+**Effort:** M · Impact ★★
+
+### Problem / Motivation
+
+Every portfolio analysis call goes to Claude API (Sonnet 4.6), costing ~$0.01–0.05 per run.
+The Ollama infrastructure is already running for the debate engine (bull/bear, postmortem,
+skill scoring). On quiet days — same regime, no new catalysts, no earnings — a fast local
+model can produce a useful "hold / monitor" read without spending tokens. Claude is reserved
+for high-conviction situations (regime change, earnings approaching, thesis-breaking news).
+
+### Implementation Plan
+
+**Step 1 — Backend endpoint** (`routes/debate.py` or new file):
+
+```python
+@bp.route("/api/debate/quick-analysis", methods=["POST"])
+def quick_analysis():
+    """Lightweight portfolio analysis via local Ollama — used when user opts into LLM fallback.
+    
+    Body: { tickers: [...], regime: str, signals: {...}, portfolio_summary: str }
+    Returns: { ok, recommendations: [{ticker, action, rationale, confidence}] }
+    """
+```
+
+Prompt design:
+- System: stripped-down version of `ANALYSIS_SYSTEM_PROMPT` (regime rules + Kelly reject + stop
+  rules only; omit calibration injection — Ollama can't use it reliably)
+- Use `format_schema` (Ollama structured outputs, already used in debate engine) to guarantee JSON
+- Model: `qwen2.5:14b` (or whichever is configured) — capable of basic BUY/SELL/HOLD with rationale
+
+**Step 2 — Frontend toggle** (`js/claude-client.js`):
+
+```js
+// In callClaude(), add a fast-path:
+if (state.settings.useLocalLLM && agentType === 'portfolio') {
+    return _callOllamaAnalysis(userMsg, opts);
+}
+```
+
+Add `useLocalLLM` toggle in Settings → AI Model section. Default `false`.
+
+**Step 3 — Validator passthrough:**
+Ollama output goes through the existing `getValidatedAnalysisWithRepair()` validator — no new
+validation code. The quant engine runs identically on top of it.
+
+**Step 4 — Rec card badge:**
+Recs generated by Ollama get a `_source: 'local'` flag → shows `🔒 Local` badge on the card so
+the user knows it wasn't Claude.
+
+### Key constraints / gotchas
+
+- Ollama structured output must match the existing rec JSON schema exactly — test with
+  `response-validator.js` before shipping
+- Calibration injection (`fetchCalibrationBlock()`) should be skipped for local calls — the
+  nudge tokens assume Claude-level instruction following
+- This is NOT a drop-in replacement; it is opt-in for "quick scan / offline" use only
+- Phase 8 skill scoring and postmortem continue to use Ollama as they already do
+
+---
+
+## 22. Multiple portfolios (super / personal / trading accounts)
+
+**Files:** `db.py`, `routes/portfolio.py`, `js/config.js`, `js/api.js`, `js/pages/portfolio.js`, `js/pages/cgt.js`, `js/pages/risk.js`, `js/pages/performance.js`
+**Severity:** Enhancement — single-user multi-account support
+**Effort:** L · Impact ★★
+
+### Problem / Motivation
+
+All holdings, CGT parcels, and trade journal entries share a single implicit portfolio.
+A user with both a super fund and a personal brokerage account must track them manually,
+losing the ability to see combined P&L, per-account CGT, or per-account heat gauges.
+
+### Implementation Plan
+
+**Step 1 — DB schema** (`db.py`):
+
+```sql
+CREATE TABLE IF NOT EXISTS portfolios (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,   -- 'Personal', 'Super', 'Trading'
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    notes      TEXT
+);
+-- Seed a default row on init_db() to avoid breaking existing data:
+INSERT OR IGNORE INTO portfolios (id, name) VALUES (1, 'Default');
+```
+
+Add `portfolio_id INTEGER NOT NULL DEFAULT 1 REFERENCES portfolios(id)` to:
+- `blob_store` — for watchlist, savedScreeners, targetAllocations per account
+- `trade_journal`
+- CGT parcels (currently in `blob_store` as JSON — migration is simpler here)
+
+For `blob_store` keys that are account-scoped, prefix with `portfolio_{id}_`:
+`portfolio_1_watchlist`, `portfolio_1_savedScreeners`, etc.
+
+**Step 2 — State** (`js/config.js`):
+
+```js
+// Add to global state:
+state.activePortfolioId = 1;   // integer — which portfolio is currently active
+state.portfolios = [];          // [{id, name, notes}] — from GET /api/portfolios
+```
+
+**Step 3 — Backend** (`routes/portfolio.py`):
+
+```
+GET  /api/portfolios              — list all portfolios
+POST /api/portfolios              — create new
+PATCH /api/portfolios/<id>        — rename / update notes
+DELETE /api/portfolios/<id>       — delete (only if no holdings/trades)
+GET  /api/portfolios/<id>/summary — combined nav, cash, P&L for one account
+```
+
+All existing save/load endpoints get an optional `portfolio_id` query param (default 1) so
+existing clients continue to work without changes.
+
+**Step 4 — Account switcher UI** (`js/navigation.js` or `js/pages/settings.js`):
+
+A dropdown in the sidebar or topbar that sets `state.activePortfolioId` and reloads state.
+Combined view (sum across all accounts) available as a special portfolio_id=0 read-only mode.
+
+**Step 5 — CGT isolation:**
+
+Each CGT parcel in `blob_store.cgtDisposals` and `blob_store.openParcels` is already a JSON
+array. Migrate to separate keys per portfolio: `portfolio_1_openParcels`, etc. No DB column
+needed — the `blob_store` key prefix is sufficient.
+
+### Key constraints / gotchas
+
+- This is the largest change in the codebase — touches every page that reads `state.portfolio`
+- Recommendation learning events are NOT portfolio-scoped (they're a global signal quality
+  record) — `ai_learning_events` stays as-is
+- Correlation-aware sizing and regime engine are portfolio-scoped by definition — they read
+  `state.portfolio` directly, so they automatically reflect the active portfolio
+- The CGT discount countdown and tax-loss planner must operate per-portfolio (CGT is calculated
+  per taxpayer identity, which maps 1:1 to an account here)
+- Suggest implementing as a feature branch; don't attempt mid-session without full smoke testing
+
+---
+
+## 23. PWA installability (manifest + service worker stub)
+
+**Files:** `asx_trading.html`, new `manifest.json`, new `sw.js`
+**Severity:** Enhancement — cosmetic but useful for quick mobile access
+**Effort:** S · Impact ★
+
+### Problem / Motivation
+
+The app is accessed via `file://` (or `localhost:5000`). On mobile, there is no home-screen
+icon; the full browser chrome takes up screen real estate. A minimal PWA manifest allows
+"Add to Home Screen" on Chrome/Safari, giving a standalone window without address bar.
+
+### Implementation Plan
+
+**`manifest.json`** (in project root, served statically):
+
+```json
+{
+  "name": "Sloth ASX Trader",
+  "short_name": "SlothASX",
+  "start_url": "/asx_trading.html",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#3b82f6",
+  "icons": [
+    { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
+```
+
+**`sw.js`** (minimal service worker — no caching strategy, just registers):
+
+```js
+// Intentionally empty — PWA requires a registered SW; no offline caching needed
+// since the Flask backend must be running anyway.
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', () => self.clients.claim());
+```
+
+**`asx_trading.html`** — add in `<head>`:
+
+```html
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#3b82f6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+</script>
+```
+
+**Flask** (`asx_server.py`) — serve both files as static routes:
+
+```python
+@app.route('/manifest.json')
+def serve_manifest():
+    return send_from_directory('.', 'manifest.json', mimetype='application/manifest+json')
+
+@app.route('/sw.js')
+def serve_sw():
+    return send_from_directory('.', 'sw.js', mimetype='application/javascript')
+```
+
+### Key constraints
+
+- PWA installability requires HTTPS or `localhost` — works on `localhost:5000` but not
+  `file://`. Users running via gunicorn on localhost are covered; `file://` users are not
+- No offline capability is planned — the service worker is a registration stub only
+- Icons (192px + 512px PNG) need to be created and placed in `static/`
+
+---
+
+## Summary — Sprint 41 plan
+
+| # | File(s) | Issue / Feature | Severity | Effort | Status |
+|---|---|---|---|---|---|
+| 19 ✅ | `db.py`, `routes/learning.py` | `tag_reviews` upsert always inserted (no UNIQUE on event_id) | Medium | S | Fixed |
+| 20 ✅ | `routes/market.py` | `universe_health` no per-ticker timeout — hung worker stalls endpoint | Low | S | Fixed |
+| 21 ✅ | `routes/debate.py`, `js/claude-client.js`, `js/pages/settings.js` | Local LLM fallback (Ollama) for portfolio analysis | Enhancement | M | Fixed |
+| 22 | — | Multiple portfolios (super / personal / trading accounts) | Enhancement | L | Skipped |
+| 23 ✅ | `asx_trading.html`, `manifest.json`, `sw.js`, `asx_server.py` | PWA installability — home-screen icon, standalone window | Enhancement | S | Fixed |
+
+**Sprint 41 status (2026-06-02):** #19–21 and #23 shipped. #22 (multiple portfolios) deferred by user request.

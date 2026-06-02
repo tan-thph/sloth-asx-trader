@@ -294,6 +294,19 @@ python3 asx_server.py</pre>
           </span>
         </label>
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border-light)">
+        <div>
+          <div style="font-size:13px;font-weight:600">Use local LLM for analysis <span style="font-size:10px;color:var(--text-muted);font-weight:400">(Ollama)</span></div>
+          <div class="text-xs text-muted">Routes portfolio analysis through local Ollama instead of Claude API. BUY/HOLD only — free, offline, slower. Requires Ollama running with a model pulled.</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="settings-local-llm" ${state.settings.useLocalLLM ? 'checked' : ''}
+            onchange="settingsToggleLocalLLM(this.checked)">
+          <span id="settings-local-llm-label" style="font-size:12px;color:${state.settings.useLocalLLM ? '#d97706' : 'var(--text-muted)'}">
+            ${state.settings.useLocalLLM ? 'Local' : 'Off'}
+          </span>
+        </label>
+      </div>
     </div>
 
     <div class="card">
@@ -409,6 +422,18 @@ function settingsToggleCompact(val) {
   document.body.classList.toggle('compact', !!val);
   scheduleSave();
   renderPage();
+}
+
+function settingsToggleLocalLLM(val) {
+  state.settings.useLocalLLM = !!val;
+  scheduleSave();
+  const label = document.getElementById('settings-local-llm-label');
+  if (label) {
+    label.textContent  = val ? 'Local' : 'Off';
+    label.style.color  = val ? '#d97706' : 'var(--text-muted)';
+  }
+  if (val) toast('Local LLM enabled — portfolio analysis will use Ollama (BUY/HOLD only)', 'info');
+  else      toast('Local LLM disabled — portfolio analysis will use Claude API', 'info');
 }
 function updateSchedSetting(key,value) {
   state.settings[key]=value;

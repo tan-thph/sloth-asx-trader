@@ -1722,12 +1722,22 @@ def submit_tag_review():
             if not row:
                 return jsonify({"ok": False, "error": "Event not found or not auto-tagged"}), 404
 
-            conn.execute("""
-                INSERT OR REPLACE INTO tag_reviews (event_id, verdict, corrected_tag, original_tag)
-                VALUES (?, ?, ?, ?)
-            """, (event_id, verdict,
-                  corrected if verdict == "disagree" else None,
-                  row["error_type"]))
+            existing = conn.execute(
+                "SELECT id FROM tag_reviews WHERE event_id=?", (event_id,)
+            ).fetchone()
+            if existing:
+                conn.execute("""
+                    UPDATE tag_reviews
+                    SET verdict=?, corrected_tag=?, reviewed_at=datetime('now','localtime')
+                    WHERE event_id=?
+                """, (verdict, corrected if verdict == "disagree" else None, event_id))
+            else:
+                conn.execute("""
+                    INSERT INTO tag_reviews (event_id, verdict, corrected_tag, original_tag)
+                    VALUES (?, ?, ?, ?)
+                """, (event_id, verdict,
+                      corrected if verdict == "disagree" else None,
+                      row["error_type"]))
 
             if verdict == "disagree":
                 conn.execute("""

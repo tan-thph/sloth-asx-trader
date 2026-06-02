@@ -212,7 +212,7 @@ _SCHEMA = """
 
     CREATE TABLE IF NOT EXISTS tag_reviews (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_id      INTEGER NOT NULL REFERENCES ai_learning_events(id) ON DELETE CASCADE,
+        event_id      INTEGER NOT NULL UNIQUE REFERENCES ai_learning_events(id) ON DELETE CASCADE,
         reviewed_at   TEXT DEFAULT (datetime('now','localtime')),
         verdict       TEXT NOT NULL,        -- 'agree' | 'disagree'
         corrected_tag TEXT,                 -- NULL when agree; user-corrected tag when disagree

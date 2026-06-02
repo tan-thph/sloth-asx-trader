@@ -1066,6 +1066,7 @@ def universe_health():
 
     # Full universe — deduplicated
     all_tickers = list(dict.fromkeys(ASX_UNIVERSE.get("asx200", [])))
+    per_ticker_timeout = int(request.args.get("timeout", 8))
 
     def _check(ticker):
         try:
@@ -1080,9 +1081,15 @@ def universe_health():
 
     stale = []
     with _cf.ThreadPoolExecutor(max_workers=20) as pool:
-        for result in pool.map(_check, all_tickers):
-            if result:
-                stale.append(result)
+        futures = {pool.submit(_check, t): t for t in all_tickers}
+        for fut in _cf.as_completed(futures, timeout=per_ticker_timeout * len(all_tickers)):
+            ticker = futures[fut]
+            try:
+                result = fut.result(timeout=per_ticker_timeout)
+                if result:
+                    stale.append(result)
+            except Exception:
+                stale.append(ticker)  # timeout or error → treat as stale
 
     checked_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
