@@ -38,7 +38,7 @@ function renderPolymarketSection() {
           <input type="checkbox" id="pm-include" onchange="state.includePolymarket=this.checked;renderPage()" ${state.includePolymarket ? 'checked' : ''}>
           Include in AI Brief
         </label>
-        <button class="btn btn-sm" onclick="fetchPolymarket()">⟳ Predictions</button>
+        <button class="btn btn-sm" onclick="fetchPolymarket()" ${window._pmFetching ? 'disabled style="opacity:0.6"' : ''}>${window._pmFetching ? '⟳ fetching…' : '⟳ Predictions'}</button>
       </div>
     </div>
 
@@ -47,7 +47,10 @@ function renderPolymarketSection() {
         ⚡ Prediction market data <strong>will be appended</strong> to the next AI Macro Brief prompt
       </div>` : ''}
 
-    ${!hasPm ? `
+    ${window._pmFetching ? `
+      <div style="display:flex;align-items:center;gap:10px;padding:1rem;color:var(--text-muted);font-size:13px">
+        <span style="animation:spin 1s linear infinite;display:inline-block">⟳</span> Fetching prediction markets…
+      </div>` : !hasPm ? `
       <div class="empty-state" style="padding:1.5rem">
         <div class="empty-icon" style="font-size:20px">📊</div>
         <p>No prediction market data loaded.</p>
@@ -111,7 +114,9 @@ function renderPolymarketSection() {
 
 async function fetchPolymarket() {
   if (!state.serverOk) { toast('Backend server not running', 'error'); return; }
-  toast('Fetching Polymarket data…', 'info');
+  if (window._pmFetching) return;
+  window._pmFetching = true;
+  renderPage();
   try {
     const r = await fetch(`${API}/api/polymarket`);
     if (!r.ok) throw new Error(`Server error ${r.status}`);
@@ -119,9 +124,11 @@ async function fetchPolymarket() {
     state.polymarketData = data;
     const ok = data.markets?.filter(m => m.question).length ?? 0;
     toast(`Polymarket: ${ok} markets loaded`, 'success');
-    renderPage();
   } catch (e) {
     toast('Polymarket error: ' + e.message, 'error');
+  } finally {
+    window._pmFetching = false;
+    renderPage();
   }
 }
 

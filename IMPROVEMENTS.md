@@ -11,6 +11,16 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 
 ---
 
+## 0. Shipped — Sprint 39 (2026-06-02)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **Polymarket fetch parallelization** | Performance (§3.4) | `/api/polymarket` now dispatches all 6 Manifold API queries in parallel via `ThreadPoolExecutor` instead of a serial list comprehension. Worst-case latency drops from 6×8s=48s to a single 8s timeout when all succeed. Typical latency improvement: 3–5s → ~1s on cache miss. |
+| **Polymarket loading state** | UX (§3.4) | `fetchPolymarket()` sets `window._pmFetching=true` and calls `renderPage()` before the fetch, disabling the button and showing a spinner row inside the Prediction Markets card. `finally` block clears flag. |
+| **IMPROVEMENTS.md stale ✓ cleanup** | Docs | Marked 8 shipped items as ✓ in §2.1–2.7 tables: Target allocations, Cash/TD tracker, Franking 45-day, Economic calendar, A-VIX, Correlation-aware sizing (exact), Thesis review at exit, Prompt A/B tracking. Removed stale "Remaining:" notes from §5. Added Sprint 37–38 and open items to §5. |
+
+---
+
 ## 0. Shipped — Sprint 38 (2026-06-02)
 
 | Fix / Feature | Area | Detail |
@@ -222,9 +232,9 @@ already exist (quant, regime, learning, dividends, CGT).
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
 | ✓ **Watchlist** (separate from holdings) | S | ★★★ | **SHIPPED** — `js/pages/watchlist.js`, `state.watchlist`, scanner ⭐ integration. See §0. |
-| **Target allocations + drift alerts** | M | ★★ | Set a target weight per holding/sector; flag when drift exceeds a band and suggest a rebalance trade list. |
+| ✓ **Target allocations + drift alerts** | M | ★★ | **SHIPPED** — `state.targetAllocations`, `_buildTargetAllocCard()` on Risk page; amber/red when |drift| ≥5%/10%. See §0. |
 | **Multiple portfolios / accounts** | M | ★★ | Separate super vs personal vs trading accounts (still single-user) with combined and per-account views — affects CGT and sizing. |
-| **Cash & term-deposit tracker** | S | ★★ | Track idle cash + TD maturities so the dashboard shows true investable cash and prompts deployment. |
+| ✓ **Cash & term-deposit tracker** | S | ★★ | **SHIPPED** — `state.termDeposits`, `_buildCashTrackerCard()` on Dashboard; idle cash + TD maturities + deployable ≤30d total. See §0. |
 | ✓ **Performance attribution** | M | ★★ | **SHIPPED** — `_buildAttributionCard()` in `performance.js`: P&L by sector and by regime at entry. See §0. |
 | ✓ **Benchmark comparison** | S | ★★ | **SHIPPED** — ^AXJO overlay on Value History canvas; normalized to portfolio start value. See §0. |
 
@@ -235,7 +245,7 @@ already exist (quant, regime, learning, dividends, CGT).
 | ✓ **CGT-discount countdown** | S | ★★★ | **SHIPPED** — urgency banner in CGT page + sell warning in checklist. See §0. |
 | ✓ **Tax-loss-harvest planner** | M | ★★★ | **SHIPPED** — card on CGT page; ranks losers by unrealised loss; EOFY countdown; wash-sale flag. See §0. |
 | ✓ **Dividend income forecast + franking credits** | M | ★★ | **SHIPPED** — `_buildDivForecastCard()` in `performance.js`: per-stock income, grossed-up at 30% corp tax, franking credits, frequency, yield on cost. See §0. |
-| **Franking-credit optimiser (45-day rule)** | M | ★★ | Flag the 45-day holding rule for franking eligibility; identify parcels approaching or failing the threshold. |
+| ✓ **Franking-credit optimiser (45-day rule)** | M | ★★ | **SHIPPED** — `_buildFranking45DayCard()` on CGT page; iterates open parcels, warns when 45-day continuous-holding rule is at risk. See §0. |
 | ✓ **EOFY tax pack** | S | ★★ | **SHIPPED** — `GET /api/tax/eofy-pack?year=N` ZIP download: CGT disposals CSV + trade fees CSV. See §0. |
 
 ### 2.3 Alerts & monitoring
@@ -254,9 +264,9 @@ already exist (quant, regime, learning, dividends, CGT).
 |---|---|---|---|
 | ✓ **Side-by-side ticker compare** | M | ★★ | **SHIPPED** — `js/pages/compare.js`, g+x shortcut, ↔ nav button, Watchlist ↔ button. See §0. |
 | ✓ **Saved screeners** | S | ★★ | **SHIPPED** — `state.savedScreeners`, ⊕ Save/Load/Delete in scanner config bar. See §0. |
-| **Economic calendar** | M | ★★ | RBA meetings, US Fed, CPI, jobs, ASX reporting season — overlaid on the dashboard so you trade around known catalysts. |
+| ✓ **Economic calendar** | M | ★★ | **SHIPPED** — `_buildEconomicCalendarCard()` on Dashboard; 45-day window with RBA dates, ex-div, earnings. See §0. |
 | ✓ **Seasonality view** | M | ★ | **SHIPPED** — `GET /api/seasonality/<ticker>` + 12-bar card on Signals detail view. See §0. |
-| **A-VIX / volatility gauge** | S | ★★ | Surface an ASX volatility proxy alongside the US VIX already in macro, for a local fear/greed read. |
+| ✓ **A-VIX / volatility gauge** | S | ★★ | **SHIPPED** — `asx_vol_20d` (20d realized vol of ^AXJO) in `/api/macro`; "A-VIX (ASX 20d)" card on Macro page; feeds two regime votes. See §0. |
 | ✓ **Regime overlay on trade history** | S | ★★ | **SHIPPED** — coloured regime badge per journal row. See §0. |
 
 ### 2.5 Risk management
@@ -266,7 +276,7 @@ already exist (quant, regime, learning, dividends, CGT).
 | ✓ **Scenario / stress test** | M | ★★★ | **SHIPPED** — card on Risk page; shock presets + custom; per-holding beta × shock table. See §0. |
 | ✓ **Trailing & ATR-based stops** | M | ★★★ | **SHIPPED** — 2×ATR14 stops card on Risk page; one-click "Set Alert". See §0. |
 | ✓ **Correlation-aware sizing (sector)** | S | ★★ | **SHIPPED** — `_sectorConcentrationWarning(rec)` shows amber/red badge on BUY recs when the rec's sector already exceeds threshold. See §0. |
-| **Correlation-aware sizing (exact)** | M | ★★ | Use the `/api/risk` correlation matrix to quantify exact |corr| with each holding; auto-reduce sizing when |corr| > 0.7. |
+| ✓ **Correlation-aware sizing (exact)** | M | ★★ | **SHIPPED** — `analysis.js` fetches `/api/risk` post-analysis; reduces BUY qty 30% (|corr|>0.7) or 50% (|corr|>0.85); ⚡ Corr badge on rec cards. See §0. |
 | ✓ **Risk-budget dashboard** | S | ★★ | **SHIPPED** — heat gauge at top of Risk page, configurable % budget. See §0. |
 | ✓ **Drawdown monitor + alert** | S | ★★ | **SHIPPED** — current + max drawdown from portfolio history; alert banner + configurable threshold. See §0. |
 
@@ -276,7 +286,7 @@ already exist (quant, regime, learning, dividends, CGT).
 |---|---|---|---|
 | ✓ **Pre-trade checklist** | S | ★★★ | **SHIPPED** — 5-item modal gate, requires ≥4 ticks. See §0. |
 | ✓ **Thesis capture** | M | ★★★ | **SHIPPED** — textarea on rec cards, captured at execution, passed to learning loop as `trade_thesis`, shown in journal tooltip. See §0. |
-| **Thesis review at exit** | S | ★★★ | Surface `_thesis` when a position closes — "Was your thesis correct?" prompt before the postmortem fires. |
+| ✓ **Thesis review at exit** | S | ★★★ | **SHIPPED** — `_showThesisReview()` in `recommendations.js` fires `<dialog>` on full position close; 3-verdict buttons post to `/api/learning/outcome`. See §0. |
 | ✓ **Broker CSV import** | M | ★★★ | **SHIPPED** — CommSec/SelfWealth/generic detection; backend parses, normalises, returns rows. See §0. |
 | ✓ **Trade tags & notes** | S | ★★ | **SHIPPED** — `tags`/`trade_thesis` DB columns + inline input on rec cards + stored in learning events. See §0. |
 | ✓ **Morning briefing auto-generate** | M | ★★ | **SHIPPED** — `'briefing'` agent type; Dashboard "Generate Brief" button chains macro + regime + holdings. See §0. |
@@ -288,7 +298,7 @@ already exist (quant, regime, learning, dividends, CGT).
 | ✓ **Portfolio-aware Q&A** | M | ★★ | **SHIPPED** — `sendChat()` now injects regime + macro context (VIX, ASX200, sentiment, AUD/USD) into system prompt. See §0. |
 | ✓ **Postmortem digest** | S | ★★ | **SHIPPED** — `GET /api/learning/digest-data` + "Generate Digest" on Learning page. See §0. |
 | **Local-LLM fallback** | M | ★ | Use the existing Ollama setup for cheap/offline analysis when you don't want to spend on Claude calls (debate engine already uses it). |
-| **Prompt A/B tracking** | M | ★★ | Compare win-rate by `PROMPT_VERSION` so you know whether a prompt change actually helped (table exists; surface it). |
+| ✓ **Prompt A/B tracking** | M | ★★ | **SHIPPED** — Prompt Version History table on Learning page; Δ vs prev column (pp delta + ↑/↓/↔); "current" badge; realised P&L column. See §0. |
 
 ---
 
@@ -308,9 +318,10 @@ Daily backup on startup + daemon thread. Keeps last 7. See §0.
 122 Vitest unit tests for pure engine files (`quant-engine`, `regime-engine`, `response-validator`,
 `_detectExitReason` in both `recommendations.js` and `performance.js`). `npm run test:js`. See §0.
 
-### 3.4 Performance / responsiveness — `S` · ★★
-Several endpoints are slow (macro/polymarket/earnings 3–5 s — see `SLOW` log lines). Parallelise
-remaining serial yfinance calls, widen caches for slow-moving data, and show optimistic loading states.
+### 3.4 Performance / responsiveness — `S` · ★★ (partial)
+Macro endpoint fully parallelised (Sprint 8). Polymarket parallelised + loading state (Sprint 39).
+Earnings calendar already parallel with 4h per-ticker TTL.
+Remaining: widen caches for RBA rate (currently DB-cached 7d but still scrapes live on miss; an in-memory `ttl_cache` wrapper would skip the network call during the 7d window), optimistic stale-data rendering for macro/earnings on the dashboard.
 
 ### ✓ 3.5 Light security hygiene (personal) — `S` · ★ **SHIPPED Sprint 21**
 - gunicorn now binds `127.0.0.1:5000` (was `0.0.0.0`) — LAN devices can no longer reach the API
@@ -345,11 +356,11 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 1. ✓ **Trust the numbers first:** §1.3 Wilson CI, §1.4 Brier score, §1.2 slippage — **done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias.
 2. ✓ **Don't lose data:** §3.2 backups, §3.1 retry + stale-cache — **done**. Remaining: secondary data provider fallback.
 3. ✓ **Highest daily payoff:** pre-trade checklist, CGT countdown, trade tags, heat gauge, drawdown monitor, Telegram, broker CSV, indicator alerts, tax-loss planner, EOFY pack, watchlist, morning briefing, regime journal, stale nudge — **all done**.
-4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. ✓ §1.7 walk-forward backtest — **done Sprint 20**. Remaining: §2.5 correlation-aware sizing.
+4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. ✓ §1.7 walk-forward backtest — **done Sprint 20**. ✓ §2.5 correlation-aware sizing — **done Sprint 8**.
 5. ✓ **Sprint 6 shipped:** §2.7 portfolio-aware Q&A, §2.1 performance attribution, §2.5 sector-concentration warning, §2.6 thesis capture, §2.2 dividend forecast + franking credits — **all done**.
 6. ✓ **Sprint 7 shipped:** thesis review at exit, prompt-version P&L, target allocations + drift alerts, economic calendar (RBA dates + ex-div + earnings), franking 45-day rule warnings — **all done**.
 7. ✓ **Sprint 8 shipped:** A-VIX (ASX realized vol), cash/TD tracker, exact correlation-aware sizing, macro endpoint perf (3 serial fetches eliminated), keyboard shortcuts (`g`+letter + `?`) — **all done**.
-8. ✓ **Sprint 9 shipped:** Prompt+response logging (ai_call_log, full prompt in every call), side-by-side compare page, prompt version A/B delta, ETF earnings filter, App Info card — **all done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias, §3.3 Vitest tests.
+8. ✓ **Sprint 9 shipped:** Prompt+response logging (ai_call_log, full prompt in every call), side-by-side compare page, prompt version A/B delta, ETF earnings filter, App Info card — **all done**.
 9. ✓ **Sprint 12 shipped:** §1.1 look-ahead bias (AI Replay fixed to nominal prices; strategy backtest disclosed as total-return), TRIM/SELL ATR stop floor, intraday Extreme Mode, intraday dynamic UI updates, Groq/Gemini key consolidation, neutral debate synthesis — **all done**.
 10. ✓ **Sprint 13 shipped:** compact/density mode, in-app changelog, macro loading state, corporate-actions split detection, liquidity-scaled slippage — **all done**.
 11. ✓ **Sprint 14 shipped:** signals page candlestick chart, journal monthly P&L bar chart, portfolio sector sidebar (replaced canvas donut), numpy.bool_ JSON serialization fix, Learning Loop table alignment + dark-theme button colors — **all done**.
@@ -364,7 +375,8 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 20. ✓ **Sprint 25 shipped:** Volatility-adaptive half-life, SQLite startup maintenance, Phase 6 design spec — **all done**.
 21. ✓ **Sprint 26 shipped:** Phase 6 calibration quality debate card (`GET /api/debate/calib-quality`, traffic-light UI, `triggerCalibQualityIfStale`) — **all done**.
 22. ✓ **Sprint 27 shipped:** Success tag calibration nudge (step 6b in `_calib_compute`), `success_patterns` in stats, Success Patterns UI card — **all done**.
-23. **Polish:** §4 UX (mobile/PWA), §3.7 types/modules, virtual outcomes for skipped recs.
+23. ✓ **Sprint 37–38 shipped:** Sell tag outcome tracking (Gap 3), `better_opportunity` cross-check (Gap 7), sell tag calibration injection (Part 9), Section 6 SELL_TAG prompt rules, calibration cache thread lock, Phase 8 Mann-Whitney gate, Kelly rejection, regime-aware stopAtrMult, 30-min blend on regime flip, SPI200 futures vote, `_sanity_check()` in indicators, `pre_earnings_risk` flag — **all done**.
+24. **Open:** §1.5 survivorship bias, §1.9 corporate-actions (special div/mergers), §3.4 performance (slow macro/polymarket endpoints), §3.7 types/ES-modules, §2.1 multiple portfolios, §4 mobile/PWA.
 
 ---
 

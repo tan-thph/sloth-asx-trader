@@ -514,7 +514,8 @@ def polymarket_markets():
         cached["cached"] = True
         return jsonify(cached)
 
-    markets_out = [_fetch_manifold_market(q, requests) for q in _PM_QUERIES]
+    with ThreadPoolExecutor(max_workers=len(_PM_QUERIES)) as pool:
+        markets_out = list(pool.map(lambda q: _fetch_manifold_market(q, requests), _PM_QUERIES))
     result = {
         "markets":    markets_out,
         "fetched_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
