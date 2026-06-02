@@ -117,6 +117,10 @@ async function renderLearningPage(gen) {
   renderDebateStatsCard().catch(() => {});
   // Async: load trading lessons card
   renderLessonsCard().catch(() => {});
+  // Async: load sell decision tracker card (Gap 3 + Gap 7)
+  renderSellOutcomesCard().catch(() => {});
+  // Async: load tag accuracy card (Gap 6)
+  renderTagAccuracyCard().catch(() => {});
 }
 
 function _renderLearningContent(d, brier) {
@@ -237,16 +241,19 @@ function _renderLearningContent(d, brier) {
       </div>`;
   })();
 
-  // ── Gap 2: Phase 8 skill-weighting status note ────────────────────────────
+  // ── Gap 2: Phase 8 skill-weighting status note (Fix #10: Mann-Whitney Z) ───
   const phase8Note = (() => {
     if (!phase8) return '';
     const icon  = phase8.active ? '✅' : '⏸️';
-    // Fix #16: show excluded good-loss count when non-zero
     const excl  = phase8.n_good_losses_excluded > 0
-      ? ` · ${phase8.n_good_losses_excluded} good-loss${phase8.n_good_losses_excluded > 1 ? 'es' : ''} excluded from gate`
+      ? ` · ${phase8.n_good_losses_excluded} good-loss${phase8.n_good_losses_excluded > 1 ? 'es' : ''} excluded`
       : '';
+    // Show Mann-Whitney Z when available (Fix #10)
+    const zStr = phase8.mann_whitney_z != null
+      ? ` · MW Z=${phase8.mann_whitney_z.toFixed(2)} (threshold ${phase8.mann_whitney_threshold ?? 1.28})`
+      : (phase8.mean_skill_wins != null ? ` · wins=${phase8.mean_skill_wins}, losses=${phase8.mean_skill_losses}` : '');
     const label = phase8.active
-      ? `Phase 8 skill-weighting active (n=${phase8.n_scored} — mean_wins=${phase8.mean_skill_wins} > losses=${phase8.mean_skill_losses}${excl})`
+      ? `Phase 8 skill-weighting active (n=${phase8.n_scored}${zStr}${excl})`
       : `Phase 8 skill-weighting paused — ${phase8.reason}`;
     const color = phase8.active ? '#16a34a' : '#d97706';
     return `<div style="font-size:11px;color:${color};margin-bottom:8px">${icon} ${label}</div>`;
@@ -765,7 +772,8 @@ function _renderLearningContent(d, brier) {
   // ── Internal Debate Engine status card ────────────────────────────────────────
   // Rendered async after the main content — see renderLearningDebateCard()
   const debateCardPlaceholder = `
-    <div id="ll-debate-card" class="card section-gap" style="display:none"></div>`;
+    <div id="ll-debate-card" class="card section-gap" style="display:none"></div>
+    <div id="ll-tag-accuracy-card" class="card" style="display:none"></div>`;
 
   // ── Debate Stats card (per-pairing agreement metrics) ──────────────────────────
   // Rendered async — see renderDebateStatsCard()
@@ -805,13 +813,16 @@ function _renderLearningContent(d, brier) {
   // ── Trading Lessons card (async — filled by renderLessonsCard()) ─────────────
   const lessonsPlaceholder = `<div id="ll-lessons-card" class="card section-gap" style="min-height:60px"></div>`;
 
+  // ── Sell Decision Tracker card (async — filled by renderSellOutcomesCard()) ──
+  const sellOutcomesPlaceholder = `<div id="ll-sell-outcomes-card" class="card section-gap" style="min-height:60px"></div>`;
+
   // ── Calibration Quality card (async — filled by renderCalibQualityCard()) ──
   const calibQualityPlaceholder = `<div id="ll-calib-quality-card"></div>`;
 
   return summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard + recentCard + failedCard + debateInsightsCard +
-    digestCard + lessonsPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
+    digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
 }
 
 // ── Postmortem digest — AI summary of recent failure patterns ─────────────────
@@ -2148,6 +2159,113 @@ async function deleteLesson(id) {
   } catch (e) { toast('Error: ' + e.message, 'error'); }
 }
 
+// ── Sell Decision Tracker card (Gap 3 + Gap 7) ───────────────────────────────
+// Shows executed SELL/TRIM events with sell_primary_driver set, and their
+// 30-day price-based outcome verification once enough time has passed.
+async function renderSellOutcomesCard() {
+  const el = document.getElementById('ll-sell-outcomes-card');
+  if (!el || !state.serverOk) return;
+
+  let data;
+  try {
+    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=20`);
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  const events = (data.events || []);
+  if (!events.length) { el.style.display = 'none'; return; }
+
+  const DRIVER_LABEL = {
+    target_reached:      'Target Reached',
+    thesis_broken:       'Thesis Broken',
+    stop_triggered:      'Stop Triggered',
+    better_opportunity:  'Better Opportunity',
+    position_sizing:     'Position Sizing',
+    risk_management:     'Risk Mgmt',
+    portfolio_rebalance: 'Rebalance',
+    time_stop:           'Time Stop',
+    fundamental_change:  'Fundamental Change',
+  };
+
+  const VERDICT_STYLE = {
+    validated:    { bg: '#dcfce7', fg: '#15803d', icon: '✓' },
+    invalidated:  { bg: '#fee2e2', fg: '#dc2626', icon: '✗' },
+    inconclusive: { bg: '#f3f4f6', fg: '#6b7280', icon: '—' },
+  };
+
+  const rows = events.map(e => {
+    const driver = DRIVER_LABEL[e.sell_primary_driver] || e.sell_primary_driver || '—';
+    const date   = (e.timestamp || '').slice(0, 10);
+    const pnl    = e.realized_pnl_pct != null ? `${e.realized_pnl_pct > 0 ? '+' : ''}${e.realized_pnl_pct.toFixed(1)}%` : '—';
+    const pnlColor = e.realized_pnl_pct > 0 ? '#16a34a' : e.realized_pnl_pct < 0 ? '#dc2626' : 'var(--text-muted)';
+
+    let verifyCell;
+    if (!e.sell_verify_date) {
+      verifyCell = `<span style="font-size:11px;color:var(--text-muted)">Pending (≥25d)</span>`;
+    } else {
+      const vs = VERDICT_STYLE[e.sell_verify_verdict] || VERDICT_STYLE.inconclusive;
+      const soldChg = e.sell_verify_sold_chg != null ? `${e.sell_verify_sold_chg > 0 ? '+' : ''}${e.sell_verify_sold_chg.toFixed(1)}%` : '';
+      const altChg  = e.sell_verify_alt_chg  != null ? ` | alt ${e.sell_verify_alt_chg > 0 ? '+' : ''}${e.sell_verify_alt_chg.toFixed(1)}%` : '';
+      const detail  = soldChg ? `<span style="font-size:10px;color:var(--text-muted);margin-left:4px">sold ${soldChg}${altChg}</span>` : '';
+      verifyCell = `<span style="padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;background:${vs.bg};color:${vs.fg}">${vs.icon} ${e.sell_verify_verdict}</span>${detail}`;
+    }
+
+    const altBadge = e.alternative_ticker
+      ? `<span style="font-size:10px;padding:1px 5px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:3px;color:#1d4ed8;margin-left:4px">→ ${escapeHTML(e.alternative_ticker)}</span>`
+      : '';
+
+    return `<tr style="border-bottom:1px solid var(--border-light);font-size:12px">
+      <td style="padding:5px 8px;color:var(--text-muted)">${date}</td>
+      <td style="padding:5px 8px;font-weight:600">${escapeHTML(e.ticker || '—')}</td>
+      <td style="padding:5px 8px">${driver}${altBadge}</td>
+      <td style="padding:5px 8px;color:${pnlColor};font-weight:600">${pnl}</td>
+      <td style="padding:5px 8px">${verifyCell}</td>
+    </tr>`;
+  }).join('');
+
+  const pending  = events.filter(e => !e.sell_verify_date).length;
+  const verified = events.length - pending;
+  const nVal     = events.filter(e => e.sell_verify_verdict === 'validated').length;
+  const nInval   = events.filter(e => e.sell_verify_verdict === 'invalidated').length;
+
+  el.innerHTML = `
+    <div class="flex-between" style="margin-bottom:8px">
+      <div class="card-title" style="margin:0">📤 Sell Decision Tracker (${events.length})</div>
+      <button class="btn btn-sm" onclick="refreshSellOutcomes()" title="Re-check outcomes now">↺ Check Now</button>
+    </div>
+    <p class="text-xs text-muted" style="margin-bottom:8px">
+      Validates executed SELL/TRIM drivers against price outcome ~30 days post-sell.
+      ${verified > 0 ? `<strong>${nVal} validated · ${nInval} invalidated</strong> of ${verified} checked.` : ''}
+      ${pending > 0  ? `${pending} pending (need ≥25 days).` : ''}
+    </p>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
+            <th style="text-align:left;padding:4px 8px">Date</th>
+            <th style="text-align:left;padding:4px 8px">Ticker</th>
+            <th style="text-align:left;padding:4px 8px">Driver</th>
+            <th style="text-align:left;padding:4px 8px">P&amp;L</th>
+            <th style="text-align:left;padding:4px 8px">30d Verdict</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+async function refreshSellOutcomes() {
+  const el = document.getElementById('ll-sell-outcomes-card');
+  if (!el || !state.serverOk) return;
+  try {
+    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=20&force=1`);
+    if (!r.ok) return;
+    await renderSellOutcomesCard();
+    toast('Sell outcomes refreshed', 'success');
+  } catch { toast('Error refreshing sell outcomes', 'error'); }
+}
+
 // ── Toggle a single tag on/off within the multi-tag set ───────────────────────
 // Called by each tag button with the full current tag string and the key to toggle.
 async function toggleLearningTag(id, currentTagStr, key) {
@@ -2206,5 +2324,145 @@ async function tagLearningEvent(id, errorType) {
     }
   } catch (e) {
     toast('Tag error: ' + e.message, 'error');
+  }
+}
+
+// ── Gap 6: Tag Accuracy spot-check card ───────────────────────────────────────
+
+async function renderTagAccuracyCard() {
+  const el = document.getElementById('ll-tag-accuracy-card');
+  if (!el) return;
+
+  let d;
+  try {
+    const r = await fetch(`${API}/api/learning/tag-accuracy`);
+    d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+  } catch { return; }
+
+  const rate   = d.agree_rate;
+  const label  = d.label || 'unreviewed';
+  const pct    = rate != null ? Math.round(rate * 100) : null;
+  const colour = label === 'good'        ? '#16a34a'
+               : label === 'acceptable'  ? '#d97706'
+               : label === 'unreliable'  ? '#dc2626'
+               : '#6b7280';
+  const bg     = label === 'good'        ? '#f0fdf4'
+               : label === 'acceptable'  ? '#fffbeb'
+               : label === 'unreliable'  ? '#fef2f2'
+               : 'var(--bg-secondary)';
+  const border = label === 'good'        ? '#bbf7d0'
+               : label === 'acceptable'  ? '#fde68a'
+               : label === 'unreliable'  ? '#fecaca'
+               : 'var(--border)';
+
+  const rateStr = pct != null
+    ? `${pct}% agreement (n=${d.n} reviewed)`
+    : `No reviews yet (${d.pending_review} auto-tagged events pending)`;
+
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="card-title" style="margin:0">🏷 Auto-Tag Accuracy</div>
+      ${rate != null ? `<span style="font-size:11px;color:${colour};background:${bg};border:1px solid ${border};padding:2px 8px;border-radius:4px">${label.charAt(0).toUpperCase()+label.slice(1)} · ${pct}%</span>` : ''}
+    </div>
+    <p style="font-size:12px;color:var(--text-secondary);margin:0 0 8px">
+      ${rateStr}.
+      ${label === 'unreliable' ? '<strong style="color:#dc2626"> ⚠ top_err calibration nudge suppressed until ≥60%.</strong>' : ''}
+      ${label === 'unreviewed' ? 'Review a batch of 5 to start tracking accuracy.' : ''}
+    </p>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button onclick="loadTagReviewBatch()" id="tag-review-btn"
+        style="font-size:11px;padding:4px 12px;border-radius:4px;background:#3b82f6;color:#fff;border:none;cursor:pointer">
+        Review Batch (5)
+      </button>
+      ${d.pending_review > 0 ? `<span style="font-size:11px;color:var(--text-muted)">${d.pending_review} events awaiting review</span>` : '<span style="font-size:11px;color:#16a34a">All reviewed ✓</span>'}
+    </div>
+    <div id="tag-review-queue" style="margin-top:12px"></div>
+  `;
+}
+
+async function loadTagReviewBatch() {
+  const qel = document.getElementById('tag-review-queue');
+  const btn = document.getElementById('tag-review-btn');
+  if (!qel) return;
+  if (btn) btn.disabled = true;
+
+  let d;
+  try {
+    const r = await fetch(`${API}/api/learning/tag-reviews?limit=5`);
+    d = await r.json();
+  } catch (e) {
+    if (qel) qel.innerHTML = `<p style="font-size:12px;color:#dc2626">Failed to load: ${e.message}</p>`;
+    if (btn) btn.disabled = false;
+    return;
+  }
+
+  if (!d.events || d.events.length === 0) {
+    qel.innerHTML = `<p style="font-size:12px;color:#16a34a">No unreviewed auto-tagged events — all caught up! ✓</p>`;
+    if (btn) btn.disabled = false;
+    return;
+  }
+
+  const ERROR_TAGS = [
+    'overconfident','missed_catalyst','regime_mismatch',
+    'poor_entry','stop_too_tight','poor_rr','thesis_broken','external_shock','none',
+  ];
+
+  qel.innerHTML = d.events.map(ev => `
+    <div id="tag-ev-${ev.id}" style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px;font-size:12px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+        <strong>${ev.ticker || '?'}</strong>
+        <span class="text-muted">${(ev.timestamp || '').slice(0,10)}</span>
+      </div>
+      <div style="margin-bottom:4px">
+        Outcome: <span style="color:${ev.outcome_status==='loss'?'#dc2626':'#d97706'}">${ev.outcome_status}</span>
+        · P&L: ${ev.realized_pnl_pct!=null ? (ev.realized_pnl_pct>0?'+':'')+ev.realized_pnl_pct.toFixed(1)+'%' : '—'}
+        · Conf: ${ev.ai_confidence!=null ? Math.round(ev.ai_confidence*100)+'%' : '—'}
+      </div>
+      <div style="margin-bottom:6px;color:var(--text-secondary)">
+        🤖 Ollama tagged: <strong>${ev.error_type || '?'}</strong>
+      </div>
+      ${ev.rationale_summary ? `<div style="margin-bottom:8px;color:var(--text-muted);font-style:italic">"${escapeHTML(ev.rationale_summary.slice(0,120))}…"</div>` : ''}
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <button onclick="submitTagReview(${ev.id},'agree')"
+          style="font-size:11px;padding:3px 10px;border-radius:4px;background:#16a34a;color:#fff;border:none;cursor:pointer">
+          ✓ Agree
+        </button>
+        <select id="tag-correct-${ev.id}" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary)">
+          ${ERROR_TAGS.map(t => `<option value="${t}"${t===ev.error_type?' selected':''}>${t}</option>`).join('')}
+        </select>
+        <button onclick="submitTagReview(${ev.id},'disagree')"
+          style="font-size:11px;padding:3px 10px;border-radius:4px;background:#dc2626;color:#fff;border:none;cursor:pointer">
+          ✗ Disagree
+        </button>
+      </div>
+    </div>
+  `).join('');
+
+  if (btn) btn.disabled = false;
+}
+
+async function submitTagReview(eventId, verdict) {
+  const correctedEl = document.getElementById(`tag-correct-${eventId}`);
+  const corrected   = correctedEl ? correctedEl.value : '';
+  if (verdict === 'disagree' && !corrected) {
+    toast('Select a corrected tag before disagreeing', 'error');
+    return;
+  }
+  try {
+    const r = await fetch(`${API}/api/learning/tag-review`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ event_id: eventId, verdict, corrected_tag: corrected }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    const card = document.getElementById(`tag-ev-${eventId}`);
+    if (card) card.innerHTML = `<span style="color:#16a34a;font-size:12px">✓ Reviewed (${verdict}${verdict==='disagree'?' → '+corrected:''})</span>`;
+    // Refresh accuracy card after last review in batch
+    renderTagAccuracyCard().catch(() => {});
+  } catch (e) {
+    toast(`Review failed: ${e.message}`, 'error');
   }
 }

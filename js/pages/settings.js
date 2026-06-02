@@ -307,6 +307,14 @@ python3 asx_server.py</pre>
         <span id="settings-server-ver" class="text-muted">checking…</span>
         <span class="text-muted">DB backups</span>
         <span id="settings-backup-info" class="text-muted">checking…</span>
+        <span class="text-muted">Universe</span>
+        <span id="settings-universe-info" style="font-size:12px">
+          <span id="settings-universe-date" class="text-muted">loading…</span>
+          <button onclick="checkUniverseHealth()" id="universe-check-btn"
+            style="margin-left:8px;font-size:10px;padding:1px 8px;border-radius:3px;border:1px solid var(--border);background:var(--bg-secondary);cursor:pointer;color:var(--text-secondary)">
+            Check Now
+          </button>
+        </span>
       </div>
     </div>
 
@@ -664,6 +672,48 @@ async function loadSettingsAppInfo() {
     const el = document.getElementById('settings-backup-info');
     if (el) el.textContent = d.last_backup || 'daily auto-backup enabled';
   } catch { /* silent */ }
+
+  // Universe health — load last-verified date from blob_store via /health or dedicated call
+  try {
+    const r = await fetch(`${API}/api/db/load`);
+    const d = await r.json();
+    const verifiedAt = d?.data?.universe_verified_at;
+    const el = document.getElementById('settings-universe-date');
+    if (el) {
+      el.textContent = verifiedAt
+        ? `last checked ${verifiedAt.slice(0, 10)}`
+        : 'never checked';
+    }
+  } catch { /* silent */ }
+}
+
+async function checkUniverseHealth() {
+  const btn  = document.getElementById('universe-check-btn');
+  const date = document.getElementById('settings-universe-date');
+  if (btn)  { btn.disabled = true; btn.textContent = 'Checking…'; }
+  if (date) date.textContent = 'checking…';
+  try {
+    const r = await fetch(`${API}/api/market/universe-health`);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'unknown error');
+    if (date) {
+      const staleStr = d.stale.length > 0
+        ? ` · ⚠ ${d.stale.length} stale: ${d.stale.join(', ')}`
+        : ` · ✓ all ${d.ok_count} OK`;
+      date.textContent = `${d.checked_at.slice(0, 10)}${staleStr}`;
+      date.style.color = d.stale.length > 0 ? '#d97706' : '#16a34a';
+    }
+    if (d.stale.length > 0) {
+      toast(`⚠ ${d.stale.length} stale/delisted tickers found — review core.py ASX_UNIVERSE`, 'warning');
+    } else {
+      toast(`Universe OK — all ${d.ok_count} tickers valid`, 'success');
+    }
+  } catch (e) {
+    if (date) { date.textContent = `check failed: ${e.message}`; date.style.color = '#dc2626'; }
+    toast(`Universe health check failed: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Check Now'; }
+  }
 }
 
 let _customIntervalTimer = null;

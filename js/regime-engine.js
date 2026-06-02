@@ -9,16 +9,18 @@
 // ============================================================
 
 const REGIME_THRESHOLDS = {
-  vixPanic:       30,   // VIX > this AND A/D < 0.3 → panic
-  vixHighVol:     22,   // VIX > this → highVol
-  asx200Trend5d:   2.0, // 5d |return| > this % → directional bias
-  asx200Trend20d:  4.0, // 20d |return| > this % → confirmed trend
-  adx200Trend:    25,   // ASX200 ADX > this → trending (not sideways)
-  adrBullish:      0.6, // advance/decline ratio > → breadth OK
-  adrBearish:      0.3, // advance/decline ratio < → breadth weak
-  atrPctHighVol:   1.5, // ASX200 ATR% > this → intraday volatility elevated
-  riskOffReturn5d: -2.0, // ASX200 5d return < this → risk-off
-  riskOnReturn5d:   1.0, // ASX200 5d return > this (+ good A/D) → risk-on
+  vixPanic:           30,   // VIX > this AND A/D < 0.3 → panic
+  vixHighVol:         22,   // VIX > this → highVol
+  asx200Trend5d:       2.0, // 5d |return| > this % → directional bias
+  asx200Trend20d:      4.0, // 20d |return| > this % → confirmed trend
+  adx200Trend:        25,   // ASX200 ADX > this → trending (not sideways)
+  adrBullish:          0.6, // advance/decline ratio > → breadth OK
+  adrBearish:          0.3, // advance/decline ratio < → breadth weak
+  atrPctHighVol:       1.5, // ASX200 ATR% > this → intraday volatility elevated
+  riskOffReturn5d:    -2.0, // ASX200 5d return < this → risk-off
+  riskOnReturn5d:      1.0, // ASX200 5d return > this (+ good A/D) → risk-on
+  spiFuturesRiskOff:  -1.5, // SPI200 futures vs spot < this % → expected weak open
+  spiFuturesRiskOn:    1.0, // SPI200 futures vs spot > this % → expected strong open
 };
 
 // classifyRegime — reads extended macro fields added by the updated /api/macro endpoint.
@@ -35,6 +37,7 @@ function classifyRegime(macroData) {
   const audChg5d  = macroData.aud_usd_change_5d;
   const ironChg5d = macroData.iron_ore_change_5d;
   const asxVol20d = macroData.asx_vol_20d;
+  const spiChg    = macroData.spi200_futures_chg;
 
   const signals = [];
   const votes = { riskOn: 0, riskOff: 0, panic: 0, highVol: 0, trend: 0, sideways: 0 };
@@ -121,6 +124,15 @@ function classifyRegime(macroData) {
     }
   }
 
+  // ── SPI200 futures (lead indicator — moves overnight before ASX opens) ──────
+  if (spiChg != null) {
+    if (spiChg < REGIME_THRESHOLDS.spiFuturesRiskOff) {
+      vote('riskOff', 2, `SPI200 futures ${spiChg.toFixed(1)}% vs spot → expected weak open`);
+    } else if (spiChg > REGIME_THRESHOLDS.spiFuturesRiskOn) {
+      vote('riskOn', 1, `SPI200 futures ${spiChg.toFixed(1)}% vs spot → expected strong open`);
+    }
+  }
+
   // ── Panic hard override ───────────────────────────────────────────────────
   if (votes.panic >= 5) {
     return { regime: 'panic', confidence: 1.0, signals };
@@ -153,13 +165,13 @@ function isStrategyAllowed(strategy, regime) {
 // getRegimeModifiers — scaling factors and warnings per regime
 function getRegimeModifiers(regime) {
   switch (regime) {
-    case 'riskOn':   return { confBoost: 0,    sizeMult: 1.0,  maxNewPositions: 5, warning: null };
-    case 'trend':    return { confBoost: 0,    sizeMult: 1.1,  maxNewPositions: 4, warning: null };
-    case 'sideways': return { confBoost: 0.05, sizeMult: 0.80, maxNewPositions: 3, warning: 'Sideways — tighten confidence bar, reduce sizing' };
-    case 'highVol':  return { confBoost: 0.08, sizeMult: 0.60, maxNewPositions: 2, warning: 'High vol — smaller positions; expect wider stops' };
-    case 'riskOff':  return { confBoost: 0.10, sizeMult: 0.50, maxNewPositions: 1, warning: 'Risk-off — minimal new exposure; prefer cash' };
-    case 'panic':    return { confBoost: 1.00, sizeMult: 0,    maxNewPositions: 0, warning: 'PANIC — no new positions. Hold cash.' };
-    default:         return { confBoost: 0.05, sizeMult: 0.90, maxNewPositions: 3, warning: 'Regime unknown — conservative defaults applied' };
+    case 'riskOn':   return { confBoost: 0,    sizeMult: 1.0,  maxNewPositions: 5, stopAtrMult: 2.5, warning: null };
+    case 'trend':    return { confBoost: 0,    sizeMult: 1.1,  maxNewPositions: 4, stopAtrMult: 2.5, warning: null };
+    case 'sideways': return { confBoost: 0.05, sizeMult: 0.80, maxNewPositions: 3, stopAtrMult: 2.5, warning: 'Sideways — tighten confidence bar, reduce sizing' };
+    case 'highVol':  return { confBoost: 0.08, sizeMult: 0.60, maxNewPositions: 2, stopAtrMult: 3.0, warning: 'High vol — smaller positions; expect wider stops' };
+    case 'riskOff':  return { confBoost: 0.10, sizeMult: 0.50, maxNewPositions: 1, stopAtrMult: 3.5, warning: 'Risk-off — minimal new exposure; prefer cash' };
+    case 'panic':    return { confBoost: 1.00, sizeMult: 0,    maxNewPositions: 0, stopAtrMult: 4.0, warning: 'PANIC — no new positions. Hold cash.' };
+    default:         return { confBoost: 0.05, sizeMult: 0.90, maxNewPositions: 3, stopAtrMult: 2.5, warning: 'Regime unknown — conservative defaults applied' };
   }
 }
 
@@ -169,14 +181,18 @@ function applyRegimeModifiers(rec, regime) {
   const mod = getRegimeModifiers(regime);
   const out = { ...rec };
   if (mod.sizeMult === 0) {
-    // Hard block — panic regime / zero allocation. Surface as a rejected rec
-    // so callers can omit it cleanly instead of seeing a forced qty=1.
+    // Panic: always an immediate hard-block, never blended
     out.qty = 0;
     out._regimeBlocked = regime;
     out._regimeAdjusted = true;
-  } else if (mod.sizeMult !== 1.0 && out.qty) {
-    out.qty = Math.max(1, Math.floor(out.qty * mod.sizeMult));
-    out._regimeAdjusted = true;
+  } else {
+    // Use blended sizeMult during a post-flip transition window, full mult otherwise
+    const sizeMult = state.currentRegime?._blendedSizeMult ?? mod.sizeMult;
+    if (sizeMult !== 1.0 && out.qty) {
+      out.qty = Math.max(1, Math.floor(out.qty * sizeMult));
+      out._regimeAdjusted = true;
+      if (state.currentRegime?._blendedSizeMult != null) out._regimeBlending = true;
+    }
   }
   if (mod.warning) {
     out.reasoning = [...(Array.isArray(out.reasoning) ? out.reasoning : [out.reasoning || '']), `[REGIME:${regime}] ${mod.warning}`];
@@ -185,6 +201,7 @@ function applyRegimeModifiers(rec, regime) {
 }
 
 // fetchAndClassifyRegime — fetches macro data and updates state.currentRegime
+const _BLEND_WINDOW_MS = 30 * 60 * 1000;  // 30-min linear blend after a non-panic regime flip
 const _regimeCache = { regime: 'unknown', confidence: 0, signals: [], fetchedAt: null };
 
 async function fetchAndClassifyRegime() {
@@ -200,8 +217,40 @@ async function fetchAndClassifyRegime() {
     state.macroData = { ...(state.macroData || {}), ...d };
     const result = classifyRegime(d);
     const prevRegime = _regimeCache.regime;
-    Object.assign(_regimeCache, result, { fetchedAt: Date.now() });
+    const now = Date.now();
+
+    // Track regime transitions for size-multiplier blending.
+    // Panic is always an immediate hard-block — never blended.
+    if (prevRegime !== result.regime) {
+      if (result.regime === 'panic') {
+        _regimeCache._regimeFlippedAt = null;
+        _regimeCache._prevSizeMult    = null;
+      } else if (prevRegime !== 'unknown') {
+        _regimeCache._regimeFlippedAt = now;
+        _regimeCache._prevSizeMult    = getRegimeModifiers(prevRegime).sizeMult;
+      }
+    }
+
+    Object.assign(_regimeCache, result, { fetchedAt: now });
+
+    // Recompute blended sizeMult — advances on each 15-min fetch within the window
+    if (_regimeCache._regimeFlippedAt != null && _regimeCache._prevSizeMult != null) {
+      const elapsed = now - _regimeCache._regimeFlippedAt;
+      if (elapsed < _BLEND_WINDOW_MS) {
+        const t = elapsed / _BLEND_WINDOW_MS;
+        const newMult = getRegimeModifiers(_regimeCache.regime).sizeMult;
+        _regimeCache._blendedSizeMult = +(_regimeCache._prevSizeMult + (newMult - _regimeCache._prevSizeMult) * t).toFixed(3);
+      } else {
+        _regimeCache._regimeFlippedAt = null;
+        _regimeCache._prevSizeMult    = null;
+        _regimeCache._blendedSizeMult = null;
+      }
+    } else {
+      _regimeCache._blendedSizeMult = null;
+    }
+
     state.currentRegime = { ..._regimeCache };
+
     // Alert when regime flips to panic or riskOff
     if (prevRegime !== 'unknown' && prevRegime !== result.regime) {
       if (result.regime === 'panic' || result.regime === 'riskOff') {

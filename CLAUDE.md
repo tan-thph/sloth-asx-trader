@@ -50,9 +50,9 @@ Signals (indicators.py) ──► Regime gate (regime-engine.js) ──► Claud
 
 | Layer | Job |
 |---|---|
-| **Regime engine** | Classifies macro (`riskOn/riskOff/panic/highVol/trend/sideways`) from live data; gates which strategies are allowed; applies size modifiers. Panic regime returns `sizeMult=0` → `_regimeBlocked` flag, recs are dropped. |
-| **Claude** | Qualitative conviction only — what to buy/sell and why. Never does arithmetic. |
-| **Quant engine** | Deterministic sizing: Kelly + vol scalar + multi-constraint (account-risk %, max-position %, liquidity, Kelly). Same input → same output. |
+| **Regime engine** | Classifies macro (`riskOn/riskOff/panic/highVol/trend/sideways`) from live data; gates which strategies are allowed; applies size modifiers. Panic regime returns `sizeMult=0` → `_regimeBlocked` flag, recs are dropped. Each regime now carries a `stopAtrMult` (2.5–4.0×) and a `_blendedSizeMult` that linearly transitions over 30 min after a flip to prevent cliff-edge sizing. SPI200 futures (`spiChg`) vote in the classifier as a same-session lead indicator. |
+| **Claude** | Qualitative conviction only — what to buy/sell and why. Never does arithmetic. User message always includes `TAX_LOSS_HARVEST_ACTIVE` (bool), date, time, and current regime. |
+| **Quant engine** | Deterministic sizing: Kelly + vol scalar + multi-constraint (account-risk %, max-position %, liquidity, Kelly). Rejects on `kellyFrac ≤ 0` (negative EV) before applying `minQty` floor. Stop distance = `stopMultiple × earningsAdj × ATR` where `stopMultiple` comes from the current regime's `stopAtrMult` and `earningsAdj = 1.3` when `signals.pre_earnings_risk = true`. Same input → same output. |
 | **Validator** | Schema + business rules; auto-repair loop (≤2 retries); HOLD recs use `requiredUnless` to skip target/stop/qty checks. |
 
 Calibration feedback (recent hit rates by confidence band and regime) is fetched from `GET /api/learning/calibration` and injected into every Claude user message.
@@ -68,7 +68,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `asx_server.py` | ~205 | Flask app + middleware + blueprint registration + `__main__` bootstrap. **Holds no routes itself.** |
 | `core.py` | ~230 | Shared infrastructure: `ttl_cache`, `fetch_with_retry` (exponential backoff + `_last_good` stale-cache), `_HTTP_SESSION`, `log`, `LOG_DIR`, `SECTOR_MAP`, `ASX_UNIVERSE`, `OLLAMA_BASE`. No Flask import. |
 | `db.py` | ~270 | SQLite schema, `get_db()`, `init_db()`, migrations, `log_failed_ticker()`, `backup_db(keep=7)`. Single source of truth — never `sqlite3.connect()` directly. `init_db()` runs `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` on every startup (non-blocking; prevents index-stat decay and WAL bloat). |
-| `indicators.py` | ~750 | All technical indicators + `analyse_ticker()` + `_score_ticker()`. Pure compute, no Flask. `_drop_forming_bar(hist)` drops the current-day candle before 07:00 UTC to avoid incomplete intraday bars. `_fetch_stooq_history(ticker, period)` is a free fallback provider (stooq.com, no API key) used when yfinance returns empty. |
+| `indicators.py` | ~750 | All technical indicators + `analyse_ticker()` + `_score_ticker()`. Pure compute, no Flask. `_drop_forming_bar(hist)` drops the current-day candle before 07:00 UTC to avoid incomplete intraday bars. `_sanity_check(hist, ticker)` drops bars with >25% single-day close move (data errors / unadjusted splits) — called after `_drop_forming_bar` in `analyse_ticker()`. `_fetch_stooq_history(ticker, period)` is a free fallback provider (stooq.com, no API key) used when yfinance returns empty. `FACTOR_WEIGHTS` dict (trend/pullback/volume/momentum/rs) controls `_score_ticker()` weights — update after running `POST /api/scanner/factor-stability` to apply empirical IC values. `analyse_ticker()` now returns `days_to_earnings` (int or None) and `pre_earnings_risk` (bool: true when ≤14 days to next earnings). |
 | `announcement_engine.py` + `announcement_routes.py` | — | ASX announcements scraper, PDF parser, Gemini scorer, blueprint `/api/announcements/*`. |
 | `news_engine.py` | — | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
 | `gunicorn.conf.py` | — | Production WSGI config. 2 workers × 8 threads. |
@@ -83,7 +83,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `routes/market.py`     | ~750 | `/health` (+ version/uptime/last_backup), `/api/{analyse,quote,macro,rba-rate,polymarket,risk,portfolio/nav-history,earnings-calendar,log/ai_response,log/ai_calls,log/ai_call/<id>}` | All yfinance read-only data + full prompt+response logging. ETFs skipped in `/api/earnings-calendar` via quoteType check. Uses `@ttl_cache`. |
 | `routes/backtest.py`   | ~610 | `/api/backtest`, `/api/backtest/ai-replay`     | Historical strategy backtest + replay scoring of executed AI recs. Supports `slippage_mode: 'flat'|'liquidity'`; liquidity mode applies ADV-tiered rates via `_adv_slippage(adv_aud)`. |
 | `routes/scanner.py`    | ~210 | `/api/market/scan*`                              | Background thread + `_scan_state` dict, sector diversification. Computes `breadth_ratio` (% of universe above 20-day SMA) after each scan; consumed by `/api/macro` via lazy import. |
-| `routes/learning.py`   | ~780 | `/api/learning/*`                                | Log → outcome → stats/calibration analytics. Decay-weighted win rates with volatility-adaptive half-life (`_HL_MAP`, 20–60d). `_calib_compute()` is a pure function cached 5 min. Step 6b: dominant success tag nudge (mirrors L2 for wins; ≥33% share + ESS≥2.5 → lean-in token). `GET /api/learning/calibration-stats` (Brier score + reliability-diagram bins). `GET /api/learning/digest-data` (structured failure data for postmortem digest AI prompt). Stats response includes `success_patterns`. |
+| `routes/learning.py`   | ~780 | `/api/learning/*`                                | Log → outcome → stats/calibration analytics. Decay-weighted win rates with volatility-adaptive half-life (`_HL_MAP`, 20–60d). `_calib_compute()` is a pure function, 5-min TTL cache protected by `_calib_lock` (threading.Lock — guards concurrent gunicorn threads). Calls `_resolve_virtual_outcomes(conn)` (price-checks unexecuted recs ≥30d old → `virtual_win`/`virtual_loss`) and `_resolve_sell_outcomes(conn)` (validates SELL tags ≥25d old → `sell_verify_verdict`). Phase 8 gate uses `_mann_whitney_z(wins, losses)` (Mann-Whitney U, no normality assumption) instead of raw means. Step 6b: dominant success tag nudge. Stats response includes `success_patterns`, `phase8_meta.mann_whitney_z`. `GET /api/learning/sell-outcomes` — executed SELL/TRIM events with driver verdicts. `GET /api/learning/lessons` / `POST /api/learning/lessons` / `DELETE /api/learning/lesson/<id>` — scoped persistent trading lessons (ticker/sector/regime) injected into Claude user messages. `GET /api/learning/tag-reviews` / `POST /api/learning/tag-review` / `GET /api/learning/tag-accuracy` — Gap 6 tag spot-check: `tag_reviews` table, 5-event weekly batch, agree/disagree/retag UI, `agree_rate` gates the `top_err` calibration nudge. When `agree_rate < 0.60`, auto-tagged events excluded from error pattern section; `⚠AUTO_TAGS_UNRELIABLE` token emitted instead. `GET /api/market/universe-health` — universe staleness check (Settings App Info card). |
 | `routes/debate.py`     | ~1100 | `/api/debate/*`                                  | Local Ollama bull/bear + postmortem + skill scoring + calibration quality debate. Direction-aware prompts (BUY vs SELL/TRIM). Uses `current_app.logger`. Sprint 26 added `GET /api/debate/calib-quality` (Phase 6) with `_norm_cdf`, `_calib_bands_raw`, `_calib_quality_prompt`, `_SCHEMA_CALIB_QUALITY`. |
 | `routes/news.py`       | ~690 | `/api/news/*`, `/api/groq/models`, `/api/google/models`, `/api/sbc-mode`, `/api/system/gpu`, `/api/ollama/start` | RSS scanner + LLM provider management + SBC toggle. Owns `_NE_OK`. |
 | `routes/claude.py`     | ~85  | `/api/claude/*`                                  | Backend proxy for the Anthropic API (opt-in). |
@@ -91,7 +91,7 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `routes/import_csv.py` | ~200 | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. Returns BUY rows only; SELL rows reported as skipped (require manual entry). |
 | `routes/intraday.py`   | ~270 | `/api/intraday/<ticker>`, `/api/intraday/scan`  | ASX100 intraday day-trade strategy. `GET /api/intraday/<ticker>` — single ticker 5m analysis (2-min TTL). `POST /api/intraday/scan` — batch scan up to 100 tickers with 8-thread pool. Returns VWAP, intraday RSI, volume acceleration, setup score 0–100, `passes` bool (entry window + VWAP + RSI + score gates). |
 
-Total: **12 blueprints, 81 routes** (including announcements blueprint). Sprint 11 added `GET /api/intraday/<ticker>` and `POST /api/intraday/scan`. Sprint 13 added `GET /api/portfolio/splits-check`.
+Total: **12 blueprints, ~95 routes** (including announcements blueprint). Sprint 38 added sell-outcomes, lessons, untagged, SPI200. Sprint 39 added `GET|POST /api/learning/tag-review(s)`, `GET /api/learning/tag-accuracy`, `GET /api/market/universe-health`.
 
 ### Frontend (JS) — load order matters
 
@@ -119,8 +119,8 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 | `js/config.js` | Global `state` object, `API` base URL, defaults |
 | `js/api.js` | All backend fetch wrappers + `saveStateToDb()` / `loadStateFromDb()` with input validators |
 | `js/claude-client.js` | `callClaude(agentType, msg, opts)` — central wrapper; supports direct + proxy mode. Agent types: `portfolio`, `analyst`, `pm`, `dayTrade`, `universe`, `macro`, `assistant`, `briefing`. |
-| `js/regime-engine.js` | `classifyRegime()`, `applyRegimeModifiers()`; panic regime hard-blocks via `_regimeBlocked` |
-| `js/quant-engine.js` | `computeTradeParams()` — deterministic sizing. Reads `signals.adv_20` (AUD) and `signals.volume_avg_20` (shares); liquidity cap is in shares. |
+| `js/regime-engine.js` | `classifyRegime()`, `applyRegimeModifiers()`; panic regime hard-blocks via `_regimeBlocked`. `getRegimeModifiers()` now returns `stopAtrMult` (2.5 riskOn/trend/sideways · 3.0 highVol · 3.5 riskOff · 4.0 panic). `_blendedSizeMult` linearly interpolates the old→new `sizeMult` over 30 min on regime flip to prevent cliff-edge sizing. SPI200 futures (`macroData.spi200_futures_chg`) cast a vote in `classifyRegime()`. |
+| `js/quant-engine.js` | `computeTradeParams()` — deterministic sizing. Rejects when `kellyFrac ≤ 0` (negative EV) before `minQty` floor applies. Stop distance = `regimeMod.stopAtrMult × earningsAdj × ATR`; `earningsAdj = 1.3` when `signals.pre_earnings_risk`. Reads `signals.adv_20` (AUD) and `signals.volume_avg_20` (shares); liquidity cap is in shares. Returns `_preEarningsAdj: true` flag on the rec when earnings adjustment fires. |
 | `js/response-validator.js` | `validateRec()`, `getValidatedAnalysisWithRepair()`. Ticker pattern accepts `[A-Z0-9]{2,5}`. Fields use `requiredUnless: 'HOLD'`. |
 | `js/learning-loop.js` | Client-side calibration analytics + `fetchCalibrationBlock()` from backend. |
 | `js/prompts.js` | All Claude system prompts (`ANALYSIS_SYSTEM_PROMPT`, `MACRO_SYSTEM_PROMPT`, `MORNING_BRIEFING_SYSTEM_PROMPT`, day-trade prompts, analyst/PM prompts) |
@@ -146,7 +146,7 @@ state.tradeJournal:       [{ id, date, ticker, action, qty, entryPrice, exitPric
 state.recHistory:         [{ id, date, ticker, action, confidence, ensembleConfidence, priceRange, target, stopLoss, qty, executed, outcome, actualProfit, regime, _learningId, _thesis?, _stopAlertedAt?, _targetAlertedAt? }]
 state.recommendations:    pending recs (same shape as recHistory entries with status='pending')
 state.liveSignals:        { TICKER: { current_price, rsi_14, bb_*, atr_14, adv_20 (AUD), volume_avg_20 (shares), score, ... } }
-state.currentRegime:      { regime, confidence, signals: [...] }
+state.currentRegime:      { regime, confidence, signals: [...], _blendedSizeMult?: number, _prevSizeMult?: number }
 state.priceTimestamps:    { TICKER: ISO-string }  — fetched_at from last quote call; used for stale-data badge (>25 min)
 state.portfolioHistory:   [{ date, netWorth, portfolioValue, cash }]  — daily snapshots; used for drawdown monitor
 state.watchlist:          [{ ticker, addedAt, notes }]  — tickers monitored but not held; persisted in blob_store
@@ -195,7 +195,10 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 | `fetchSkillScore(learningId)` | `debate-client.js` | Scores the closed trade's process quality 0-10. Queued LOW priority. |
 | `triggerCalibQualityIfStale(regime)` | `debate-client.js` | Fires `GET /api/debate/calib-quality` once per calendar day (localStorage date guard). Called from `analysis.js` after `logRecsToLearningLoop()`. Queued LOW priority. *(Sprint 26)* |
 | `fetchCalibrationBlock(regime, sectors, tickers)` | `learning-loop.js` | Pulls the compact calibration string from `GET /api/learning/calibration`; injected into every Claude user message. |
-| `_calib_compute()` | `routes/learning.py` | Pure function, 5-min TTL cache. Decay-weighted win rate per confidence band; returns the `adj` nudge the prompt applies to confidence. |
+| `_calib_compute()` | `routes/learning.py` | Pure function, 5-min TTL cache (thread-safe: `_calib_lock`). Calls `_resolve_virtual_outcomes()` and `_resolve_sell_outcomes()` lazily. Decay-weighted win rate per confidence band; returns the `adj` nudge the prompt applies to confidence. Token-budget-ordered assembly: header → conf bands → regime warning → skill insight → conservatism warning → sell tags → success nudge → per-ticker. |
+| `_resolve_virtual_outcomes(conn)` | `routes/learning.py` | Fetches price history for unexecuted recs ≥30d old; writes `virtual_outcome = 'virtual_win'/'virtual_loss'/'virtual_open'`. Prevents calibration from being censored to executed-only outcomes. |
+| `_resolve_sell_outcomes(conn)` | `routes/learning.py` | For SELL/TRIM events ≥25d old with `sell_primary_driver` set, fetches post-sell price change (and alt ticker if `better_opportunity`). Writes `sell_verify_verdict` (`validated`/`invalidated`/`inconclusive`). Capped at 5 per calibration call. |
+| `_mann_whitney_z(wins, losses)` | `routes/learning.py` | Phase 8 gate statistic. Replaces raw mean comparison — computes U statistic and z-score (no scipy needed). Phase 8 active when z > 1.28 (one-sided p < 0.10). |
 
 ### Gotchas specific to the Learning Loop
 
@@ -217,7 +220,7 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 
 ### Market data (all cached via `ttl_cache`)
 - `GET /api/seasonality/<ticker>` — 12-month avg return pattern from 10yr monthly history. Returns `{ok, ticker, years, months:[{month, avg, positive, count, min, max}]}`. avg/min/max in %. **24 h cache.** Displayed on Signals page detail card; cached in `window._seasonalityCache` per session.
-- `GET /api/macro` — ASX200, AUD/USD, gold, iron ore + regime fields. **5 min cache.** `advance_decline_ratio` is now populated from the last scanner run: `routes/market.py` lazy-imports `_scan_state["breadth_ratio"]` from `routes/scanner.py` (computed as % of universe above 20-day SMA after each scan). Will be `null` until the first scan completes.
+- `GET /api/macro` — ASX200, AUD/USD, gold, iron ore + regime fields. **5 min cache.** `advance_decline_ratio` populated from last scanner run (% universe above 20-day SMA). `spi200_futures_chg` is `(SPI200 futures / ASX200 spot − 1) × 100`; fetched from `YAP=F` in the parallel yfinance block — `null` if futures data unavailable. `asx_vol_20d` is 20-day realised ASX vol (A-VIX proxy).
 - `GET /api/quote/<ticker>` — fast price + sector + **`fetched_at` (UTC ISO)**. **45 s cache.** Both `_quote_cached` and `_fetch_symbol` (macro) use `fetch_with_retry` with stale-cache fallback.
 - `GET /api/analyse/<ticker>` / `POST /api/analyse/batch` — full indicator pack. **5 min cache.**
 - `GET /api/risk?tickers=A,B,C&rf=4.35` — beta, Sharpe, VaR, CVaR, correlation matrix.
@@ -233,10 +236,19 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 - `POST /api/learning/log` — log a recommendation event.
 - `POST /api/learning/outcome` — partial-patch an event's outcome.
 - `DELETE /api/learning/event/<id>`
-- `GET /api/learning/stats` — confidence-band win rates + **Wilson 95% CI**, regime stats, prompt-version history, R:R stats, failure patterns, debate insights. Includes `calibration_active` (bool: n≥30) and `overall_ci_lo/hi`.
-- `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` — compact calibration block (~30–60 tokens) for prompt injection. Includes per-ticker stats for portfolio holdings. 5-min TTL cache via `_calib_compute()`. Gated at n<30 — returns `{available:false}` when sample too small.
+- `GET /api/learning/stats` — confidence-band win rates + **Wilson 95% CI**, regime stats, prompt-version history, R:R stats, failure patterns, debate insights. Includes `calibration_active` (bool: n≥30), `overall_ci_lo/hi`, `success_patterns`, and `phase8_meta` (with `mann_whitney_z` and `mann_whitney_threshold`).
+- `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` — compact calibration block (~30–100 tokens, priority-ordered) for prompt injection. Includes per-ticker stats, sell-tag verdicts, conservatism warning when virtual-outcome `would_have_won` rate is high. 5-min TTL cache via `_calib_compute()` (thread-safe). Gated at n<30 — returns `{available:false}` when sample too small.
 - `GET /api/learning/calibration-stats` — Brier score + reliability-diagram bins. Returns `{brier_score, n, bins:[{range,lo,hi,n,mean_confidence,actual_win_rate}]}`. Displayed on Learning page.
 - `GET /api/learning/digest-data` — structured failure data for the postmortem digest: `{recent_failures, regime_stats, overall_wins, overall_total, error_dist, exit_dist}`. Frontend builds a Claude prompt from this and calls `callClaude('assistant', …)`.
+- `GET /api/learning/sell-outcomes` — executed SELL/TRIM events with `sell_primary_driver` set, with per-event `sell_verify_verdict` badges. `?force=1` triggers immediate re-resolve before returning.
+- `GET /api/learning/lessons?ticker=X&sector=Y&regime=Z` — scoped trading lessons matching the current context; injected into Claude user messages (cap: 3–4 lessons, ~15–25 tokens each).
+- `POST /api/learning/lessons` — create a lesson `{lesson_text, ticker?, sector?, regime?, source}`.
+- `DELETE /api/learning/lesson/<id>` — hard-delete one lesson.
+- `GET /api/learning/untagged` — loss/breakeven events with no `error_type` set; used by the batch-classify button.
+- `GET /api/learning/tag-reviews?limit=5` — up to 5 random unreviewed auto-tagged events; weekly spot-check queue on the Learning page.
+- `POST /api/learning/tag-review` — submit `{event_id, verdict:'agree'|'disagree', corrected_tag?}`; disagree updates `error_type` → `manual` and clears `_calib_cache`.
+- `GET /api/learning/tag-accuracy` — `{n, n_agree, agree_rate, label, pending_review}`. When `agree_rate < 0.60`, `_calib_compute()` restricts the `top_err` nudge to manually-reviewed events and emits `⚠AUTO_TAGS_UNRELIABLE` instead.
+- `GET /api/market/universe-health` — checks all `ASX_UNIVERSE["asx200"]` tickers via yfinance `quoteType`; returns `{stale:[...], ok_count, checked_at}`; persists `universe_verified_at` to `blob_store`. Shown in Settings → App Info with "Check Now" button.
 
 ### Alerts (Telegram)
 - `GET /api/alerts/config` — `{has_telegram: bool}` — whether credentials are stored.
@@ -295,7 +307,7 @@ Edit `js/prompts.js`. If it's reused, add the agent type to `_AGENT_MAX_TOKENS` 
 `js/regime-engine.js` → `REGIME_THRESHOLDS`. Test with `classifyRegime(macroData)` from console.
 
 ### Tune indicator weights
-`indicators.py` → `_score_ticker()`. The market scanner uses this directly.
+`indicators.py` → `FACTOR_WEIGHTS` dict. Run `POST /api/scanner/factor-stability` to get per-factor OOS IC values, then update `FACTOR_WEIGHTS` with those values (or use the "suggested weights" row in the Factor Stability UI table). `_score_ticker()` reads `FACTOR_WEIGHTS` at runtime — no restart needed after editing the dict.
 
 ### Tune Kelly fraction / risk %
 `js/quant-engine.js` → `QUANT_CONFIG`.
@@ -367,7 +379,19 @@ The Vitest suite (`tests/`) uses `vm.runInThisContext` to load browser-global sc
 
 23. **`stk.quarterly_earnings` and `stk.earnings` are deprecated in yfinance ≥0.2.x.** Use `stk.earnings_history` instead (columns: `epsActual`, `epsEstimate`). The earnings calendar endpoint in `routes/market.py` was updated to use this API. Any new code consuming per-quarter EPS data should use `earnings_history`, not `quarterly_earnings`.
 
-24. **Intraday strategy is same-day only — no overnight hold.** `routes/intraday.py` fetches 5m bars (`period="2d", interval="5m"`). Entry window gate (`_in_entry_window()`) ensures `passes=False` outside 10:45–15:00 AEST — scanner still shows data but won't mark setups as actionable outside that window. `checkIntradayCloseouts()` fires a time-stop alert at 15:00 AEST for any open intraday position. yfinance 5m data has ~5–15 min latency; prices are indicative only. `state.intraday.openPositions` and `todayPnl` are stored in state (persisted to DB); the allocatedCash draws from `state.cash` and is tracked separately from `state.dayTrading.allocatedCash`. The ⚡ Intraday tab has a universe selector (asx20/asx50/asx100/asx200) stored in `state.intraday.params.universeKey`. The scan endpoint uses `as_completed` with 8s per-ticker timeout and 15 workers to avoid slow/delisted tickers blocking the batch. `IPL.AX` was removed from all universe lists (delisted 2025).
+24. **`_calib_cache` is protected by `_calib_lock` (threading.Lock).** Any code that reads or writes `_calib_cache` in `routes/learning.py` must hold the lock. Compute expensive DB work outside the lock — only the dict read and the final write need to be inside `with _calib_lock:`.
+
+25. **Kelly `minQty` floor applies only to positive-Kelly trades.** `computeTradeParams()` returns `{ok:false}` when `kellyFrac ≤ 0` before reaching the `Math.max(QUANT_CONFIG.minQty, …)` line. Do not move the Kelly guard below the `minQty` floor — that was the original bug.
+
+26. **`_sanity_check` runs after `_drop_forming_bar` in `analyse_ticker()`.** It drops bars with >25% single-day close move. Penny stocks (close < $0.50) are exempt. If a legitimate corporate event causes a large move, the bar will be dropped and the following bar's ATR/RSI will look unusual — this is intentional and preferable to letting a data error corrupt all downstream signals.
+
+27. **`FACTOR_WEIGHTS` must sum to 100.** `_score_ticker()` normalises each component's raw max against its weight (e.g., trend raw max 30 → `trend * w["trend"] / 30`). If you change `FACTOR_WEIGHTS`, verify the normalised total still caps at 100. The `_WEIGHT_TOTAL` variable is informational only — it's not used in the scoring formula.
+
+28. **`pre_earnings_risk` is set in `analyse_ticker()` output, not in the quant engine.** The quant engine reads `signals.pre_earnings_risk` — if that field is absent (e.g., from a cached `analyse_ticker()` call before the field was added), `earningsAdj` defaults to 1.0. Recs flagged with `_preEarningsAdj: true` show a `📅 Pre-earnings` badge on the rec card.
+
+29. **Regime `_blendedSizeMult` is set by `fetchAndClassifyRegime()` not `getRegimeModifiers()`.** The blend is computed in the async fetch function and stored on `_regimeCache._blendedSizeMult`. `applyRegimeModifiers()` reads `state.currentRegime?._blendedSizeMult` as an override over `mod.sizeMult`. If `state.currentRegime` is stale (e.g., regime was just refreshed in a different tab), the blend fraction may be wrong — this is acceptable given the 15-min regime cache TTL.
+
+30. **Intraday strategy is same-day only — no overnight hold.** `routes/intraday.py` fetches 5m bars (`period="2d", interval="5m"`). Entry window gate (`_in_entry_window()`) ensures `passes=False` outside 10:45–15:00 AEST — scanner still shows data but won't mark setups as actionable outside that window. `checkIntradayCloseouts()` fires a time-stop alert at 15:00 AEST for any open intraday position. yfinance 5m data has ~5–15 min latency; prices are indicative only. `state.intraday.openPositions` and `todayPnl` are stored in state (persisted to DB); the allocatedCash draws from `state.cash` and is tracked separately from `state.dayTrading.allocatedCash`. The ⚡ Intraday tab has a universe selector (asx20/asx50/asx100/asx200) stored in `state.intraday.params.universeKey`. The scan endpoint uses `as_completed` with 8s per-ticker timeout and 15 workers to avoid slow/delisted tickers blocking the batch. `IPL.AX` was removed from all universe lists (delisted 2025).
 
 ---
 

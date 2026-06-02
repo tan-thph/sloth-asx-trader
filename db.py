@@ -209,6 +209,16 @@ _SCHEMA = """
     CREATE INDEX IF NOT EXISTS idx_lessons_ticker  ON trading_lessons(ticker);
     CREATE INDEX IF NOT EXISTS idx_lessons_sector  ON trading_lessons(sector);
     CREATE INDEX IF NOT EXISTS idx_lessons_regime  ON trading_lessons(regime);
+
+    CREATE TABLE IF NOT EXISTS tag_reviews (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id      INTEGER NOT NULL REFERENCES ai_learning_events(id) ON DELETE CASCADE,
+        reviewed_at   TEXT DEFAULT (datetime('now','localtime')),
+        verdict       TEXT NOT NULL,        -- 'agree' | 'disagree'
+        corrected_tag TEXT,                 -- NULL when agree; user-corrected tag when disagree
+        original_tag  TEXT                  -- snapshot of error_type at review time
+    );
+    CREATE INDEX IF NOT EXISTS idx_tag_reviews_event ON tag_reviews(event_id);
 """
 
 
@@ -247,6 +257,13 @@ _LE_MIGRATIONS = [
     # virtual_win | virtual_loss | virtual_open (neither hit yet) | NULL (unresolved)
     ("virtual_outcome",        "TEXT"),  # virtual_win|virtual_loss|virtual_open|NULL
     ("virtual_pnl_pct",        "REAL"),  # reserved — NULL until entry price is known
+    # Sprint 37: Sell tag outcome tracking (Gap 3 + Gap 7)
+    # Lazy-resolved in _calib_compute() ~25 days after the sell event.
+    ("alternative_ticker",   "TEXT"),  # for better_opportunity cross-check (set at generation time)
+    ("sell_verify_date",     "TEXT"),  # date when 30d verify check ran
+    ("sell_verify_verdict",  "TEXT"),  # validated|invalidated|inconclusive
+    ("sell_verify_sold_chg", "REAL"),  # % price change of sold ticker since sell date
+    ("sell_verify_alt_chg",  "REAL"),  # % price change of alternative ticker since sell date
 ]
 
 

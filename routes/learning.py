@@ -1097,11 +1097,21 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
                        realized_pnl_pct, rr_ratio, timestamp,
-                       error_type, exit_reason, skill_score, success_tags
+                       error_type, error_type_source, exit_reason, skill_score, success_tags
                 FROM ai_learning_events
                 WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
                 ORDER BY timestamp DESC LIMIT 300
             """, (cutoff,)).fetchall()
+
+            # Gap 6: check auto-tag agreement rate to gate the top_err nudge.
+            tag_acc = conn.execute("""
+                SELECT COUNT(*) as n,
+                       SUM(CASE WHEN verdict='agree' THEN 1 ELSE 0 END) as n_agree
+                FROM tag_reviews
+            """).fetchone()
+            _auto_tag_n      = tag_acc["n"] if tag_acc else 0
+            _auto_tag_agree  = (tag_acc["n_agree"] / tag_acc["n"]) if (_auto_tag_n > 0) else None
+            _auto_tags_ok    = _auto_tag_agree is None or _auto_tag_agree >= 0.60
 
             # Fix #18: fetch resolved virtual outcomes to supplement calibration at 0.75× weight.
             # Maps virtual_win → 'win', virtual_loss → 'loss' so all downstream logic is unchanged.
@@ -1312,6 +1322,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         # 6. Dominant learnable error in non-shock losses — L2: threshold lowered to 33%, n≥3
         learnable_losses = [r for r in rows if r["outcome_status"] == "loss"
                             and "external_shock" not in (r["error_type"] or "").split(",")]
+        # Gap 6: if auto-tag accuracy < 60%, restrict to manually-reviewed events only.
+        if not _auto_tags_ok:
+            learnable_losses = [r for r in learnable_losses
+                                if (r["error_type_source"] or "") != "auto"]
         if len(learnable_losses) >= 3:
             type_counts: dict = {}
             for r in learnable_losses:
@@ -1339,6 +1353,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                            "require min R:R 2.5" if top_et == "poor_rr" else
                            "add re-validation step")
                     )
+        # Gap 6: auto-tags unreliable and not enough manually-reviewed events — warn Claude.
+        if not _auto_tags_ok and len(learnable_losses) < 3:
+            parts.append(f"⚠AUTO_TAGS_UNRELIABLE({int(_auto_tag_agree*100)}%agree,n={_auto_tag_n})→err nudge suppressed")
 
         # 6b. Dominant success tag — mirror of L2 dominant error check
         # Only emit when ESS of wins is high enough to trust the pattern.
@@ -1629,5 +1646,145 @@ def sell_outcomes():
                 ORDER BY timestamp DESC LIMIT ?
             """, (limit,)).fetchall()
         return jsonify({"ok": True, "events": [dict(r) for r in rows]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── Gap 6: Ollama tag spot-check ─────────────────────────────────────────────
+
+@bp.route("/api/learning/tag-reviews", methods=["GET"])
+def tag_reviews_queue():
+    """Return up to 5 randomly-chosen auto-tagged loss/breakeven events not yet reviewed.
+
+    These are served as the weekly spot-check queue on the Learning page. The user
+    reviews each one (agree / disagree + corrected tag) to build an agreement-rate
+    signal that gates the top_err calibration nudge in _calib_compute().
+
+    Query params:
+        limit (int, default 5, max 20): number of events to return.
+    """
+    limit = min(int(request.args.get("limit", 5)), 20)
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT e.id, e.ticker, e.error_type, e.error_type_source,
+                       e.outcome_status, e.realized_pnl_pct, e.ai_confidence,
+                       e.rationale_summary, e.timestamp, e.regime, e.recommendation
+                FROM ai_learning_events e
+                WHERE e.error_type_source = 'auto'
+                  AND e.outcome_status IN ('loss', 'breakeven')
+                  AND e.error_type IS NOT NULL AND e.error_type != ''
+                  AND e.id NOT IN (SELECT event_id FROM tag_reviews)
+                ORDER BY RANDOM()
+                LIMIT ?
+            """, (limit,)).fetchall()
+            total_pending = conn.execute("""
+                SELECT COUNT(*) FROM ai_learning_events
+                WHERE error_type_source = 'auto'
+                  AND outcome_status IN ('loss', 'breakeven')
+                  AND id NOT IN (SELECT event_id FROM tag_reviews)
+            """).fetchone()[0]
+        return jsonify({"ok": True, "events": [dict(r) for r in rows],
+                        "count": len(rows), "total_pending": total_pending})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/tag-review", methods=["POST"])
+def submit_tag_review():
+    """Submit a manual review verdict for one auto-tagged event.
+
+    Body (JSON):
+        event_id      int    — ID of the ai_learning_events row
+        verdict       str    — 'agree' | 'disagree'
+        corrected_tag str?   — required when verdict='disagree'; replaces error_type
+
+    On 'disagree', updates the event's error_type and marks error_type_source='manual'
+    so the corrected tag is included in future calibration without restriction.
+    On 'agree', records the review without changing the event.
+    """
+    data      = request.get_json(force=True)
+    event_id  = data.get("event_id")
+    verdict   = data.get("verdict")
+    corrected = data.get("corrected_tag", "").strip()
+
+    if not event_id or verdict not in ("agree", "disagree"):
+        return jsonify({"ok": False, "error": "event_id and verdict ('agree'|'disagree') required"}), 400
+    if verdict == "disagree" and not corrected:
+        return jsonify({"ok": False, "error": "corrected_tag required when verdict is 'disagree'"}), 400
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT id, error_type FROM ai_learning_events WHERE id=? AND error_type_source='auto'",
+                (event_id,)
+            ).fetchone()
+            if not row:
+                return jsonify({"ok": False, "error": "Event not found or not auto-tagged"}), 404
+
+            conn.execute("""
+                INSERT OR REPLACE INTO tag_reviews (event_id, verdict, corrected_tag, original_tag)
+                VALUES (?, ?, ?, ?)
+            """, (event_id, verdict,
+                  corrected if verdict == "disagree" else None,
+                  row["error_type"]))
+
+            if verdict == "disagree":
+                conn.execute("""
+                    UPDATE ai_learning_events
+                    SET error_type = ?, error_type_source = 'manual'
+                    WHERE id = ?
+                """, (corrected, event_id))
+
+        # Invalidate calibration cache so the next request picks up the corrected tag.
+        with _calib_lock:
+            _calib_cache.clear()
+
+        return jsonify({"ok": True, "event_id": event_id, "verdict": verdict})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/tag-accuracy", methods=["GET"])
+def tag_accuracy():
+    """Return Ollama auto-tag agreement rate computed from tag_reviews.
+
+    Surfaced on the Learning page Debate Engine card as a small accuracy line.
+    Also consumed by _calib_compute() to gate the top_err calibration nudge:
+        ≥75%  → reliable    (green)
+        60–75%→ acceptable  (amber)
+        <60%  → unreliable  (red) — top_err nudge suppressed
+    """
+    try:
+        with get_db() as conn:
+            row = conn.execute("""
+                SELECT COUNT(*) as n,
+                       SUM(CASE WHEN verdict='agree' THEN 1 ELSE 0 END) as n_agree
+                FROM tag_reviews
+            """).fetchone()
+            n       = row["n"]       or 0
+            n_agree = row["n_agree"] or 0
+            rate    = round(n_agree / n, 3) if n > 0 else None
+
+            pending = conn.execute("""
+                SELECT COUNT(*) FROM ai_learning_events
+                WHERE error_type_source = 'auto'
+                  AND outcome_status IN ('loss', 'breakeven')
+                  AND id NOT IN (SELECT event_id FROM tag_reviews)
+            """).fetchone()[0]
+
+        if rate is None:
+            label = "unreviewed"
+        elif rate >= 0.75:
+            label = "good"
+        elif rate >= 0.60:
+            label = "acceptable"
+        else:
+            label = "unreliable"
+
+        return jsonify({
+            "ok": True, "n": n, "n_agree": n_agree,
+            "agree_rate": rate, "label": label, "pending_review": pending,
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

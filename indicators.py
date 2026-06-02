@@ -58,6 +58,23 @@ def _drop_forming_bar(hist: pd.DataFrame) -> pd.DataFrame:
     return hist
 
 
+# ── Price sanity check ───────────────────────────────────────────────────────
+
+def _sanity_check(hist: pd.DataFrame, ticker: str = "") -> pd.DataFrame:
+    """Drop bars with a single-day close move >25% (data error or unadjusted split).
+    Penny stocks (close < $0.50) are excluded — large % swings are normal there.
+    """
+    if len(hist) < 2:
+        return hist
+    pct_chg = hist["Close"].pct_change().abs()
+    mask = (pct_chg <= 0.25) | (hist["Close"] < 0.50) | pct_chg.isna()
+    n_dropped = int((~mask).sum())
+    if n_dropped > 0:
+        from core import log
+        log.warning(f"[sanity_check] {ticker}: dropped {n_dropped} bar(s) with >25% single-day move")
+    return hist[mask]
+
+
 # ── Stooq fallback data provider ─────────────────────────────────────────────
 
 def _fetch_stooq_history(ticker: str, period: str = "6mo") -> pd.DataFrame:
@@ -333,6 +350,16 @@ def compute_support_resistance(high, low, close, lookback=50):
 
 # ── Market scanner scoring (lightweight, numpy-only) ──────────────────────────
 # Used by _run_market_scan in asx_server.py. Edit scoring weights here.
+# After running POST /api/scanner/factor-stability, update FACTOR_WEIGHTS with
+# the suggested_weights row from the Factor Stability tab to apply empirical ICs.
+
+FACTOR_WEIGHTS = {
+    "trend":    30,
+    "pullback": 30,
+    "volume":   20,
+    "momentum": 10,
+    "rs":       10,
+}
 
 def _simple_rsi(closes: np.ndarray, period: int = 14) -> float:
     if len(closes) < period + 2:
@@ -414,7 +441,12 @@ def _score_ticker(
         elif rs_5d_alpha > -2: rs_score = 4
         else:                  rs_score = 1
 
-    total = trend + pullback + vol_score + mom_score + rs_score
+    w = FACTOR_WEIGHTS
+    total = (trend     * w["trend"]    / 30 +
+             pullback  * w["pullback"] / 30 +
+             vol_score * w["volume"]   / 20 +
+             mom_score * w["momentum"] / 10 +
+             rs_score  * w["rs"]       / 10)
 
     result = {
         "score":          round(min(total, 100), 1),
@@ -463,6 +495,7 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
 
     # ── Drop forming bar (incomplete intraday candle during ASX market hours) ─
     hist = _drop_forming_bar(hist)
+    hist = _sanity_check(hist, ticker)
     if len(hist) < 30:
         return {"error": f"Insufficient data for {ticker}", "ticker": ticker.upper()}
 
@@ -657,6 +690,24 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     if fundamentals["52w_low"] and cp:
         fundamentals["pct_from_52w_low"] = round((cp / fundamentals["52w_low"] - 1) * 100, 2)
 
+    # ── Earnings proximity ────────────────────────────────────────────────────
+    days_to_earnings = None
+    try:
+        cal = stk.calendar
+        if cal is not None:
+            if isinstance(cal, dict):
+                earn_dates = cal.get("Earnings Date", [])
+                if earn_dates:
+                    first = earn_dates[0] if isinstance(earn_dates, (list, tuple)) else earn_dates
+                    days_to_earnings = (pd.Timestamp(first) - pd.Timestamp.now()).days
+            elif hasattr(cal, "columns") and "Earnings Date" in cal.columns:
+                earn_ts = cal["Earnings Date"].dropna()
+                if not earn_ts.empty:
+                    days_to_earnings = (pd.Timestamp(earn_ts.iloc[0]) - pd.Timestamp.now()).days
+    except Exception:
+        pass
+    pre_earnings_risk = bool(days_to_earnings is not None and 0 <= days_to_earnings <= 14)
+
     # ── Chart data (last 90 days) ─────────────────────────────────────────────
     chart_data = []
     for dt, row in hist.tail(90).iterrows():
@@ -752,6 +803,10 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
 
         # Composite score (0-100) from _score_ticker
         "score": (_score_ticker(close.values, volume.values) or {}).get("score"),
+
+        # Earnings proximity
+        "days_to_earnings": days_to_earnings,
+        "pre_earnings_risk": pre_earnings_risk,
 
         # Fundamentals
         "fundamentals": fundamentals,

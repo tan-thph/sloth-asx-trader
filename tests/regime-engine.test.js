@@ -208,6 +208,22 @@ describe('getRegimeModifiers', () => {
     expect(m.sizeMult).toBeGreaterThan(0);
     expect(m.sizeMult).toBeLessThanOrEqual(1);
   });
+
+  it('returns stopAtrMult for every regime', () => {
+    for (const r of ['riskOn', 'trend', 'sideways', 'highVol', 'riskOff', 'panic']) {
+      expect(typeof getRegimeModifiers(r).stopAtrMult).toBe('number');
+      expect(getRegimeModifiers(r).stopAtrMult).toBeGreaterThan(0);
+    }
+  });
+
+  it('stopAtrMult escalates as risk increases: riskOn < highVol < riskOff < panic', () => {
+    expect(getRegimeModifiers('riskOn').stopAtrMult)
+      .toBeLessThan(getRegimeModifiers('highVol').stopAtrMult);
+    expect(getRegimeModifiers('highVol').stopAtrMult)
+      .toBeLessThan(getRegimeModifiers('riskOff').stopAtrMult);
+    expect(getRegimeModifiers('riskOff').stopAtrMult)
+      .toBeLessThan(getRegimeModifiers('panic').stopAtrMult);
+  });
 });
 
 // ── applyRegimeModifiers ──────────────────────────────────────────────────────

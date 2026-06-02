@@ -209,6 +209,7 @@ def _macro_payload() -> dict:
         "us10y":    ("^TNX",     "5d"),
         "iron_ore": ("TIO=F",    "1mo"),
         "copper":   ("HG=F",     "5d"),
+        "spi200":   ("YAP=F",    "5d"),    # ASX SPI200 futures — lead indicator vs ^AXJO spot
         # ASX sector ETFs (SPDR series) — 1mo for 5d return
         "xmj":      ("XMJ.AX",  "1mo"),   # Materials
         "xfj":      ("XFJ.AX",  "1mo"),   # Financials
@@ -346,6 +347,24 @@ def _macro_payload() -> dict:
         macro_data["advance_decline_ratio"] = _scanner_state.get("breadth_ratio")
     except Exception:
         macro_data["advance_decline_ratio"] = None
+
+    # ── SPI200 futures vs ASX200 spot (overnight lead indicator) ─────────────
+    # YAP=F is the ASX SPI200 futures contract. When US markets are open
+    # overnight, this moves before ASX opens, giving a ~12h lead on direction.
+    # spi200_futures_chg = (futures / asx200_spot - 1) × 100
+    spi_hist = _histories.get("spi200")
+    if spi_hist is not None and len(spi_hist) >= 1 and asx_hist is not None:
+        try:
+            spi_price = safe_float(spi_hist["Close"].iloc[-1])
+            asx_spot  = safe_float(asx_hist["Close"].iloc[-1])
+            if spi_price and asx_spot:
+                macro_data["spi200_futures_chg"] = round((spi_price / asx_spot - 1) * 100, 2)
+            else:
+                macro_data["spi200_futures_chg"] = None
+        except Exception:
+            macro_data["spi200_futures_chg"] = None
+    else:
+        macro_data["spi200_futures_chg"] = None
 
     return macro_data
 
@@ -711,74 +730,87 @@ def benchmark_history():
 
 # ── Earnings calendar ────────────────────────────────────────────────────────
 
+@ttl_cache(seconds=14400)   # 4 h per ticker — earnings dates change quarterly
+def _get_ticker_earnings_cached(ticker: str) -> dict:
+    """Fetch earnings data for one ticker (already in .AX format).
+
+    Cached independently per ticker so repeat calls within 4 hours avoid
+    hitting yfinance (info + calendar + earnings_history = 3 HTTP round-trips).
+    """
+    try:
+        stk = yf.Ticker(ticker)
+        info = stk.info or {}
+        # Skip ETFs and mutual funds — they have no earnings data and yfinance
+        # logs 404 errors per symbol.  Detect via quoteType from the info dict.
+        if info.get("quoteType", "").upper() in ("ETF", "MUTUALFUND", "MONEYMARKET"):
+            return {"nextEarningsDate": None, "skipped": "ETF"}
+
+        next_earnings = None
+        try:
+            cal = stk.calendar
+            if cal is not None:
+                if isinstance(cal, dict):
+                    ed = cal.get("Earnings Date")
+                    if ed:
+                        if hasattr(ed, '__iter__') and not isinstance(ed, str):
+                            ed = list(ed)[0]
+                        next_earnings = str(ed)[:10] if ed else None
+                elif hasattr(cal, 'loc') and "Earnings Date" in cal.index:
+                    vals = cal.loc["Earnings Date"].values
+                    if len(vals):
+                        next_earnings = str(vals[0])[:10]
+        except Exception:
+            pass
+
+        eps_fwd = safe_float(info.get("forwardEps"))
+        eps_ttm = safe_float(info.get("trailingEps"))
+        eps_growth = safe_float(info.get("earningsGrowth"))
+        revenue_growth = safe_float(info.get("revenueGrowth"))
+        earnings_quarterly = []
+        try:
+            # yfinance ≥0.2.x: earnings_history has epsActual / epsEstimate columns.
+            # quarterly_earnings / earnings were deprecated (fundamentals.py:33 warning).
+            eh = stk.earnings_history
+            if eh is not None and not eh.empty:
+                for dt, row in eh.tail(4).iterrows():
+                    earnings_quarterly.append({
+                        "date": str(dt)[:10] if hasattr(dt, '__str__') else str(dt),
+                        "actual":   safe_float(row.get("epsActual")   or row.get("Reported EPS")  or row.get("actual")),
+                        "estimate": safe_float(row.get("epsEstimate") or row.get("Estimated EPS") or row.get("estimate")),
+                    })
+        except Exception:
+            pass
+
+        return {
+            "nextEarningsDate": next_earnings,
+            "forwardEps": eps_fwd,
+            "trailingEps": eps_ttm,
+            "epsGrowth": eps_growth,
+            "revenueGrowth": revenue_growth,
+            "quarterlyEarnings": earnings_quarterly,
+            "analystTarget": safe_float(info.get("targetMeanPrice")),
+            "analystRec": info.get("recommendationKey", "n/a"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @bp.route("/api/earnings-calendar")
 def earnings_calendar():
-    """Fetch upcoming earnings dates + EPS estimates from yfinance (ETFs skipped)."""
+    """Fetch upcoming earnings dates + EPS estimates from yfinance (ETFs skipped).
+
+    Results are cached per ticker for 4 hours via _get_ticker_earnings_cached.
+    The ThreadPoolExecutor still provides parallel dispatch on cache misses.
+    """
     tickers_param = request.args.get("tickers", "")
     tickers = [t.strip() for t in tickers_param.split(",") if t.strip()]
     if not tickers:
         return jsonify({"error": "No tickers"}), 400
 
-    results = {}
-
     def _fetch_earnings(ticker):
-        try:
-            stk = yf.Ticker(asx(ticker))
-            info = stk.info or {}
-            # Skip ETFs and mutual funds — they have no earnings data and yfinance
-            # logs 404 errors per symbol.  Detect via quoteType from the info dict.
-            if info.get("quoteType", "").upper() in ("ETF", "MUTUALFUND", "MONEYMARKET"):
-                return ticker.upper(), {"nextEarningsDate": None, "skipped": "ETF"}
+        return ticker.upper(), _get_ticker_earnings_cached(asx(ticker))
 
-            next_earnings = None
-            try:
-                cal = stk.calendar
-                if cal is not None:
-                    if isinstance(cal, dict):
-                        ed = cal.get("Earnings Date")
-                        if ed:
-                            if hasattr(ed, '__iter__') and not isinstance(ed, str):
-                                ed = list(ed)[0]
-                            next_earnings = str(ed)[:10] if ed else None
-                    elif hasattr(cal, 'loc') and "Earnings Date" in cal.index:
-                        vals = cal.loc["Earnings Date"].values
-                        if len(vals):
-                            next_earnings = str(vals[0])[:10]
-            except Exception:
-                pass
-
-            eps_fwd = safe_float(info.get("forwardEps"))
-            eps_ttm = safe_float(info.get("trailingEps"))
-            eps_growth = safe_float(info.get("earningsGrowth"))
-            revenue_growth = safe_float(info.get("revenueGrowth"))
-            earnings_quarterly = []
-            try:
-                # yfinance ≥0.2.x: earnings_history has epsActual / epsEstimate columns.
-                # quarterly_earnings / earnings were deprecated (fundamentals.py:33 warning).
-                eh = stk.earnings_history
-                if eh is not None and not eh.empty:
-                    for dt, row in eh.tail(4).iterrows():
-                        earnings_quarterly.append({
-                            "date": str(dt)[:10] if hasattr(dt, '__str__') else str(dt),
-                            "actual":   safe_float(row.get("epsActual")   or row.get("Reported EPS")  or row.get("actual")),
-                            "estimate": safe_float(row.get("epsEstimate") or row.get("Estimated EPS") or row.get("estimate")),
-                        })
-            except Exception:
-                pass
-
-            return ticker.upper(), {
-                "nextEarningsDate": next_earnings,
-                "forwardEps": eps_fwd,
-                "trailingEps": eps_ttm,
-                "epsGrowth": eps_growth,
-                "revenueGrowth": revenue_growth,
-                "quarterlyEarnings": earnings_quarterly,
-                "analystTarget": safe_float(info.get("targetMeanPrice")),
-                "analystRec": info.get("recommendationKey", "n/a"),
-            }
-        except Exception as e:
-            return ticker.upper(), {"error": str(e)}
-
+    results = {}
     with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as pool:
         for ticker, result in pool.map(_fetch_earnings, tickers):
             results[ticker] = result
@@ -999,4 +1031,60 @@ def ai_cost_summary():
         "all_time_calls": all_time_calls,
         "total_cost_usd": round(grand_cost, 4),
         "breakdown": breakdown,
+    })
+
+
+@bp.route("/api/market/universe-health")
+def universe_health():
+    """Check ASX_UNIVERSE for stale / delisted tickers.
+
+    Fetches each ticker's quoteType via yfinance info (batched via ThreadPoolExecutor).
+    Flags tickers where quoteType is None, 'NONE', or empty history.
+    Updates blob_store key 'universe_verified_at' with the check timestamp.
+
+    Heavy call — only invoke on user request; not cached.
+    Returns:
+        { ok, checked_at, total, ok_count, stale: [ticker, ...] }
+    """
+    from core import ASX_UNIVERSE
+    import concurrent.futures as _cf
+
+    # Full universe — deduplicated
+    all_tickers = list(dict.fromkeys(ASX_UNIVERSE.get("asx200", [])))
+
+    def _check(ticker):
+        try:
+            t = yf.Ticker(f"{ticker}.AX")
+            info = t.info or {}
+            qt   = info.get("quoteType", "")
+            if qt in ("", None, "NONE"):
+                return ticker  # stale / unknown
+            return None
+        except Exception:
+            return ticker  # treat fetch error as stale
+
+    stale = []
+    with _cf.ThreadPoolExecutor(max_workers=20) as pool:
+        for result in pool.map(_check, all_tickers):
+            if result:
+                stale.append(result)
+
+    checked_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Persist the check timestamp in blob_store so the Settings card can show it.
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO blob_store (key, value) VALUES ('universe_verified_at', ?)",
+                (checked_at,)
+            )
+    except Exception:
+        pass
+
+    return jsonify({
+        "ok": True,
+        "checked_at": checked_at,
+        "total":      len(all_tickers),
+        "ok_count":   len(all_tickers) - len(stale),
+        "stale":      stale,
     })

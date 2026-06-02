@@ -58,8 +58,16 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
     ...(state.dayTrading?.aiParams || {}),
     ...(state.analysisConfig?.rules || {}),
   };
-  const stopMultiple = _ap.stopAtrMultiple ?? QUANT_CONFIG.stopAtrMultiple;
-  const stopDist = stopMultiple * atr;
+  // Regime-aware stop multiplier: wider stops in high-vol/risk-off regimes.
+  // Explicit user rule overrides regime; regime overrides global default.
+  const userStopMult = state.dayTrading?.aiParams?.stopAtrMultiple
+                    ?? state.analysisConfig?.rules?.stopAtrMultiple;
+  const regimeMod = (state.currentRegime?.regime && typeof getRegimeModifiers === 'function')
+    ? getRegimeModifiers(state.currentRegime.regime)
+    : {};
+  const earningsAdj = signals.pre_earnings_risk ? 1.3 : 1.0;
+  const stopMultiple = userStopMult ?? regimeMod.stopAtrMult ?? QUANT_CONFIG.stopAtrMultiple;
+  const stopDist = stopMultiple * earningsAdj * atr;
   const stopLoss = +(price - stopDist).toFixed(4);
 
   // ── Target ─────────────────────────────────────────────────────────────────
@@ -103,8 +111,12 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   const p = Math.min(1, Math.max(0, winProb));
   const q = 1 - p;
   const b = rrRatio;
-  const kellyFull = b > 0 ? Math.max(0, (p * b - q) / b) : 0;
+  // Allow negative Kelly through so we can reject on negative EV before minQty applies.
+  const kellyFull = b > 0 ? (p * b - q) / b : 0;
   const kellyFrac = kellyFull * (_ap.kellyFraction ?? QUANT_CONFIG.kellyFraction);
+  if (kellyFrac <= 0) {
+    return { ok: false, reason: `negative expected value (Kelly=${kellyFull.toFixed(3)}) — skip` };
+  }
   const qtyByKelly = Math.floor((capital * kellyFrac) / price);
 
   // ── Final qty ──────────────────────────────────────────────────────────────
@@ -160,6 +172,7 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
     scenarios,
     holdDays,
     winProb: p,
+    ...(earningsAdj > 1 ? { _preEarningsAdj: true } : {}),
   };
 }
 

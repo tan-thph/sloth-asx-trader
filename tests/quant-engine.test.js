@@ -214,3 +214,37 @@ describe('computeTradeParams — scenarios', () => {
     expect(bear + panic).toBeCloseTo(0.4, 1);
   });
 });
+
+describe('computeTradeParams — pre-earnings adjustment', () => {
+  // Use a wider target so both base and earnings cases clear R:R ≥ 2.0 after 1.3× stop widening
+  const bigTargetSignals = () => makeSignals({
+    atr_14: 0.10,
+    bb_upper: 14.00,
+    support_resistance: { r1: 13.00, r2: 15.00, s1: 9.00, pivot: 10.00 },
+  });
+  const bigTargetAnalyst = () => makeAnalyst({ target: 13.00 });
+
+  it('sets _preEarningsAdj:true when pre_earnings_risk is set', () => {
+    const r = computeTradeParams('X', { ...bigTargetSignals(), pre_earnings_risk: true },
+      makeCtx(), bigTargetAnalyst());
+    expect(r.ok).toBe(true);
+    expect(r._preEarningsAdj).toBe(true);
+  });
+
+  it('does not set _preEarningsAdj when pre_earnings_risk is absent', () => {
+    const r = computeTradeParams('X', bigTargetSignals(), makeCtx(), bigTargetAnalyst());
+    expect(r.ok).toBe(true);
+    expect(r._preEarningsAdj).toBeFalsy();
+  });
+
+  it('widens stop distance by 1.3× when pre_earnings_risk is set', () => {
+    const base = computeTradeParams('X', bigTargetSignals(), makeCtx(), bigTargetAnalyst());
+    const earns = computeTradeParams('X', { ...bigTargetSignals(), pre_earnings_risk: true },
+      makeCtx(), bigTargetAnalyst());
+    expect(base.ok).toBe(true);
+    expect(earns.ok).toBe(true);
+    const baseDist  = base.entryPrice  - base.stopLoss;
+    const earnsDist = earns.entryPrice - earns.stopLoss;
+    expect(earnsDist).toBeCloseTo(baseDist * 1.3, 3);
+  });
+});

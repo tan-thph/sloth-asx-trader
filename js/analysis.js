@@ -724,6 +724,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           rewardAUD: qt.rewardAUD,
           _quantEngine: true,
           _constraintBinding: qt.constraintBinding,
+          _preEarningsAdj: qt._preEarningsAdj,
         };
       });
     }
@@ -854,6 +855,69 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           }
         }
       } catch { /* non-fatal — analysis continues without correlation adjustment */ }
+    }
+
+    // ── Portfolio heat budget gate ─────────────────────────────────────────────
+    // Scale or block BUY/TOP_UP recs that would push total $ at-risk beyond the
+    // user-configured heat budget (Risk page → "Set budget", stored in
+    // state.settings.maxRiskBudgetPct, default 5% of net worth).
+    {
+      const budgetPct   = parseFloat(state.settings.maxRiskBudgetPct || 5);
+      const totalValue  = totalNetWorth();
+      const budgetAUD   = totalValue * budgetPct / 100;
+
+      // Sum riskAUD already consumed by pre-existing pending recs
+      let consumed = (state.recommendations || [])
+        .filter(r => r.status === 'pending' &&
+                     (r.action === 'BUY' || r.action === 'TOP_UP') &&
+                     r.riskAUD > 0)
+        .reduce((s, r) => s + r.riskAUD, 0);
+
+      let budgetScaledCount = 0, budgetBlockedCount = 0;
+
+      recs = recs.map(r => {
+        const action = (r.action || '').toUpperCase();
+        if ((action !== 'BUY' && action !== 'TOP_UP') || !(r.riskAUD > 0)) return r;
+
+        const remaining = budgetAUD - consumed;
+
+        if (r.riskAUD <= remaining) {
+          consumed += r.riskAUD;  // rec fits — count it for subsequent recs in batch
+          return r;
+        }
+
+        if (remaining <= 0) {
+          budgetBlockedCount++;
+          return { ...r, qty: 0, _budgetBlocked: true,
+            _budgetNote: `Heat budget exhausted ($${budgetAUD.toFixed(0)} limit, $0 remaining)` };
+        }
+
+        // Rec partially fits — scale qty to remaining capacity
+        const riskPerShare = r.riskAUD / r.qty;
+        const scaledQty = Math.floor(remaining / riskPerShare);
+        if (scaledQty < 1) {
+          budgetBlockedCount++;
+          return { ...r, qty: 0, _budgetBlocked: true,
+            _budgetNote: `Heat budget: $${remaining.toFixed(0)} remaining < 1-share risk ($${riskPerShare.toFixed(0)})` };
+        }
+        budgetScaledCount++;
+        const scaledRisk = +(scaledQty * riskPerShare).toFixed(2);
+        consumed += scaledRisk;
+        return { ...r, qty: scaledQty, riskAUD: scaledRisk, _budgetScaled: true,
+          _budgetNote: `Heat budget: $${remaining.toFixed(0)} of $${budgetAUD.toFixed(0)} remaining` };
+      });
+
+      // Drop budget-blocked recs
+      const preBudgetLen = recs.length;
+      recs = recs.filter(r => !r._budgetBlocked);
+      const budgetDropped = preBudgetLen - recs.length;
+
+      if (budgetScaledCount > 0 || budgetDropped > 0) {
+        const parts = [];
+        if (budgetScaledCount > 0) parts.push(`${budgetScaledCount} scaled to heat budget`);
+        if (budgetDropped > 0)     parts.push(`${budgetDropped} blocked (budget exhausted)`);
+        summary = (summary ? summary + ' ' : '') + `[Heat budget: ${parts.join('; ')}]`;
+      }
     }
 
     // FIX #3: conviction is derived client-side — no longer required from the model.
@@ -1125,6 +1189,8 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
           sell_secondary_factors: Array.isArray(r.secondary_factors)
             ? r.secondary_factors.join(',') : (r.secondary_factors ?? null),
           sell_urgency:           r.urgency           ?? null,
+          // Sprint 37: Gap 7 — log alternativeTicker for better_opportunity cross-check
+          alternative_ticker:     r.alternativeTicker ?? null,
         } : {}),
       };
       const resp = await fetch(`${API}/api/learning/log`, {
