@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** June 2026 (Sprint 31)
-**Status:** Phases 1–7 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–31 improvements applied · Phase 8 Gated (pending outcome-correlation validation)
+**Last Updated:** June 2026 (Sprint 41)
+**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–41 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -30,7 +30,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `recommendation`      | TEXT       | BUY / SELL / TRIM / TOP_UP / HOLD |
 | `ai_confidence`       | REAL       | Claude's stated confidence (0–1) |
 | `ensemble_confidence` | REAL       | Quant engine confidence (0–1) |
-| `outcome_status`      | TEXT       | win / loss / breakeven / open / skipped |
+| `outcome_status`      | TEXT       | `win` / `loss` / `breakeven` / `open` / `skipped` / `virtual_win` / `virtual_loss` / `virtual_open` (last three set by `_resolve_virtual_outcomes()`) |
 | `realized_pnl_pct`    | REAL       | Exit P&L as % of cost basis |
 | `realized_pnl_aud`    | REAL       | Exit P&L in AUD |
 | `regime`              | TEXT       | Market regime at time of rec |
@@ -46,13 +46,27 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `actual_exit_price`   | REAL       | Actual exit price |
 | `sector`              | TEXT       | GICS sector |
 | `error_type`          | TEXT       | Comma-separated tags (loss/breakeven only) |
-| `error_type_source`   | TEXT       | `'manual'` / `'auto'` / `'debated-consensus'` / `'debated-merged'` / `'debated-singleton'` / `'debated'` |
+| `error_type_source`   | TEXT       | `'manual'` / `'auto'` / `'debated-consensus'` / `'debated-merged'` / `'debated-singleton'` / `'debated'` / `'debated-synthesis'` (Phase 3 neutral synthesis) / `'adjudicated'` (cloud adjudicator) |
 | `skill_score`              | REAL       | 0–10 analysis quality vs luck (Ollama scored) |
 | `debate_summary`           | TEXT       | ≤200-char bull/bear summary stored at analysis time |
 | `prompt_hash`              | TEXT       | 12-char djb2 fingerprint of prompt version + regime + date |
 | `postmortem_debate`        | TEXT       | JSON blob of full adversarial debate transcript (Phase 3) |
 | `entry_signals_json`       | TEXT       | JSON snapshot of live signals at rec generation time — used by postmortem and skill-score prompts (Stage 1 / D5 / D6) |
 | `debate_synthesis_winner`  | TEXT       | Synthesizer verdict at analysis time: `'bull'`/`'bear'`/`'neutral'` for BUY recs, `'hold'`/`'exit'`/`'neutral'` for SELL/TRIM (Stage 4 / L6) |
+| `tags`                     | TEXT       | Comma-separated user trade tags (sprint-3C) |
+| `trade_thesis`             | TEXT       | Entry thesis captured at execution (sprint-3C) |
+| `checklist_bypasses`       | TEXT       | Pre-trade checklist items bypassed at execution (Sprint 15) |
+| `success_tags`             | TEXT       | Comma-sep win tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry` (Sprint 15) |
+| `sell_primary_driver`      | TEXT       | One of 9 closed values declared by Claude at SELL/TRIM generation (Sprint 29) |
+| `sell_secondary_factors`   | TEXT       | 0–3 comma-sep secondary tags (Sprint 29) |
+| `sell_urgency`             | TEXT       | `immediate` / `routine` / `monitor` (TRIM only) (Sprint 29) |
+| `virtual_outcome`          | TEXT       | `virtual_win` / `virtual_loss` / `virtual_open` — lazy-resolved by `_resolve_virtual_outcomes()` for `was_executed=0` recs ≥30d old (Sprint 36) |
+| `virtual_pnl_pct`          | REAL       | Reserved for future use; NULL until entry price known (Sprint 36) |
+| `alternative_ticker`       | TEXT       | Set at SELL/TRIM generation when `primary_driver=better_opportunity`; used by `_resolve_sell_outcomes()` for cross-check (Sprint 37) |
+| `sell_verify_date`         | TEXT       | Date when the 25d+ sell outcome verification ran (Sprint 37) |
+| `sell_verify_verdict`      | TEXT       | `validated` / `invalidated` / `inconclusive` (Sprint 37) |
+| `sell_verify_sold_chg`     | REAL       | % price change of sold ticker from sell date → verify date (Sprint 37) |
+| `sell_verify_alt_chg`      | REAL       | % price change of `alternative_ticker` from sell date → verify date (Sprint 37) |
 
 > **Note on `loss_quality`:** This is a *computed property*, not a stored column. It is derived at calibration time from existing fields:
 > - `exit_reason = 'protective_stop'` → **good** loss (deliberate capital defence, excluded from confidence calibration)
@@ -65,6 +79,9 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 ### Supporting Tables
 - `rec_history` — Every Claude recommendation + `learning_id` link to `ai_learning_events`.
 - `trade_journal` — All trades (AI + manual) with `close_date`.
+- `trading_lessons` — Scoped persistent trading lessons `(lesson_text, ticker?, sector?, regime?, source)` injected into Claude user messages (Sprint 39). CRUD via `GET/POST /api/learning/lessons` and `DELETE /api/learning/lesson/<id>`.
+- `tag_reviews` — Manual spot-check verdicts for Ollama auto-tagged events `(event_id UNIQUE, verdict, corrected_tag, original_tag)`. Drives `agree_rate` gate on the `top_err` calibration nudge (Sprint 41).
+- `ai_call_log` — Full prompt + response audit trail for every `callClaude()` call `(agent_type, model, system_prompt [8k cap], user_message [30k cap], response, tokens, duration_ms)`. Browsable via `GET /api/log/ai_calls` and `GET /api/log/ai_call/<id>`.
 
 ---
 
@@ -209,8 +226,8 @@ Auto-triggered once per day via `triggerCalibQualityIfStale(regime)` in `debate-
 **Confidence → position sizing (deferred)**
 The quant engine already binds Claude's calibrated confidence to Kelly position sizing via `winProb: r.confidence`. When the calibration block instructs Claude to adjust confidence (e.g. -8pp nudge), that adjusted value flows directly into the Kelly fraction and thus the share count. Adding a second linear multiplier on top would double-discount. Deferred until empirical evidence shows Kelly alone is insufficient to transmit calibration feedback into execution sizes.
 
-**Virtual outcomes / paper-trade skipped recs (deferred)**
-When calibration suppresses Claude's confidence in a regime and recs are skipped, no new outcomes enter the loop — the pessimism can become self-reinforcing. The fix: track hypothetical P&L on `was_executed=0` events at their suggested entry/stop/target prices, feed those back into calibration at a discount (weight × 0.75). Deferred — requires scheduled background price-checking + new DB columns + frontend visibility.
+**Virtual outcomes / paper-trade skipped recs** ✅ *(Sprint 36)*
+`_resolve_virtual_outcomes(conn)` runs lazily inside `_calib_compute()`. For `was_executed=0` recs ≥30 days old with non-null stop and target, it fetches OHLCV history and checks whether `high ≥ target` (virtual_win) or `low ≤ stop` (virtual_loss). Results written to `virtual_outcome` and fed back into calibration at 0.75× weight via `rows_all`. Prevents the pessimism loop where suppressed calibration produces no new outcomes. Frontend shows virtual outcome count in the calibration stats card.
 
 ---
 
@@ -238,23 +255,35 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 
 ## Backend Endpoints
 
-| Endpoint                           | Method | Description |
-|------------------------------------|--------|-------------|
-| `POST /api/learning/log`           | Write  | Create new event |
-| `POST /api/learning/outcome`       | Write  | Update outcome, tags, exit_reason |
-| `DELETE /api/learning/event/<id>`  | Write  | Hard delete |
-| `GET /api/learning/stats`          | Read   | Aggregates for Learning Loop UI |
-| `GET /api/learning/calibration`    | Read   | Decay-weighted, shock-excluded calibration block |
-| `GET /api/learning/debate-stats`   | Read   | Per-pairing adversarial-debate breakdown (consensus/partial/diverged + concede rate) |
-| `GET /api/debate/status`           | Read   | Ollama health check (60s TTL in JS) |
-| `POST /api/debate`                 | Write  | Bull/Bear debate (sequential, 4h signal-hash cache) |
-| `POST /api/debate/postmortem`         | Write  | Auto-tag error_type for loss/breakeven events (single model) |
-| `POST /api/debate/postmortem-debate`  | Write  | Adversarial two-model debate → CONSENSUS / PARTIAL / DIVERGED |
-| `POST /api/debate/adjudicate`         | Write  | Cloud adjudicator (Gemini/Groq auto-pick) scores both local models + picks winner |
-| `GET  /api/debate/adjudicator-status` | Read   | Is a cloud adjudicator configured? Used by UI to enable/disable 🧑‍⚖️ button |
-| `POST /api/debate/staleness`          | Write  | Freshness check for pending recs ≥ 2 days old |
-| `POST /api/debate/skill`              | Write  | Score closed trade outcome quality 0–10 |
-| `GET  /api/debate/calib-quality`      | Read   | Calibration quality debate: pre-computes Z-scores per band, calls Ollama for qualitative root-cause, returns per-band verdicts. Cached in `blob_store.calib_quality_latest`; `?force=1` bypasses cache. *(Sprint 26)* |
+| Endpoint                                | Method | Description |
+|-----------------------------------------|--------|-------------|
+| `POST /api/learning/log`                | Write  | Create new event |
+| `POST /api/learning/outcome`            | Write  | Update outcome, tags, exit_reason |
+| `DELETE /api/learning/event/<id>`       | Write  | Hard delete |
+| `GET /api/learning/stats`               | Read   | Aggregates for Learning Loop UI; includes `success_patterns`, `phase8_meta` (mann_whitney_z), `prompt_regression`, Wilson 95% CI on all win-rate fields |
+| `GET /api/learning/calibration`         | Read   | Decay-weighted, shock-excluded calibration block (5-min TTL, thread-safe `_calib_lock`) |
+| `GET /api/learning/calibration-stats`   | Read   | Brier score + reliability-diagram bins `{brier_score, n, bins:[{range,lo,hi,n,mean_confidence,actual_win_rate}]}` |
+| `GET /api/learning/digest-data`         | Read   | Structured failure data for the postmortem digest `{recent_failures, regime_stats, overall_wins, error_dist, exit_dist}` |
+| `GET /api/learning/sell-outcomes`       | Read   | Executed SELL/TRIM events with `sell_primary_driver` set and per-event `sell_verify_verdict` badges; `?force=1` triggers immediate re-resolve *(Sprint 37)* |
+| `GET /api/learning/lessons`             | Read   | Scoped lessons matching `?ticker=X&sector=Y&regime=Z` (cap 4); injected into Claude user messages *(Sprint 39)* |
+| `POST /api/learning/lessons`            | Write  | Create a lesson `{lesson_text, ticker?, sector?, regime?, source}` *(Sprint 39)* |
+| `DELETE /api/learning/lesson/<id>`      | Write  | Hard-delete one lesson *(Sprint 39)* |
+| `GET /api/learning/untagged`            | Read   | Loss/breakeven events with no `error_type` — batch-classify queue *(Sprint 38)* |
+| `GET /api/learning/tag-reviews`         | Read   | Up to 5 random unreviewed auto-tagged events for weekly spot-check *(Sprint 41)* |
+| `POST /api/learning/tag-review`         | Write  | Submit `{event_id, verdict:'agree'\|'disagree', corrected_tag?}`; disagree updates `error_type` → manual and clears `_calib_cache` *(Sprint 41)* |
+| `GET /api/learning/tag-accuracy`        | Read   | `{n, n_agree, agree_rate, label, pending_review}` — agree_rate gates top_err nudge *(Sprint 41)* |
+| `GET /api/learning/debate-stats`        | Read   | Per-pairing adversarial-debate breakdown (consensus/partial/diverged + concede rate) |
+| `GET /api/market/universe-health`       | Read   | Checks all ASX200 tickers via yfinance quoteType (20-worker pool, per-ticker 8s timeout); persists `universe_verified_at` to blob_store *(Sprint 41)* |
+| `GET /api/debate/status`                | Read   | Ollama health check (60s TTL in JS) |
+| `POST /api/debate`                      | Write  | Bull/Bear debate (sequential, 4h signal-hash cache) |
+| `POST /api/debate/postmortem`           | Write  | Auto-tag error_type for loss/breakeven events (single model) |
+| `POST /api/debate/postmortem-debate`    | Write  | Adversarial two-model debate → CONSENSUS / PARTIAL / DIVERGED |
+| `POST /api/debate/adjudicate`           | Write  | Cloud adjudicator (Gemini/Groq auto-pick) scores both local models + picks winner |
+| `GET  /api/debate/adjudicator-status`   | Read   | Is a cloud adjudicator configured? Used by UI to enable/disable 🧑‍⚖️ button |
+| `POST /api/debate/staleness`            | Write  | Freshness check for pending recs ≥ 2 days old |
+| `POST /api/debate/skill`                | Write  | Score closed trade outcome quality 0–10 |
+| `GET  /api/debate/calib-quality`        | Read   | Calibration quality debate: pre-computes Z-scores per band, calls Ollama for qualitative root-cause, returns per-band verdicts. Cached in `blob_store.calib_quality_latest`; `?force=1` bypasses cache *(Sprint 26)* |
+| `POST /api/debate/quick-analysis`       | Write  | Local LLM portfolio analysis via Ollama (BUY/TOP_UP/HOLD only; 4000-char context limit; opt-in via `state.settings.useLocalLLM`) *(Sprint 41)* |
 
 ---
 
@@ -265,9 +294,12 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 - Calibration accuracy table (per confidence band, decay-weighted, n<5 warnings)
 - **Calibration Quality card** *(Sprint 26):* shows per-band verdict (🟢 noise / 🟡 uncertain / 🔴 signal) with statistical significance badges (Z-score, p_noise, ESS). Ollama's qualitative analysis shown per band. Refresh button forces `force=1` re-run. Auto-triggered once daily after analysis calls via `triggerCalibQualityIfStale()`
 - Regime performance table
-- Prompt version history
+- Prompt version history (with Δ vs prior version + regression detector banner)
 - **Success Patterns card** *(Sprint 27):* two-column layout — left: tag chips with count + win rate bars (color-coded per tag type); right: calibration nudge explanation when a dominant tag was injected into the last calibration block. Tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`
 - Failure Patterns (exit reason distribution + error tag counts, shock excluded)
+- **Sell Decision Tracker card** *(Sprint 37):* executed SELL/TRIM events with `sell_primary_driver` set; 🟢 validated / 🔴 invalidated / — inconclusive badges per event; "↺ Check Now" button triggers `?force=1` re-resolve
+- **Lessons card** *(Sprint 39):* list of scoped trading lessons with ticker/sector/regime scope badges; "Add Lesson" form; delete button per lesson
+- **Auto-Tag Accuracy card** *(Sprint 41):* agree-rate badge (🟢 ≥75% / 🟡 60–75% / 🔴 <60%); "Review Batch (5)" button loads up to 5 unreviewed auto-tagged events with agree/disagree/retag UI; when <60%, emits `⚠AUTO_TAGS_UNRELIABLE` in calibration block and suppresses `top_err` nudge
 - Recent Events table (30 most recent) — features:
   - `outcomeChip` + 🛡 badge if `protective_stop`, 🛡? button if `stop_hit` loss
   - Error tag buttons (8 tags, multi-select, auto=dashed/manual=solid border)
@@ -597,7 +629,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Prompt regression detector using binomial SE (Sprint 31) | A Δ column in the UI requires the user to notice a regression. Automated detection with SE-thresholded significance (1×SE = early warning, 2×SE = significant) surfaces the signal immediately. Displaying SE alongside the drop prevents false alarms from being acted on |
 | Priority-ordered calibration token budget (Sprint 31) | Parts appended in priority order (conf bands first, per-ticker last) means dropping from the end always removes the least critical information. A hard ceiling as safety net prevents mid-sentence truncation even if a single part is unusually long |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
-| Lessons Database deferred | Needs proper design: what is a "lesson"? How injected? Until defined, premature to implement. |
+| Lessons Database ✅ *(Sprint 39)* | `trading_lessons` table with scoped keys (ticker/sector/regime). `GET /api/learning/lessons?ticker=X&sector=Y&regime=Z` returns up to 4 matching lessons injected as `LESSONS_BLOCK` in every Claude user message. CRUD: `POST /api/learning/lessons`, `DELETE /api/learning/lesson/<id>`. |
 
 ---
 
@@ -672,7 +704,31 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 
 ## Next Milestones
 
-1. **Phase 8 activation** — accumulate 10+ scored events where wins score higher than losses; `_compute_phase8_meta()` gate will auto-activate once the outcome-correlation check passes
-2. ✅ Phase 6: Calibration quality debate card — implemented Sprint 26. `GET /api/debate/calib-quality` live; Z-scores pre-computed server-side; Learning page card with traffic-light verdicts; auto-triggered daily
-3. Virtual outcomes for skipped recs — paper-trade `was_executed=0` events to break potential pessimism loops (deferred)
-4. Structured Trade Checklist UI form (currently documented as reference only)
+1. ✅ **Phase 8** — `_compute_phase8_meta()` live with Mann-Whitney U gate (z>1.28, one-sided p<0.10). Replaces raw mean comparison. Phase 8 activates automatically once 10+ scored events exist where wins score statistically higher than losses.
+2. ✅ **Phase 6** — `GET /api/debate/calib-quality` live; Z-scores pre-computed server-side; Learning page traffic-light card; auto-triggered daily.
+3. ✅ **Virtual outcomes** — `_resolve_virtual_outcomes()` live (Sprint 36); feeds back at 0.75× weight.
+4. ✅ **Lessons Database** — `trading_lessons` table + CRUD + Claude injection live (Sprint 39).
+5. ✅ **Regime-aware SELL/TRIM ATR floor** — `analysis.js` Step 3 now reads `regimeMod.stopAtrMult ?? 2.5` from `getRegimeModifiers(state.currentRegime.regime)`. Rec flagged `_stopRepaired: true` and `_stopRepairedMult: N`. *(Sprint 41)*
+6. ✅ **`high_60d` / `low_60d` for Fibonacci** — `indicators.py` `analyse_ticker()` now emits `high_60d = high.tail(60).max()` and `low_60d = low.tail(60).min()`. Signal #4 in `prompts.js` updated to use `fib_50`/`fib_618` computed from these values, with `return_60d` as fallback. *(Sprint 41)*
+
+---
+
+## Implementation Plans — Open Items
+
+### ✅ Plan A: Regime-aware SELL/TRIM stop floor in `analysis.js` — SHIPPED Sprint 41
+
+**Problem (resolved):** Post-processing Step 3 previously hardcoded `2.5×ATR` for SELL/TRIM regardless of regime.
+
+**Fix applied:** `analysis.js` reads `regimeMod.stopAtrMult ?? 2.5` from `getRegimeModifiers(state.currentRegime.regime)`. Uses that value for both the check threshold and the floor value. Recs flagged `_stopRepaired: true` and `_stopRepairedMult: stopMult`. Tests in `test_app.py` `TestSprint41PlanAB`.
+
+---
+
+### ✅ Plan B: `high_60d` / `low_60d` for day-trade Fibonacci levels — SHIPPED Sprint 41
+
+**Fix applied:** `indicators.py` `analyse_ticker()` now emits `"high_60d": safe_float(high.tail(60).max())` and `"low_60d": safe_float(low.tail(60).min())` (None when < 60 bars). Signal #4 in both day-trade prompts in `prompts.js` updated to use `fib_50 = low_60d + 0.50*(high_60d - low_60d)` and `fib_618 = low_60d + 0.618*(high_60d - low_60d)`, with `return_60d` fallback. Tests in `test_app.py` `TestSprint41PlanAB`.
+
+---
+
+### ✅ Plan C: Formalise `eps_revision_30d` proxy in system prompt — ALREADY SHIPPED
+
+**Already in place:** `ANALYSIS_SYSTEM_PROMPT` Priority 1 already explicitly states "This is a PROXY for revision direction, not true 30-day analyst consensus revision data (which is unavailable from yfinance)" with clear 3+ beat / 2+ miss rules. No code change required — only doc update to close the gap.

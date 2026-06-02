@@ -789,6 +789,8 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "return_20d": pct_return(20),
         "return_60d": pct_return(60),
         "return_90d": pct_return(90),
+        "high_60d":   safe_float(high.tail(60).max())  if len(high) >= 60 else None,
+        "low_60d":    safe_float(low.tail(60).min())   if len(low)  >= 60 else None,
 
         # Signal
         "composite_signal": composite,

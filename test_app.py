@@ -4567,5 +4567,53 @@ class TestFix18VirtualOutcomes(unittest.TestCase):
         self.assertIn("virtual_loss", src)
 
 
+class TestSprint41PlanAB(unittest.TestCase):
+    """Sprint 41 — Plan A (regime-aware SELL/TRIM stop) + Plan B (high_60d/low_60d)."""
+
+    def test_analysis_js_sell_trim_stop_reads_stopAtrMult(self):
+        """analysis.js ATR floor for SELL/TRIM must read stopAtrMult from getRegimeModifiers."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("stopAtrMult", src)
+        self.assertIn("_stopRepairedMult", src)
+        # Must not hardcode 2.5 as the floor (only allowed as fallback default)
+        # The floor computation must use stopMult, not a literal 2.5
+        self.assertIn("stopMult * atr", src)
+
+    def test_analysis_js_sell_trim_stop_uses_regime_fallback(self):
+        """analysis.js must default stopMult to 2.5 when regime modifiers unavailable."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("stopAtrMult ?? 2.5", src)
+
+    def test_indicators_emits_high_60d_low_60d(self):
+        """analyse_ticker() result dict must include high_60d and low_60d keys."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"high_60d"', src)
+        self.assertIn('"low_60d"', src)
+        # Must use safe_float and tail(60) OHLCV slices
+        self.assertIn("high.tail(60).max()", src)
+        self.assertIn("low.tail(60).min()", src)
+
+    def test_prompts_signal4_uses_high_60d_low_60d(self):
+        """prompts.js Signal #4 must reference high_60d and low_60d (not just return_60d)."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("high_60d", src)
+        self.assertIn("low_60d", src)
+        self.assertIn("fib_50", src)
+        self.assertIn("fib_618", src)
+
+    def test_prompts_priority1_eps_revision_proxy_documented(self):
+        """ANALYSIS_SYSTEM_PROMPT Priority 1 must document EPSvEst(4Q) as the revision proxy."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("EPSvEst(4Q)", src)
+        # Must not rely on a non-existent eps_revision_30d field
+        # (the proxy wording makes clear it's unavailable from yfinance)
+        self.assertIn("unavailable from yfinance", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,6 +1,6 @@
 # Sloth ASX Trader — Prompt Architecture Reference
 
-**Last Updated:** June 2026 (Sprint 32)
+**Last Updated:** June 2026 (Sprint 41)
 **Model:** `claude-sonnet-4-6` · all calls via `callClaude()` in `js/claude-client.js`
 
 This document is the authoritative reference for every Claude API call in the application:
@@ -212,7 +212,7 @@ SYNTHESIS: {winner} | {key_pivot}
 
 1. **JSON parse** — `parseClaudeJSON()` with brace-depth recovery on truncation
 2. **Quant engine** — `computeTradeParams()` replaces AI-computed `qty / stopLoss / rrRatio / riskAUD / rewardAUD` for BUY/TOP_UP with deterministic Kelly + volatility-scalar + multi-constraint sizing
-3. **ATR floor** — SELL/TRIM stop loss floored at `entry + 2.5×ATR` (prevents near-zero stop distance)
+3. **ATR floor** — SELL/TRIM stop loss floored at `entry + stopMult×ATR` where `stopMult = regimeMod.stopAtrMult ?? 2.5` (regime-conditional: 2.5 riskOn/trend/sideways · 3.0 highVol · 3.5 riskOff · 4.0 panic). Rec flagged `_stopRepaired: true` and `_stopRepairedMult: N` when repair fires. *(Sprint 41: was hardcoded 2.5×, now reads `getRegimeModifiers(state.currentRegime.regime).stopAtrMult ?? 2.5`)*
 4. **Regime modifiers** — `applyRegimeModifiers()` applies size multipliers; `panic` blocks all recs
 5. **P&L recompute** — SELL/TRIM `netProfit` recalculated from actual `holding.avgPrice`
 6. **Confidence floor** — recs below `minConfidence` (default 0.62) are dropped
@@ -370,6 +370,8 @@ Signals for passing tickers:
 
 ## 5. Analyst — `'analyst'`
 
+> **⚠ Dormant pipeline.** The `'analyst'` and `'pm'` agent types are defined and tested but `runAnalysis()` calls `'portfolio'` directly. These prompts are available for explicit use via `callClaude('analyst', ...)` / `callClaude('pm', ...)` but are not part of any active user flow. Treat Sections 5–6 as reference specs, not live architecture.
+
 **System prompt:** `ANALYST_SYSTEM_PROMPT` (static, cached)
 **Max tokens:** 3,000
 
@@ -395,7 +397,7 @@ Signals for passing tickers:
 }
 ```
 
-**Note:** The analyst/PM two-phase pipeline is defined and tested but the main `runAnalysis()` flow calls `'portfolio'` directly (single-phase). The analyst and PM prompts are available for explicit use via `callClaude('analyst', ...)` / `callClaude('pm', ...)` in custom analysis flows.
+**Note:** See dormant-pipeline warning at the top of §5. To activate the 3-phase flow, wire `callClaude('analyst', ...)` → quant engine → `callClaude('pm', sizedProposals)` in a new `runAnalysisPipeline()` function in `analysis.js`. The system prompts and schemas are ready; only the orchestration is missing.
 
 ---
 
@@ -523,7 +525,7 @@ Please write a concise postmortem digest (under 250 words) in plain text:
 
 **File:** `js/pages/dashboard.js → generateMorningBrief()`
 **Trigger:** "Generate Brief" button on Dashboard
-**Max tokens:** 600 · `noCache: false` (cached — same prompt structure each morning)
+**Max tokens:** 600 · `noCache: true` (not cached — daily freshness needed; `briefing: true` in `_AGENT_NO_CACHE`)
 
 **System prompt:** `MORNING_BRIEFING_SYSTEM_PROMPT`
 ```
@@ -552,6 +554,57 @@ Write a morning briefing covering:
 ```
 
 **Expected output:** Numbered plain-text sections, ≤220 words. Stored in `window._morningBrief` and rendered in the Dashboard brief card.
+
+---
+
+## 9. Local LLM — `'portfolio'` via Ollama fast-path *(Sprint 41)*
+
+**File:** `js/claude-client.js → _callLocalAnalysis()` · `routes/debate.py → quick_analysis()`
+**Trigger:** Same "Run Analysis" button; fast-path activates when `state.settings.useLocalLLM = true`
+**Toggled by:** Settings → Display → "Use local LLM for analysis" checkbox
+
+### How it works
+
+`callClaude()` checks `agentType === 'portfolio' && state.settings.useLocalLLM` **before** any API key resolution. If true, it calls `_callLocalAnalysis(userMessage)` which POSTs to `POST /api/debate/quick-analysis` instead of the Anthropic API.
+
+The backend (`routes/debate.py`) prepends `_LOCAL_ANALYSIS_SYSTEM` (a stripped-down rule set) to the first 4000 chars of the assembled user message, calls `_call_ollama()` with `_SCHEMA_QUICK_ANALYSIS` structured output, tags each rec with `_source: 'local'`, and returns `{ ok, text: JSON_string, model, elapsed_ms }`.
+
+`_callLocalAnalysis()` returns `{ text, usage: { local: true, model, elapsed_ms } }` — the same shape as `callClaude()` — so `analysis.js` is transparent to the routing.
+
+### Key constraints
+
+| Constraint | Reason |
+|---|---|
+| BUY / TOP_UP / HOLD only — no SELL / TRIM | SELL/TRIM require `sell_primary_driver`, `sell_secondary_factors`, `sell_urgency` structured tagging which small models produce inconsistently |
+| Context truncated to 4000 chars | Ollama small models (Qwen 4B–9B) have limited context windows; the most critical context (date, regime, holdings, top signals) is always first |
+| No calibration injection | Calibration nudges assume Claude-level instruction following; small models may ignore or invert them |
+| `🔒 Local` badge on rec cards | `_source === 'local'` triggers amber badge in `recommendations.js` so the user sees which recs came from Ollama |
+| Validator + quant engine still run | Ollama output goes through `getValidatedAnalysisWithRepair()` and `computeTradeParams()` identically to the Claude path |
+| No call logged to `ai_call_log` | The `callClaude()` logging block is bypassed (fast-path returns before it). `routes/debate.py` logs to server log only |
+
+### System prompt (`_LOCAL_ANALYSIS_SYSTEM`)
+
+```
+You are a conservative ASX equity analyst. Analyse the portfolio context below and output
+structured trading recommendations.
+
+RULES:
+- Only output BUY (new position), TOP_UP (add to existing), or HOLD (keep existing) actions.
+  Do NOT output SELL or TRIM.
+- BUY/TOP_UP require all of: priceRange [lo,hi], target (above hi), stopLoss (below lo).
+- stopLoss must be BELOW priceRange[0] for BUY/TOP_UP.
+- target must be ABOVE priceRange[1] for BUY/TOP_UP.
+- confidence: 0.60 = marginal, 0.70 = moderate, 0.80 = strong. Use 0 for HOLD.
+- Output 1-3 recommendations maximum. Prefer HOLD when uncertain.
+- qty is not required — the quant engine will calculate it.
+
+Output only the JSON object. No preamble, no markdown fences.
+```
+
+### Future enhancements
+
+- Add `ai_call_log` write from the backend endpoint (low priority — local calls are cheap, audit trail matters less)
+- Expand to SELL/TRIM once Ollama structured-output reliability is validated with the full tag taxonomy
 
 ---
 
@@ -610,7 +663,7 @@ These exist in `state.liveSignals[t]` but are not currently included in any prom
 
 ## Prompt Versioning
 
-`PROMPT_VERSION = '2026-05-v5'` in `js/prompts.js`.
+`PROMPT_VERSION = '2026-06-v6'` in `js/prompts.js`.
 
 Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. The version is:
 - Stored on every `ai_learning_events` row at log time
@@ -620,6 +673,7 @@ Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. Th
 **Version history:**
 | Version | Key changes |
 |---|---|
+| `2026-06-v6` | Rule 17 renumbered (was duplicate Rule 16); SELL_TAG calibration injection rules (Section 6); sell tag urgency/monitor enforcement |
 | `2026-05-v5` | Calibration algorithm in prompt; debate-block usage rule; Stage 3–4 |
 | `2026-05-v4` | Sprint 23: ESS gates; Ollama structured outputs |
 | `2026-05-v3` | Sprint 22: adversarial debate + cloud adjudicator |
@@ -630,12 +684,25 @@ Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. Th
 
 ## Known Gaps (prompt references data that may be absent)
 
-1. **`eps_revision_30d`** — Priority 1 asks for consensus EPS revision direction. The `EPSvEst(4Q)` beat/miss history provides a proxy but is not the same as 30-day analyst revision data. yfinance does not provide this. Requires a paid data source or daily snapshot storage to compute the delta.
+1. ~~**`eps_revision_30d`**~~ ✅ **Fixed (already in place)** — Priority 1 already explicitly states "This is a PROXY for revision direction, not true 30-day analyst consensus revision data (which is unavailable from yfinance)". No code change needed. See Plan C in `learning_loop.md`.
 
-2. **`bid-ask spread`** — Rule 5 execution says "if bid-ask spread > 0.5%, flag wide spread". Spread is not in the signals payload (yfinance doesn't reliably provide it for ASX). Rule effectively never fires from data; Claude must infer from liquidity signals.
+2. **`bid-ask spread`** — Rule 5 execution says "if bid-ask spread > 0.5%, flag wide spread". Spread is not in the signals payload (yfinance doesn't reliably provide it for ASX). Rule effectively never fires from data; Claude must infer from liquidity signals. **No fix available** without a real-time market data feed.
 
-3. **`high_60d / low_60d`** — Day trade Signal #4 references explicit 60-day high/low for Fibonacci retracement. The current payload only has `return_60d`. The signal is approximated using the return value; true Fib levels require storing the 60d high and low separately.
+3. ~~**`high_60d / low_60d`**~~ ✅ **Fixed Sprint 41** — `indicators.py` now emits `high_60d`/`low_60d` (60-bar max/min). Signal #4 in both day-trade prompts updated to use actual Fib retracement levels; `return_60d` kept as fallback. See Plan B in `learning_loop.md`.
 
-4. **Duplicate Rule 16** — `ANALYSIS_SYSTEM_PROMPT` has two rules numbered 16 (RISK-ADJUSTED SIZING and RISK-REWARD CONTEXT). The second should be renumbered Rule 17. Tracked as a pending fix.
+4. ~~**Duplicate Rule 16**~~ ✅ **Fixed** — Rule 17 (`RISK-REWARD CONTEXT`) correctly renumbered in `ANALYSIS_SYSTEM_PROMPT`. Version bumped to v6.
 
-5. **`monitor` urgency for SELL** — Section 2 vocabulary says `monitor — TRIM only` but the forbidden combinations list doesn't explicitly block `SELL + urgency:monitor`. Validator and prompt both need this restriction added.
+5. ~~**`monitor` urgency for SELL**~~ ✅ **Fixed** — `validateSellTags()` in `response-validator.js` line 89 rejects `SELL + urgency:monitor` with an explicit error. The forbidden combination is also listed in `ANALYSIS_SYSTEM_PROMPT` Section 2. No further action needed.
+
+---
+
+## Implementation Plans — All Shipped Sprint 41
+
+### ✅ Plan A: Regime-aware SELL/TRIM stop floor
+`analysis.js` Step 3 reads `regimeMod.stopAtrMult ?? 2.5` from `getRegimeModifiers()`. Rec flagged `_stopRepaired: true` + `_stopRepairedMult: N`. *(Sprint 41)*
+
+### ✅ Plan B: `high_60d` / `low_60d` for Fibonacci
+`indicators.py` emits both fields. Signal #4 in both day-trade prompts uses `fib_50`/`fib_618` = `low_60d + 0.50/0.618×(high_60d − low_60d)`, with `return_60d` fallback when absent. *(Sprint 41)*
+
+### ✅ Plan C: Formalise `eps_revision_30d` proxy in Priority 1
+Already in place — Priority 1 text explicitly documents EPSvEst(4Q) as the proxy and states the 30d revision field is unavailable from yfinance. No code change needed. *(Pre-Sprint 41)*

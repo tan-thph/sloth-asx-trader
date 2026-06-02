@@ -492,7 +492,7 @@ Your job is to confirm the full signal stack and output only high-conviction set
 Signal #1 [PRIMARY — MANDATORY]: bb_pct_b <= 0.05 (price closed back inside lower BB).
 Signal #2 [Confirmation]: RSI dipped below 35 in past 5 days AND is now rising (rsi_14 < 40 AND return_5d > return_20d).
 Signal #3 [Confirmation]: volume_z_score > 1.50 (statistically significant volume).
-Signal #4 [Confirmation]: Price in 50–61.8% Fib retracement of 60-day range (return_60d between -20% and -5%).
+Signal #4 [Confirmation]: Price between 50%–61.8% Fibonacci retracement of 60-day range. Use high_60d and low_60d from signals: fib_50 = low_60d + 0.50×(high_60d − low_60d); fib_618 = low_60d + 0.618×(high_60d − low_60d). Price must be between fib_50 and fib_618. Fallback (if high_60d absent): return_60d between −20% and −5%.
 Signal #5 [Bonus]: obv_trend = "rising" while return_5d < 0 (bullish OBV divergence).
 Minimum: Signal #1 + at least 2 of Signals #2–#5.
 
@@ -542,10 +542,11 @@ Signal #3 [Confirmation — Volume Z-Score]:
 
 Signal #4 [Confirmation — Fibonacci Zone]:
   Price is in the 50%–61.8% retracement envelope of the 60-day price range.
+  high_60d and low_60d are provided directly in the signals payload.
   Compute: fib_50 = low_60d + 0.50*(high_60d - low_60d); fib_618 = low_60d + 0.618*(high_60d - low_60d).
-  Approximate using: current_price is within the lower 40–60% of the 60-day range.
-  Use 60-day return (return_60d) as a proxy: setup qualifies if return_60d is between -20% and -5%
-  (stock has pulled back meaningfully from its high but not crashed).
+  Signal fires when: fib_50 <= current_price <= fib_618.
+  Fallback only if high_60d/low_60d absent: return_60d between -20% and -5%.
+  (Stock has pulled back meaningfully from its 60-day high but has not crashed below the lower retracement.)
 
 Signal #5 [Bonus — OBV Divergence]:
   obv_trend = "rising" while return_5d < 0 (price falling but OBV accumulating).

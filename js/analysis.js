@@ -731,21 +731,27 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 
     // ── ATR floor for SELL/TRIM stop loss ──────────────────────────────────────
     // Claude sometimes generates near-zero stop distances for SELL/TRIM (e.g. +0.2%
-    // above entry = a 60:1 R:R). Apply a minimum of 1.5× ATR above entry.
-    recs = recs.map(r => {
-      const action = (r.action || '').toUpperCase();
-      if (action !== 'SELL' && action !== 'TRIM') return r;
-      const entry   = Array.isArray(r.priceRange) ? r.priceRange[0] : null;
-      const signals = state.liveSignals && state.liveSignals[r.ticker];
-      const atr     = signals && signals.atr_14;
-      if (!entry || !atr || atr <= 0) return r;
-      const minStopDist = 1.5 * atr;
-      if ((r.stopLoss - entry) < minStopDist) {
-        const newStop = +(entry + 2.5 * atr).toFixed(3);
-        return { ...r, stopLoss: newStop, _stopRepaired: true };
-      }
-      return r;
-    });
+    // above entry = a 60:1 R:R). Apply a regime-aware minimum of stopAtrMult×ATR above entry.
+    // stopAtrMult matches computeTradeParams(): 2.5 riskOn/trend/sideways · 3.0 highVol ·
+    // 3.5 riskOff · 4.0 panic.
+    {
+      const regimeMod = (state.currentRegime && typeof getRegimeModifiers === 'function')
+        ? getRegimeModifiers(state.currentRegime.regime) : {};
+      const stopMult = regimeMod.stopAtrMult ?? 2.5;
+      recs = recs.map(r => {
+        const action = (r.action || '').toUpperCase();
+        if (action !== 'SELL' && action !== 'TRIM') return r;
+        const entry   = Array.isArray(r.priceRange) ? r.priceRange[0] : null;
+        const signals = state.liveSignals && state.liveSignals[r.ticker];
+        const atr     = signals && signals.atr_14;
+        if (!entry || !atr || atr <= 0) return r;
+        const minStop = +(entry + stopMult * atr).toFixed(3);
+        if (!r.stopLoss || r.stopLoss < minStop) {
+          return { ...r, stopLoss: minStop, _stopRepaired: true, _stopRepairedMult: stopMult };
+        }
+        return r;
+      });
+    }
 
     // ── Apply regime size modifiers ─────────────────────────────────────────────
     if (typeof applyRegimeModifiers === 'function' && _activeRegime && _activeRegime !== 'unknown') {
