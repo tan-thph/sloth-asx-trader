@@ -12,6 +12,7 @@ Endpoints:
 
 import json
 import math
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -21,8 +22,13 @@ from db import get_db
 
 # ── Calibration TTL cache (L4) ────────────────────────────────────────────────
 # Keyed by (regime, sectors_str, tickers_str, days); evicted after 5 minutes.
+# Fix #8: _calib_lock serialises reads and writes so concurrent gunicorn threads
+# cannot interleave a partial cache write and serve corrupted calibration data.
+# The expensive _calib_compute() runs *outside* the lock; only the dict access is
+# protected, so lock contention is negligible.
 _calib_cache: dict = {}
-_CALIB_TTL = 300
+_CALIB_TTL   = 300
+_calib_lock  = threading.Lock()
 
 
 bp = Blueprint("learning", __name__)
@@ -46,28 +52,52 @@ def _is_good_loss(r: dict) -> bool:
     return er == "protective_stop" or "external_shock" in et.split(",")
 
 
+def _mann_whitney_z(wins: list, losses: list) -> float:
+    """Mann-Whitney U statistic normalised to a Z-score (no scipy required).
+
+    Positive z means wins tend to score higher than losses.
+    z > 1.28 ≈ one-sided p < 0.10  (Phase 8 activation threshold)
+    z > 1.65 ≈ one-sided p < 0.05
+
+    Uses the standard normal approximation — valid for n₁, n₂ ≥ 5.
+    """
+    n1, n2 = len(wins), len(losses)
+    if n1 == 0 or n2 == 0:
+        return 0.0
+    u = sum(
+        1.0 if w > l else (0.5 if w == l else 0.0)
+        for w in wins for l in losses
+    )
+    mu    = n1 * n2 / 2
+    sigma = math.sqrt(n1 * n2 * (n1 + n2 + 1) / 12)
+    return (u - mu) / sigma if sigma > 0 else 0.0
+
+
 def _compute_phase8_meta(skill_rows: list) -> dict:
-    """Gap 2 — Phase 8 validation gate.
+    """Gap 2 — Phase 8 validation gate (Fix #10: Mann-Whitney U replaces mean compare).
 
     Phase 8 skill-weighting (sf = max(0.2, min(1.8, score/5.0))) is only
     trustworthy if Ollama's scores actually predict trade outcomes.
-    This function checks whether mean skill score for wins exceeds that for
-    losses/breakevent.  If not — or if n < 10 — Phase 8 is disabled and
-    _weight() falls back to sf=1.0 (neutral, no amplification or suppression).
 
-    Returns a dict suitable for the /api/learning/stats response.
+    Fix #10: the old mean comparison (mean_win > mean_loss) is flipped by a single
+    outlier — e.g. a well-executed trade that hit an external shock scores 9/10 and
+    inflates mean_loss, locking Phase 8 off even when the scorer is predictive across
+    the other 9 events. Mann-Whitney U tests the full rank distribution; a single
+    high-skill loss doesn't dominate.
+
+    Threshold: z > 1.28 (one-sided p < 0.10). Returns z and threshold in the response
+    so the Learning page can display the statistical evidence.
     """
     n = len(skill_rows)
     if n < 10:
         return {"active": False, "n_scored": n,
                 "reason": f"insufficient scored events (need 10, have {n})"}
-    win_skills  = [float(r["skill_score"]) for r in skill_rows if r["outcome_status"] == "win"]
-    # Fix #16: exclude protective_stop + external_shock losses from the gate.
-    # These reflect disciplined execution or unforeseeable events — including their
-    # (correctly high) skill scores in loss_skills inflates mean_loss and can keep
-    # Phase 8 permanently locked even when analysis genuinely predicts outcomes.
-    good_loss_rows      = [r for r in skill_rows
-                           if r["outcome_status"] in ("loss", "breakeven") and _is_good_loss(r)]
+    win_skills = [float(r["skill_score"]) for r in skill_rows if r["outcome_status"] == "win"]
+    # Exclude protective_stop + external_shock losses — disciplined capital protection
+    # and black-swan events reflect execution quality, not analytical error. Including
+    # their high scores in loss_skills would suppress Phase 8 despite correct analysis.
+    good_loss_rows       = [r for r in skill_rows
+                            if r["outcome_status"] in ("loss", "breakeven") and _is_good_loss(r)]
     analytical_loss_rows = [r for r in skill_rows
                             if r["outcome_status"] in ("loss", "breakeven") and not _is_good_loss(r)]
     loss_skills = [float(r["skill_score"]) for r in analytical_loss_rows]
@@ -75,20 +105,26 @@ def _compute_phase8_meta(skill_rows: list) -> dict:
     if not win_skills or not loss_skills:
         return {"active": False, "n_scored": n, "n_good_losses_excluded": n_good_excl,
                 "reason": "no wins or no analytical losses among scored events"}
+
     mean_win  = round(sum(win_skills)  / len(win_skills),  2)
     mean_loss = round(sum(loss_skills) / len(loss_skills), 2)
-    active = mean_win > mean_loss
+    z         = round(_mann_whitney_z(win_skills, loss_skills), 2)
+    threshold = 1.28  # one-sided p < 0.10
+    active    = z > threshold
+
+    excl_note = f"; {n_good_excl} good-loss excluded" if n_good_excl else ""
     return {
         "active":                  active,
         "n_scored":                n,
         "n_good_losses_excluded":  n_good_excl,
         "mean_skill_wins":         mean_win,
         "mean_skill_losses":       mean_loss,
+        "mann_whitney_z":          z,
+        "mann_whitney_threshold":  threshold,
         "reason": (
-            f"scores predict outcomes (mean wins={mean_win} > losses={mean_loss}"
-            + (f"; {n_good_excl} good-loss excluded)" if n_good_excl else ")")
+            f"MW Z={z:.2f}>{threshold} — scores predict outcomes (wins={mean_win}, losses={mean_loss}{excl_note})"
             if active else
-            f"skill scores do NOT predict wins (wins={mean_win} ≤ losses={mean_loss}) — sf=1.0 applied"
+            f"MW Z={z:.2f}≤{threshold} — scores do NOT reliably predict wins — sf=1.0 applied"
         ),
     }
 
@@ -199,8 +235,9 @@ def learning_log():
                      skill_score, debate_summary, prompt_hash, error_type_source,
                      entry_signals_json, debate_synthesis_winner,
                      tags, trade_thesis,
-                     sell_primary_driver, sell_secondary_factors, sell_urgency)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     sell_primary_driver, sell_secondary_factors, sell_urgency,
+                     alternative_ticker)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -236,6 +273,7 @@ def learning_log():
                 data.get("sell_primary_driver"),
                 data.get("sell_secondary_factors"),
                 data.get("sell_urgency"),
+                data.get("alternative_ticker"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -766,6 +804,115 @@ def learning_calibration_stats():
         return jsonify({"error": str(e)}), 500
 
 
+def _resolve_sell_outcomes(conn) -> int:
+    """Check sell driver validity 25+ days post-generation by comparing price evolution.
+
+    Runs lazily inside _calib_compute() — capped at 5 resolutions per call.
+    Finds executed SELL/TRIM events with sell_primary_driver set but not yet
+    verified, from at least 25 days ago.
+
+    Verdict rules (from the perspective of a long-position exit):
+      target_reached   — validated if sold ticker ≤ +5% since sell, invalidated if > +10%
+      thesis_broken    — validated if sold ticker < −5% since sell, invalidated if > +5%
+      stop_triggered   — same as thesis_broken
+      better_opportunity — validated if alt outperformed sold by > 3pp, invalidated if < −3pp
+      all others       — inconclusive (can't be price-validated)
+    """
+    cutoff = (datetime.now() - timedelta(days=25)).isoformat()
+    try:
+        rows = conn.execute("""
+            SELECT id, ticker, alternative_ticker, sell_primary_driver,
+                   actual_exit_price, timestamp
+            FROM ai_learning_events
+            WHERE was_executed = 1
+              AND sell_primary_driver IS NOT NULL
+              AND sell_verify_date IS NULL
+              AND outcome_status IN ('win', 'loss', 'breakeven')
+              AND timestamp < ?
+            ORDER BY timestamp DESC LIMIT 5
+        """, (cutoff,)).fetchall()
+    except Exception:
+        return 0
+
+    if not rows:
+        return 0
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+
+    resolved  = 0
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    for row in rows:
+        ticker   = (row["ticker"] or "").strip()
+        driver   = row["sell_primary_driver"] or ""
+        exit_px  = row["actual_exit_price"]
+        start_dt = row["timestamp"][:10]
+        alt_tk   = (row["alternative_ticker"] or "").strip()
+
+        if not ticker or exit_px is None:
+            conn.execute(
+                "UPDATE ai_learning_events SET sell_verify_date=?, sell_verify_verdict='inconclusive' WHERE id=?",
+                (today_str, row["id"]))
+            resolved += 1
+            continue
+
+        yf_sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+        try:
+            hist = yf.Ticker(yf_sym).history(start=start_dt, interval="1d")
+            if hist.empty:
+                conn.execute(
+                    "UPDATE ai_learning_events SET sell_verify_date=?, sell_verify_verdict='inconclusive' WHERE id=?",
+                    (today_str, row["id"]))
+                resolved += 1
+                continue
+            ref_px     = float(hist["Close"].iloc[0])
+            current_px = float(hist["Close"].iloc[-1])
+            sold_chg   = (current_px - ref_px) / ref_px * 100 if ref_px else 0
+        except Exception:
+            continue
+
+        # Fetch alt ticker price change for better_opportunity
+        alt_chg = None
+        if driver == "better_opportunity" and alt_tk:
+            try:
+                yf_alt   = alt_tk if alt_tk.endswith(".AX") else alt_tk + ".AX"
+                hist_alt = yf.Ticker(yf_alt).history(start=start_dt, interval="1d")
+                if not hist_alt.empty:
+                    alt_ref = float(hist_alt["Close"].iloc[0])
+                    alt_cur = float(hist_alt["Close"].iloc[-1])
+                    alt_chg = (alt_cur - alt_ref) / alt_ref * 100 if alt_ref else 0
+            except Exception:
+                pass
+
+        # Determine verdict
+        if driver == "target_reached":
+            verdict = "validated" if sold_chg <= 5 else ("invalidated" if sold_chg > 10 else "inconclusive")
+        elif driver in ("thesis_broken", "stop_triggered"):
+            verdict = "validated" if sold_chg < -5 else ("invalidated" if sold_chg > 5 else "inconclusive")
+        elif driver == "better_opportunity":
+            if alt_chg is not None:
+                delta = alt_chg - sold_chg
+                verdict = "validated" if delta > 3 else ("invalidated" if delta < -3 else "inconclusive")
+            else:
+                verdict = "inconclusive"
+        else:
+            # position_sizing, risk_management, portfolio_rebalance, time_stop — can't price-validate
+            verdict = "inconclusive"
+
+        conn.execute("""
+            UPDATE ai_learning_events
+            SET sell_verify_date=?, sell_verify_verdict=?,
+                sell_verify_sold_chg=?, sell_verify_alt_chg=?
+            WHERE id=?
+        """, (today_str, verdict, round(sold_chg, 2), round(alt_chg, 2) if alt_chg is not None else None, row["id"]))
+        resolved += 1
+
+    return resolved
+
+
 def _resolve_virtual_outcomes(conn) -> int:
     """Lazy-evaluate skipped/unexecuted trades for virtual calibration signal.
 
@@ -944,6 +1091,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             # Fix #18: lazy-resolve skipped trades — capped at 10, fast, idempotent.
             # Failures degrade gracefully (yfinance timeout → marks virtual_open, skipped).
             _resolve_virtual_outcomes(conn)
+            # Sprint 37: lazy-resolve sell tag outcomes (Gap 3 + Gap 7) — capped at 5.
+            _resolve_sell_outcomes(conn)
 
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
@@ -972,6 +1121,25 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             """, (cutoff,)).fetchall()
             virtual_rows = [dict(r) for r in v_rows_raw]
             n_virtual    = len(virtual_rows)
+
+            # Part 9: sell tag verification stats — feeds sell-tag calibration signal.
+            # Excludes drivers that are always inconclusive (can't be price-validated).
+            sell_tag_rows = conn.execute("""
+                SELECT sell_primary_driver,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN sell_verify_verdict = 'validated'   THEN 1 ELSE 0 END) AS n_val,
+                       SUM(CASE WHEN sell_verify_verdict = 'invalidated' THEN 1 ELSE 0 END) AS n_inval
+                FROM ai_learning_events
+                WHERE sell_verify_date IS NOT NULL
+                  AND sell_primary_driver IS NOT NULL
+                  AND sell_primary_driver NOT IN (
+                        'position_sizing', 'risk_management', 'tax_optimisation', 'regime_change'
+                      )
+                GROUP BY sell_primary_driver
+                HAVING COUNT(*) >= 3
+                ORDER BY COUNT(*) DESC
+            """).fetchall()
+            sell_tag_stats = [dict(r) for r in sell_tag_rows]
 
         # Gate: personalised calibration nudges require n ≥ 30 to avoid chasing noise.
         # Below that, return an ASX base-rate prior so the user message still has a
@@ -1238,6 +1406,41 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                 sx_parts.sort(key=lambda x: abs(float(x.split("Δ")[1].split("pp")[0])), reverse=True)
                 parts.append(f"sector×{regime}:" + ",".join(sx_parts[:2]))
 
+        # 9. Sell tag validation — surface when a SELL driver is consistently reliable/unreliable.
+        # Only verifiable drivers are included (target_reached, thesis_broken, stop_triggered,
+        # technical_breakdown, better_opportunity, time_stop). Requires n≥3 per driver.
+        if sell_tag_stats:
+            _DRV_SHORT = {
+                "time_stop":           "time_stop",
+                "target_reached":      "target_rch",
+                "better_opportunity":  "better_opp",
+                "thesis_broken":       "thesis_brk",
+                "stop_triggered":      "stop_trig",
+                "technical_breakdown": "tech_break",
+            }
+            _DRV_TIP = {
+                "time_stop":           "→CUTTING WINNERS:extend hold",
+                "target_reached":      "→stock kept rising:raise targets",
+                "better_opportunity":  "→alt rarely better",
+                "thesis_broken":       "→stock recovered:tighten entry",
+                "stop_triggered":      "→stock recovered:tighten entry",
+                "technical_breakdown": "→breakdown reversed:need confluence",
+            }
+            st_parts = []
+            for st in sell_tag_stats[:3]:  # cap at 3 drivers to stay within token budget
+                drv      = st["sell_primary_driver"]
+                n_st     = st["n"]
+                val_rate   = st["n_val"]   / n_st
+                inval_rate = st["n_inval"] / n_st
+                short = _DRV_SHORT.get(drv, drv[:10])
+                if inval_rate >= 0.50:
+                    tip = _DRV_TIP.get(drv, "→unreliable")
+                    st_parts.append(f"⚠SELL_TAG:{short}(n={n_st},val={val_rate*100:.0f}%){tip}")
+                elif val_rate >= 0.65:
+                    st_parts.append(f"✓SELL_TAG:{short}(n={n_st},val={val_rate*100:.0f}%)→reliable")
+            if st_parts:
+                parts.append(" | ".join(st_parts))
+
         if not parts:
             return {"available": False, "block": None}
 
@@ -1285,20 +1488,24 @@ def learning_calibration():
     tickers_str = request.args.get("tickers", "")
     days        = min(int(request.args.get("days", 90)), 180)
 
-    # L4: serve from cache if fresh
+    # L4: serve from cache if fresh (Fix #8: lock protects dict access only)
     cache_key = (regime, sectors_str, tickers_str, days)
-    cached = _calib_cache.get(cache_key)
-    if cached and (time.time() - cached[1]) < _CALIB_TTL:
-        return jsonify(cached[0])
+    with _calib_lock:
+        cached = _calib_cache.get(cache_key)
+        if cached and (time.time() - cached[1]) < _CALIB_TTL:
+            return jsonify(cached[0])
 
+    # Expensive computation runs outside the lock to avoid blocking other threads
     result = _calib_compute(regime, sectors_str, tickers_str, days)
+
     if "error" not in result:
-        _calib_cache[cache_key] = (result, time.time())
-        # Prune if cache grows unexpectedly (many different param combos)
-        if len(_calib_cache) > 50:
-            oldest = sorted(_calib_cache.items(), key=lambda x: x[1][1])[:25]
-            for k, _ in oldest:
-                _calib_cache.pop(k, None)
+        with _calib_lock:
+            _calib_cache[cache_key] = (result, time.time())
+            # Prune if cache grows unexpectedly (many different param combos)
+            if len(_calib_cache) > 50:
+                oldest = sorted(_calib_cache.items(), key=lambda x: x[1][1])[:25]
+                for k, _ in oldest:
+                    _calib_cache.pop(k, None)
 
     if "error" in result:
         return jsonify(result), 500
@@ -1389,5 +1596,38 @@ def lessons_delete(lesson_id):
         if rows == 0:
             return jsonify({"ok": False, "error": "Lesson not found"}), 404
         return jsonify({"ok": True, "deleted": lesson_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── Sell tag outcome tracking (Gap 3 + Gap 7) ────────────────────────────────
+
+@bp.route("/api/learning/sell-outcomes", methods=["GET"])
+def sell_outcomes():
+    """Return executed SELL/TRIM events with their driver + 30d verification.
+
+    Query params:
+      limit (default 30, max 100) — number of events to return.
+      force (0|1) — if 1, immediately run _resolve_sell_outcomes before querying.
+    """
+    limit = min(int(request.args.get("limit", 30)), 100)
+    force = request.args.get("force", "0") == "1"
+    try:
+        with get_db() as conn:
+            if force:
+                _resolve_sell_outcomes(conn)
+            rows = conn.execute("""
+                SELECT id, ticker, sell_primary_driver, sell_secondary_factors,
+                       sell_urgency, alternative_ticker,
+                       actual_exit_price, realized_pnl_pct, outcome_status,
+                       sell_verify_date, sell_verify_verdict,
+                       sell_verify_sold_chg, sell_verify_alt_chg,
+                       timestamp
+                FROM ai_learning_events
+                WHERE was_executed = 1
+                  AND sell_primary_driver IS NOT NULL
+                ORDER BY timestamp DESC LIMIT ?
+            """, (limit,)).fetchall()
+        return jsonify({"ok": True, "events": [dict(r) for r in rows]})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

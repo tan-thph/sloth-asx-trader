@@ -128,16 +128,16 @@ weighting is neutral.
 
 ---
 
-## Gap 3 — Sell Tag Outcome Tracking
+## Gap 3 — Sell Tag Outcome Tracking ✅ SHIPPED Sprint 37 + Sprint 38
 
 **Status in doc:** Sprint 29 added SELL/TRIM tagging at generation time.
 The tags are stored. The doc says they're rendered in the UI and logged to
 the backend.
 
-**What's missing:**
+**What was missing:**
 
-The tags exist but aren't yet *closing the loop*. The system records
-`sell_primary_driver = 'thesis_broken'` but never answers: "when Claude tags
+The tags existed but weren't *closing the loop*. The system recorded
+`sell_primary_driver = 'thesis_broken'` but never answered: "when Claude tags
 `thesis_broken`, does the price actually keep falling?"
 
 **Three analytics queries that unlock real value:**
@@ -188,6 +188,24 @@ GROUP BY rh.sell_primary_driver;
 This closes the sell-tag loop the same way calibration closes the confidence
 loop. Without it, the tags are labelling data for later but providing no
 feedback signal.
+
+**Sprint 37 shipped:** `_resolve_sell_outcomes(conn)` lazy-evaluates executed
+SELL/TRIM events 25+ days old. Stores `sell_verify_verdict` (`validated` /
+`invalidated` / `inconclusive`), `sell_verify_sold_chg`, and `sell_verify_alt_chg`
+per event. UI card on Learning page with colour-coded badges. `GET /api/learning/sell-outcomes`.
+
+**Sprint 38 shipped:** Part 9 added to `_calib_compute()`. Queries verified
+verdicts grouped by driver (n≥3, verifiable drivers only). Emits calibration
+block tokens:
+```
+⚠SELL_TAG:time_stop(n=11,val=27%)→CUTTING WINNERS:extend hold
+✓SELL_TAG:thesis_brk(n=12,val=67%)→reliable
+```
+`inval_rate≥50%` triggers warning; `val_rate≥65%` triggers positive signal.
+`ANALYSIS_SYSTEM_PROMPT` Section 6 updated with explicit handling rules for
+each signal type — raise bar + prefer `monitor` urgency for `⚠`; standard
+threshold for `✓`. CUTTING WINNERS guidance: `time_stop` only valid at ≥3×
+expected hold with flat price.
 
 ---
 
@@ -328,12 +346,12 @@ Surface as a small "Tag Accuracy" line in the Debate Engine card:
 
 ---
 
-## Gap 7 — `better_opportunity` Alternative Ticker Cross-Check
+## Gap 7 — `better_opportunity` Alternative Ticker Cross-Check ✅ SHIPPED Sprint 37 + Sprint 38
 
 **Status in doc:** Sprint 29 requires `alternativeTicker` in the rationale
 when `better_opportunity` is the primary driver. The ticker is stored.
 
-**What's missing:**
+**What was missing:**
 
 The cross-check itself. Requiring the ticker is the right foundation, but
 without comparing subsequent performance there's no feedback signal. Claude can
@@ -506,24 +524,20 @@ the sample into sub-groups too small for ESS gating.
 
 ## Priority Order
 
-| # | Gap | Impact | Effort | When |
-|---|-----|--------|--------|------|
-| 1 | Virtual outcomes (conservatism counterbalance) | Very High | Medium | Sprint 30 |
-| 9 | Lessons database (minimal design above) | High | Low–Medium | Sprint 30 |
-| 3 | Sell tag outcome tracking (30d follow-up) | High | Medium | Sprint 30 |
-| 2 | Skill scorer validation gate | Medium | Low | Sprint 30 |
-| 5 | Prompt version regression detector | Medium | Low | Sprint 31 |
-| 4 | ATR-based debate cache invalidation | Medium | Low | Sprint 31 |
-| 7 | `better_opportunity` cross-check | Medium | Low | Sprint 31 |
-| 6 | Ollama tag spot-check accuracy | Low–Medium | Low | Sprint 32 |
-| 8 | Calibration block token budget | Low (now) | Low | Before Phase 8 |
+| # | Gap | Impact | Effort | Status |
+|---|-----|--------|--------|--------|
+| 1 | Virtual outcomes (conservatism counterbalance) | Very High | Medium | ✅ Sprint 36 |
+| 9 | Lessons database (minimal design above) | High | Low–Medium | ✅ Sprint 36 |
+| 3 | Sell tag outcome tracking (30d follow-up) | High | Medium | ✅ Sprint 37 + 38 |
+| 2 | Skill scorer validation gate | Medium | Low | ✅ Sprint 31 (Phase 8 gate) |
+| 5 | Prompt version regression detector | Medium | Low | ✅ Sprint 31 |
+| 4 | ATR-based debate cache invalidation | Medium | Low | ✅ Implicit (atr_pct in signal hash) |
+| 7 | `better_opportunity` cross-check | Medium | Low | ✅ Sprint 37 + 38 |
+| 6 | Ollama tag spot-check accuracy | Low–Medium | Low | Open |
+| 8 | Calibration block token budget | Low (now) | Low | ✅ Sprint 31 |
 
-**Gap 1 first** — the conservatism loop is a structural flaw that compounds
-over time. Every month without it, the calibration tightens a little more.
-
-**Gap 9 second** — the lessons database is deferred but the infrastructure is
-ready. The "what is a lesson?" question has a clear answer now: a one-sentence
-rule scoped to ticker/sector/regime, created by the adjudicator or manually.
-
-**Gap 3 alongside Gap 1** — the nightly price-fetch job supports both virtual
-outcomes and sell tag outcome tracking. Build once, serve both.
+**Only Gap 6 remains open** — Ollama tag spot-check accuracy. All other gaps
+are shipped. Gap 6 requires a `tag_reviews` table, two endpoints, and a small
+weekly spot-check UI widget (5 random auto-tagged events per week, agree/disagree
+buttons). Until then, `top_err` calibration nudges derived from auto-tagged
+events go unaudited.

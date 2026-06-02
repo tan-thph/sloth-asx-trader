@@ -324,6 +324,16 @@ const ANALYSIS_SYSTEM_PROMPT =
       confidence band (e.g. "conf 70-80%: adj+0.08"). Apply: new_conf = clamp(orig_conf + adj, 0, 0.98).
       If a per-ticker line appears (e.g. "BHP.AX:45%(Δ−18pp)⚠weak"), apply an extra −0.10 to that
       ticker's confidence regardless of band. Ignore CALIBRATION if fewer than 5 closed trades.
+    - If "SELL_TAG:" lines appear in the CALIBRATION block, apply them to every SELL/TRIM rec
+      whose primary_driver matches the tagged driver:
+        ⚠SELL_TAG: driver is underperforming. Require at least one additional confirming signal
+          before recommending SELL with that driver; prefer urgency='monitor' over 'immediate'.
+          "CUTTING WINNERS:extend hold" means time-based exits in this account have been premature —
+          do not recommend time_stop unless the position has been flat for ≥ 3× the expected hold.
+          "alt rarely better" for better_opportunity means past capital-redeployment calls were poor —
+          require a clearly superior entry signal in the alternative, not just mild preference.
+        ✓SELL_TAG: driver is validated by historical outcomes. Treat its presence as a positive
+          prior — standard evidence threshold applies; no extra confirming signal required.
 
     - If "--- Local Debate [model]: TICKER ---" blocks appear in the user message, treat them as
       adversarial pre-analysis by a local model. They are not authoritative. Use them as sanity checks:

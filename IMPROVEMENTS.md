@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-05-29 (Sprints 17–27 shipped)
+**Last Updated:** 2026-06-02 (Sprint 38 partial shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -8,6 +8,34 @@
 > and **useful features** that make day-to-day trading decisions faster and more disciplined.
 
 Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for triage.
+
+---
+
+## 0. Shipped — Sprint 38 (2026-06-02)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **Sell tag calibration injection** | Learning Loop | `_calib_compute()` in `routes/learning.py` now queries `sell_verify_verdict` per `sell_primary_driver` (n≥3, verifiable drivers only). Adds part 9 to the calibration block: `⚠SELL_TAG:time_stop(n=11,val=27%)→CUTTING WINNERS:extend hold` when `inval_rate≥50%`; `✓SELL_TAG:thesis_brk(n=12,val=67%)→reliable` when `val_rate≥65%`. Excluded: `position_sizing`, `risk_management`, `tax_optimisation`, `regime_change` (unverifiable by price). Capped at 3 drivers; subject to Gap 8 token-budget truncation. |
+| **Section 6 sell tag interpretation** | Prompts | `ANALYSIS_SYSTEM_PROMPT` Section 6 now tells Claude how to act on `⚠SELL_TAG` / `✓SELL_TAG` lines. `⚠` → require one additional confirming signal, prefer `urgency='monitor'`; CUTTING WINNERS means `time_stop` only valid at ≥3× expected hold with flat price; alt rarely better means `better_opportunity` requires a clearly superior entry. `✓` → standard evidence threshold applies. |
+| **Calibration cache thread lock (Fix #8)** | Backend | `threading.Lock()` added to `routes/learning.py`. Guards `_calib_cache` reads and writes; expensive `_calib_compute()` runs outside the lock. Prevents partial cache-write corruption under concurrent gunicorn threads. |
+| **Phase 8 Mann-Whitney gate (Fix #10)** | Learning Loop | `_mann_whitney_z(wins, losses)` replaces mean comparison in `_compute_phase8_meta()`. Uses U-statistic normalised to Z-score; `active = z > 1.28` (one-sided p<0.10). Single high-skill outlier no longer flips Phase 8 on/off. |
+
+---
+
+## 0. Shipped — Sprint 37 (2026-06-02)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **Sell tag outcome tracking (Gap 3)** | Learning Loop | `_resolve_sell_outcomes(conn)` in `routes/learning.py` — lazy-evaluated inside `_calib_compute()`. Finds executed SELL/TRIM events with `sell_primary_driver` set, 25+ days old, and unverified. Fetches yfinance price at sell date and now; computes `sell_verify_sold_chg`. Verdicts: `validated`/`invalidated`/`inconclusive` per driver. `target_reached`: validated if sold ≤+5%; `thesis_broken`/`stop_triggered`: validated if < −5%; `position_sizing`/`risk_management`/`portfolio_rebalance`: always inconclusive. Capped at 5 resolutions per calibration call — shares the 5-min TTL. |
+| **`better_opportunity` cross-check (Gap 7)** | Learning Loop | `alternative_ticker` column added to `ai_learning_events`. Logged at SELL/TRIM generation time from `analysis.js` (`r.alternativeTicker`). `_resolve_sell_outcomes()` fetches alt ticker price history from sell date → now; computes `sell_verify_alt_chg`. Validated if alt outperformed sold by >3pp, invalidated if < −3pp. |
+| **Sell Decision Tracker UI card** | Learning Page | `renderSellOutcomesCard()` async card on Learning page. Shows ticker, driver, P&L, and 30d verdict per executed SELL. Colour-coded badges (🟢 validated / 🔴 invalidated / — inconclusive). "↺ Check Now" button triggers `?force=1` re-resolve. Pending events shown with "Pending (≥25d)" label. |
+| **`GET /api/learning/sell-outcomes`** | Backend | New endpoint. Returns executed SELL/TRIM events with `sell_primary_driver IS NOT NULL`, ordered by timestamp DESC. `?force=1` param triggers an immediate resolve before returning. |
+
+**Already shipped (confirmed in Sprint 37 audit):**
+- Thesis review at exit — `_showThesisReview()` fires in `markExecuted()` on full position close
+- ATR-based debate cache invalidation — `atr_pct` is in the signal hash; cache auto-invalidates on ATR spikes
+- Economic calendar on Dashboard — `_buildEconomicCalendarCard()` live, shows RBA + ex-div + earnings in 45d window
+- Exact correlation-aware sizing — `analysis.js` lines 819–857: fetches `/api/risk` correlation matrix post-analysis; reduces BUY qty by 30% (|corr|>0.7) or 50% (|corr|>0.85)
 
 ---
 
