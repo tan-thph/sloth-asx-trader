@@ -704,8 +704,8 @@ async function runBacktest() {
 
     document.getElementById('backtest-results').innerHTML = `
 
-      <!-- Price basis disclosure -->
-      <div style="background:rgba(99,102,241,.07);border:0.5px solid rgba(99,102,241,.25);border-radius:6px;padding:9px 14px;margin-bottom:12px;font-size:12px;display:flex;gap:10px;align-items:flex-start">
+      <!-- Price basis + survivorship bias disclosures -->
+      <div style="background:rgba(99,102,241,.07);border:0.5px solid rgba(99,102,241,.25);border-radius:6px;padding:9px 14px;margin-bottom:6px;font-size:12px;display:flex;gap:10px;align-items:flex-start">
         <span style="font-size:14px;flex-shrink:0;opacity:.7">ℹ</span>
         <div style="color:var(--text-secondary)">
           <strong style="color:var(--text-primary)">Total-return price basis.</strong>
@@ -716,6 +716,17 @@ async function runBacktest() {
           Signal timing (RSI, MACD, BB, ADX) is <strong>unaffected</strong> — all are
           scale-invariant. Entry/exit prices in the trade log are adjusted and will be
           lower than the nominal price visible on a chart on that date.
+        </div>
+      </div>
+      <div style="background:rgba(245,158,11,.07);border:0.5px solid rgba(245,158,11,.30);border-radius:6px;padding:9px 14px;margin-bottom:12px;font-size:12px;display:flex;gap:10px;align-items:flex-start">
+        <span style="font-size:14px;flex-shrink:0;opacity:.7">⚠</span>
+        <div style="color:var(--text-secondary)">
+          <strong style="color:var(--text-primary)">Survivorship bias.</strong>
+          This backtest uses <em>current</em> ASX200 constituents — stocks that were delisted,
+          merged, or dropped from the index during the test period are excluded. Returns are
+          therefore biased upward relative to what was investable at the time.
+          Treat absolute return figures as indicative only; use the Sharpe ratio and
+          win-rate comparisons (which are less sensitive to the bias) for strategy evaluation.
         </div>
       </div>
 
@@ -1087,6 +1098,7 @@ function _renderWfResults(res) {
         the best parameter set (by Sharpe ratio). That set is then applied to the out-of-sample test
         window (${Math.round((1-res.train_ratio)*100)}%) — no look-ahead. The OOS equity curve stitches
         the test segments together. Prices use yfinance dividend-adjusted (total-return) series.
+        <span style="color:#d97706">⚠ Survivorship bias: uses current ASX200 constituents — delisted/dropped stocks excluded, returns may be overstated.</span>
       </div>
     </div>
   `;

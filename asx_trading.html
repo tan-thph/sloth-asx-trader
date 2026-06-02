@@ -57,9 +57,13 @@
     </div>
   </nav>
 
+  <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeMobileSidebar()"></div>
   <div class="main">
     <div class="topbar">
-      <h2 id="page-title">Dashboard</h2>
+      <div class="flex-row" style="gap:10px">
+        <button class="mobile-menu-btn" onclick="toggleMobileSidebar()" aria-label="Open navigation">☰</button>
+        <h2 id="page-title">Dashboard</h2>
+      </div>
       <div class="flex-row">
         <button class="btn btn-sm" id="sbc-mode-btn" onclick="toggleSbcMode()" title="Toggle SBC mode — single board computer (Jetson Orin, RPi 5): 20min refresh, no auto-scan">⬡ PC</button>
         <div class="market-pill"><div class="live-dot"></div><span id="market-time">ASX Loading...</span></div>

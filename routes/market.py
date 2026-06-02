@@ -7,7 +7,7 @@ Endpoints:
   /api/analyse/batch               POST    — parallel batch
   /api/quote/<ticker>              GET     — fast price + sector (45 s cache)
   /api/macro                       GET     — ASX200 + global indices (5 min cache)
-  /api/rba-rate                    GET     — live → cache → user fallback → 4.35
+  /api/rba-rate                    GET     — live scrape → 6h in-memory cache → DB cache (7d) → user fallback → 4.35
   /api/polymarket                  GET     — Manifold market probabilities (30 min cache)
   /api/risk                        GET     — beta, Sharpe, VaR, CVaR per ticker
   /api/portfolio/nav-history       POST    — reconstruct NAV curve vs VAS
@@ -377,13 +377,16 @@ def macro():
 
 # ── RBA cash rate ────────────────────────────────────────────────────────────
 
-@bp.route("/api/rba-rate")
-def rba_rate():
-    """Live RBA scrape → DB cache (7d) → user-set → 4.35 fallback."""
-    CACHE_KEY = "rba_cash_rate"
-    CACHE_DATE_KEY = "rba_cash_rate_date"
-    today = datetime.now().strftime("%Y-%m-%d")
+_RBA_CACHE_KEY = "rba_cash_rate"
+_RBA_DATE_KEY  = "rba_cash_rate_date"
 
+
+@ttl_cache(seconds=21600)  # 6 h in-memory; avoids network hit on every macro refresh
+def _rba_rate_cached() -> tuple:
+    """Live RBA scrape → DB cache (7d). Returns (rate, source, date) or raises RuntimeError.
+    RuntimeError is not stored by ttl_cache, so the next call retries immediately.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
     rate = None
     source = "live"
     try:
@@ -391,7 +394,6 @@ def rba_rate():
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-
         m = re.search(r"Cash\s+Rate\s+Target[^0-9]*(\d+\.\d+)\s*%", html, re.IGNORECASE | re.DOTALL)
         if not m:
             m = re.search(r'<td[^>]*>\s*(\d+\.\d+)\s*%\s*</td>', html)
@@ -399,7 +401,6 @@ def rba_rate():
             rate = float(m.group(1))
             if not (0 <= rate <= 10):
                 rate = None
-                source = "live-failed"
             else:
                 source = "live-rba"
     except Exception:
@@ -408,22 +409,35 @@ def rba_rate():
     if rate is not None:
         with get_db() as conn:
             conn.execute("INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))",
-                         (CACHE_KEY, json.dumps(rate)))
+                         (_RBA_CACHE_KEY, json.dumps(rate)))
             conn.execute("INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))",
-                         (CACHE_DATE_KEY, json.dumps(today)))
-        return jsonify({"rate": rate, "source": source, "date": today})
+                         (_RBA_DATE_KEY, json.dumps(today)))
+        return (rate, source, today)
 
     with get_db() as conn:
-        row = conn.execute("SELECT value, updated_at FROM blob_store WHERE key=?", (CACHE_KEY,)).fetchone()
-        date_row = conn.execute("SELECT value FROM blob_store WHERE key=?", (CACHE_DATE_KEY,)).fetchone()
-        if row and date_row:
-            try:
-                cached_rate = json.loads(row["value"])
-                cached_date = json.loads(date_row["value"])
-                if (datetime.now() - datetime.strptime(cached_date, "%Y-%m-%d")).days < 7:
-                    return jsonify({"rate": cached_rate, "source": "cached", "date": cached_date})
-            except Exception:
-                pass
+        row      = conn.execute("SELECT value FROM blob_store WHERE key=?", (_RBA_CACHE_KEY,)).fetchone()
+        date_row = conn.execute("SELECT value FROM blob_store WHERE key=?", (_RBA_DATE_KEY,)).fetchone()
+    if row and date_row:
+        try:
+            cached_rate = json.loads(row["value"])
+            cached_date = json.loads(date_row["value"])
+            if (datetime.now() - datetime.strptime(cached_date, "%Y-%m-%d")).days < 7:
+                return (cached_rate, "cached", cached_date)
+        except Exception:
+            pass
+
+    raise RuntimeError("no RBA rate available from live or DB cache")
+
+
+@bp.route("/api/rba-rate")
+def rba_rate():
+    """Live RBA scrape → 6h in-memory cache → DB cache (7d) → user-set → 4.35 fallback."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        rate, source, date = _rba_rate_cached()
+        return jsonify({"rate": rate, "source": source, "date": date})
+    except Exception:
+        pass
 
     user_rate = request.args.get("user_rate")
     if user_rate:

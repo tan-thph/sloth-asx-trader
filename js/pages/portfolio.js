@@ -64,6 +64,24 @@ function renderPortfolio() {
       </div>`;
     })()}
 
+    ${(()=>{
+      const crw = state._capitalReturnWarnings;
+      if (!crw) return '';
+      const flagged = Object.entries(crw).filter(([, v]) => v && v.length > 0);
+      if (!flagged.length) return '';
+      const items = flagged.map(([t, events]) =>
+        events.map(e => `<strong>${t}</strong>: ${e.amount_pct}% payment on ${e.date} ($${e.amount}/share)`).join(', ')
+      ).join('; ');
+      return `
+      <div class="critical-alert-banner" style="border-color:#f97316;background:#fff7ed;color:#9a3412;margin-bottom:12px">
+        <span style="font-size:16px">💰</span>
+        <div style="flex:1">
+          <div style="font-weight:600;margin-bottom:2px">Large distribution detected — verify your cost base</div>
+          <div style="font-size:12px">${items}. Payments ≥5% of current price may be special dividends or capital returns that reduce your cost base for CGT purposes. Check your broker confirmation and update your CGT parcels if required.</div>
+        </div>
+      </div>`;
+    })()}
+
     ${merged.length === 0 ? _emptyCard('⬢',
       'No holdings yet',
       'Add your first trade to start tracking your portfolio. Import a broker CSV to bulk-load positions, or add holdings manually below.',
@@ -811,5 +829,19 @@ async function checkPortfolioSplits() {
     state._splitWarnings = await r.json();
     const hasSplits = Object.values(state._splitWarnings).some(v => v && v.length > 0);
     if (hasSplits) renderPage();
+  } catch {}
+}
+
+async function checkCapitalReturns() {
+  if (!state.serverOk || !state.portfolio.length) return;
+  // Only run once per page load (undefined = not yet checked, {} = checked clean)
+  if (state._capitalReturnWarnings !== undefined) return;
+  const tickers = [...new Set(state.portfolio.map(h => h.ticker))].join(',');
+  try {
+    const r = await fetch(`${API}/api/portfolio/capital-returns-check?tickers=${encodeURIComponent(tickers)}`);
+    if (!r.ok) return;
+    state._capitalReturnWarnings = await r.json();
+    const hasEvents = Object.values(state._capitalReturnWarnings).some(v => v && v.length > 0);
+    if (hasEvents) renderPage();
   } catch {}
 }

@@ -1,7 +1,25 @@
 // ============================================================
 // NAVIGATION
 // ============================================================
+// ── Mobile sidebar toggle ─────────────────────────────────────────────────────
+function toggleMobileSidebar() {
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  if (!sidebar) return;
+  const open = sidebar.classList.toggle('mobile-open');
+  if (overlay) overlay.classList.toggle('mobile-open', open);
+}
+function closeMobileSidebar() {
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  if (sidebar) sidebar.classList.remove('mobile-open');
+  if (overlay) overlay.classList.remove('mobile-open');
+}
+
 function showPage(page) {
+  // Auto-close mobile sidebar when navigating
+  if (window.innerWidth <= 768) closeMobileSidebar();
+
   // Compare is now a tab inside Market Scanner — redirect transparently
   if (page === 'compare') {
     if (typeof _scannerTab !== 'undefined') _scannerTab = 'compare';
@@ -121,6 +139,7 @@ function _renderPageUnsafe() {
     case 'portfolio':
       el.innerHTML = renderPortfolio();
       if (state._splitWarnings === undefined) checkPortfolioSplits();
+      if (state._capitalReturnWarnings === undefined) checkCapitalReturns();
       break;
     case 'macro':           el.innerHTML = renderMacro(); break;
     case 'recommendations':

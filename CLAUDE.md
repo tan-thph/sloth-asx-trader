@@ -157,6 +157,7 @@ state.settings.tgToken / tgChatId: stored locally in state but credentials saved
 state.settings.drawdownAlertPct:  number — alert threshold for drawdown monitor (default 10)
 state.settings.compactMode:       bool — applies `.compact` CSS body class on startup; reduces card padding, row heights, button sizes (default false)
 state._splitWarnings:             undefined | {} | { TICKER: [{date, ratio}] } — undefined = not yet checked, {} = checked (no splits), populated = splits found; cached per Portfolio page load
+state._capitalReturnWarnings:     undefined | {} | { TICKER: [{date, amount, amount_pct, label}] } — undefined = not yet checked, {} = checked (none), populated = large distributions ≥5% of price; cached per Portfolio page load
 state.targetAllocations:  { TICKER: number }  — ticker → target weight %; persisted in blob_store; used by Risk page drift card
 state.termDeposits:       [{ id, label, amount, rate, maturityDate, notes }]  — idle cash + TDs; persisted in blob_store; Dashboard cash tracker
 window._morningBrief:     { text, date } | undefined — last generated morning briefing note; lives on window so it survives renderPage() calls but clears on full page reload

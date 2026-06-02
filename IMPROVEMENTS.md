@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-02 (Sprint 38 partial shipped)
+**Last Updated:** 2026-06-02 (Sprint 39 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -11,12 +11,26 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 
 ---
 
+## 0. Shipped — Sprint 40 (2026-06-02)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **RBA rate 6h in-memory cache** | Performance (§3.4) | Extracted `_rba_rate_cached()` with `@ttl_cache(seconds=21600)` in `routes/market.py`. Previously the route always made a live HTTP scrape to `rba.gov.au` on every call (macro page refresh, Settings load, etc.) before falling back to the DB 7d cache. Now the successful result (live or DB) is held in memory for 6h, cutting the network call to at most once per 6h. `RuntimeError` on total failure is not cached by `ttl_cache` (exception propagates without storing), so the next call retries immediately. User-set rate override and 4.35 fallback remain unchanged in the route. |
+| **Signals page optimistic rendering** | UX (§4) | `renderSignalsPage()` now renders stale `state.liveSignals` immediately on navigation; kicks a background `fetchSignals()` that re-renders when done (with a "⟳ Refreshing…" badge in the header). Full spinner shown only on first cold load (no cached data). Module-level `_sigRefreshing` guard prevents duplicate concurrent refreshes. |
+
+---
+
 ## 0. Shipped — Sprint 39 (2026-06-02)
 
 | Fix / Feature | Area | Detail |
 |---|---|---|
 | **Polymarket fetch parallelization** | Performance (§3.4) | `/api/polymarket` now dispatches all 6 Manifold API queries in parallel via `ThreadPoolExecutor` instead of a serial list comprehension. Worst-case latency drops from 6×8s=48s to a single 8s timeout when all succeed. Typical latency improvement: 3–5s → ~1s on cache miss. |
 | **Polymarket loading state** | UX (§3.4) | `fetchPolymarket()` sets `window._pmFetching=true` and calls `renderPage()` before the fetch, disabling the button and showing a spinner row inside the Prediction Markets card. `finally` block clears flag. |
+| **Earnings-calendar 4h per-ticker cache** | Performance (§3.4) | Extracted `_get_ticker_earnings_cached(ticker)` with `@ttl_cache(seconds=14400)` in `routes/market.py`. Previously, every call made 3 yfinance HTTP round-trips per ticker (`info`, `calendar`, `earnings_history`) — repeated loads of the Dashboard economic calendar or Signals page incurred the full cost each time. ThreadPoolExecutor still provides parallel dispatch on cache misses. |
+| **`_preEarningsAdj` forwarded through quant merge** | Bug fix | `computeTradeParams()` correctly set `_preEarningsAdj: true` when pre-earnings stop widening (1.3×) fired, but `analysis.js` only forwarded named fields from the quant result. The flag was silently dropped, so the `📅 Pre-earnings` badge never appeared on rec cards. Fixed by adding `_preEarningsAdj: qt._preEarningsAdj` to the merge. 3 new quant-engine tests + 2 new regime-engine tests for stopAtrMult monotonicity (127 JS tests total). |
+| **Survivorship bias disclosures in backtest** | Accuracy (§1.5) | Added an amber warning panel to Technical backtest results (alongside the existing total-return disclosure) and a footer note to the Walk-Forward methodology box. Both explain that current ASX200 constituents are used — delisted/dropped stocks are excluded and returns may be overstated. Treat absolute figures as indicative; use Sharpe/win-rate for cross-strategy comparisons. |
+| **Capital-returns-check endpoint** | Data quality (§1.9) | New `GET /api/portfolio/capital-returns-check?tickers=...` in `routes/portfolio.py`. Fetches `stk.dividends` for the last 90 days; flags any single payment ≥5% of current price as a potential special dividend / capital return. Portfolio page calls `checkCapitalReturns()` alongside `checkPortfolioSplits()` on load; shows an orange banner with date, amount, and per-share figure when flagged. `state._capitalReturnWarnings` mirrors `state._splitWarnings`. 5 new tests (3 endpoint, 2 frontend). |
+| **Mobile / responsive layout (§4)** | UX | Added `@media (max-width: 768px)` block to `asx_trading.css`: sidebar slides in as an overlay (transforms from `translateX(-100%)` to `translateX(0)`) with a semi-transparent backdrop. Hamburger button (`☰`) appears in the topbar on mobile; hidden on desktop. `toggleMobileSidebar()` / `closeMobileSidebar()` added to `navigation.js`; `showPage()` auto-closes the sidebar on any navigation. Grid layouts collapse to single column at 768px. Tables and content padding already handled by `.table-wrap` and existing grid media queries. |
 | **IMPROVEMENTS.md stale ✓ cleanup** | Docs | Marked 8 shipped items as ✓ in §2.1–2.7 tables: Target allocations, Cash/TD tracker, Franking 45-day, Economic calendar, A-VIX, Correlation-aware sizing (exact), Thesis review at exit, Prompt A/B tracking. Removed stale "Remaining:" notes from §5. Added Sprint 37–38 and open items to §5. |
 
 ---
@@ -190,9 +204,11 @@ Wilson 95% CI now appears on all win-rate cells; calibration gated at n<30. See 
 Brier score + reliability diagram in `GET /api/learning/calibration-stats`. Learning page shows the
 Brier score metric card and a CSS bar diagram (actual win rate vs predicted confidence, per bin). See §0.
 
-### 1.5 Survivorship bias in the universe — `L` · ★★
-`ASX_UNIVERSE` is *today's* constituents; backtests over it silently exclude delisted/relegated names
-and overstate returns. Use point-in-time membership for honest historical tests.
+### ✓ 1.5 Survivorship bias in the universe — `L` · ★★ **(disclosure shipped Sprint 39)**
+`ASX_UNIVERSE` is *today's* constituents; backtests silently exclude delisted/relegated names.
+Amber disclosure panel added to Technical backtest results and Walk-Forward methodology note (Sprint 39).
+True point-in-time constituents require paid data or historical tracking — this remains an open data gap,
+but the disclosure prevents the bias from misleading without warning.
 
 ### ✓ 1.6 Overfitting guard on `_score_ticker` weights — `L` · ★★ **SHIPPED Sprint 21**
 K-fold cross-validation of the eight `_score_ticker` signal factors. Each factor's Information
@@ -213,9 +229,12 @@ both the grid-search and the final OOS evaluation.
 Scanner computes `breadth_ratio` (% of universe above 20-day SMA) after each scan; `/api/macro` reads
 it via lazy import as `advance_decline_ratio`; regime engine breadth vote now fires. See §0.
 
-### 1.9 Corporate-actions correctness — `M` · ★★
-Splits, special dividends, capital returns, mergers affect holdings, average price, and **CGT
-parcels**. A missed 1:5 split silently corrupts P&L and tax output — verify these reconcile.
+### ✓ 1.9 Corporate-actions correctness — `M` · ★★ **(split + large-dividend detection shipped)**
+Splits: detection + one-click auto-adjust shipped (Sprints 13/17). Large special dividends / capital
+returns: `GET /api/portfolio/capital-returns-check` (Sprint 39) flags payments ≥5% of current price
+in the last 90 days; Portfolio page shows orange warning. Remaining open: mergers/takeovers (stock →
+cash at premium) and capital returns affecting CGT cost base require manual entry; yfinance does not
+tag these as distinct corporate-action types.
 
 ### ✓ 1.10 Data-staleness guards — `S` · ★★ **SHIPPED**
 `fetched_at` stamped on quote responses. `⚠ stale` badge in portfolio table when >25 min. See §0.
@@ -318,10 +337,10 @@ Daily backup on startup + daemon thread. Keeps last 7. See §0.
 122 Vitest unit tests for pure engine files (`quant-engine`, `regime-engine`, `response-validator`,
 `_detectExitReason` in both `recommendations.js` and `performance.js`). `npm run test:js`. See §0.
 
-### 3.4 Performance / responsiveness — `S` · ★★ (partial)
+### ✓ 3.4 Performance / responsiveness — `S` · ★★ (partial)
 Macro endpoint fully parallelised (Sprint 8). Polymarket parallelised + loading state (Sprint 39).
-Earnings calendar already parallel with 4h per-ticker TTL.
-Remaining: widen caches for RBA rate (currently DB-cached 7d but still scrapes live on miss; an in-memory `ttl_cache` wrapper would skip the network call during the 7d window), optimistic stale-data rendering for macro/earnings on the dashboard.
+Earnings calendar parallel with 4h per-ticker TTL (Sprint 39). RBA rate wrapped in `@ttl_cache(seconds=21600)` (Sprint 40) — `_rba_rate_cached()` skips the network scrape entirely within the 6h window; RuntimeError on total failure is not cached so the next call retries live.
+Remaining: optimistic stale-data rendering for macro/earnings on the dashboard (show old data while re-fetching instead of blocking).
 
 ### ✓ 3.5 Light security hygiene (personal) — `S` · ★ **SHIPPED Sprint 21**
 - gunicorn now binds `127.0.0.1:5000` (was `0.0.0.0`) — LAN devices can no longer reach the API
@@ -342,12 +361,12 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 
 | Item | Effort | Impact | Notes |
 |---|---|---|---|
-| Mobile / PWA | L | ★★ | Check positions + alerts on the phone during market hours; installable PWA is enough for personal use. |
-| Onboarding & empty states | S | ★ | First-run setup (key, cash, import) and friendly empty cards. |
-| Keyboard shortcuts | S | ★ | Fast page switching + "log trade" hotkey for a power user. |
-| Dark/light + density toggle | S | ★ | Already dark; a compact density mode helps on the Pi/small screens. |
-| In-app changelog / version banner | S | ★ | Surface app version + `PROMPT_VERSION` so you know when logic/models changed. |
-| Consistent loading/error states | S | ★ | Skeletons + retry; the error boundary catches crashes but happy-path spinners are uneven. |
+| ✓ **Mobile responsive layout** | L | ★★ | **SHIPPED Sprint 39** — sidebar overlay + hamburger, grid single-column at 768px, auto-close on nav. |
+| Onboarding & empty states | S | ★ | First-run setup (key, cash, import) and friendly empty cards. Portfolio first-run state shipped (Sprint 18); full wizard out of scope for personal tool. |
+| ✓ **Keyboard shortcuts** | S | ★ | **SHIPPED** — `g`+letter page navigation + `?` shortcut help `<dialog>`. See §0. |
+| ✓ **Dark/light + density toggle** | S | ★ | **SHIPPED** — compact mode (`.compact` body class, Settings → Display). See §0. |
+| ✓ **In-app changelog / version banner** | S | ★ | **SHIPPED** — Settings → "What's New" collapsible sprint history + App Info card (version/uptime/last backup). See §0. |
+| ✓ **Consistent loading/error states** | S | ★ | **SHIPPED Sprint 40** — signals page now renders stale data immediately + background refresh with "⟳ Refreshing…" badge; only shows spinner on first cold load. Risk page (Sprint 18) + performance page already had error+retry pattern. |
 
 ---
 
@@ -376,7 +395,9 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 21. ✓ **Sprint 26 shipped:** Phase 6 calibration quality debate card (`GET /api/debate/calib-quality`, traffic-light UI, `triggerCalibQualityIfStale`) — **all done**.
 22. ✓ **Sprint 27 shipped:** Success tag calibration nudge (step 6b in `_calib_compute`), `success_patterns` in stats, Success Patterns UI card — **all done**.
 23. ✓ **Sprint 37–38 shipped:** Sell tag outcome tracking (Gap 3), `better_opportunity` cross-check (Gap 7), sell tag calibration injection (Part 9), Section 6 SELL_TAG prompt rules, calibration cache thread lock, Phase 8 Mann-Whitney gate, Kelly rejection, regime-aware stopAtrMult, 30-min blend on regime flip, SPI200 futures vote, `_sanity_check()` in indicators, `pre_earnings_risk` flag — **all done**.
-24. **Open:** §1.5 survivorship bias, §1.9 corporate-actions (special div/mergers), §3.4 performance (slow macro/polymarket endpoints), §3.7 types/ES-modules, §2.1 multiple portfolios, §4 mobile/PWA.
+24. ✓ **Sprint 39 shipped:** `_preEarningsAdj` badge fix, earnings-calendar 4h TTL cache, survivorship-bias disclosures (§1.5), capital-returns-check endpoint (§1.9 partial), mobile responsive layout (§4).
+25. ✓ **Sprint 40 shipped:** RBA rate 6h in-memory `ttl_cache` wrapper (`_rba_rate_cached`); signals page optimistic stale rendering + background refresh; §4 table docs cleanup (keyboard shortcuts, density mode, in-app changelog marked ✓).
+26. **Open:** §1.9 mergers/takeover CGT (no yfinance tag), §2.1 multiple portfolios, §3.7 ES-modules (deferred — no dev server), PWA installability.
 
 ---
 

@@ -1944,6 +1944,96 @@ class TestETFEarningsFilter(unittest.TestCase):
         self.assertEqual(body["VAS"].get("skipped"), "ETF")
 
 
+class TestCapitalReturnsCheck(unittest.TestCase):
+    """GET /api/portfolio/capital-returns-check — large distribution detection."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_endpoint_returns_empty_for_no_dividends(self):
+        """Returns [] per ticker when dividends are None or empty."""
+        import unittest.mock as _mock
+        import yfinance as yf
+
+        class _FakeTicker:
+            splits = None
+            dividends = None
+            def history(self, **kw):
+                import pandas as pd
+                return pd.DataFrame()
+        with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+            resp = self.client.get("/api/portfolio/capital-returns-check?tickers=CBA")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("CBA", body)
+        self.assertEqual(body["CBA"], [])
+
+    def test_flags_large_dividend(self):
+        """Payment ≥5% of current price must be flagged with amount_pct."""
+        import unittest.mock as _mock
+        import yfinance as yf
+        import pandas as pd
+
+        large_div = pd.Series(
+            [0.60],
+            index=pd.to_datetime(["2026-05-01"]).tz_localize("UTC"),
+        )
+        large_div.index.name = "Date"
+
+        class _FakeTicker:
+            splits = None
+            dividends = large_div
+            def history(self, **kw):
+                return pd.DataFrame({"Close": [10.0]}, index=pd.to_datetime(["2026-05-01"]))
+        with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+            resp = self.client.get("/api/portfolio/capital-returns-check?tickers=BHP")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(len(body["BHP"]) > 0, "Expected large dividend (6%) to be flagged")
+        self.assertIn("amount_pct", body["BHP"][0])
+        self.assertGreaterEqual(body["BHP"][0]["amount_pct"], 5.0)
+
+    def test_ignores_small_dividend(self):
+        """Regular dividend below 5% threshold must NOT be flagged."""
+        import unittest.mock as _mock
+        import yfinance as yf
+        import pandas as pd
+
+        small_div = pd.Series(
+            [0.20],
+            index=pd.to_datetime(["2026-05-01"]).tz_localize("UTC"),
+        )
+        small_div.index.name = "Date"
+
+        class _FakeTicker:
+            splits = None
+            dividends = small_div
+            def history(self, **kw):
+                return pd.DataFrame({"Close": [10.0]}, index=pd.to_datetime(["2026-05-01"]))
+        with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+            resp = self.client.get("/api/portfolio/capital-returns-check?tickers=CBA")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertEqual(body["CBA"], [], "Small dividend (2%) should not be flagged")
+
+    def test_portfolio_js_capital_return_warning_renders(self):
+        """portfolio.js must render a capital-return warning banner."""
+        with open(os.path.join(ROOT, "js/pages/portfolio.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_capitalReturnWarnings", src)
+        self.assertIn("capital return", src)
+
+    def test_navigation_js_calls_check_capital_returns(self):
+        """navigation.js must call checkCapitalReturns when loading portfolio page."""
+        with open(os.path.join(ROOT, "js/navigation.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("checkCapitalReturns", src)
+
+
 class TestPromptVersionDelta(unittest.TestCase):
     """Prompt version A/B delta in the Learning Loop UI."""
 

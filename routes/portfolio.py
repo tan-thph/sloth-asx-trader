@@ -423,3 +423,64 @@ def splits_check():
         except Exception:
             result[ticker] = []
     return jsonify(result)
+
+
+@bp.route("/api/portfolio/capital-returns-check")
+def capital_returns_check():
+    """Flag large single-payment dividends that may represent special dividends or capital returns.
+
+    A payment exceeding THRESHOLD_PCT (5%) of the current price in a single ex-date within the
+    last 90 days is flagged — regular quarterly/semi-annual dividends are typically 0.5–2.5%
+    per payment, so a 5%+ single payment is a strong signal of a capital return or special div.
+
+    Query param: tickers (comma-separated, e.g. CBA.AX,BHP.AX)
+    Returns: {TICKER: [{date, amount, amount_pct, label}]} — empty list when nothing flagged.
+    """
+    import yfinance as yf
+    from datetime import timedelta
+
+    THRESHOLD_PCT = 5.0  # % of current price — below this it's likely a normal dividend
+
+    raw = request.args.get("tickers", "")
+    tickers = [t.strip().upper() for t in raw.split(",") if t.strip()]
+    if not tickers:
+        return jsonify({"error": "tickers required"}), 400
+
+    cutoff = datetime.utcnow() - timedelta(days=90)
+    result = {}
+    for ticker in tickers[:50]:
+        try:
+            sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+            stk = yf.Ticker(sym)
+            divs = stk.dividends
+            if divs is None or divs.empty:
+                result[ticker] = []
+                continue
+
+            # Current price for % calculation — use last close from 2-day history
+            try:
+                hist = stk.history(period="2d")
+                current_price = float(hist["Close"].iloc[-1]) if not hist.empty else None
+            except Exception:
+                current_price = None
+
+            flagged = []
+            for idx, amount in divs.items():
+                ts = idx.to_pydatetime().replace(tzinfo=None)
+                if ts < cutoff:
+                    continue
+                amt = float(amount)
+                if amt <= 0:
+                    continue
+                pct = (amt / current_price * 100) if current_price else None
+                if pct is not None and pct >= THRESHOLD_PCT:
+                    flagged.append({
+                        "date":       str(idx.date()),
+                        "amount":     round(amt, 4),
+                        "amount_pct": round(pct, 2),
+                        "label":      "special dividend / capital return",
+                    })
+            result[ticker] = flagged
+        except Exception:
+            result[ticker] = []
+    return jsonify(result)

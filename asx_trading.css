@@ -272,3 +272,41 @@
   body.compact .btn { padding: 5px 10px; font-size: 12px; }
   body.compact .ind-row { padding: 3px 0; font-size: 11px; }
   body.compact .signal-row { padding: 4px 0; font-size: 12px; }
+
+  /* ── Mobile / responsive layout (≤768px) ── */
+  .mobile-menu-btn {
+    display: none;
+    align-items: center; justify-content: center;
+    width: 32px; height: 32px; flex-shrink: 0;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border-medium);
+    background: none; cursor: pointer;
+    color: var(--text-primary); font-size: 18px;
+    line-height: 1;
+  }
+  .sidebar-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.45);
+    z-index: 99;
+  }
+  @media (max-width: 768px) {
+    .mobile-menu-btn { display: flex; }
+    .sidebar {
+      position: fixed; left: 0; top: 0; bottom: 0;
+      z-index: 100;
+      transform: translateX(-100%);
+      transition: transform 0.22s ease;
+      width: 240px;
+    }
+    .sidebar.mobile-open {
+      transform: translateX(0);
+      box-shadow: 4px 0 24px rgba(0,0,0,.18);
+    }
+    .sidebar-overlay.mobile-open { display: block; }
+    .content { padding: 0.875rem; }
+    .grid-2 { grid-template-columns: 1fr !important; }
+    .grid-3 { grid-template-columns: 1fr !important; }
+    .grid-4 { grid-template-columns: 1fr 1fr !important; }
+    .metrics-grid { grid-template-columns: 1fr 1fr; }
+  }

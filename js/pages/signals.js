@@ -1,6 +1,8 @@
 // ============================================================
 // LIVE SIGNALS PAGE (yfinance powered)
 // ============================================================
+let _sigRefreshing = false; // true while a background refresh is in flight
+
 async function renderSignalsPage(gen) {
   const el = document.getElementById('main-content');
   const tickers = state.portfolio.map(h => h.ticker);
@@ -17,14 +19,29 @@ async function renderSignalsPage(gen) {
     return;
   }
 
-  // Show loading — only if still on signals page
-  if(state._renderGen !== gen) return;
-  el.innerHTML=`<div class="card"><div class="empty-state"><div class="loading-dots"><span></span><span></span><span></span></div><p class="text-muted mt-1">Fetching yfinance data for ${tickers.join(', ')}...</p></div></div>`;
+  const now = Date.now();
+  const hasCachedData = tickers.some(t => state.liveSignals[t] && !state.liveSignals[t].error);
+  const needsRefresh  = tickers.some(t => !state.lastSignalFetch[t] || (now - state.lastSignalFetch[t]) > 15*60*1000);
 
-  await fetchSignals(tickers, false);
-
-  // After await — check we're still on signals page before writing
-  if(state._renderGen !== gen) return;
+  if (hasCachedData) {
+    // Render immediately with what we have; kick a background refresh if data is stale
+    if(state._renderGen !== gen) return;
+    if (needsRefresh && !_sigRefreshing) {
+      _sigRefreshing = true;
+      fetchSignals(tickers, false)
+        .then(() => {
+          _sigRefreshing = false;
+          if (state.page === 'signals' && state._renderGen === gen) renderPage();
+        })
+        .catch(() => { _sigRefreshing = false; });
+    }
+  } else {
+    // No cached data — show spinner and wait for first fetch
+    if(state._renderGen !== gen) return;
+    el.innerHTML=`<div class="card"><div class="empty-state"><div class="loading-dots"><span></span><span></span><span></span></div><p class="text-muted mt-1">Fetching yfinance data for ${tickers.join(', ')}...</p></div></div>`;
+    await fetchSignals(tickers, false);
+    if(state._renderGen !== gen) return;
+  }
 
   const signals=state.liveSignals;
 
@@ -40,7 +57,9 @@ async function renderSignalsPage(gen) {
 
   let html=`
     <div class="flex-between section-gap">
-      <p class="text-muted text-sm">Real-time technical indicators via yfinance · 6-month lookback</p>
+      <p class="text-muted text-sm">Real-time technical indicators via yfinance · 6-month lookback
+        ${_sigRefreshing ? ' <span class="text-xs" style="color:var(--text-secondary)">⟳ Refreshing…</span>' : ''}
+      </p>
       <button class="btn btn-primary btn-sm" onclick="refreshSignals()">⟳ Refresh Signals</button>
     </div>
 
