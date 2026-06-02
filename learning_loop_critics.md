@@ -306,7 +306,7 @@ on.
 
 ---
 
-## Gap 6 — Ollama Tag Spot-Check Accuracy
+## Gap 6 — Ollama Tag Spot-Check Accuracy ✅ SHIPPED
 
 **Status in doc:** `error_type_source` distinguishes auto/manual/debated tags.
 The adversarial debate catches disagreements between two models. But the bulk
@@ -343,6 +343,17 @@ Surface as a small "Tag Accuracy" line in the Debate Engine card:
 ```
 
 **Effort:** Low. A new table, two endpoints, and a small UI component.
+
+**Shipped:** `tag_reviews` table in `db.py`. Three endpoints in `routes/learning.py`:
+`GET /api/learning/tag-reviews?limit=5` (spot-check queue of unreviewed auto-tagged
+events), `POST /api/learning/tag-review` (submit agree/disagree/retag verdict, with
+optional `corrected_tag` applied back to the event), `GET /api/learning/tag-accuracy`
+(returns `{n, n_agree, agree_rate, label, pending_review}`). Calibration gating in
+`_calib_compute()` part 6: when `agree_rate < 0.60`, auto-tagged events are excluded
+from the `learnable_losses` pool so the `top_err` nudge is not built on unreliable
+Ollama classifications; a `⚠AUTO_TAGS_UNRELIABLE` token is emitted instead. Learning
+page: `🏷 Auto-Tag Accuracy` card with colour-coded status badge (Good/Acceptable/
+Unreliable), "Review Batch (5)" button, and inline agree/disagree/retag controls.
 
 ---
 
@@ -533,11 +544,12 @@ the sample into sub-groups too small for ESS gating.
 | 5 | Prompt version regression detector | Medium | Low | ✅ Sprint 31 |
 | 4 | ATR-based debate cache invalidation | Medium | Low | ✅ Implicit (atr_pct in signal hash) |
 | 7 | `better_opportunity` cross-check | Medium | Low | ✅ Sprint 37 + 38 |
-| 6 | Ollama tag spot-check accuracy | Low–Medium | Low | Open |
+| 6 | Ollama tag spot-check accuracy | Low–Medium | Low | ✅ Sprint 39 |
 | 8 | Calibration block token budget | Low (now) | Low | ✅ Sprint 31 |
 
-**Only Gap 6 remains open** — Ollama tag spot-check accuracy. All other gaps
-are shipped. Gap 6 requires a `tag_reviews` table, two endpoints, and a small
-weekly spot-check UI widget (5 random auto-tagged events per week, agree/disagree
-buttons). Until then, `top_err` calibration nudges derived from auto-tagged
-events go unaudited.
+**All gaps are now shipped.** Gap 6 (Sprint 39) added: `tag_reviews` table, three
+endpoints (`GET /api/learning/tag-reviews`, `POST /api/learning/tag-review`,
+`GET /api/learning/tag-accuracy`), and a Tag Accuracy card on the Learning page
+with a weekly 5-event spot-check queue. Agree rate gate in `_calib_compute()`:
+when `agree_rate < 60%`, `top_err` nudge is restricted to manually-reviewed
+events only and a `⚠AUTO_TAGS_UNRELIABLE` token is emitted in its place.
