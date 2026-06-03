@@ -2110,6 +2110,17 @@ async function renderLessonsCard() {
           <input id="ll-lesson-regime" placeholder="Regime (opt.)"
             style="flex:1;min-width:100px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);font-size:12px">
         </div>
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:3px">Market Breadth Scope</div>
+          <select id="ll-lesson-breadth"
+            style="padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);font-size:12px;width:100%">
+            <option value="">(none — always show)</option>
+            <option value="adl_below_0.3">ADL below 0.3 (broad market weak)</option>
+            <option value="adl_above_0.7">ADL above 0.7 (broad market strong)</option>
+            <option value="high_vol">High volatility (A-VIX &gt; 25%)</option>
+            <option value="low_vol">Low volatility (A-VIX &lt; 12%)</option>
+          </select>
+        </div>
         <div style="display:flex;gap:6px">
           <button class="btn btn-sm btn-primary" onclick="submitManualLesson()">Save</button>
           <button class="btn btn-sm" onclick="document.getElementById('ll-add-lesson-form').style.display='none'">Cancel</button>
@@ -2124,16 +2135,17 @@ function showAddLessonModal() {
 }
 
 async function submitManualLesson() {
-  const text   = (document.getElementById('ll-lesson-text')?.value || '').trim();
-  const ticker = (document.getElementById('ll-lesson-ticker')?.value || '').trim().toUpperCase() || null;
-  const sector = (document.getElementById('ll-lesson-sector')?.value || '').trim() || null;
-  const regime = (document.getElementById('ll-lesson-regime')?.value || '').trim() || null;
+  const text         = (document.getElementById('ll-lesson-text')?.value || '').trim();
+  const ticker       = (document.getElementById('ll-lesson-ticker')?.value || '').trim().toUpperCase() || null;
+  const sector       = (document.getElementById('ll-lesson-sector')?.value || '').trim() || null;
+  const regime       = (document.getElementById('ll-lesson-regime')?.value || '').trim() || null;
+  const breadthScope = (document.getElementById('ll-lesson-breadth')?.value || '').trim() || null;
   if (!text) { toast('Lesson text is required', 'error'); return; }
   try {
     const r = await fetch(`${API}/api/learning/lessons`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lesson_text: text, ticker, sector, regime, source: 'manual' }),
+      body: JSON.stringify({ lesson_text: text, ticker, sector, regime, source: 'manual', breadth_scope: breadthScope }),
     });
     const d = await r.json();
     if (d.ok) {

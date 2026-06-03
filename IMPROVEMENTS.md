@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-03 (Sprint 43 shipped)
+**Last Updated:** 2026-06-04 (Sprint 44 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -8,6 +8,17 @@
 > and **useful features** that make day-to-day trading decisions faster and more disciplined.
 
 Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for triage.
+
+---
+
+## 0. Shipped — Sprint 44 (2026-06-04)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **§2.6 DRP parcel tracking** | Workflow (M) | Portfolio page gains a "DRP" button per holding row. Clicking opens a modal (shares, price/share, settlement date, optional dividend amount). `applyDrpEvent()` recalculates weighted `avgPrice`, adds a `state.cgtParcels` entry (`action:'DRP'`), and logs to `state.tradeJournal`. CGT page shows an indigo `DRP` badge on DRP parcels. `badge-drp` CSS added. `actionBadge()` in `utils.js` handles DRP. Journal filter includes DRP option. |
+| **§1.12 Virtual-outcome speed weighting** | Calibration (S) | `virtual_speed_weight REAL` column added to `ai_learning_events` via `_LE_MIGRATIONS`. `_resolve_virtual_outcomes()` now writes `speed_weight = min(1.0, 7.0 / hold_days)` — trades that hit target in 7d get weight=1.0; 29d → ~0.24. `_weight()` in `_calib_compute()` multiplies the existing 0.75× virtual discount by `virtual_speed_weight`. |
+| **§1.11 Regime-change calibration penalty** | Calibration (S) | On regime flip, `fetchAndClassifyRegime()` writes `regime_flipped_at` and `regime_flipped_to` to `localStorage`. `fetchCalibrationBlock()` passes them as query params. Backend `_calib_compute()` halves the half-life (`hl = max(10, hl // 2)`) for the first <10 trades in the new regime when flip was within 30d; emits `⚠REGIME_FLIP(Nd ago, N trades, hl=Nd)` token in the calibration block. |
+| **§2.6 Lessons market-breadth scope** | Workflow (M) | `breadth_scope TEXT` column added to `trading_lessons` via `init_db()`. Valid values: `adl_below_0.3`, `adl_above_0.7`, `high_vol`, `low_vol`, `null` (always inject). `GET /api/learning/lessons` accepts `adl` and `asx_vol` params and filters scoped lessons accordingly. `POST /api/learning/lessons` accepts `breadth_scope`. Create Lesson form in `learning.js` gains a breadth-scope dropdown. `analysis.js` passes `adl` + `asx_vol` from `state.macroData` to the lessons fetch. |
 
 ---
 
@@ -446,7 +457,8 @@ Single canonical copy now in `js/utils.js`. Both page files reference it via the
 27. ✓ **Sprint 42 shipped:** `high_60d`/`low_60d` forwarded to Claude in `analysis.js` (`Range60d` line); `_dtBuildRecs()` Signal #4 updated to actual Fibonacci zone (with `return_60d` fallback); Stooq price fallback (`stooq_quote` in `core.py`) wired into `_quote_cached()` and `_macro_payload()` — third line of defence when yfinance fails and `_last_good` is empty; doc fixes in `learning_loop.md` and `prompts.md` (Phase 8 live, day-trade Claude prompts marked dormant, Phase 3 neutral synthesis terminology).
 28. ✓ **Sprint 42 shipped:** `high_60d`/`low_60d` forwarded to Claude in `analysis.js` (`Range60d` line); `_dtBuildRecs()` Signal #4 updated to actual Fibonacci zone (with `return_60d` fallback); Stooq price fallback (`stooq_quote` in `core.py`) wired into `_quote_cached()` and `_macro_payload()` — third line of defence when yfinance fails and `_last_good` is empty; doc fixes in `learning_loop.md` and `prompts.md` (Phase 8 live, day-trade Claude prompts marked dormant, Phase 3 neutral synthesis terminology); pre-trade checklist 6th item (profit harvest / risk management); executed-rec button immediate feedback; `max_tokens` raised to 8,000; `unrealised_loss_large` enforcement line + SELL exit semantics in `ANALYSIS_SYSTEM_PROMPT`.
 29. ✓ **Sprint 43 shipped:** §3.8 `_detectExitReason` hoisted to `utils.js`; §3.10 Stooq rate-limit semaphore; §3.9 `FACTOR_WEIGHTS` guard; §2.7 "Why this rec?" traceability panel.
-30. **Open:** §1.11 regime-change calibration penalty (S, ★★), §2.7 local LLM SELL/TRIM (L, ★★★), §1.12 virtual-outcome speed weighting (S, ★), §2.6 lessons breadth scope (M, ★★), §2.6 lessons auto-generate (M, ★), §1.9 mergers/takeover CGT (no yfinance tag), §3.7 ES-modules (deferred).
+30. ✓ **Sprint 44 shipped:** §1.11 regime-change calibration penalty; §1.12 virtual-outcome speed weighting; §2.6 lessons breadth scope; §2.6 DRP parcel tracking.
+31. **Open:** §2.7 local LLM SELL/TRIM (L, ★★★), §2.6 lessons auto-generate (M, ★), §1.9 mergers/takeover CGT (no yfinance tag), §3.7 ES-modules (deferred).
 
 ---
 

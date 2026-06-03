@@ -264,6 +264,8 @@ _LE_MIGRATIONS = [
     ("sell_verify_verdict",  "TEXT"),  # validated|invalidated|inconclusive
     ("sell_verify_sold_chg", "REAL"),  # % price change of sold ticker since sell date
     ("sell_verify_alt_chg",  "REAL"),  # % price change of alternative ticker since sell date
+    # Sprint 44: speed weight — recs that hit target quickly get higher calibration weight
+    ("virtual_speed_weight", "REAL"),  # 1.0 (slow, 30d) → higher for fast hits (capped at 1.0)
 ]
 
 
@@ -287,6 +289,12 @@ def init_db():
         tj_cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_journal)").fetchall()}
         if "close_date" not in tj_cols:
             conn.execute("ALTER TABLE trade_journal ADD COLUMN close_date TEXT")
+
+        # trading_lessons: breadth_scope column (Sprint 44)
+        # Valid: adl_below_0.3 | adl_above_0.7 | high_vol | low_vol | NULL (always inject)
+        tl_cols = {r[1] for r in conn.execute("PRAGMA table_info(trading_lessons)").fetchall()}
+        if "breadth_scope" not in tl_cols:
+            conn.execute("ALTER TABLE trading_lessons ADD COLUMN breadth_scope TEXT")
 
         # Passive maintenance on every startup:
         # - optimize: updates index statistics so the query planner stays accurate

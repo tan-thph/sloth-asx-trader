@@ -988,18 +988,25 @@ def _resolve_virtual_outcomes(conn) -> int:
                 if bar["High"] >= target: outcome = "virtual_win";  break
                 if bar["Low"]  <= stop:   outcome = "virtual_loss"; break
 
+        hold_days = max(1, (datetime.now() - datetime.fromisoformat(row["timestamp"])).days)
+        speed_weight = round(min(1.0, 7.0 / hold_days), 3)
         conn.execute(
-            "UPDATE ai_learning_events SET virtual_outcome=? WHERE id=?",
-            (outcome, row["id"]))
+            "UPDATE ai_learning_events SET virtual_outcome=?, virtual_speed_weight=? WHERE id=?",
+            (outcome, speed_weight, row["id"]))
         resolved += 1
 
     return resolved
 
 
-def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -> dict:
+def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
+                   flipped_at: str = "", flipped_to: str = "") -> dict:
     """
     Pure calibration computation. Returns a plain dict.
     Separated from the route so results can be TTL-cached (L4).
+
+    flipped_at / flipped_to (Sprint 44): when a regime flip occurred recently and
+    fewer than 10 trades have accumulated in the new regime, the half-life is
+    temporarily halved to discount stale pre-flip calibration data faster.
     """
     sectors     = [s for s in sectors_str.split(",") if s]
     tickers_req = [t for t in tickers_str.split(",") if t]
@@ -1021,6 +1028,28 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         "neutral":      60,
     }
     hl = _HL_MAP.get(regime or "", 45)
+
+    # Sprint 44: regime-flip penalty — temporarily halve hl when the regime
+    # flipped recently AND fewer than 10 trades have accumulated in the new regime.
+    # This prevents stale pre-flip calibration from dominating the first few weeks.
+    _regime_flip_token = ""
+    if flipped_at and flipped_to and flipped_to == regime:
+        try:
+            flip_dt  = datetime.fromisoformat(flipped_at.replace("Z", "+00:00").replace("+00:00", ""))
+            flip_days = (datetime.now() - flip_dt).days
+            if flip_days <= 30:
+                # Count executed trades logged since the flip
+                from db import get_db as _get_db_local
+                with _get_db_local() as _conn:
+                    n_new = _conn.execute(
+                        "SELECT COUNT(*) FROM ai_learning_events WHERE regime=? AND timestamp>=? AND outcome_status IN ('win','loss','breakeven')",
+                        (regime, flipped_at[:10]),
+                    ).fetchone()[0]
+                if n_new < 10:
+                    hl = max(10, hl // 2)
+                    _regime_flip_token = f"⚠REGIME_FLIP({flip_days}d ago, {n_new} trades in new regime, hl={hl}d)"
+        except Exception:
+            pass
 
     # Phase 8 gate — set to True after rows are fetched if scores predict outcomes.
     # Captured by closure in _weight() below; Python reads the name at call time.
@@ -1058,8 +1087,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
         # _phase8_active is resolved at call time (closure over outer scope variable).
         sf = max(0.2, min(1.8, float(sk) / 5.0)) if (sk is not None and _phase8_active) else 1.0
         base = td * sf
-        # Fix #18: virtual rows get 0.75× multiplier (is_virtual=1 in DB query)
-        return base * 0.75 if r.get("is_virtual") else base
+        # Fix #18: virtual rows get 0.75× multiplier × speed_weight (Sprint 44: fast hits weighted higher)
+        if r.get("is_virtual"):
+            return base * 0.75 * float(r.get("virtual_speed_weight") or 1.0)
+        return base
 
     def _ess(subset):
         """Kish's effective sample size for weighted samples.
@@ -1114,6 +1145,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             _auto_tags_ok    = _auto_tag_agree is None or _auto_tag_agree >= 0.60
 
             # Fix #18: fetch resolved virtual outcomes to supplement calibration at 0.75× weight.
+            # Sprint 44: virtual_speed_weight multiplies the 0.75× base for fast hits.
             # Maps virtual_win → 'win', virtual_loss → 'loss' so all downstream logic is unchanged.
             v_rows_raw = conn.execute("""
                 SELECT ai_confidence,
@@ -1121,7 +1153,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
                        regime, sector, ticker,
                        NULL AS realized_pnl_pct, rr_ratio, timestamp,
                        error_type, exit_reason, skill_score, success_tags,
-                       1 AS is_virtual
+                       1 AS is_virtual,
+                       COALESCE(virtual_speed_weight, 1.0) AS virtual_speed_weight
                 FROM ai_learning_events
                 WHERE was_executed = 0
                   AND virtual_outcome IN ('virtual_win', 'virtual_loss')
@@ -1458,6 +1491,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int) -
             if st_parts:
                 parts.append(" | ".join(st_parts))
 
+        # Sprint 44: insert regime-flip warning at the front (high priority — survives truncation)
+        if _regime_flip_token:
+            parts.insert(0, _regime_flip_token)
+
         if not parts:
             return {"available": False, "block": None}
 
@@ -1499,13 +1536,18 @@ def learning_calibration():
     - external_shock / protective_stop excluded from confidence-band calibration
     - Regime freshness gate (L1: silent when 0 trades, warn at 1-2)
     - Error-type threshold lowered to 33% from 40% for earlier pattern detection (L2)
+    - Sprint 44: regime-flip penalty — halve hl for first <10 trades in new regime
     """
     regime      = request.args.get("regime", "")
     sectors_str = request.args.get("sectors", "")
     tickers_str = request.args.get("tickers", "")
     days        = min(int(request.args.get("days", 90)), 180)
+    flipped_at  = request.args.get("flipped_at", "")
+    flipped_to  = request.args.get("flipped_to", "")
 
     # L4: serve from cache if fresh (Fix #8: lock protects dict access only)
+    # flipped_at/flipped_to are not part of the cache key — they are short-lived
+    # and the TTL (5 min) is shorter than the minimum meaningful penalty window.
     cache_key = (regime, sectors_str, tickers_str, days)
     with _calib_lock:
         cached = _calib_cache.get(cache_key)
@@ -1513,7 +1555,7 @@ def learning_calibration():
             return jsonify(cached[0])
 
     # Expensive computation runs outside the lock to avoid blocking other threads
-    result = _calib_compute(regime, sectors_str, tickers_str, days)
+    result = _calib_compute(regime, sectors_str, tickers_str, days, flipped_at, flipped_to)
 
     if "error" not in result:
         with _calib_lock:
@@ -1533,15 +1575,27 @@ def learning_calibration():
 
 @bp.route("/api/learning/lessons", methods=["GET"])
 def lessons_list():
-    """Fetch lessons, optionally filtered by ticker/sector/regime.
+    """Fetch lessons, optionally filtered by ticker/sector/regime/breadth.
 
-    Query params: ticker, sector, regime, limit (default 20).
+    Query params: ticker, sector, regime, adl (float), asx_vol (float), limit (default 20).
+    Breadth-scoped lessons are only returned when the current market conditions match.
     Used by analysis.js to inject contextual lessons into Claude's prompt.
     """
-    ticker = request.args.get("ticker", "")
-    sector = request.args.get("sector", "")
-    regime = request.args.get("regime", "")
-    limit  = min(int(request.args.get("limit", 20)), 100)
+    ticker  = request.args.get("ticker", "")
+    sector  = request.args.get("sector", "")
+    regime  = request.args.get("regime", "")
+    limit   = min(int(request.args.get("limit", 20)), 100)
+    adl_raw = request.args.get("adl", "")
+    vol_raw = request.args.get("asx_vol", "")
+
+    try:
+        adl = float(adl_raw) if adl_raw else None
+    except ValueError:
+        adl = None
+    try:
+        asx_vol = float(vol_raw) if vol_raw else None
+    except ValueError:
+        asx_vol = None
 
     clauses, vals = [], []
     if ticker:
@@ -1559,12 +1613,29 @@ def lessons_list():
         with get_db() as conn:
             rows = conn.execute(
                 f"""SELECT id, learning_event_id, ticker, sector, regime,
-                           setup_type, lesson_text, source, created_at
+                           setup_type, lesson_text, source, created_at,
+                           breadth_scope
                     FROM trading_lessons {where}
                     ORDER BY created_at DESC LIMIT ?""",
                 vals + [limit],
             ).fetchall()
-        return jsonify({"ok": True, "lessons": [dict(r) for r in rows]})
+        lessons = []
+        for r in rows:
+            d = dict(r)
+            scope = d.get("breadth_scope")
+            if scope is None:
+                lessons.append(d)
+                continue
+            # Breadth-scoped: only inject when current market conditions match
+            if scope == "adl_below_0.3" and adl is not None and adl < 0.3:
+                lessons.append(d)
+            elif scope == "adl_above_0.7" and adl is not None and adl > 0.7:
+                lessons.append(d)
+            elif scope == "high_vol" and asx_vol is not None and asx_vol > 25:
+                lessons.append(d)
+            elif scope == "low_vol" and asx_vol is not None and asx_vol < 12:
+                lessons.append(d)
+        return jsonify({"ok": True, "lessons": lessons})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1574,18 +1645,24 @@ def lessons_create():
     """Create a new trading lesson.
 
     Body: { lesson_text, ticker?, sector?, regime?, setup_type?,
-             learning_event_id?, source? }
+             learning_event_id?, source?, breadth_scope? }
+    breadth_scope: adl_below_0.3 | adl_above_0.7 | high_vol | low_vol | null
     """
     data = request.get_json() or {}
-    lesson_text = (data.get("lesson_text") or "").strip()
+    lesson_text   = (data.get("lesson_text") or "").strip()
+    breadth_scope = data.get("breadth_scope") or None
+    if breadth_scope and breadth_scope not in (
+            "adl_below_0.3", "adl_above_0.7", "high_vol", "low_vol"):
+        return jsonify({"ok": False, "error": f"Invalid breadth_scope: {breadth_scope}"}), 400
     if not lesson_text:
         return jsonify({"ok": False, "error": "lesson_text required"}), 400
     try:
         with get_db() as conn:
             conn.execute(
                 """INSERT INTO trading_lessons
-                       (learning_event_id, ticker, sector, regime, setup_type, lesson_text, source)
-                   VALUES (?,?,?,?,?,?,?)""",
+                       (learning_event_id, ticker, sector, regime, setup_type,
+                        lesson_text, source, breadth_scope)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 (
                     data.get("learning_event_id"),
                     data.get("ticker"),
@@ -1594,6 +1671,7 @@ def lessons_create():
                     data.get("setup_type"),
                     lesson_text,
                     data.get("source", "manual"),
+                    breadth_scope,
                 )
             )
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]

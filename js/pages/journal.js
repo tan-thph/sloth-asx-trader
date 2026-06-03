@@ -117,6 +117,7 @@ function renderJournal() {
             <option value="SELL"   ${jf.action==='SELL'  ?'selected':''}>SELL</option>
             <option value="TOP_UP" ${jf.action==='TOP_UP'?'selected':''}>TOP_UP</option>
             <option value="TRIM"   ${jf.action==='TRIM'  ?'selected':''}>TRIM</option>
+            <option value="DRP"    ${jf.action==='DRP'   ?'selected':''}>DRP</option>
           </select>
         </div>
         <!-- Status -->

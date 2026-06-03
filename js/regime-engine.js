@@ -251,6 +251,15 @@ async function fetchAndClassifyRegime() {
 
     state.currentRegime = { ..._regimeCache };
 
+    // When regime flips, write the flip timestamp + new regime to localStorage so
+    // fetchCalibrationBlock() can pass them to the backend as query params.
+    // The backend uses them to temporarily halve the calibration half-life for
+    // the first <10 trades in the new regime (Sprint 44).
+    if (prevRegime !== 'unknown' && prevRegime !== result.regime) {
+      localStorage.setItem('regime_flipped_at', new Date().toISOString());
+      localStorage.setItem('regime_flipped_to', result.regime);
+    }
+
     // Alert when regime flips to panic or riskOff
     if (prevRegime !== 'unknown' && prevRegime !== result.regime) {
       if (result.regime === 'panic' || result.regime === 'riskOff') {

@@ -538,6 +538,11 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       if (_portfolioTickers.length) _lParams.set('ticker', _portfolioTickers.slice(0, 5).join(','));
       if (_portfolioSectors.length) _lParams.set('sector', _portfolioSectors[0]);
       _lParams.set('limit', '10');
+      // Sprint 44: pass breadth metrics so backend can filter breadth-scoped lessons
+      const _adl = state.macroData?.advance_decline_ratio;
+      const _vol = state.macroData?.asx_vol_20d;
+      if (_adl != null) _lParams.set('adl', _adl);
+      if (_vol != null) _lParams.set('asx_vol', _vol);
       const _lr = await fetch(`${API}/api/learning/lessons?${_lParams}`);
       if (_lr.ok) {
         const _ld = await _lr.json();

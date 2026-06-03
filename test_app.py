@@ -4728,5 +4728,165 @@ class TestSprint42StooqFallback(unittest.TestCase):
             self.assertIsNone(c.stooq_quote("BHP.AX"))
 
 
+class TestSprint44(unittest.TestCase):
+    """Sprint 44 feature tests: DRP parcels, virtual speed weight, regime-flip penalty, lessons breadth."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    # ── Item 1: DRP parcel tracking ──────────────────────────────────────────
+
+    def test_drp_button_in_portfolio_js(self):
+        """portfolio.js must contain the DRP button and applyDrpEvent function."""
+        src = open(os.path.join(ROOT, "js", "pages", "portfolio.js"), encoding="utf-8").read()
+        self.assertIn("showDrpModal", src)
+        self.assertIn("applyDrpEvent", src)
+        self.assertIn("DRP", src)
+
+    def test_drp_badge_in_utils_js(self):
+        """actionBadge in utils.js must handle DRP action with badge-drp class."""
+        src = open(os.path.join(ROOT, "js", "utils.js"), encoding="utf-8").read()
+        self.assertIn("DRP", src)
+        self.assertIn("badge-drp", src)
+
+    def test_drp_badge_css_defined(self):
+        """asx_trading.css must define .badge-drp styles."""
+        src = open(os.path.join(ROOT, "asx_trading.css"), encoding="utf-8").read()
+        self.assertIn(".badge-drp", src)
+
+    # ── Item 2: Virtual-outcome speed weighting ───────────────────────────────
+
+    def test_virtual_speed_weight_written_by_resolve_virtual_outcomes(self):
+        """_resolve_virtual_outcomes must write virtual_speed_weight on resolved rows."""
+        src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
+        self.assertIn("virtual_speed_weight", src)
+        self.assertIn("speed_weight", src)
+        self.assertIn("7.0 / hold_days", src)
+
+    def test_virtual_speed_weight_column_in_db_migrations(self):
+        """virtual_speed_weight must be in _LE_MIGRATIONS in db.py."""
+        src = open(os.path.join(ROOT, "db.py"), encoding="utf-8").read()
+        self.assertIn('"virtual_speed_weight"', src)
+
+    def test_calib_compute_applies_speed_weight_to_virtual_rows(self):
+        """_weight() in _calib_compute must multiply by virtual_speed_weight for virtual rows."""
+        src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
+        self.assertIn("virtual_speed_weight", src)
+        self.assertIn('r.get("virtual_speed_weight")', src)
+
+    # ── Item 3: Regime-flip calibration penalty ───────────────────────────────
+
+    def test_calibration_route_accepts_flipped_params(self):
+        """GET /api/learning/calibration must accept flipped_at and flipped_to params."""
+        src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
+        self.assertIn('flipped_at', src)
+        self.assertIn('flipped_to', src)
+
+    def test_regime_flip_token_emitted(self):
+        """_calib_compute must emit REGIME_FLIP token when flip is recent and trades < 10."""
+        src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
+        self.assertIn("REGIME_FLIP", src)
+        self.assertIn("hl // 2", src)
+
+    def test_regime_flip_localStorage_in_regime_engine(self):
+        """regime-engine.js must write regime_flipped_at/to to localStorage on flip."""
+        src = open(os.path.join(ROOT, "js", "regime-engine.js"), encoding="utf-8").read()
+        self.assertIn("regime_flipped_at", src)
+        self.assertIn("regime_flipped_to", src)
+        self.assertIn("localStorage.setItem", src)
+
+    def test_fetch_calibration_block_passes_flip_params(self):
+        """fetchCalibrationBlock in learning-loop.js must pass flipped_at and flipped_to."""
+        src = open(os.path.join(ROOT, "js", "learning-loop.js"), encoding="utf-8").read()
+        self.assertIn("flipped_at", src)
+        self.assertIn("flipped_to", src)
+
+    # ── Item 4: Lessons breadth scope ────────────────────────────────────────
+
+    def test_breadth_scope_column_in_db_migration(self):
+        """breadth_scope column must be added to trading_lessons in init_db()."""
+        src = open(os.path.join(ROOT, "db.py"), encoding="utf-8").read()
+        self.assertIn("breadth_scope", src)
+        self.assertIn("trading_lessons", src)
+
+    def test_lessons_breadth_dropdown_in_learning_js(self):
+        """learning.js must include the breadth_scope dropdown in the Add Lesson form."""
+        src = open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8").read()
+        self.assertIn("ll-lesson-breadth", src)
+        self.assertIn("adl_below_0.3", src)
+        self.assertIn("adl_above_0.7", src)
+        self.assertIn("high_vol", src)
+        self.assertIn("low_vol", src)
+
+    def test_lessons_post_accepts_breadth_scope(self):
+        """POST /api/learning/lessons must accept breadth_scope field."""
+        r = self.client.post("/api/learning/lessons", json={
+            "lesson_text": "Sprint44 high vol lesson",
+            "breadth_scope": "high_vol",
+        }, content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        data = json.loads(r.data)
+        self.assertTrue(data["ok"])
+        self.assertIn("id", data)
+
+    def test_lessons_post_rejects_invalid_breadth_scope(self):
+        """POST /api/learning/lessons must reject unknown breadth_scope values."""
+        r = self.client.post("/api/learning/lessons", json={
+            "lesson_text": "Bad scope lesson",
+            "breadth_scope": "invalid_scope",
+        }, content_type="application/json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_lessons_filter_by_adl(self):
+        """GET /api/learning/lessons must filter breadth-scoped lessons by adl param."""
+        # Insert a scoped lesson
+        self.client.post("/api/learning/lessons", json={
+            "lesson_text": "Sprint44 bear adl lesson",
+            "breadth_scope": "adl_below_0.3",
+        }, content_type="application/json")
+
+        # adl=0.2 (below 0.3) → scoped lesson included
+        r = self.client.get("/api/learning/lessons?adl=0.2")
+        data = json.loads(r.data)
+        self.assertTrue(data["ok"])
+        texts = [l["lesson_text"] for l in data["lessons"]]
+        self.assertIn("Sprint44 bear adl lesson", texts)
+
+        # adl=0.5 (above 0.3) → scoped lesson excluded
+        r2 = self.client.get("/api/learning/lessons?adl=0.5")
+        data2 = json.loads(r2.data)
+        texts2 = [l["lesson_text"] for l in data2["lessons"]]
+        self.assertNotIn("Sprint44 bear adl lesson", texts2)
+
+        # no adl param → scoped lesson excluded (condition cannot be evaluated)
+        r3 = self.client.get("/api/learning/lessons?ticker=ZZZNOMATCH")
+        data3 = json.loads(r3.data)
+        texts3 = [l["lesson_text"] for l in data3["lessons"]]
+        self.assertNotIn("Sprint44 bear adl lesson", texts3)
+
+    def test_lessons_filter_by_asx_vol(self):
+        """GET /api/learning/lessons must filter high_vol lessons by asx_vol param."""
+        self.client.post("/api/learning/lessons", json={
+            "lesson_text": "Sprint44 high vol specific",
+            "breadth_scope": "high_vol",
+        }, content_type="application/json")
+
+        # asx_vol=30 > 25 → high_vol lesson included
+        r = self.client.get("/api/learning/lessons?asx_vol=30")
+        data = json.loads(r.data)
+        texts = [l["lesson_text"] for l in data["lessons"]]
+        self.assertIn("Sprint44 high vol specific", texts)
+
+        # asx_vol=10 < 25 → high_vol lesson excluded
+        r2 = self.client.get("/api/learning/lessons?asx_vol=10")
+        data2 = json.loads(r2.data)
+        texts2 = [l["lesson_text"] for l in data2["lessons"]]
+        self.assertNotIn("Sprint44 high vol specific", texts2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -63,7 +63,7 @@ function _detectExitReason(exitPrice, stopLoss, target, action) {
 }
 
 function actionBadge(a) {
-  const map = { BUY:'badge-buy', SELL:'badge-sell', HOLD:'badge-hold', TRIM:'badge-trim', TOP_UP:'badge-topup' };
+  const map = { BUY:'badge-buy', SELL:'badge-sell', HOLD:'badge-hold', TRIM:'badge-trim', TOP_UP:'badge-topup', DRP:'badge-drp' };
   const cls = map[a] || 'badge-hold';
   const label = a === 'TOP_UP' ? 'TOP UP' : a;
   return `<span class="badge ${cls}">${label}</span>`;
