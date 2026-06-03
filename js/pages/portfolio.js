@@ -88,6 +88,18 @@ function renderPortfolio() {
       `<button class="btn btn-primary" onclick="document.getElementById('brokerCsvUpload').click()">↑ Import Broker CSV</button>
        <button class="btn" style="margin-left:8px" onclick="showPage('journal')">+ Add Trade Manually</button>`) : ''}
 
+    ${(()=>{
+      const _ACCT_LABELS = { all:'All accounts', personal:'Personal', super:'Super', trading:'Trading' };
+      const _ACCT_COLORS = { personal:'#6366f1', super:'#16a34a', trading:'#d97706' };
+      const cur = state.activeAccount || 'all';
+      return `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+        ${['all','personal','super','trading'].map(a => `
+          <button class="btn btn-sm" style="${a===cur?'background:var(--accent);color:#fff;border-color:var(--accent)':''}" onclick="state.activeAccount='${a}';renderPage()">${_ACCT_LABELS[a]}</button>
+        `).join('')}
+        ${cur !== 'all' ? `<span class="text-xs text-muted" style="align-self:center;margin-left:4px">Viewing ${_ACCT_LABELS[cur]} account — analysis and signals use this account's holdings only.</span>` : ''}
+      </div>`;
+    })()}
+
     <div style="display:grid;grid-template-columns:1fr 220px;gap:12px;align-items:start;margin-bottom:12px">
     <div class="card">
       <div class="flex-between" style="margin-bottom:10px">
@@ -99,9 +111,9 @@ function renderPortfolio() {
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th></th><th>Ticker</th><th>Sector</th><th>Lots</th><th>Total Shares</th><th>Avg Cost</th><th>Current</th><th>Value</th><th>P&L ($)</th><th>P&L (%)</th><th>Weight</th><th>Div Yield</th><th title="Franking percentage — 100% = fully franked (tax credit included)">Franking</th><th>Ex-Div Date</th><th></th></tr></thead>
+          <thead><tr><th></th><th>Ticker</th><th>Sector</th>${state.activeAccount==='all'?'<th>Account</th>':''}<th>Lots</th><th>Total Shares</th><th>Avg Cost</th><th>Current</th><th>Value</th><th>P&L ($)</th><th>P&L (%)</th><th>Weight</th><th>Div Yield</th><th title="Franking percentage — 100% = fully franked (tax credit included)">Franking</th><th>Ex-Div Date</th><th></th></tr></thead>
           <tbody>
-            ${merged.map(h => {
+            ${merged.slice().sort((a, b) => (b.shares * b.currentPrice) - (a.shares * a.currentPrice)).map(h => {
               const val = h.shares * h.currentPrice;
               const pl  = (h.currentPrice - h.avgPrice) * h.shares;
               const plp = ((h.currentPrice - h.avgPrice) / h.avgPrice) * 100;
@@ -127,11 +139,17 @@ function renderPortfolio() {
                     ? `<span class="${dv.frankingPct===100?'text-success':dv.frankingPct===0?'text-muted':''}" style="font-size:12px">${dv.frankingPct.toFixed(0)}%</span>`
                     : '<span class="text-muted text-xs">—</span>')
                 : '<span class="text-muted text-xs">—</span>';
+              const _ACCT_COLORS = {personal:'#6366f1',super:'#16a34a',trading:'#d97706'};
+              const acct = h.account || 'personal';
+              const acctBadge = state.activeAccount === 'all'
+                ? `<td><span class="text-xs" style="background:${_ACCT_COLORS[acct]}22;color:${_ACCT_COLORS[acct]};padding:1px 5px;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();_cycleHoldingAccount('${h.ticker}')" title="Click to change account">${acct}</span></td>`
+                : '';
               return `
                 <tr style="cursor:${hasMulti?'pointer':'default'}" onclick="${hasMulti?`toggleLots('${h.ticker}')`:''}" title="${hasMulti?'Click to expand lots':''}">
                   <td style="width:20px;text-align:center;color:var(--text-tertiary)">${hasMulti?`<span id="lots-arrow-${h.ticker}" style="font-size:10px">▶</span>`:'&nbsp;'}</td>
                   <td><strong>${h.ticker}</strong></td>
                   <td><span class="text-xs">${h.sector}</span></td>
+                  ${acctBadge}
                   <td class="text-xs text-muted">${lots > 0 ? `${lots} lot${lots!==1?'s':''}` : '—'}</td>
                   <td>${h.shares}</td>
                   <td>$${fmt(h.avgPrice)}</td>
@@ -679,6 +697,15 @@ async function handleBrokerCSV(e) {
   renderPage();
 }
 
+function _cycleHoldingAccount(ticker) {
+  const _cycle = {personal:'super', super:'trading', trading:'personal'};
+  state.portfolio.filter(h => h.ticker === ticker).forEach(h => {
+    h.account = _cycle[h.account || 'personal'] || 'personal';
+  });
+  scheduleSave();
+  renderPage();
+}
+
 function addHolding() {
   const ticker = prompt('Ticker (e.g. NAB):'); if (!ticker) return;
   const dateRaw = prompt('Buy date (DD-MM-YYYY):');
@@ -687,17 +714,19 @@ function addHolding() {
   const avg = Number(prompt('Avg buy price ($):')); if (!avg) return;
   const sector = prompt('Sector (e.g. Banking):') || 'Other';
   const fees = Number(prompt('Brokerage paid ($, e.g. 10):') || state.settings.brokerage);
+  const acctRaw = (prompt('Account (personal / super / trading):') || 'personal').trim().toLowerCase();
+  const account = ['personal','super','trading'].includes(acctRaw) ? acctRaw : 'personal';
   const symbol = ticker.toUpperCase();
 
   // Update portfolio
-  const existing = state.portfolio.find(h => h.ticker === symbol);
+  const existing = state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === account);
   if (existing) {
     const totalCostVal = existing.shares * existing.avgPrice + shares * avg;
     existing.shares += shares;
     existing.avgPrice = totalCostVal / existing.shares;
     if (sector !== 'Other') existing.sector = sector;
   } else {
-    state.portfolio.push({ ticker: symbol, shares, avgPrice: avg, currentPrice: avg, sector });
+    state.portfolio.push({ ticker: symbol, shares, avgPrice: avg, currentPrice: avg, sector, account });
   }
 
   // Create CGT parcel
