@@ -950,14 +950,33 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     }
     const deconflictedRecs = conflictFreeRecs;
 
-    const newRecs = deconflictedRecs.map((r,i) => ({
-      ...r,
-      id: `R-${Date.now()}-${i}`,
-      status: 'pending',
-      generatedAt: nowSydney(),
-      date: todayStr(),
-      feedback: null,
-    }));
+    const newRecs = deconflictedRecs.map((r,i) => {
+      // Attach generation-time context for the "Why this rec?" traceability panel.
+      const _sig = state.liveSignals && state.liveSignals[r.ticker];
+      const _signalsSnap = _sig ? {
+        rsi_14:      _sig.rsi_14,
+        atr_14:      _sig.atr_14,
+        adx:         _sig.adx,
+        obv_trend:   _sig.obv_trend,
+        bb_pctb:     _sig.bb_pctb,
+        score:       _sig.score,
+        macd_signal: _sig.macd_signal,
+        volume_ratio:_sig.volume_ratio,
+        rs_score:    _sig.rs_score,
+      } : null;
+      return {
+        ...r,
+        id: `R-${Date.now()}-${i}`,
+        status: 'pending',
+        generatedAt: nowSydney(),
+        date: todayStr(),
+        feedback: null,
+        _genRegime:     _activeRegime || null,
+        _genRegimeConf: state.currentRegime ? state.currentRegime.confidence : null,
+        _calibSnap:     _calibrationNote ? String(_calibrationNote).slice(0, 350) : null,
+        _signalsSnap,
+      };
+    });
 
     // ── SAME-DAY DEDUP: prevent multiple TRIM or TOP_UP on the same ticker today ──
     const todayKey = todayStr();

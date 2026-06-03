@@ -310,3 +310,6 @@
     .grid-4 { grid-template-columns: 1fr 1fr !important; }
     .metrics-grid { grid-template-columns: 1fr 1fr; }
   }
+
+/* Traceability panel arrow rotation */
+details[open] .trace-arrow { transform: rotate(90deg); }

@@ -559,6 +559,60 @@ function renderPendingRecs(recs) {
           style="flex:1;padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-light);background:var(--bg-secondary);color:var(--text-primary);font-size:11px;font-family:var(--font);resize:vertical"
           title="Investment thesis — reviewed at trade exit">${escapeHTML(r._thesis||'')}</textarea>
       </div>
+      <!-- Why this rec? traceability panel -->
+      ${(() => {
+        const hasContext = r._genRegime || r._signalsSnap || r._calibSnap;
+        if (!hasContext) return '';
+        const regimeLine = r._genRegime ? `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span style="font-weight:600;color:var(--text-secondary)">Regime</span>
+          <span style="padding:1px 7px;background:var(--bg-secondary);border:0.5px solid var(--border-light);border-radius:3px">${r._genRegime}</span>
+          ${r._genRegimeConf != null ? `<span class="text-muted">${fmt(r._genRegimeConf*100,0)}% conf</span>` : ''}
+        </div>` : '';
+        let sigLines = '';
+        if (r._signalsSnap) {
+          const s = r._signalsSnap;
+          const cells = [
+            s.rsi_14    != null ? `RSI ${fmt(s.rsi_14,1)}` : null,
+            s.adx       != null ? `ADX ${fmt(s.adx,1)}` : null,
+            s.bb_pctb   != null ? `BB%B ${fmt(s.bb_pctb,2)}` : null,
+            s.atr_14    != null ? `ATR $${fmt(s.atr_14,3)}` : null,
+            s.score     != null ? `Score ${Math.round(s.score)}/100` : null,
+            s.obv_trend != null ? `OBV ${s.obv_trend}` : null,
+            s.macd_signal != null ? `MACD ${s.macd_signal}` : null,
+            s.volume_ratio != null ? `Vol×${fmt(s.volume_ratio,1)}` : null,
+            s.rs_score  != null ? `RS ${fmt(s.rs_score,0)}` : null,
+          ].filter(Boolean);
+          if (cells.length) {
+            sigLines = `<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+              <span style="font-weight:600;color:var(--text-secondary)">Signals</span>
+              ${cells.map(c=>`<span style="padding:1px 7px;background:var(--bg-secondary);border:0.5px solid var(--border-light);border-radius:3px">${c}</span>`).join('')}
+            </div>`;
+          }
+        }
+        const calibLine = r._calibSnap ? `<div style="color:var(--text-muted);font-family:monospace;font-size:10px;background:var(--bg-secondary);padding:5px 8px;border-radius:3px;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow-y:auto">
+          <span style="font-weight:600;font-family:var(--font)">Calibration:</span> ${escapeHTML(r._calibSnap)}</div>` : '';
+        let debateLine = '';
+        if (typeof _getCachedDebate === 'function') {
+          const sig = state.liveSignals && state.liveSignals[r.ticker];
+          const d = sig ? _getCachedDebate(r.ticker, sig) : null;
+          if (d && d.bull && d.bear) {
+            const synth = d.synthesis?.winner ? `[${d.synthesis.winner.toUpperCase()}] ` : '';
+            const snippet = synth + (d.synthesis?.key_pivot || (d.bull.slice(0,80) + '…'));
+            debateLine = `<div style="color:var(--text-secondary);background:var(--bg-secondary);padding:5px 8px;border-radius:3px;font-size:10px;border-left:2px solid #7c3aed">
+              <span style="font-weight:600;font-size:11px">Debate (${d.model||'?'}): </span>${escapeHTML(snippet)}</div>`;
+          }
+        }
+        return `
+        <details style="margin-top:8px;border-top:0.5px solid var(--border-light);padding-top:6px">
+          <summary style="font-size:11px;color:var(--text-muted);cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:5px">
+            <span style="transition:transform 0.15s" class="trace-arrow">▶</span> 🔍 Why this rec? (generation context)
+          </summary>
+          <div style="margin-top:7px;display:grid;gap:6px;font-size:11px" onclick="event.stopPropagation()">
+            ${regimeLine}${sigLines}${calibLine}${debateLine}
+          </div>
+        </details>`;
+      })()}
+
       <!-- Feedback -->
       <div style="display:flex;gap:8px;align-items:center;padding-top:8px;border-top:0.5px solid var(--border-light)">
         <input type="text" id="feedback-${r.id}" placeholder="Optional feedback for next analysis run (e.g. 'too aggressive', 'ignore WDS for now')" value="${r.feedback||''}"
@@ -929,6 +983,9 @@ function _showPreTradeChecklist(recId, onConfirm) {
     { id: 'chk-avg',      label: isReducing
         ? 'I\'m not exiting in panic — the thesis has actually changed'
         : 'I\'m not averaging into a losing position without a plan' },
+    { id: 'chk-reason',   label: isReducing
+        ? 'This exit is to harvest profits or manage risk — not panic or FOMO'
+        : 'This entry fits a planned strategy — not FOMO or impulse buying' },
   ];
 
   const dialog = document.createElement('dialog');
@@ -976,22 +1033,7 @@ function _checklistProceed(mode) {
   if (cb) cb();
 }
 
-function _detectExitReason(exitPrice, stopLoss, target, action) {
-  if (!exitPrice || exitPrice <= 0) return 'manual';
-  // SELL/TRIM recs frame stop ABOVE and target BELOW entry (inverse of BUY/TOP_UP),
-  // so a profitable trim must not be read as 'stop_hit'. Prefer the action; fall back
-  // to stop-vs-target geometry when action is unavailable.
-  const isShort = (action === 'SELL' || action === 'TRIM') ||
-                  (!action && stopLoss && target && stopLoss > target);
-  if (isShort) {
-    if (stopLoss && exitPrice >= stopLoss * 0.995) return 'stop_hit';
-    if (target   && exitPrice <= target   * 1.005) return 'target_hit';
-    return 'manual';
-  }
-  if (stopLoss && exitPrice <= stopLoss * 1.005) return 'stop_hit';
-  if (target   && exitPrice >= target   * 0.995) return 'target_hit';
-  return 'manual';
-}
+// _detectExitReason is defined in utils.js (single canonical copy)
 
 function _showThesisReview(thesisText, learningId, ticker) {
   document.getElementById('thesis-review-dialog')?.remove();
@@ -1030,6 +1072,16 @@ function _showThesisReview(thesisText, learningId, ticker) {
 
 function markExecuted(id, execPrice, execFee, execQty) {
   const rec = state.recommendations.find(r => r.id === id); if(!rec) return;
+
+  // Immediately mark button as executed so the card looks settled before renderPage fires
+  const _execBtn = document.querySelector(`button[onclick="confirmExecute('${id}')"]`);
+  if (_execBtn) {
+    _execBtn.textContent = '✓ Executed';
+    _execBtn.disabled = true;
+    _execBtn.classList.remove('btn-success');
+    _execBtn.style.cssText += ';opacity:0.55;cursor:default';
+  }
+
   const time = nowSydney();
   const today = todayStr();
   rec.status = 'executed';

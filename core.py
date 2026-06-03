@@ -135,6 +135,11 @@ OLLAMA_BASE = "http://localhost:11434"
 # Rate limit: ~1 req/sec (undocumented). Safe at our TTL windows (45s quote,
 # 5min macro) — never called concurrently under normal operation.
 
+# Stooq has an undocumented ~1 req/sec rate limit. Concurrent batch requests
+# return empty CSVs silently. This semaphore serialises all Stooq calls across
+# both core.py (stooq_quote) and indicators.py (_fetch_stooq_history).
+_stooq_sem = threading.BoundedSemaphore(1)
+
 _STOOQ_MAP: dict[str, str] = {
     "^AXJO":    "^axjo",
     "^GSPC":    "^spx",
@@ -168,24 +173,27 @@ def stooq_quote(yf_symbol: str) -> dict | None:
     sym = _to_stooq_sym(yf_symbol)
     if sym is None:
         return None
-    try:
-        url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlcvn&e=csv"
-        resp = _HTTP_SESSION.get(url, timeout=10)
-        resp.raise_for_status()
-        lines = resp.text.strip().splitlines()
-        if len(lines) < 2:
+    with _stooq_sem:
+        try:
+            url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlcvn&e=csv"
+            resp = _HTTP_SESSION.get(url, timeout=10)
+            resp.raise_for_status()
+            lines = resp.text.strip().splitlines()
+            if len(lines) < 2:
+                return None
+            fields = lines[1].split(",")
+            if len(fields) < 7:
+                return None
+            close = float(fields[6])
+            open_ = float(fields[3])
+            if close <= 0:
+                return None
+            change_pct = round((close / open_ - 1) * 100, 2) if open_ > 0 else 0.0
+            return {"price": round(close, 3), "change_pct": change_pct, "_source": "stooq"}
+        except Exception:
             return None
-        fields = lines[1].split(",")
-        if len(fields) < 7:
-            return None
-        close = float(fields[6])
-        open_ = float(fields[3])
-        if close <= 0:
-            return None
-        change_pct = round((close / open_ - 1) * 100, 2) if open_ > 0 else 0.0
-        return {"price": round(close, 3), "change_pct": change_pct, "_source": "stooq"}
-    except Exception:
-        return None
+        finally:
+            time.sleep(1.0)
 
 
 # ── Sector map (used by market scanner) ──────────────────────────────────────

@@ -649,7 +649,8 @@ class TestRegressionBugs(unittest.TestCase):
         """SELL/TRIM recs frame stop ABOVE and target BELOW entry; _detectExitReason
         must invert its comparisons so a profitable trim isn't mislabeled stop_hit.
 
-        Evaluates the real function extracted from both JS files against known cases.
+        §3.8: The function now has a single canonical copy in utils.js.
+        We evaluate it against known cases; page files must NOT redefine it.
         """
         node_script = r"""
 const fs = require('fs');
@@ -681,13 +682,19 @@ for (const [ex, st, tg, ac, exp] of cases) {
 }
 process.exit(fail ? 1 : 0);
 """
+        # Canonical copy lives in utils.js
+        result = subprocess.run(
+            ["node", "-e", node_script, os.path.join(ROOT, "js/utils.js")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0,
+                         f"js/utils.js _detectExitReason direction logic wrong:\n{result.stderr}")
+        # Page files must NOT redefine the function (single canonical copy guard)
         for fn in ("js/pages/recommendations.js", "js/pages/performance.js"):
-            result = subprocess.run(
-                ["node", "-e", node_script, os.path.join(ROOT, fn)],
-                capture_output=True, text=True,
-            )
-            self.assertEqual(result.returncode, 0,
-                             f"{fn} _detectExitReason direction logic wrong:\n{result.stderr}")
+            with open(os.path.join(ROOT, fn), encoding="utf-8") as f:
+                src = f.read()
+            self.assertNotIn("function _detectExitReason", src,
+                             f"{fn} must NOT redefine _detectExitReason (§3.8: single copy in utils.js)")
 
 
 class TestInfraImprovements(unittest.TestCase):
@@ -823,14 +830,22 @@ class TestStage1DataCapture(unittest.TestCase):
         self.assertIn("liveSignals", src)
 
     def test_detect_exit_reason_helper_present(self):
-        """_detectExitReason must be defined in both recommendations.js and performance.js."""
+        """_detectExitReason must be defined in utils.js (single canonical copy) and
+        referenced by both recommendations.js and performance.js."""
+        with open(os.path.join(ROOT, "js/utils.js"), encoding="utf-8") as f:
+            utils_src = f.read()
+        self.assertIn("function _detectExitReason", utils_src,
+                      "utils.js must define _detectExitReason")
+        self.assertIn("stop_hit", utils_src)
+        self.assertIn("target_hit", utils_src)
+        # Page files must call the function (not redefine it)
         for fn in ("js/pages/recommendations.js", "js/pages/performance.js"):
             with open(os.path.join(ROOT, fn), encoding="utf-8") as f:
                 src = f.read()
             self.assertIn("_detectExitReason", src,
-                          f"{fn} must define _detectExitReason helper")
-            self.assertIn("stop_hit", src)
-            self.assertIn("target_hit", src)
+                          f"{fn} must reference _detectExitReason")
+            self.assertNotIn("function _detectExitReason", src,
+                             f"{fn} must NOT redefine _detectExitReason (single copy in utils.js)")
 
     def test_exit_reason_no_longer_hardcoded_manual(self):
         """recommendations.js must call _detectExitReason instead of hardcoding 'manual'."""
@@ -897,11 +912,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_bumped_to_v5(self):
-        """PROMPT_VERSION must be bumped to v6 after FIXES.md changes."""
+        """PROMPT_VERSION must be bumped to v7 after Sprint 42 system prompt fixes."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v6'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v6 after FIXES.md sprint")
+        self.assertIn("PROMPT_VERSION = '2026-06-v7'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v7 after Sprint 42 prompt fixes")
 
     def test_calibration_algorithm_in_system_prompt(self):
         """System prompt must prescribe the calibration algorithm (confidence += adj, clamped)."""

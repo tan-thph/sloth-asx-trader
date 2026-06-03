@@ -736,22 +736,7 @@ function exportTradeJournalCSV() {
 // For each recHistory entry with a _learningId and a reconciled win/loss outcome,
 // call POST /api/learning/outcome. Also handles existing recs without a _learningId
 // by re-logging them as new events with was_executed:true.
-function _detectExitReason(exitPrice, stopLoss, target, action) {
-  if (!exitPrice || exitPrice <= 0) return 'manual';
-  // SELL/TRIM recs frame stop ABOVE and target BELOW entry (inverse of BUY/TOP_UP),
-  // so a profitable trim must not be read as 'stop_hit'. Prefer the action; fall back
-  // to stop-vs-target geometry when action is unavailable.
-  const isShort = (action === 'SELL' || action === 'TRIM') ||
-                  (!action && stopLoss && target && stopLoss > target);
-  if (isShort) {
-    if (stopLoss && exitPrice >= stopLoss * 0.995) return 'stop_hit';
-    if (target   && exitPrice <= target   * 1.005) return 'target_hit';
-    return 'manual';
-  }
-  if (stopLoss && exitPrice <= stopLoss * 1.005) return 'stop_hit';
-  if (target   && exitPrice >= target   * 0.995) return 'target_hit';
-  return 'manual';
-}
+// _detectExitReason is defined in utils.js (single canonical copy)
 
 async function syncClosedTradesToLearningLoop() {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
