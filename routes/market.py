@@ -31,7 +31,7 @@ import requests
 import yfinance as yf
 from flask import Blueprint, jsonify, request
 
-from core import LOG_DIR, ttl_cache, fetch_with_retry
+from core import LOG_DIR, ttl_cache, fetch_with_retry, stooq_quote
 from db import get_db, log_failed_ticker
 from indicators import analyse_ticker, asx, safe_float
 
@@ -173,6 +173,19 @@ def _quote_cached(ticker: str) -> dict:
     try:
         return fetch_with_retry(_fetch, cache_key=f"quote:{ticker}")
     except Exception as e:
+        # yfinance exhausted all retries AND _last_good is empty — try Stooq
+        fb = stooq_quote(t)
+        if fb:
+            log.warning("quote: yfinance failed for %s — serving Stooq fallback", ticker)
+            return {
+                "ticker":     ticker.upper(),
+                "price":      fb["price"],
+                "change":     0.0,
+                "change_pct": fb["change_pct"],
+                "sector":     get_sector_for_ticker(ticker),
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "_source":    "stooq",
+            }
         log_failed_ticker(ticker, str(e), context='quote')
         return {"error": str(e), "_status": 500}
 
@@ -238,6 +251,16 @@ def _macro_payload() -> dict:
             }
             return name, hist, summary
         except Exception:
+            # yfinance failed + no stale cache — try Stooq for price-only symbols
+            fb = stooq_quote(sym)
+            if fb:
+                log.warning("macro: yfinance failed for %s (%s) — Stooq fallback", name, sym)
+                return name, None, {
+                    "value":      fb["price"],
+                    "change_pct": fb["change_pct"],
+                    "prev_close": None,
+                    "_source":    "stooq",
+                }
             return name, None, None
 
     with ThreadPoolExecutor(max_workers=len(symbols)) as pool:

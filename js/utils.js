@@ -17,10 +17,14 @@ const totalNetWorth  = () => portfolioValue() + state.cash;
 
 // Deduplicates portfolio by ticker for display (weighted avg cost, summed shares)
 function mergedPortfolio() {
+  const acct = state.activeAccount || 'all';
+  const holdings = acct === 'all'
+    ? state.portfolio
+    : state.portfolio.filter(h => (h.account || 'personal') === acct);
   const map = {};
-  for (const h of state.portfolio) {
+  for (const h of holdings) {
     if (!map[h.ticker]) {
-      map[h.ticker] = { ticker: h.ticker, shares: 0, _totalCost: 0, currentPrice: h.currentPrice, sector: h.sector || 'Other' };
+      map[h.ticker] = { ticker: h.ticker, shares: 0, _totalCost: 0, currentPrice: h.currentPrice, sector: h.sector || 'Other', account: h.account || 'personal' };
     }
     map[h.ticker]._totalCost += h.shares * h.avgPrice;
     map[h.ticker].shares += h.shares;

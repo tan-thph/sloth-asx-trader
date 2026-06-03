@@ -1,6 +1,6 @@
 # Sloth ASX Trader — Prompt Architecture Reference
 
-**Last Updated:** June 2026 (Sprint 41)
+**Last Updated:** June 2026 (Sprint 42)
 **Model:** `claude-sonnet-4-6` · all calls via `callClaude()` in `js/claude-client.js`
 
 This document is the authoritative reference for every Claude API call in the application:
@@ -84,7 +84,7 @@ These are assembled by `buildSystemArray()` in `prompt-modules.js` based on date
 ### User message — all injected by `analysis.js`
 
 ```
-Date: {YYYY-MM-DD} | Time: {HH:MM AEST} | TAX_LOSS_HARVEST_ACTIVE: {bool}
+Date: {YYYY-MM-DD} | Time: {HH:MM AEST} | TAX_LOSS_HARVEST_ACTIVE: {bool}[ | Account: {PERSONAL|SUPER|TRADING}]
 Account settings: brokerage ${n}/trade (round-trip ${2n}) | max {n} trades/day | min trade ${n}
 
 LIVE PORTFOLIO STATE:
@@ -150,6 +150,7 @@ LIVE TECHNICAL DATA (yfinance, real-time):
   S/R Pivots: R2=${n}, R1=${n}, Pivot=${n}, S1=${n}, S2=${n}
   Returns: 1D={n}%, 5D={n}%, 20D={n}%, 60D={n}%, 90D={n}%
            vs.ASX200:{±n}pp vs.Sector:{±n}pp
+           | Range60d: hi=${n} lo=${n}   ← for Fibonacci zone calc (when available)
   Fundamentals: PE={n}, FwdPE={n}, PB={n}, DivYield={n}%, Beta={n}, ROE={n}%,
                 OpMgn={n}%, D/E={n}, RevGrowth={n}%, FCFYield={n}%, Short={n}%float
   52W: High=${n}, Low=${n}, FromHigh={n}%, AnalystUpside:{±n}%, Analyst={rec} (target ${n})
@@ -291,6 +292,8 @@ Return only JSON.
 
 ## 3. Day Trade Portfolio Scan — `'dayTrade'`
 
+> **⚠ Dormant prompt.** `runDayTradeAnalysis()` is **quantitative-only** — it calls `_dtBuildRecs()` which scores the 5-signal confluence stack deterministically. `callClaude('dayTrade', …)` and `buildDtSystemArray()` are defined and registered but never called. The system prompt below is the reference spec if the Claude AI phase is ever re-activated. Signal #4 in the live quant path (`_dtBuildRecs()`) uses the actual Fibonacci zone computation (Sprint 42).
+
 **File:** `js/day-trading-analysis.js → runDayTradeAnalysis()`
 **Trigger:** "Run Swing Scan" button on Day Trading page · max 4,000 output tokens
 
@@ -357,6 +360,8 @@ Signals for passing tickers:
 ---
 
 ## 4. Day Trade Universe Scan — `'universe'`
+
+> **⚠ Dormant prompt.** Same as §3 — `runUniverseScan()` is quantitative-only. `callClaude('universe', …)` is registered in `claude-client.js` but never called.
 
 **File:** `js/day-trading-analysis.js → runUniverseScan()`
 **Trigger:** "Scan Universe" button · max 4,000 output tokens
@@ -580,7 +585,7 @@ The backend (`routes/debate.py`) prepends `_LOCAL_ANALYSIS_SYSTEM` (a stripped-d
 | No calibration injection | Calibration nudges assume Claude-level instruction following; small models may ignore or invert them |
 | `🔒 Local` badge on rec cards | `_source === 'local'` triggers amber badge in `recommendations.js` so the user sees which recs came from Ollama |
 | Validator + quant engine still run | Ollama output goes through `getValidatedAnalysisWithRepair()` and `computeTradeParams()` identically to the Claude path |
-| No call logged to `ai_call_log` | The `callClaude()` logging block is bypassed (fast-path returns before it). `routes/debate.py` logs to server log only |
+| `ai_call_log` written by backend *(Sprint 42)* | `routes/debate.py` writes to `ai_call_log` with `agent_type='portfolio:local'` after each Ollama response. `callClaude()` client-side logging block is still bypassed (fast-path returns before it). Browsable via `GET /api/log/ai_calls?agent_type=portfolio:local` |
 
 ### System prompt (`_LOCAL_ANALYSIS_SYSTEM`)
 
@@ -603,8 +608,7 @@ Output only the JSON object. No preamble, no markdown fences.
 
 ### Future enhancements
 
-- Add `ai_call_log` write from the backend endpoint (low priority — local calls are cheap, audit trail matters less)
-- Expand to SELL/TRIM once Ollama structured-output reliability is validated with the full tag taxonomy
+- Expand to SELL/TRIM once Ollama structured-output reliability is validated with the full tag taxonomy (requires `sell_primary_driver` / `sell_secondary_factors` / `sell_urgency` structured tagging — small models produce these inconsistently)
 
 ---
 
@@ -673,7 +677,7 @@ Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. Th
 **Version history:**
 | Version | Key changes |
 |---|---|
-| `2026-06-v6` | Rule 17 renumbered (was duplicate Rule 16); SELL_TAG calibration injection rules (Section 6); sell tag urgency/monitor enforcement |
+| `2026-06-v6` | Rule 17 renumbered (was duplicate Rule 16); SELL_TAG calibration injection rules (Section 6); sell tag urgency/monitor enforcement. Sprint 42 user-message additions: `Range60d: hi=${n} lo=${n}` in Returns line; optional `Account: {PERSONAL\|SUPER\|TRADING}` in date header |
 | `2026-05-v5` | Calibration algorithm in prompt; debate-block usage rule; Stage 3–4 |
 | `2026-05-v4` | Sprint 23: ESS gates; Ollama structured outputs |
 | `2026-05-v3` | Sprint 22: adversarial debate + cloud adjudicator |

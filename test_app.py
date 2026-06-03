@@ -4615,5 +4615,103 @@ class TestSprint41PlanAB(unittest.TestCase):
         self.assertIn("unavailable from yfinance", src)
 
 
+class TestSprint42Fibonacci(unittest.TestCase):
+    """Sprint 42 — Fibonacci zone fix in _dtBuildRecs + high_60d/low_60d forwarding."""
+
+    def test_dt_build_recs_signal4_uses_fibonacci(self):
+        """_dtBuildRecs Signal #4 must use high_60d/low_60d for Fibonacci zone check."""
+        with open(os.path.join(ROOT, "js", "day-trading-analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("high_60d", src)
+        self.assertIn("low_60d", src)
+        self.assertIn("fib50", src)
+        self.assertIn("fib618", src)
+
+    def test_dt_build_recs_signal4_has_return60d_fallback(self):
+        """_dtBuildRecs Signal #4 must fall back to return_60d range when high/low absent."""
+        with open(os.path.join(ROOT, "js", "day-trading-analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        # Both the Fibonacci path and the return_60d fallback must be present
+        self.assertIn("fib50", src)
+        self.assertIn("fibReturnMin", src)
+        self.assertIn("fibReturnMax", src)
+
+    def test_analysis_js_forwards_high60d_low60d_to_claude(self):
+        """analysis.js signal block must include high_60d and low_60d fields."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("high_60d", src)
+        self.assertIn("low_60d", src)
+        # Must appear in the Returns/Range60d line sent to Claude
+        self.assertIn("Range60d", src)
+
+    def test_dt_comment_notes_quant_only_engine(self):
+        """day-trading-analysis.js comment must document the quantitative-only (no Claude) approach."""
+        with open(os.path.join(ROOT, "js", "day-trading-analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("no Claude call", src)
+
+
+class TestSprint42StooqFallback(unittest.TestCase):
+    """Sprint 42 — Stooq price fallback for quote and macro endpoints."""
+
+    def test_stooq_quote_in_core(self):
+        """core.py must export stooq_quote and _to_stooq_sym."""
+        import core as c
+        self.assertTrue(callable(c.stooq_quote))
+        self.assertTrue(callable(c._to_stooq_sym))
+
+    def test_stooq_symbol_map_asx_equity(self):
+        """_to_stooq_sym must convert BHP.AX → bhp.au."""
+        from core import _to_stooq_sym
+        self.assertEqual(_to_stooq_sym("BHP.AX"), "bhp.au")
+        self.assertEqual(_to_stooq_sym("CBA.AX"), "cba.au")
+
+    def test_stooq_symbol_map_known_globals(self):
+        """_to_stooq_sym must map major yfinance global symbols to Stooq equivalents."""
+        from core import _to_stooq_sym
+        self.assertEqual(_to_stooq_sym("^AXJO"),    "^axjo")
+        self.assertEqual(_to_stooq_sym("AUDUSD=X"), "audusd")
+        self.assertEqual(_to_stooq_sym("GC=F"),     "gc.f")
+        self.assertEqual(_to_stooq_sym("^VIX"),     "^vix")
+
+    def test_stooq_symbol_map_unsupported_returns_none(self):
+        """_to_stooq_sym must return None for symbols not on Stooq."""
+        from core import _to_stooq_sym
+        self.assertIsNone(_to_stooq_sym("TIO=F"))   # iron ore futures
+        self.assertIsNone(_to_stooq_sym("YAP=F"))   # SPI200 futures
+
+    def test_stooq_quote_wired_into_quote_endpoint(self):
+        """routes/market.py must import and call stooq_quote in _quote_cached."""
+        with open(os.path.join(ROOT, "routes", "market.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("stooq_quote", src)
+        self.assertIn("_source", src)
+
+    def test_stooq_quote_wired_into_macro_endpoint(self):
+        """_fetch_symbol in _macro_payload must call stooq_quote on yfinance failure."""
+        with open(os.path.join(ROOT, "routes", "market.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Both call sites use stooq_quote; macro fallback returns name/None/summary
+        self.assertIn("Stooq fallback", src)
+
+    def test_stooq_quote_returns_none_on_bad_csv(self):
+        """stooq_quote must return None when Stooq returns malformed data."""
+        from unittest.mock import patch, MagicMock
+        import core as c
+        mock_resp = MagicMock()
+        mock_resp.text = "Symbol,Date\nBHP,2026-06-03"  # too few columns
+        mock_resp.raise_for_status = lambda: None
+        with patch.object(c._HTTP_SESSION, "get", return_value=mock_resp):
+            self.assertIsNone(c.stooq_quote("BHP.AX"))
+
+    def test_stooq_quote_returns_none_on_network_error(self):
+        """stooq_quote must return None (not raise) on any network exception."""
+        from unittest.mock import patch
+        import core as c
+        with patch.object(c._HTTP_SESSION, "get", side_effect=Exception("timeout")):
+            self.assertIsNone(c.stooq_quote("BHP.AX"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

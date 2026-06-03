@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** June 2026 (Sprint 41)
-**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–41 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28)
+**Last Updated:** June 2026 (Sprint 42)
+**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–42 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -81,7 +81,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 - `trade_journal` — All trades (AI + manual) with `close_date`.
 - `trading_lessons` — Scoped persistent trading lessons `(lesson_text, ticker?, sector?, regime?, source)` injected into Claude user messages (Sprint 39). CRUD via `GET/POST /api/learning/lessons` and `DELETE /api/learning/lesson/<id>`.
 - `tag_reviews` — Manual spot-check verdicts for Ollama auto-tagged events `(event_id UNIQUE, verdict, corrected_tag, original_tag)`. Drives `agree_rate` gate on the `top_err` calibration nudge (Sprint 41).
-- `ai_call_log` — Full prompt + response audit trail for every `callClaude()` call `(agent_type, model, system_prompt [8k cap], user_message [30k cap], response, tokens, duration_ms)`. Browsable via `GET /api/log/ai_calls` and `GET /api/log/ai_call/<id>`.
+- `ai_call_log` — Full prompt + response audit trail for every `callClaude()` call `(agent_type, model, system_prompt [8k cap], user_message [30k cap], response, tokens, duration_ms)`. Also written by `quick_analysis()` with `agent_type='portfolio:local'` for local LLM calls (Sprint 42). Browsable via `GET /api/log/ai_calls` and `GET /api/log/ai_call/<id>`; filter by agent type with `?agent_type=portfolio:local`.
 
 ---
 
@@ -348,7 +348,8 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 - Debate Engine UI card (primary model, **opposition model**, aggression=none/light/full, Test Debate)
 
 ### Future
-- Phase 8: Skill-weighted calibration (needs ~20+ scored events to validate weights; formula already live since Sprint 24)
+
+All phases implemented. No open future items for the debate system.
 
 ### Ollama stability rules
 - Bull and bear calls are **sequential** (not concurrent) to avoid VRAM spikes
@@ -682,6 +683,12 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **SELL/TRIM structured decision tagging:** Three new DB columns (`sell_primary_driver`, `sell_secondary_factors`, `sell_urgency`) added via `_LE_MIGRATIONS`. Claude declares tags at SELL/TRIM generation time — before outcome is known — to avoid self-justification bias. 9 primary drivers (closed vocabulary), 12 secondary factors (0–3), 3 urgency levels. `validateSellTags()` added to `response-validator.js` and wired into `validateRec()` for SELL/TRIM; enforces forbidden combos, required-secondary rules, and `alternativeTicker` presence for `better_opportunity`. Tags logged to backend via `logRecsToLearningLoop()` and rendered as a colour-coded strip on SELL/TRIM rec cards. Ollama postmortem remains the separate agent for closed-trade analysis
   - **Sync to Learning Loop duplicate fix:** `syncClosedTradesToLearningLoop()` was setting `r._learningId = res.id` on a spread copy of the `recHistory` entry, not the original. `scheduleSave()` then persisted the unchanged original (still lacking `_learningId`), causing every subsequent Sync to re-log the same trades as new events and inflate calibration stats. Fixed by also writing `_learningId` back to the matching `state.recHistory` entry before `scheduleSave()`
   - **`quarterly_earnings` deprecation fix:** `routes/market.py` earnings calendar switched from deprecated `stk.quarterly_earnings` to `stk.earnings_history` (yfinance ≥0.2.x). Column name mapping updated: `epsActual`/`epsEstimate` (new) with `Reported EPS`/`Estimated EPS` as fallbacks
+- **Sprint 42 (June 2026):**
+  - **Stooq price fallback (third line of defence):** `stooq_quote(yf_symbol)` added to `core.py`. Fires only when `fetch_with_retry` exhausts retries AND `_last_good` stale cache is empty (fresh server start + yfinance completely down). `_to_stooq_sym()` converts Yahoo Finance symbols: dict for globals (`^AXJO→^axjo`, `AUDUSD=X→audusd`, `GC=F→gc.f`, etc.), `.AX→.au` rule for ASX equities. `TIO=F` and `YAP=F` unsupported (not on Stooq). Integrated in `_quote_cached()` (quote endpoint) and `_fetch_symbol()` (macro payload). Response includes `_source: 'stooq'` when the fallback fires. Normal operation never hits Stooq.
+  - **`ai_call_log` for local LLM:** `quick_analysis()` in `routes/debate.py` now writes to `ai_call_log` with `agent_type='portfolio:local'` after every successful Ollama response. `input_tokens`/`output_tokens` are `NULL` (Ollama doesn't return token counts); `duration_ms` is the Ollama round-trip time. Browsable via `GET /api/log/ai_calls?agent_type=portfolio:local`.
+  - **`high_60d`/`low_60d` forwarded to Claude:** `analysis.js` user message now appends `| Range60d: hi=${n} lo=${n}` to the Returns line when both fields are non-null. Previously emitted by `indicators.py` but never reached the Claude prompt. Signal #4 in `_dtBuildRecs()` also updated to use the actual Fibonacci computation (`fib50 = low_60d + 0.50 × range`, `fib618 = low_60d + 0.618 × range`) with `return_60d` fallback.
+  - **Multiple portfolios (account tagging):** `account: 'personal'|'super'|'trading'` field added to each holding. `state.activeAccount` ('all' by default) filters `mergedPortfolio()`. Portfolio page shows account filter tabs and colour-coded account badges (click to cycle). `analysis.js` injects `Account: SUPER` (etc.) into the Claude user message header when `activeAccount !== 'all'`. `ai_learning_events` rows do not yet capture account scope — recorded as a future enhancement when per-account calibration data is sufficient.
+
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
 - **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
 - **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.

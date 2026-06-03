@@ -261,7 +261,7 @@ already exist (quant, regime, learning, dividends, CGT).
 |---|---|---|---|
 | ✓ **Watchlist** (separate from holdings) | S | ★★★ | **SHIPPED** — `js/pages/watchlist.js`, `state.watchlist`, scanner ⭐ integration. See §0. |
 | ✓ **Target allocations + drift alerts** | M | ★★ | **SHIPPED** — `state.targetAllocations`, `_buildTargetAllocCard()` on Risk page; amber/red when |drift| ≥5%/10%. See §0. |
-| **Multiple portfolios / accounts** | M | ★★ | Separate super vs personal vs trading accounts (still single-user) with combined and per-account views — affects CGT and sizing. |
+| ✓ **Multiple portfolios / accounts (account tagging)** | M | ★★ | **SHIPPED Sprint 42** — `account` field on holdings (`personal`\|`super`\|`trading`), `state.activeAccount` filter. Portfolio page: account filter tabs, account badge per row (click to cycle), account prompt in Add Holding dialog. `mergedPortfolio()` filters by `state.activeAccount`. Analysis prompt includes `Account: SUPER` header when not 'all'. Cash stays single for now (full per-account cash in a future pass). |
 | ✓ **Cash & term-deposit tracker** | S | ★★ | **SHIPPED** — `state.termDeposits`, `_buildCashTrackerCard()` on Dashboard; idle cash + TD maturities + deployable ≤30d total. See §0. |
 | ✓ **Performance attribution** | M | ★★ | **SHIPPED** — `_buildAttributionCard()` in `performance.js`: P&L by sector and by regime at entry. See §0. |
 | ✓ **Benchmark comparison** | S | ★★ | **SHIPPED** — ^AXJO overlay on Value History canvas; normalized to portfolio start value. See §0. |
@@ -325,7 +325,7 @@ already exist (quant, regime, learning, dividends, CGT).
 |---|---|---|---|
 | ✓ **Portfolio-aware Q&A** | M | ★★ | **SHIPPED** — `sendChat()` now injects regime + macro context (VIX, ASX200, sentiment, AUD/USD) into system prompt. See §0. |
 | ✓ **Postmortem digest** | S | ★★ | **SHIPPED** — `GET /api/learning/digest-data` + "Generate Digest" on Learning page. See §0. |
-| **Local-LLM fallback** | M | ★ | Use the existing Ollama setup for cheap/offline analysis when you don't want to spend on Claude calls (debate engine already uses it). |
+| ✓ **Local-LLM fallback** | M | ★ | **SHIPPED Sprint 41** — `POST /api/debate/quick-analysis` in `routes/debate.py`; `_callLocalAnalysis()` in `claude-client.js`; toggled via Settings → "Use local LLM for analysis"; BUY/TOP_UP/HOLD only; `🔒 Local` badge on rec cards; now also writes to `ai_call_log` with `agent_type='portfolio:local'` (Sprint 42). |
 | ✓ **Prompt A/B tracking** | M | ★★ | **SHIPPED** — Prompt Version History table on Learning page; Δ vs prev column (pp delta + ↑/↓/↔); "current" badge; realised P&L column. See §0. |
 
 ---
@@ -334,10 +334,14 @@ already exist (quant, regime, learning, dividends, CGT).
 
 You don't need multi-user infra, but you *do* want it to not lose your data or break mid-session.
 
-### ✓ 3.1 Data-source resilience — `M` · ★★★ **SHIPPED**
-`fetch_with_retry()` in `core.py` with exponential backoff and stale-cache fallback. Quote and macro
-endpoints use it. Remaining: secondary provider (Alpha Vantage / Stooq) behind a `DataProvider`
-interface for when yfinance is completely down.
+### ✓ 3.1 Data-source resilience — `M` · ★★★ **COMPLETE Sprint 42**
+Three lines of defence: (1) `fetch_with_retry()` in `core.py` — exponential backoff (3×, 2s/4s/8s);
+(2) `_last_good` stale-cache per key — serves the last successful result on full retry exhaustion;
+(3) `stooq_quote()` in `core.py` — Stooq CSV price fallback when `_last_good` is also empty (fresh
+server start with yfinance down). Wired into `_quote_cached()` and `_macro_payload._fetch_symbol()`.
+OHLCV history fallback via `_fetch_stooq_history()` in `indicators.py` was already live.
+Coverage: all ASX equities (`.AX` → `.au`), `^AXJO`, S&P500, NASDAQ, VIX, US10Y, AUD/USD, gold,
+oil, copper, sector ETFs. Not covered: iron ore (`TIO=F`) and SPI200 futures (`YAP=F`) — not on Stooq.
 
 ### ✓ 3.2 Automated local backups — `S` · ★★★ **SHIPPED**
 Daily backup on startup + daemon thread. Keeps last 7. See §0.
@@ -382,7 +386,7 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 ## 5. Suggested sequencing
 
 1. ✓ **Trust the numbers first:** §1.3 Wilson CI, §1.4 Brier score, §1.2 slippage — **done**. Remaining: §1.1 look-ahead bias, §1.5 survivorship bias.
-2. ✓ **Don't lose data:** §3.2 backups, §3.1 retry + stale-cache — **done**. Remaining: secondary data provider fallback.
+2. ✓ **Don't lose data:** §3.2 backups, §3.1 retry + stale-cache + Stooq fallback — **done Sprint 42**.
 3. ✓ **Highest daily payoff:** pre-trade checklist, CGT countdown, trade tags, heat gauge, drawdown monitor, Telegram, broker CSV, indicator alerts, tax-loss planner, EOFY pack, watchlist, morning briefing, regime journal, stale nudge — **all done**.
 4. ✓ **Deepen the edge:** §2.5 stress test / trailing stops / breadth signal — **done**. ✓ §1.7 walk-forward backtest — **done Sprint 20**. ✓ §2.5 correlation-aware sizing — **done Sprint 8**.
 5. ✓ **Sprint 6 shipped:** §2.7 portfolio-aware Q&A, §2.1 performance attribution, §2.5 sector-concentration warning, §2.6 thesis capture, §2.2 dividend forecast + franking credits — **all done**.
@@ -407,7 +411,8 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 24. ✓ **Sprint 39 shipped:** `_preEarningsAdj` badge fix, earnings-calendar 4h TTL cache, survivorship-bias disclosures (§1.5), capital-returns-check endpoint (§1.9 partial), mobile responsive layout (§4).
 25. ✓ **Sprint 40 shipped:** RBA rate 6h in-memory `ttl_cache` wrapper (`_rba_rate_cached`); signals page optimistic stale rendering + background refresh; §4 table docs cleanup (keyboard shortcuts, density mode, in-app changelog marked ✓).
 26. ✓ **Sprint 41 shipped:** Macro page optimistic stale rendering (`renderMacroPage(gen)`, silent background fetch, `_macroRefreshing` badge); earnings calendar auto-fetch on Dashboard + Macro navigation; `state.earningsLastFetch` + dashboard re-render in `fetchEarningsCalendar()`; §3.4 fully complete.
-27. **Open:** §1.9 mergers/takeover CGT (no yfinance tag), §2.1 multiple portfolios, §3.7 ES-modules (deferred — no dev server), PWA installability.
+27. ✓ **Sprint 42 shipped:** `high_60d`/`low_60d` forwarded to Claude in `analysis.js` (`Range60d` line); `_dtBuildRecs()` Signal #4 updated to actual Fibonacci zone (with `return_60d` fallback); Stooq price fallback (`stooq_quote` in `core.py`) wired into `_quote_cached()` and `_macro_payload()` — third line of defence when yfinance fails and `_last_good` is empty; doc fixes in `learning_loop.md` and `prompts.md` (Phase 8 live, day-trade Claude prompts marked dormant, Phase 3 neutral synthesis terminology).
+28. **Open:** §1.9 mergers/takeover CGT (no yfinance tag), §2.1 multiple portfolios, §3.7 ES-modules (deferred — no dev server), PWA installability.
 
 ---
 

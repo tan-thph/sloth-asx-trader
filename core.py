@@ -129,6 +129,65 @@ _HTTP_SESSION.mount("https://", _adapter)
 OLLAMA_BASE = "http://localhost:11434"
 
 
+# ── Stooq price fallback ──────────────────────────────────────────────────────
+# Free, no API key. Used when yfinance is completely down and _last_good is
+# also empty (i.e. first-ever fetch on this server start).
+# Rate limit: ~1 req/sec (undocumented). Safe at our TTL windows (45s quote,
+# 5min macro) — never called concurrently under normal operation.
+
+_STOOQ_MAP: dict[str, str] = {
+    "^AXJO":    "^axjo",
+    "^GSPC":    "^spx",
+    "^IXIC":    "^ndq",
+    "^DJI":     "^dji",
+    "^VIX":     "^vix",
+    "^TNX":     "^tnx",
+    "AUDUSD=X": "audusd",
+    "GC=F":     "gc.f",
+    "CL=F":     "cl.f",
+    "HG=F":     "hg.f",
+    # TIO=F (iron ore) and YAP=F (SPI200 futures) are not available on Stooq.
+}
+
+
+def _to_stooq_sym(yf_symbol: str) -> str | None:
+    """Convert a yfinance symbol to its Stooq equivalent, or None if unsupported."""
+    if yf_symbol in _STOOQ_MAP:
+        return _STOOQ_MAP[yf_symbol]
+    if yf_symbol.endswith(".AX"):
+        return yf_symbol[:-3].lower() + ".au"
+    return None
+
+
+def stooq_quote(yf_symbol: str) -> dict | None:
+    """Fetch the latest price from Stooq as a last-resort fallback.
+
+    Returns {'price': float, 'change_pct': float, '_source': 'stooq'} or None.
+    CSV columns: Symbol,Date,Time,Open,High,Low,Close,Volume,Name
+    """
+    sym = _to_stooq_sym(yf_symbol)
+    if sym is None:
+        return None
+    try:
+        url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlcvn&e=csv"
+        resp = _HTTP_SESSION.get(url, timeout=10)
+        resp.raise_for_status()
+        lines = resp.text.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        fields = lines[1].split(",")
+        if len(fields) < 7:
+            return None
+        close = float(fields[6])
+        open_ = float(fields[3])
+        if close <= 0:
+            return None
+        change_pct = round((close / open_ - 1) * 100, 2) if open_ > 0 else 0.0
+        return {"price": round(close, 3), "change_pct": change_pct, "_source": "stooq"}
+    except Exception:
+        return None
+
+
 # ── Sector map (used by market scanner) ──────────────────────────────────────
 # Curated lookup for ASX200-ish tickers. Each ticker appears exactly once.
 # Falls back to "Other" if a scanned ticker isn't here.

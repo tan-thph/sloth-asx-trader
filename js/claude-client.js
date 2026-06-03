@@ -122,6 +122,19 @@ async function callClaude(agentType, userMessage, options = {}) {
     ? `${API}/api/claude/proxy`
     : 'https://api.anthropic.com/v1/messages';
 
+  // ── Pre-send diagnostic ────────────────────────────────────────────────────
+  const _sysLen = Array.isArray(system)
+    ? system.reduce((sum, b) => sum + (b.text?.length || 0), 0)
+    : (typeof system === 'string' ? system.length : 0);
+  const _msgLen = messages.reduce((sum, m) =>
+    sum + (typeof m.content === 'string' ? m.content.length
+      : JSON.stringify(m.content).length), 0);
+  console.log(
+    `[callClaude] ▶ ${agentType} | sys=${(_sysLen / 1024).toFixed(1)}KB ` +
+    `msg=${(_msgLen / 1024).toFixed(1)}KB | maxTokens=${maxTokens} | ` +
+    `${useProxy ? 'proxy' : 'direct'} | ${new Date().toLocaleTimeString('en-AU')}`
+  );
+
   // ── Exponential backoff: 4 attempts (0s, 1s, 2s, 4s) ──────────────────────
   const RETRY_DELAYS = [0, 1000, 2000, 4000];
   let lastErr;
@@ -161,11 +174,14 @@ async function callClaude(agentType, userMessage, options = {}) {
     }
 
     const usage = data.usage || {};
-    if (usage.cache_read_input_tokens || usage.cache_creation_input_tokens) {
-      console.log(`[${agentType}] cache read=${usage.cache_read_input_tokens ?? 0} written=${usage.cache_creation_input_tokens ?? 0}`);
-    }
-
     const responseText = data.content?.[0]?.text ?? '';
+
+    console.log(
+      `[callClaude] ✓ ${agentType} | sent OK → response received | ` +
+      `in=${usage.input_tokens ?? '?'} out=${usage.output_tokens ?? '?'} ` +
+      `cache_hit=${usage.cache_read_input_tokens ?? 0} cache_written=${usage.cache_creation_input_tokens ?? 0} | ` +
+      `${Date.now() - _callStart}ms | response: ${responseText.length} chars`
+    );
 
     // ── Fire-and-forget: log full call (prompt + response) to backend ──────────
     // Runs after every successful callClaude — covers all agent types automatically.
@@ -189,13 +205,15 @@ async function callClaude(agentType, userMessage, options = {}) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text:          responseText,
-          system_prompt: _sysText.slice(0, 8000),
+          system_prompt: _sysText.slice(0, 20000),
           user_message:  _userText.slice(0, 30000),
           agent_type:    agentType,
           model:         CLAUDE_MODEL,
           usage,
           duration_ms:   Date.now() - _callStart,
         }),
+      }).then(r => {
+        if (r.ok) console.log(`[callClaude] 💾 ${agentType} call saved to ai_call_log (sys=${(_sysText.length/1024).toFixed(1)}KB user=${(_userText.length/1024).toFixed(1)}KB resp=${(responseText.length/1024).toFixed(1)}KB)`);
       }).catch(() => {});  // never let logging break the caller
     } catch (_logErr) { /* swallow */ }
 

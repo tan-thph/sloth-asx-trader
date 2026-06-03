@@ -151,7 +151,10 @@ explicitly state why this trade is different — or downgrade your conviction sc
 ${lines.join('\n')}`;
 }
 
-// buildDtSystemArray — same approach for day trade prompts
+// buildDtSystemArray — reference implementation for the dormant day-trade Claude path.
+// Not called: runDayTradeAnalysis() and runUniverseScan() are quantitative-only.
+// Kept so the Claude AI phase can be re-activated by wiring callClaude('dayTrade',…)
+// from day-trading-analysis.js and passing buildDtSystemArray(context) as systemArray.
 function buildDtSystemArray(context = {}) {
   const core = typeof getDayTradeSystemPrompt === 'function' ? getDayTradeSystemPrompt() : '';
   if (!core) return undefined;

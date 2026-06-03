@@ -2,7 +2,11 @@
 // DAY TRADING ANALYSIS ENGINE
 // Quantitative confluence strategy: 5–15 day swing trades.
 // Primary: BB reclaim. Confirms: RSI<35, Vol Z-Score, Fib zone, OBV div.
-// Stop: 2.5×ATR. Hard filters: ADV, SMA200, ADX, no catalyst.
+// Stop: regime-aware stopAtrMult×ATR (2.5–4.0×, via quant engine).
+// Hard filters: ADV, SMA200, ADX, no catalyst.
+// NOTE: Fully quantitative — no Claude call. getDayTradeSystemPrompt /
+//       getDayTradeUniverseScanPrompt exist for potential future use but
+//       are not invoked by runDayTradeAnalysis() or runUniverseScan().
 // ============================================================
 
 // ── _dtPreFilterWithStats ─────────────────────────────────────────────────────
@@ -137,11 +141,21 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
     if (s.volume_z_score != null && s.volume_z_score >= (ap.volZScore ?? 1.5))
       signals.push(`VolZ ${s.volume_z_score.toFixed(2)}σ`);
 
-    // Signal #4: Fib zone (60d return in pullback range)
-    if (s.return_60d != null
+    // Signal #4: Fib zone — 50%–61.8% retracement of 60-day range
+    // Uses high_60d/low_60d when available; falls back to return_60d range
+    const _fibOk = (() => {
+      const px = s.current_price;
+      if (s.high_60d != null && s.low_60d != null && s.high_60d > s.low_60d) {
+        const range = s.high_60d - s.low_60d;
+        const fib50  = s.low_60d + 0.50  * range;
+        const fib618 = s.low_60d + 0.618 * range;
+        return px >= fib50 && px <= fib618;
+      }
+      return s.return_60d != null
         && s.return_60d >= (ap.fibReturnMin ?? -20)
-        && s.return_60d <= (ap.fibReturnMax ?? -5))
-      signals.push(`Fib ${s.return_60d.toFixed(1)}%`);
+        && s.return_60d <= (ap.fibReturnMax ?? -5);
+    })();
+    if (_fibOk) signals.push(`Fib zone`);
 
     // Signal #5: OBV rising (bonus)
     if (s.obv_trend === 'rising') signals.push('OBV rising');

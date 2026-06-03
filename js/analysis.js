@@ -166,7 +166,7 @@ async function runAnalysis() {
   const loaded = allTickers.filter(t=>state.liveSignals[t]&&!state.liveSignals[t].error);
   if(loaded.length) {
     // ASX200 5d return for relative-strength baseline (from macro data)
-    const _asx200_5d = _m?.asx200_5d_return ?? null;
+    const _asx200_5d = state.macroData?.asx200_5d_return ?? null;
 
     indicatorCtx = sectorAllocCtx + '\n\nLIVE TECHNICAL DATA (yfinance, real-time):\n' + loaded.map(t=>{
       const s  = state.liveSignals[t];
@@ -200,7 +200,7 @@ async function runAnalysis() {
       const rsAlpha = (s.return_5d != null && _asx200_5d != null)
         ? (s.return_5d - _asx200_5d).toFixed(1) : null;
       const sectorKey = _SECTOR_TO_ETF[f.sector || ''] || null;
-      const sectorRet5d = sectorKey ? (_m?.sectors?.[sectorKey]?.return_5d ?? null) : null;
+      const sectorRet5d = sectorKey ? (state.macroData?.sectors?.[sectorKey]?.return_5d ?? null) : null;
       const sectorAlpha = (s.return_5d != null && sectorRet5d != null)
         ? (s.return_5d - sectorRet5d).toFixed(1) : null;
 
@@ -235,7 +235,7 @@ async function runAnalysis() {
   Bollinger: Upper=$${s.bb_upper?.toFixed(3)}, Mid=$${s.bb_mid?.toFixed(3)}, Lower=$${s.bb_lower?.toFixed(3)}, %B=${s.bb_pct_b!=null?(s.bb_pct_b*100).toFixed(0)+'%':'n/a'}, Width=${s.bb_bandwidth?.toFixed(1)}%${donchRange!=null?`, DonchPos=${donchRange.toFixed(0)}%`:''}
   Volatility: ATR=$${s.atr_14?.toFixed(3)} (${s.atr_pct?.toFixed(1)}%), HistVol20d=${s.hist_vol_20?.toFixed(1)}%ann${s.hist_vol_60?` 60d:${s.hist_vol_60.toFixed(1)}% regime:${volRegime}`:''}, Keltner=${s.keltner_lower?.toFixed(3)}-${s.keltner_upper?.toFixed(3)}
   Volume: Today=${s.volume_today?.toLocaleString()}, Avg20=${s.volume_avg_20?.toLocaleString()}, Ratio=${s.volume_ratio?.toFixed(2)}x, VZ=${s.volume_z_score?.toFixed(1)}σ, OBV=${s.obv_trend}, VWAP20=$${s.vwap_20d?.toFixed(3)} (price ${s.price_vs_vwap})${nearPivot}
-  Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%${s.return_90d!=null?` 90D:${s.return_90d.toFixed(2)}%`:''}${rsAlpha!=null?` vs.ASX200:${rsAlpha>0?'+':''}${rsAlpha}pp`:''}${sectorAlpha!=null?` vs.Sector:${sectorAlpha>0?'+':''}${sectorAlpha}pp`:''}
+  Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%${s.return_90d!=null?` 90D:${s.return_90d.toFixed(2)}%`:''}${rsAlpha!=null?` vs.ASX200:${rsAlpha>0?'+':''}${rsAlpha}pp`:''}${sectorAlpha!=null?` vs.Sector:${sectorAlpha>0?'+':''}${sectorAlpha}pp`:''}${s.high_60d!=null?` | Range60d: hi=$${s.high_60d.toFixed(3)} lo=$${s.low_60d?.toFixed(3)||'?'}`  :''}
   Fundamentals: PE=${f.pe_ratio?.toFixed(1)||'n/a'}, FwdPE=${f.forward_pe?.toFixed(1)||'n/a'}, PB=${f.pb_ratio?.toFixed(2)||'n/a'}, DivYield=${f.dividend_yield?(f.dividend_yield*100).toFixed(2)+'%':'n/a'}, Beta=${f.beta?.toFixed(2)||'n/a'}, ROE=${f.roe?(f.roe*100).toFixed(1)+'%':'n/a'}, OpMgn=${f.operating_margin!=null?(f.operating_margin*100).toFixed(1)+'%':'n/a'}, D/E=${f.debt_to_equity?.toFixed(1)||'n/a'}, RevGrowth=${f.revenue_growth!=null?(f.revenue_growth*100).toFixed(1)+'%':'n/a'}, FCFYield=${(f.free_cashflow&&f.market_cap)?((f.free_cashflow/f.market_cap)*100).toFixed(1)+'%':'n/a'}${f.short_pct_float!=null?`, Short=${(f.short_pct_float*100).toFixed(1)}%float`:''}
   52W: High=$${f['52w_high']?.toFixed(3)||'n/a'}, Low=$${f['52w_low']?.toFixed(3)||'n/a'}, FromHigh=${f.pct_from_52w_high?.toFixed(1)||'n/a'}%${analystUpside!=null?`, AnalystUpside=${analystUpside>0?'+':''}${analystUpside}%`:''}, Analyst=${f.analyst_recommendation||'n/a'} (target $${f.analyst_target?.toFixed(2)||'n/a'})
   BuySignals: ${(s.buy_signals||[]).join(', ')||'none'} | SellSignals: ${(s.sell_signals||[]).join(', ')||'none'}`;
@@ -480,7 +480,8 @@ ${riskRows}`;
     return _r.customRules ? block + `\n\nCUSTOM RULES (apply in addition to all above):\n${_r.customRules}` : block;
   })();
 
-  const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()} | TAX_LOSS_HARVEST_ACTIVE: ${inHarvestWindow}
+  const _acctLabel = state.activeAccount && state.activeAccount !== 'all' ? ` | Account: ${state.activeAccount.toUpperCase()}` : '';
+  const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()} | TAX_LOSS_HARVEST_ACTIVE: ${inHarvestWindow}${_acctLabel}
 Account settings: brokerage $${state.settings.brokerage}/trade (round-trip $${state.settings.brokerage * 2}) | max ${state.settings.maxTradesPerDay} trades/day | min trade $${state.settings.minTradeSize}
 
 LIVE PORTFOLIO STATE:
