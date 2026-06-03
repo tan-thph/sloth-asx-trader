@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-03 (Sprint 41 shipped)
+**Last Updated:** 2026-06-03 (Sprint 43 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -8,6 +8,17 @@
 > and **useful features** that make day-to-day trading decisions faster and more disciplined.
 
 Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for triage.
+
+---
+
+## 0. Shipped — Sprint 43 (2026-06-03)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **§3.8 Hoist `_detectExitReason` to `utils.js`** | Tech debt | Single canonical copy now in `js/utils.js`. Removed duplicate definitions from `recommendations.js` and `performance.js`. `utils.js` loads first — both page files resolve the global at call time. Tests updated: `detect-exit-reason.test.js` extracts from `utils.js`; `test_detect_exit_reason_direction_aware` validates `utils.js` and asserts neither page file redefines it. |
+| **§3.10 Stooq rate-limit semaphore** | Reliability | `_stooq_sem = threading.BoundedSemaphore(1)` in `core.py`. Both `stooq_quote()` and `_fetch_stooq_history()` in `indicators.py` acquire the semaphore; a 1-second sleep in the `finally` block paces requests to Stooq's undocumented ~1 req/sec limit. Prevents silent empty-CSV responses under parallel batch scans. |
+| **§3.9 `FACTOR_WEIGHTS` normalization guard** | Safety | `indicators.py` emits `warnings.warn` at import time if `sum(FACTOR_WEIGHTS) != 100`. Catches misconfiguration before it silently corrupts scanner scores. |
+| **§2.7 "Why this rec?" traceability panel** | UX ★★★ | `analysis.js` attaches `_genRegime`, `_genRegimeConf`, `_calibSnap` (≤350 chars of the calibration block), and `_signalsSnap` (9 signal fields) to every rec at generation time. Each pending rec card in `recommendations.js` now has a collapsed `<details>` section showing: regime + confidence badge, signal chips (RSI/ADX/BB%B/ATR/Score/OBV/MACD/Vol×/RS), calibration nudge monospace block, and cached Ollama debate synthesis if available. Arrow rotates on expand via `details[open] .trace-arrow` CSS. |
 
 ---
 
@@ -248,6 +259,14 @@ tag these as distinct corporate-action types.
 ### ✓ 1.10 Data-staleness guards — `S` · ★★ **SHIPPED**
 `fetched_at` stamped on quote responses. `⚠ stale` badge in portfolio table when >25 min. See §0.
 
+### 1.11 Regime-change calibration penalty — `S` · ★★
+When `classifyRegime()` detects a regime flip, the current calibration still heavily weights data from the outgoing regime (e.g. 60d half-life in sideways means old `riskOn` trades still dominate for weeks). Add a transient decay multiplier: on flip, divide the effective half-life by 2 for the first 5–10 trades in the new regime until ESS recovers above 2.5. Wire into `_calib_compute()` using a `regime_flipped_at` timestamp stored in `blob_store` by `fetchAndClassifyRegime()` whenever the regime changes.
+*Source: critics.md §2D*
+
+### 1.12 Virtual-outcome time-decay weighting — `S` · ★
+`_resolve_virtual_outcomes()` currently marks all virtual outcomes equally regardless of how long the price took to reach target. A virtual win resolved in 2 days is a stronger signal than one that drifted there over 29 days. Add `virtual_speed_weight = min(1.0, 7.0 / max(1, hold_days))` computed at resolution time, stored as a new `virtual_speed_weight` column on `ai_learning_events`, and applied as an additional multiplier in `_calib_compute()` alongside the existing time-decay weight.
+*Source: critics.md §3.2*
+
 ---
 
 ## 2. New features & usefulness  ← the main ask
@@ -312,12 +331,14 @@ already exist (quant, regime, learning, dividends, CGT).
 
 | Feature | Effort | Impact | Idea |
 |---|---|---|---|
-| ✓ **Pre-trade checklist** | S | ★★★ | **SHIPPED** — 5-item modal gate, requires ≥4 ticks. See §0. |
+| ✓ **Pre-trade checklist** | S | ★★★ | **SHIPPED** — 6-item modal gate (Sprint 42 added profit-harvest/risk-management item), requires ≥4 ticks. See §0. |
 | ✓ **Thesis capture** | M | ★★★ | **SHIPPED** — textarea on rec cards, captured at execution, passed to learning loop as `trade_thesis`, shown in journal tooltip. See §0. |
 | ✓ **Thesis review at exit** | S | ★★★ | **SHIPPED** — `_showThesisReview()` in `recommendations.js` fires `<dialog>` on full position close; 3-verdict buttons post to `/api/learning/outcome`. See §0. |
 | ✓ **Broker CSV import** | M | ★★★ | **SHIPPED** — CommSec/SelfWealth/generic detection; backend parses, normalises, returns rows. See §0. |
 | ✓ **Trade tags & notes** | S | ★★ | **SHIPPED** — `tags`/`trade_thesis` DB columns + inline input on rec cards + stored in learning events. See §0. |
 | ✓ **Morning briefing auto-generate** | M | ★★ | **SHIPPED** — `'briefing'` agent type; Dashboard "Generate Brief" button chains macro + regime + holdings. See §0. |
+| **Lessons: market-breadth scope** | M | ★★ | Add `breadth_scope` field to `ai_learning_lessons` table (e.g. `adl_below_0.3`, `high_vol`). `GET /api/learning/lessons` filters by current `advance_decline_ratio` and `asx_vol_20d` alongside existing ticker/sector/regime scopes. Example: "When ADL<0.3, ignore bullish RSI divergences." *Source: critics.md §3.1* |
+| **Lessons: auto-generate from calib-quality** | M | ★ | After `triggerCalibQualityIfStale()` completes, if the Ollama output identifies a recurring failure mode (e.g. "chasing breakouts in low volume"), surface a toast prompt: *"Create a lesson from this? [pre-filled rule]"*. Requires extracting a `suggested_lesson` field from the `/api/debate/calib-quality` structured response. *Source: critics.md §3.1* |
 
 ### 2.7 AI assistant enhancements
 
@@ -327,6 +348,8 @@ already exist (quant, regime, learning, dividends, CGT).
 | ✓ **Postmortem digest** | S | ★★ | **SHIPPED** — `GET /api/learning/digest-data` + "Generate Digest" on Learning page. See §0. |
 | ✓ **Local-LLM fallback** | M | ★ | **SHIPPED Sprint 41** — `POST /api/debate/quick-analysis` in `routes/debate.py`; `_callLocalAnalysis()` in `claude-client.js`; toggled via Settings → "Use local LLM for analysis"; BUY/TOP_UP/HOLD only; `🔒 Local` badge on rec cards; now also writes to `ai_call_log` with `agent_type='portfolio:local'` (Sprint 42). |
 | ✓ **Prompt A/B tracking** | M | ★★ | **SHIPPED** — Prompt Version History table on Learning page; Δ vs prev column (pp delta + ↑/↓/↔); "current" badge; realised P&L column. See §0. |
+| **Local LLM SELL/TRIM support** | L | ★★★ | Extend `_LOCAL_ANALYSIS_SYSTEM` and `_SCHEMA_QUICK_ANALYSIS` in `routes/debate.py` to allow SELL/TRIM with a simplified tag set (primary_driver only; no secondary_factors initially). Use a larger pulled model (e.g. `qwen3:14b`) for exits. Critical gap: in a correction, `useLocalLLM=true` produces no exit signals — user must manually disable the toggle for any SELL. *Source: critics.md §2A; also prompts.md §9 "Future enhancements"* |
+| ✓ **"Why this rec?" traceability panel** | M | ★★★ | **SHIPPED Sprint 43** — collapsed `<details>` on each pending rec card. Shows regime + conf at generation time, 9 signal chips (RSI/ADX/BB%B/ATR/Score/OBV/MACD/Vol×/RS), calibration nudge block (≤350 chars), and cached Ollama debate synthesis. Context attached to rec in `analysis.js` via `_genRegime`, `_calibSnap`, `_signalsSnap` fields. |
 
 ---
 
@@ -367,6 +390,15 @@ Macro page optimistic rendering: `renderMacroPage(gen)` renders cached state imm
 ### 3.7 Type safety / ES-modules — `L` · ★★
 TypeScript (or JSDoc + `tsc --checkJs`) on the core engines, and the ES-modules migration noted in
 CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life, not urgent.
+
+### ✓ 3.8 Hoist `_detectExitReason` to `utils.js` — `S` · ★★★ **SHIPPED Sprint 43**
+Single canonical copy now in `js/utils.js`. Both page files reference it via the shared global. Tests updated.
+
+### ✓ 3.9 `FACTOR_WEIGHTS` normalization guard — `S` · ★ **SHIPPED Sprint 43**
+`indicators.py` emits `warnings.warn` at import if `sum(FACTOR_WEIGHTS) != 100`.
+
+### ✓ 3.10 Stooq rate-limit semaphore — `S` · ★★ **SHIPPED Sprint 43**
+`_stooq_sem = threading.BoundedSemaphore(1)` in `core.py`; both `stooq_quote()` and `_fetch_stooq_history()` acquire it with a 1-second `finally` sleep.
 
 ---
 
@@ -412,7 +444,9 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 25. ✓ **Sprint 40 shipped:** RBA rate 6h in-memory `ttl_cache` wrapper (`_rba_rate_cached`); signals page optimistic stale rendering + background refresh; §4 table docs cleanup (keyboard shortcuts, density mode, in-app changelog marked ✓).
 26. ✓ **Sprint 41 shipped:** Macro page optimistic stale rendering (`renderMacroPage(gen)`, silent background fetch, `_macroRefreshing` badge); earnings calendar auto-fetch on Dashboard + Macro navigation; `state.earningsLastFetch` + dashboard re-render in `fetchEarningsCalendar()`; §3.4 fully complete.
 27. ✓ **Sprint 42 shipped:** `high_60d`/`low_60d` forwarded to Claude in `analysis.js` (`Range60d` line); `_dtBuildRecs()` Signal #4 updated to actual Fibonacci zone (with `return_60d` fallback); Stooq price fallback (`stooq_quote` in `core.py`) wired into `_quote_cached()` and `_macro_payload()` — third line of defence when yfinance fails and `_last_good` is empty; doc fixes in `learning_loop.md` and `prompts.md` (Phase 8 live, day-trade Claude prompts marked dormant, Phase 3 neutral synthesis terminology).
-28. **Open:** §1.9 mergers/takeover CGT (no yfinance tag), §2.1 multiple portfolios, §3.7 ES-modules (deferred — no dev server), PWA installability.
+28. ✓ **Sprint 42 shipped:** `high_60d`/`low_60d` forwarded to Claude in `analysis.js` (`Range60d` line); `_dtBuildRecs()` Signal #4 updated to actual Fibonacci zone (with `return_60d` fallback); Stooq price fallback (`stooq_quote` in `core.py`) wired into `_quote_cached()` and `_macro_payload()` — third line of defence when yfinance fails and `_last_good` is empty; doc fixes in `learning_loop.md` and `prompts.md` (Phase 8 live, day-trade Claude prompts marked dormant, Phase 3 neutral synthesis terminology); pre-trade checklist 6th item (profit harvest / risk management); executed-rec button immediate feedback; `max_tokens` raised to 8,000; `unrealised_loss_large` enforcement line + SELL exit semantics in `ANALYSIS_SYSTEM_PROMPT`.
+29. ✓ **Sprint 43 shipped:** §3.8 `_detectExitReason` hoisted to `utils.js`; §3.10 Stooq rate-limit semaphore; §3.9 `FACTOR_WEIGHTS` guard; §2.7 "Why this rec?" traceability panel.
+30. **Open:** §1.11 regime-change calibration penalty (S, ★★), §2.7 local LLM SELL/TRIM (L, ★★★), §1.12 virtual-outcome speed weighting (S, ★), §2.6 lessons breadth scope (M, ★★), §2.6 lessons auto-generate (M, ★), §1.9 mergers/takeover CGT (no yfinance tag), §3.7 ES-modules (deferred).
 
 ---
 
