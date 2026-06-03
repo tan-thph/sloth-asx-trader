@@ -549,52 +549,21 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     } catch { /* non-fatal */ }
   }
 
-  // ── Internal Debate (optional — Ollama local model) ─────────────────────────
-  // Respects state.debate.aggression: 'none' skips, 'light' = 3 tickers, 'full' = 8.
-  // Results go into user message (not system prompt) to preserve prompt-cache hits.
-  // debate_summary (≤200 chars) is stored in ai_learning_events for later review.
+  // ── Inject cached debate results (read-only — never starts new debates) ──────
+  // Only uses results already in the client-side cache from user-initiated debates.
+  // To run debates, use the Debate Engine on the Learning page.
   let _debatePreamble = '';
-  let _debateResults  = {};  // ticker → debate result; passed to logRecsToLearningLoop
-  if (typeof fetchDebateBatch === 'function' && state.serverOk
-      && (state.debate?.aggression || 'light') !== 'none') {
-    try {
-      const { maxTickers } = typeof _aggressionParams === 'function'
-        ? _aggressionParams() : { maxTickers: 3 };
-      const _debateTickers = mergedPortfolio()
-        .map(h => h.ticker)
-        .filter(t => state.liveSignals[t] && !state.liveSignals[t].error)
-        .slice(0, maxTickers);
-      if (_debateTickers.length) {
-        const _dStatus = await debateStatus();
-        if (_dStatus.available) {
-          const _debModel = typeof preferredDebateModel === 'function'
-            ? preferredDebateModel(_dStatus.models) : '?';
-          toast(`🤖 ${_debModel} debating ${_debateTickers.join(', ')}…`, 'info');
-          // D7: build action map so debate engine uses exit-biased prompts for SELL/TRIM
-          const _debateActions = {};
-          for (const t of _debateTickers) {
-            const rec = (state.recommendations || []).find(r => r.ticker === t);
-            if (rec) _debateActions[t] = rec.action || 'BUY';
-          }
-          const _debateT0 = Date.now();
-          _debateResults  = await fetchDebateBatch(_debateTickers, undefined, { actions: _debateActions });
-          _debatePreamble = buildDebatePreamble(_debateResults);
-
-          const _debated  = Object.values(_debateResults).filter(d => d?.ok);
-          const _cached   = _debated.filter(d => d._fromCache).length;
-          const _fresh    = _debated.length - _cached;
-          const _debMs    = Date.now() - _debateT0;
-          if (_debated.length > 0) {
-            const _cacheNote = _cached > 0 ? ` (${_cached} cached, ${_fresh} fresh)` : '';
-            toast(`🤖 Debate done in ${(_debMs/1000).toFixed(1)}s${_cacheNote} — ${_debated.length} ticker(s) ready`, 'success');
-            console.log(`[Debate] ${_debated.length} ticker(s) | ${_fresh} fresh, ${_cached} cached | ${_debMs}ms`);
-          } else {
-            console.log('[Debate] No successful debates — skipping preamble');
-          }
-        }
-      }
-    } catch (_debateErr) {
-      console.warn('[Debate] skipped:', _debateErr.message);
+  let _debateResults  = {};
+  if (typeof _getCachedDebate === 'function') {
+    for (const h of mergedPortfolio()) {
+      const sig = state.liveSignals[h.ticker];
+      if (!sig || sig.error) continue;
+      const cached = _getCachedDebate(h.ticker, sig);
+      if (cached) _debateResults[h.ticker] = { ...cached, _fromCache: true };
+    }
+    if (Object.keys(_debateResults).length > 0) {
+      _debatePreamble = buildDebatePreamble(_debateResults);
+      console.log(`[Debate] injecting ${Object.keys(_debateResults).length} cached result(s) into prompt`);
     }
   }
 
