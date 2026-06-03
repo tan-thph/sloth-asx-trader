@@ -52,10 +52,13 @@ function _resolveSystemPrompt(agentType) {
 // POSTs the assembled user message to /api/debate/quick-analysis (Ollama backend).
 // Returns the same { text, usage } shape as callClaude() so analysis.js is unaware.
 async function _callLocalAnalysis(userMessage) {
+  const prefModel = (typeof preferredDebateModel === 'function')
+    ? preferredDebateModel()
+    : (state.debate?.model || 'qwen3:9b');
   const resp = await fetch(`${API}/api/debate/quick-analysis`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userMessage }),
+    body: JSON.stringify({ userMessage, model: prefModel }),
   });
   const d = await resp.json();
   if (!d.ok) throw new Error(d.error || 'Local LLM analysis failed');
