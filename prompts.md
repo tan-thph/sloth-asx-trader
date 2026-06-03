@@ -312,12 +312,12 @@ Returned by a function (not a constant) so it can embed `state.settings.brokerag
 - Signal #1 BB Reclaim (**MANDATORY**): `bb_pct_b ≤ 0.05`
 - Signal #2 RSI Recovery: `rsi_14 < 40 AND return_5d > return_20d`
 - Signal #3 Volume Z-Score: `volume_z_score > 1.50`
-- Signal #4 Fibonacci Zone: `return_60d` between −20% and −5%
+- Signal #4 Fibonacci Zone: `fib_50 ≤ current_price ≤ fib_618` where `fib_50 = low_60d + 0.50×(high_60d − low_60d)` and `fib_618 = low_60d + 0.618×(high_60d − low_60d)`. Fallback when `high_60d`/`low_60d` absent: `return_60d` between −20% and −5% *(Sprint 41)*
 - Signal #5 OBV Divergence (bonus): `obv_trend = "rising"` while `return_5d < 0`
 
 Minimum: Signal #1 + ≥2 of Signals #2–#5.
 
-**Sizing:** `stop = entry − 2.5×ATR` · `qty = floor(riskPerTrade / stop_distance)` · max 20% of allocatedCash · R:R ≥ 2.0
+**Sizing:** `stop = entry − 2.5×ATR` (prompt instruction; quant engine recalculates with regime-aware `stopAtrMult×ATR`: 2.5× riskOn/trend/sideways · 3.0× highVol · 3.5× riskOff · 4.0× panic) · `qty = floor(riskPerTrade / stop_distance)` · max 20% of allocatedCash · R:R ≥ 2.0
 
 **User message (per ticker, after pre-filter):**
 ```
@@ -644,7 +644,7 @@ Output only the JSON object. No preamble, no markdown fences.
 | `rs_5d_alpha` | ✅ (Sprint 32) | Derived: `return_5d − asx200_5d_return` |
 | `eps_revision_30d` | ❌ | Not in yfinance; referenced in Priority 1 but must be inferred from beat/miss history |
 | `bid-ask spread` | ❌ | Not provided; spread rule only fires from live data during market hours |
-| `high_60d / low_60d` | ⚠️ | Referenced in day-trade Fib calc; approximated by `return_60d` range |
+| `high_60d / low_60d` | ✅ *(Sprint 41)* | Emitted by `indicators.py` `analyse_ticker()`; 60-bar max/min of OHLCV `high`/`low` Series. `None` when < 60 bars. Used by Signal #4 for exact Fibonacci levels; `return_60d` remains the fallback when absent |
 
 ### Fields not sent despite being available
 

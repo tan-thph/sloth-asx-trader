@@ -197,15 +197,15 @@ Both are safe on any existing database and complete in milliseconds on a <100 MB
 
 ---
 
-### Still to implement
+### Calibration Design Notes
 
-**Skill-weighted calibration (Phase 8) — partially live**
+**Skill-weighted calibration (Phase 8)** ✅ *live (Sprint 31)*
 The `_weight()` function in `_calib_compute()` applies skill weighting centered at 5 (neutral):
 ```python
 sf = max(0.2, min(1.8, skill_score / 5.0))  # skill_score=5 → sf=1.0 (neutral)
 weight = time_decay × sf
 ```
-Centering at 5 means unscored events (`skill_score=NULL`) fall back to `sf=1.0` — identical to a neutral-scored trade. A high-skill trade (score=8) gets `sf=1.6`, amplifying its calibration signal; a low-skill trade (score=2) gets `sf=0.4`, down-weighting lucky wins. The old formula (`max(0.2, skill/10)`) centred at 10 and penalised all scored trades vs unscored, which was backwards. Phase 8 is fully realised once ~20+ scored events exist; the formula is already live (Sprint 24).
+Centering at 5 means unscored events (`skill_score=NULL`) fall back to `sf=1.0` — identical to a neutral-scored trade. A high-skill trade (score=8) gets `sf=1.6`, amplifying its calibration signal; a low-skill trade (score=2) gets `sf=0.4`, down-weighting lucky wins. The old formula (`max(0.2, skill/10)`) centred at 10 and penalised all scored trades vs unscored, which was backwards. Phase 8 is fully live via `_compute_phase8_meta()` (Sprint 31): Mann-Whitney U gate (z>1.28, one-sided p<0.10) compares mean skill score for wins vs losses — when the gate fails, `sf=1.0` for all events regardless of `skill_score`. Activates automatically once 10+ scored events exist where wins score statistically higher than losses.
 
 **Phase 6: Calibration quality debate card** ✅ *(Sprint 26)*
 `GET /api/debate/calib-quality` — backend pre-calculates binomial SE + Z-scores per confidence band, builds a constrained prompt, calls the local Ollama model, returns per-band verdicts and qualitative analysis. Result cached in `blob_store` key `calib_quality_latest` with date; `force=1` bypasses cache.
@@ -600,7 +600,6 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Auto-detect exit reason (Stage 1) | Eliminates `exit_reason='manual'` blanket; stop_hit/target_hit now correctly detected ±0.5% so calibration has accurate exit stats |
 | Adversarial debate: user-initiated only | 3 sequential Ollama calls × up to 120s each; auto-running on every loss would block UI for minutes. 🤖 fast-path handles the common case; ⚔️ is for disputes |
 | PARTIAL verdict: keep intersection only | Higher confidence than either model's full output. A tag both agreed on is stronger signal than either individual response |
-| Phase 3 challenges Model A (not arbitrary) | Model A runs first and is the "incumbent"; Model B is the challenger. Incumbent defends first — this mirrors how human debates work and produces more decisive outcomes |
 | Phase 3 neutral synthesis replaces challenger model | Earlier design: Model A defends vs Model B (challenger bias toward B regardless of quality). Current: both positions presented as equal inputs to a neutral reconciliation pass. More balanced and produces more consistent results |
 | Sanity check after final tags determined | Catches model self-contradictions like `stop_too_tight` on a 43%-distance stop. Cheaper and more reliable than asking the model to verify its own output |
 | ESS instead of raw trade count for calibration gates | Raw count misrepresents statistical power when most weights are near zero. Kish ESS = (Σwi)²/Σwi² correctly reflects a sample dominated by one fresh trade vs N equally-weighted trades. Threshold 2.5 — below this a warning token replaces a calibration nudge |
@@ -693,8 +692,8 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 - **`qwen3.5:9b` is a valid Ollama model** (confirmed). It is a thinking/reasoning model — `think: false` and `/no_think` both apply. Works for all JSON endpoints after the thinking-model fixes.
 - **Shared postmortem helpers** (`_pm_build_summary`, `_pm_exit_hint`, `_pm_build_prompt`, `_pm_validate_tags`, `_pm_parse`): extracted before both postmortem endpoints so single-model and adversarial debate use identical trade summaries and prompts. This ensures Phase 1 of the adversarial debate is a fair comparison — both models see exactly what 🤖 would have seen.
 - **`_pm_validate_tags()`**: stand-alone validator (no JSON roundtrip). Splits comma-separated tags, validates each against `VALID_PM_TYPES`, and strips `none` when mixed with real tags (mutually exclusive).
-- **`error_type_source` values for adversarial debate**: `debated-consensus` (sets identical), `debated-merged` (overlap kept), `debated-singleton` (only one model parsed), `debated` (Phase 3 — one model maintained or conceded). These are distinct from `'auto'` (single 🤖 run) and `'manual'` (user button clicks).
-- **Debate transcript modal**: shown immediately after ⚔️ completes, before the page re-renders. The transcript persists in `postmortem_debate` column for later inspection. The modal shows Phase 1 tags+reason per model, Phase 3 maintain/concede decision, final tag, and timing.
+- **`error_type_source` values for adversarial debate**: `debated-consensus` (sets identical), `debated-merged` (overlap kept), `debated-singleton` (only one model parsed), `debated-synthesis` (Phase 3 neutral synthesis parsed successfully), `debated` (Phase 3 fallback when synthesis parsing fails). These are distinct from `'auto'` (single 🤖 run) and `'manual'` (user button clicks).
+- **Debate transcript modal**: shown immediately after ⚔️ completes, before the page re-renders. The transcript persists in `postmortem_debate` column for later inspection. The modal shows Phase 1 tags+reason per model, Phase 3 neutral synthesis result, final tag, and timing.
 - **Per-phase logging**: each phase logs separate INFO lines with timing — `Phase 1A — qwen3.5:9b…` / `Phase 1A done (4231ms)`. Lets you tail `asx_server.log` to watch a debate progress without polling.
 - **Stored-debate viewer (📜)**: rows where `postmortem_debate IS NOT NULL` get a 📜 button next to ⚔️. Click opens the same modal used after a fresh run, with a `STORED` badge in the header. The data comes from an in-memory cache (`_learningEventsById`) populated by `_renderLearningContent` — no extra HTTP round-trip. ⚔️ still triggers a fresh debate that overwrites the stored transcript.
 - **Modal ESC-to-close**: keydown listener attached on modal mount, removed via MutationObserver when the modal element is detached (handles all three close paths: ✕ button, click-outside, ESC).

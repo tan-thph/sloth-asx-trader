@@ -1132,3 +1132,124 @@ def serve_sw():
 | 23 ✅ | `asx_trading.html`, `manifest.json`, `sw.js`, `asx_server.py` | PWA installability — home-screen icon, standalone window | Enhancement | S | Fixed |
 
 **Sprint 41 status (2026-06-02):** #19–21 and #23 shipped. #22 (multiple portfolios) deferred by user request.
+
+---
+
+## Sprint 42 — Audit findings (2026-06-03)
+
+Issues identified during the Sprint 41 post-ship deep audit. Grouped by severity and effort.
+
+---
+
+### Minor — correctness / UX polish
+
+## 24. `js/claude-client.js` — Local LLM fast-path ignores user's preferred model ✅ FIXED (Sprint 42)
+
+**File:** `js/claude-client.js`
+**Function:** `_callLocalAnalysis()`
+**Severity:** Low — always uses `qwen3:9b` default regardless of `state.debate.model`
+
+### Problem
+
+```js
+async function _callLocalAnalysis(userMessage) {
+  const resp = await fetch(`${API}/api/debate/quick-analysis`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ userMessage }),   // ← no 'model' field
+  });
+```
+
+The backend `/api/debate/quick-analysis` defaults to `qwen3:9b` when no model is specified. A user who has configured `qwen3.5:9b` (faster, better) as their preferred debate model in Settings → Debate Engine does not get to use it for quick analysis. Inconsistent with all other Ollama calls which honour `state.debate.model` via `preferredDebateModel()`.
+
+### Fix
+
+Pass the preferred model in the request body:
+
+```js
+async function _callLocalAnalysis(userMessage) {
+  const prefModel = (typeof preferredDebateModel === 'function')
+    ? preferredDebateModel()
+    : (state.debate?.model || 'qwen3:9b');
+  const resp = await fetch(`${API}/api/debate/quick-analysis`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ userMessage, model: prefModel }),
+  });
+```
+
+`preferredDebateModel()` is defined in `debate-client.js` which loads before `claude-client.js` — safe to call. Falls back to `state.debate.model` string or `qwen3:9b` if the function is unavailable.
+
+---
+
+## 25. `routes/debate.py` — `quick_analysis` logger uses `'parsed' in dir()` anti-pattern ✅ FIXED (Sprint 42)
+
+**File:** `routes/debate.py`
+**Function:** `quick_analysis()`
+**Severity:** Low — cosmetic / code smell. Works correctly.
+
+### Problem
+
+```python
+current_app.logger.info(
+    f"[QuickAnalysis] {model} → {len(parsed.get('recs', []) if 'parsed' in dir() else [])} recs ..."
+)
+```
+
+`'parsed' in dir()` is a non-idiomatic way to check if a variable exists. `dir()` works here because Python doesn't have block scoping (the `try` block's `parsed` survives into the outer scope), but it's fragile and confusing to readers.
+
+### Fix
+
+Initialize `rec_count` before the try block:
+
+```python
+rec_count = 0
+try:
+    parsed = json.loads(raw)
+    for r in parsed.get("recs", []):
+        r["_source"] = "local"
+    rec_count = len(parsed.get("recs", []))
+    text_out = json.dumps(parsed)
+except Exception:
+    text_out = raw
+
+current_app.logger.info(f"[QuickAnalysis] {model} → {rec_count} recs in {elapsed_ms}ms")
+```
+
+---
+
+## 26. `js/config.js` — `useLocalLLM` and `maxRiskBudgetPct` not initialized in state defaults ✅ FIXED (Sprint 42)
+
+**File:** `js/config.js`
+**Severity:** Low — no runtime bug (both fields use `??` / `||` defaults in callers), but inconsistent with all other settings fields
+
+### Problem
+
+`state.settings.useLocalLLM` and `state.settings.maxRiskBudgetPct` are not in the initial `state.settings` object in `config.js`. They are dynamically added at runtime:
+- `useLocalLLM` — added by `settingsToggleLocalLLM()` in `settings.js` and loaded from DB
+- `maxRiskBudgetPct` — added by the Risk page budget input and loaded from DB
+
+Both callers use safe defaults (`state.settings?.useLocalLLM` → falsy, `state.settings.maxRiskBudgetPct || 5` → 5). But the missing initialization means `Object.keys(state.settings)` is non-deterministic and a fresh install shows no budget input pre-populated.
+
+### Fix
+
+Add defaults to `js/config.js`:
+
+```js
+settings: {
+  // ... existing fields ...
+  compactMode: false,
+  useLocalLLM: false,       // opt-in local Ollama analysis (Sprint 41)
+  maxRiskBudgetPct: 5,      // heat budget gate: max total risk % of portfolio (Sprint 38)
+},
+```
+
+---
+
+## Summary — Sprint 42 plan
+
+| # | File(s) | Issue / Feature | Severity | Effort |
+|---|---|---|---|---|
+| 24 ✅ | `js/claude-client.js` | Local LLM fast-path ignores user's preferred model (`qwen3:9b` hardcoded) | Low | S | Fixed |
+| 25 ✅ | `routes/debate.py` | `quick_analysis` logger uses `'parsed' in dir()` anti-pattern | Low | XS | Fixed |
+| 26 ✅ | `js/config.js` | `useLocalLLM` and `maxRiskBudgetPct` not initialized in state defaults | Low | XS | Fixed |
+
+**Sprint 42 status (2026-06-03):** #24–26 shipped.
