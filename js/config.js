@@ -8,16 +8,8 @@ const API = 'http://localhost:5000';
 // ============================================================
 const state = {
   page: 'dashboard',
-  portfolio: [
-    { ticker: 'CBA',   shares: 50,  avgPrice: 118.20, currentPrice: 124.50, sector: 'Banking',  account: 'personal' },
-    { ticker: 'BHP',   shares: 80,  avgPrice: 43.10,  currentPrice: 45.80,  sector: 'Mining',   account: 'personal' },
-    { ticker: 'TLS',   shares: 200, avgPrice: 3.92,   currentPrice: 4.18,   sector: 'Telecoms', account: 'personal' },
-    { ticker: 'GMG',   shares: 30,  avgPrice: 33.50,  currentPrice: 36.20,  sector: 'REITs',    account: 'personal' },
-    { ticker: 'HUB24', shares: 25,  avgPrice: 58.00,  currentPrice: 63.40,  sector: 'Fintech',  account: 'personal' },
-    { ticker: 'JBH',   shares: 15,  avgPrice: 67.30,  currentPrice: 71.90,  sector: 'Retail',   account: 'personal' },
-    { ticker: 'SCG',   shares: 180, avgPrice: 3.42,   currentPrice: 3.58,   sector: 'REITs',    account: 'personal' },
-  ],
-  cash: 15000,
+  portfolio: [],
+  cash: 0,
   activeAccount: 'all',   // 'all' | 'personal' | 'super' | 'trading'
   recommendations: [],
   tradeJournal: [],
