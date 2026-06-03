@@ -1143,7 +1143,7 @@ Issues identified during the Sprint 41 post-ship deep audit. Grouped by severity
 
 ### Minor — correctness / UX polish
 
-## 24. `js/claude-client.js` — Local LLM fast-path ignores user's preferred model ✅ FIXED (Sprint 42)
+## 24. `js/claude-client.js` — Local LLM fast-path ignores user's preferred model
 
 **File:** `js/claude-client.js`
 **Function:** `_callLocalAnalysis()`
@@ -1180,7 +1180,7 @@ async function _callLocalAnalysis(userMessage) {
 
 ---
 
-## 25. `routes/debate.py` — `quick_analysis` logger uses `'parsed' in dir()` anti-pattern ✅ FIXED (Sprint 42)
+## 25. `routes/debate.py` — `quick_analysis` logger uses `'parsed' in dir()` anti-pattern
 
 **File:** `routes/debate.py`
 **Function:** `quick_analysis()`
@@ -1216,7 +1216,7 @@ current_app.logger.info(f"[QuickAnalysis] {model} → {rec_count} recs in {elaps
 
 ---
 
-## 26. `js/config.js` — `useLocalLLM` and `maxRiskBudgetPct` not initialized in state defaults ✅ FIXED (Sprint 42)
+## 26. `js/config.js` — `useLocalLLM` and `maxRiskBudgetPct` not initialized in state defaults
 
 **File:** `js/config.js`
 **Severity:** Low — no runtime bug (both fields use `??` / `||` defaults in callers), but inconsistent with all other settings fields
@@ -1248,8 +1248,6 @@ settings: {
 
 | # | File(s) | Issue / Feature | Severity | Effort |
 |---|---|---|---|---|
-| 24 ✅ | `js/claude-client.js` | Local LLM fast-path ignores user's preferred model (`qwen3:9b` hardcoded) | Low | S | Fixed |
-| 25 ✅ | `routes/debate.py` | `quick_analysis` logger uses `'parsed' in dir()` anti-pattern | Low | XS | Fixed |
-| 26 ✅ | `js/config.js` | `useLocalLLM` and `maxRiskBudgetPct` not initialized in state defaults | Low | XS | Fixed |
-
-**Sprint 42 status (2026-06-03):** #24–26 shipped.
+| 24 | `js/claude-client.js` | Local LLM fast-path ignores user's preferred model (`qwen3:9b` hardcoded) | Low | S | Planned |
+| 25 | `routes/debate.py` | `quick_analysis` logger uses `'parsed' in dir()` anti-pattern | Low | XS | Planned |
+| 26 | `js/config.js` | `useLocalLLM` and `maxRiskBudgetPct` not initialized in state defaults | Low | XS | Planned |

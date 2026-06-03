@@ -2539,19 +2539,20 @@ def quick_analysis():
     raw = result["text"].strip()
 
     # Add _source flag to each rec so the frontend can show a badge
-    rec_count = 0
     try:
         parsed = json.loads(raw)
         for r in parsed.get("recs", []):
             r["_source"] = "local"
-        rec_count = len(parsed.get("recs", []))
         text_out = json.dumps(parsed)
     except Exception:
         # If format_schema produced parseable output but json.loads disagrees,
         # return the raw text — analysis.js brace-depth recovery handles it
         text_out = raw
 
-    current_app.logger.info(f"[QuickAnalysis] {model} → {rec_count} recs in {elapsed_ms}ms")
+    current_app.logger.info(
+        f"[QuickAnalysis] {model} → {len(parsed.get('recs', []) if 'parsed' in dir() else [])} recs "
+        f"in {elapsed_ms}ms"
+    )
     return jsonify({"ok": True, "text": text_out, "model": model, "elapsed_ms": elapsed_ms})
 
 

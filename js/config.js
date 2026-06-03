@@ -57,8 +57,6 @@ const state = {
     sbcMode: false,
     stopProximityPct: 3,
     compactMode: false,
-    useLocalLLM: false,        // opt-in: route portfolio analysis to local Ollama (Sprint 41)
-    maxRiskBudgetPct: 5,       // heat budget gate: max total stop-risk as % of portfolio (Sprint 38)
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary
