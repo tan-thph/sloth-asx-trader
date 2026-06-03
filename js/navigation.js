@@ -135,13 +135,20 @@ function _renderPageUnsafe() {
   const el = document.getElementById('main-content');
   const gen = (state._renderGen = (state._renderGen || 0)); // snapshot current gen
   switch(state.page) {
-    case 'dashboard':       el.innerHTML = renderDashboard(); break;
+    case 'dashboard':
+      el.innerHTML = renderDashboard();
+      // Auto-fetch earnings if Upcoming Catalysts card has no data yet
+      if (state.serverOk && mergedPortfolio().length > 0) {
+        const _hasEarnings = state.earningsCalendar && Object.keys(state.earningsCalendar).length > 0;
+        if (!_hasEarnings) fetchEarningsCalendar();
+      }
+      break;
     case 'portfolio':
       el.innerHTML = renderPortfolio();
       if (state._splitWarnings === undefined) checkPortfolioSplits();
       if (state._capitalReturnWarnings === undefined) checkCapitalReturns();
       break;
-    case 'macro':           el.innerHTML = renderMacro(); break;
+    case 'macro':           renderMacroPage(gen); break;
     case 'recommendations':
       el.innerHTML = renderRecommendations();
       if (typeof initRecStalenessChecks === 'function') initRecStalenessChecks().catch(() => {});

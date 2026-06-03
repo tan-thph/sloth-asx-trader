@@ -60,8 +60,9 @@ async function fetchEarningsCalendar(force = false) {
     if (!r.ok) return;
     const data = await r.json();
     state.earningsCalendar = data;
+    state.earningsLastFetch = Date.now();
     console.log(`Earnings calendar loaded for: ${Object.keys(data).join(', ')}`);
-    if (state.page === 'macro') renderPage();
+    if (state.page === 'macro' || state.page === 'dashboard') renderPage();
   } catch(e) { console.warn('Earnings calendar fetch failed:', e.message); }
 }
 

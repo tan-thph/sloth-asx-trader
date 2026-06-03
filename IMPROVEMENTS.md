@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-02 (Sprint 39 shipped)
+**Last Updated:** 2026-06-03 (Sprint 41 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -8,6 +8,15 @@
 > and **useful features** that make day-to-day trading decisions faster and more disciplined.
 
 Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for triage.
+
+---
+
+## 0. Shipped — Sprint 41 (2026-06-03)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **Macro page optimistic stale rendering** | UX (§3.4) | `renderMacroPage(gen)` async wrapper added to `macro.js`. On navigation, renders cached `state.macroData` immediately; if data is >5 min stale, kicks a silent background `GET /api/macro` fetch (no disruptive spinner, no `renderPage()` at start) and shows a small "⟳ Refreshing…" badge in the header. `_macroRefreshing` guard prevents concurrent refreshes. `state.macroLastFetch` timestamp set on both user-initiated `fetchRealMacro()` and background auto-refresh. |
+| **Earnings calendar auto-fetch on navigation** | UX (§3.4) | Macro page auto-calls `fetchEarningsCalendar()` if earnings are missing for portfolio tickers. Dashboard case in `navigation.js` also kicks `fetchEarningsCalendar()` if the Upcoming Catalysts card has no data. `fetchEarningsCalendar()` now sets `state.earningsLastFetch` timestamp and re-renders on `dashboard` (previously only `macro`). |
 
 ---
 
@@ -337,10 +346,10 @@ Daily backup on startup + daemon thread. Keeps last 7. See §0.
 122 Vitest unit tests for pure engine files (`quant-engine`, `regime-engine`, `response-validator`,
 `_detectExitReason` in both `recommendations.js` and `performance.js`). `npm run test:js`. See §0.
 
-### ✓ 3.4 Performance / responsiveness — `S` · ★★ (partial)
+### ✓ 3.4 Performance / responsiveness — `S` · ★★ **COMPLETE Sprint 41**
 Macro endpoint fully parallelised (Sprint 8). Polymarket parallelised + loading state (Sprint 39).
-Earnings calendar parallel with 4h per-ticker TTL (Sprint 39). RBA rate wrapped in `@ttl_cache(seconds=21600)` (Sprint 40) — `_rba_rate_cached()` skips the network scrape entirely within the 6h window; RuntimeError on total failure is not cached so the next call retries live.
-Remaining: optimistic stale-data rendering for macro/earnings on the dashboard (show old data while re-fetching instead of blocking).
+Earnings calendar parallel with 4h per-ticker TTL (Sprint 39). RBA rate wrapped in `@ttl_cache(seconds=21600)` (Sprint 40). Signals page optimistic rendering (Sprint 40).
+Macro page optimistic rendering: `renderMacroPage(gen)` renders cached state immediately; if `state.macroData` is >5 min stale, a silent background `GET /api/macro` fires and re-renders on completion with a "⟳ Refreshing…" badge (Sprint 41). Dashboard and Macro page auto-kick `fetchEarningsCalendar()` when the calendar is unpopulated (Sprint 41).
 
 ### ✓ 3.5 Light security hygiene (personal) — `S` · ★ **SHIPPED Sprint 21**
 - gunicorn now binds `127.0.0.1:5000` (was `0.0.0.0`) — LAN devices can no longer reach the API
@@ -397,7 +406,8 @@ CLAUDE.md, would remove the fragile global load-order contract. Quality-of-life,
 23. ✓ **Sprint 37–38 shipped:** Sell tag outcome tracking (Gap 3), `better_opportunity` cross-check (Gap 7), sell tag calibration injection (Part 9), Section 6 SELL_TAG prompt rules, calibration cache thread lock, Phase 8 Mann-Whitney gate, Kelly rejection, regime-aware stopAtrMult, 30-min blend on regime flip, SPI200 futures vote, `_sanity_check()` in indicators, `pre_earnings_risk` flag — **all done**.
 24. ✓ **Sprint 39 shipped:** `_preEarningsAdj` badge fix, earnings-calendar 4h TTL cache, survivorship-bias disclosures (§1.5), capital-returns-check endpoint (§1.9 partial), mobile responsive layout (§4).
 25. ✓ **Sprint 40 shipped:** RBA rate 6h in-memory `ttl_cache` wrapper (`_rba_rate_cached`); signals page optimistic stale rendering + background refresh; §4 table docs cleanup (keyboard shortcuts, density mode, in-app changelog marked ✓).
-26. **Open:** §1.9 mergers/takeover CGT (no yfinance tag), §2.1 multiple portfolios, §3.7 ES-modules (deferred — no dev server), PWA installability.
+26. ✓ **Sprint 41 shipped:** Macro page optimistic stale rendering (`renderMacroPage(gen)`, silent background fetch, `_macroRefreshing` badge); earnings calendar auto-fetch on Dashboard + Macro navigation; `state.earningsLastFetch` + dashboard re-render in `fetchEarningsCalendar()`; §3.4 fully complete.
+27. **Open:** §1.9 mergers/takeover CGT (no yfinance tag), §2.1 multiple portfolios, §3.7 ES-modules (deferred — no dev server), PWA installability.
 
 ---
 

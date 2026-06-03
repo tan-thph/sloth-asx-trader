@@ -2,6 +2,8 @@
 // MACRO
 // ============================================================
 
+let _macroRefreshing = false;
+
 // ── Polymarket helpers ──────────────────────────────────────
 function _pmFmt(vol) {
   if (vol == null) return '—';
@@ -148,7 +150,9 @@ function renderMacro() {
   return `
     <div class="flex-between section-gap">
       <div>
-        <p class="text-muted text-sm">Morning macro brief &mdash; ${todayStr()}</p>
+        <p class="text-muted text-sm">Morning macro brief &mdash; ${todayStr()}
+          ${_macroRefreshing ? ' <span class="text-xs" style="color:var(--text-secondary)">⟳ Refreshing…</span>' : ''}
+        </p>
         ${macroRanToday ? `<span style="font-size:11px;color:#16a34a;font-weight:600">✓ Updated today</span>` : `<span style="font-size:11px;color:var(--text-tertiary)">Not yet run today</span>`}
       </div>
       <div class="flex-row">
@@ -321,6 +325,7 @@ async function fetchRealMacro() {
     if(!r.ok) throw new Error('Server error');
     const data = await r.json();
     state.macroData = {...data, _source:'live'};
+    state.macroLastFetch = Date.now();
     toast('Live macro data loaded','success');
   } catch(e) {
     toast('Macro fetch error: '+e.message,'error');
@@ -392,4 +397,37 @@ Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"a
   } catch(e) {
     toast('Macro error: '+e.message,'error');
   }
+}
+
+async function renderMacroPage(gen) {
+  const el = document.getElementById('main-content');
+  if (state._renderGen !== gen) return;
+  el.innerHTML = renderMacro(); // render cached state immediately
+
+  if (!state.serverOk) return;
+  const now = Date.now();
+
+  // Auto-refresh live data if it's stale (>5 min) — silent background fetch, no disruptive spinner
+  const macroStale = state.macroData &&
+    (!state.macroLastFetch || now - state.macroLastFetch > 5 * 60 * 1000);
+  // Auto-load earnings calendar if not yet populated for portfolio tickers
+  const needsEarnings = mergedPortfolio().length > 0 &&
+    (!state.earningsCalendar || !Object.keys(state.earningsCalendar).length);
+
+  if (!_macroRefreshing && macroStale) {
+    _macroRefreshing = true;
+    if (state._renderGen === gen) el.innerHTML = renderMacro(); // show ⟳ badge
+    try {
+      const r = await fetch(`${API}/api/macro`);
+      if (!r.ok) throw new Error('Server error');
+      const data = await r.json();
+      state.macroData = { ...data, _source: 'live' };
+      state.macroLastFetch = Date.now();
+    } catch (_) { /* stale data stays visible */ } finally {
+      _macroRefreshing = false;
+      if (state.page === 'macro' && state._renderGen === gen) renderPage();
+    }
+  }
+
+  if (needsEarnings) fetchEarningsCalendar();
 }
