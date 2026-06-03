@@ -377,16 +377,13 @@ async function runMacroAnalysis(force=false) {
     }
   }
 
-  const system=`You are a macro analyst for Australian equity markets. Return ONLY valid JSON, no markdown.
-Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"analysis":"3 paragraph analysis","keyDrivers":"key market drivers today"}`;
-
   const userMsg = `Provide current macro analysis for ASX morning brief. Today: ${todayStr()}`
     + (liveCtx ? '. Live market data: ' + liveCtx : '. Use realistic current estimates.')
     + (pmCtx || '')
     + '  Return only JSON.';
 
   try {
-    const { text } = await callClaude('macro', userMsg, { systemPrompt: system, noCache: true });
+    const { text } = await callClaude('macro', userMsg, { noCache: true });
     const { ok: macroOk, data: ai } = parseClaudeJSON(text);
     if (!macroOk) throw new Error('Failed to parse macro response: ' + text?.slice(0, 200));
     state.macroData={...state.macroData, ...ai, _source:'ai'};

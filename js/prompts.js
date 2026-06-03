@@ -22,7 +22,7 @@ const PROMPT_VERSION = '2026-06-v6';
 
 const MACRO_SYSTEM_PROMPT =
 `You are a macro analyst for Australian equity markets. Return ONLY valid JSON, no markdown.
-Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"keyDrivers":"2-3 sentence summary of key market drivers today"}`;
+Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"analysis":"3 paragraph macro analysis covering overnight US/global moves, key commodities, and ASX outlook","keyDrivers":"2-3 sentence summary of key market drivers today"}`;
 
 
 // ── Main portfolio analysis ───────────────────────────────────────────────────
