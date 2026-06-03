@@ -40,6 +40,9 @@ function showPage(page) {
   if (state.page === 'scanner' && page !== 'scanner') {
     if (typeof _stopScanPoller === 'function') _stopScanPoller();
   }
+  if (state.page === 'recommendations' && page !== 'recommendations') {
+    if (typeof _stopRecPoller === 'function') _stopRecPoller();
+  }
   state.page = page;
   state._renderGen = (state._renderGen || 0) + 1; // invalidate any in-flight async renders
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
@@ -152,6 +155,7 @@ function _renderPageUnsafe() {
     case 'recommendations':
       el.innerHTML = renderRecommendations();
       if (typeof initRecStalenessChecks === 'function') initRecStalenessChecks().catch(() => {});
+      if (typeof _startRecPoller === 'function') _startRecPoller();
       break;
     case 'day-trading':     renderDayTradingPage(gen); break;
     case 'signals':         renderSignalsPage(gen); break;
