@@ -161,7 +161,10 @@ function renderPortfolio() {
                   <td>${divYieldStr}</td>
                   <td>${frankingStr}</td>
                   <td>${exDivStr}</td>
-                  <td><button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removeHolding(${portfolioIdx})">✕</button></td>
+                  <td style="white-space:nowrap">
+                    <button class="btn btn-sm" style="background:#ede9fe;color:#6d28d9;border-color:#c4b5fd;margin-right:4px" onclick="event.stopPropagation();showDrpModal('${h.ticker}')" title="Record a Dividend Reinvestment Plan share issue">DRP</button>
+                    <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removeHolding(${portfolioIdx})">✕</button>
+                  </td>
                 </tr>
                 ${hasMulti ? `
                 <tr id="lots-${h.ticker}" style="display:none">
@@ -873,4 +876,84 @@ async function checkCapitalReturns() {
     const hasEvents = Object.values(state._capitalReturnWarnings).some(v => v && v.length > 0);
     if (hasEvents) renderPage();
   } catch {}
+}
+
+function showDrpModal(ticker) {
+  const existing = document.getElementById('drp-modal');
+  if (existing) existing.remove();
+
+  const today = todayStr();
+  const holding = mergedPortfolio().find(h => h.ticker === ticker);
+  const currentPrice = holding ? holding.currentPrice : '';
+
+  const modal = document.createElement('div');
+  modal.id = 'drp-modal';
+  modal.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center`;
+  modal.innerHTML = `
+    <div style="background:var(--bg-primary);border-radius:10px;padding:24px;width:360px;max-width:95vw;box-shadow:0 8px 32px rgba(0,0,0,0.3)">
+      <div style="font-weight:700;font-size:15px;margin-bottom:16px">Record DRP — ${ticker}</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <label style="font-size:12px;color:var(--text-secondary)">DRP Shares (required)
+          <input id="drp-shares" type="number" min="0" step="any" placeholder="e.g. 12"
+            style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px">
+        </label>
+        <label style="font-size:12px;color:var(--text-secondary)">DRP Price per Share (required)
+          <input id="drp-price" type="number" min="0" step="any" value="${currentPrice}"
+            style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px">
+        </label>
+        <label style="font-size:12px;color:var(--text-secondary)">Settlement Date
+          <input id="drp-date" type="date" value="${today}"
+            style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px">
+        </label>
+        <label style="font-size:12px;color:var(--text-secondary)">Dividend Amount (optional, for reference)
+          <input id="drp-divamt" type="number" min="0" step="any" placeholder="e.g. 45.60"
+            style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px">
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
+        <button class="btn btn-sm" onclick="document.getElementById('drp-modal').remove()">Cancel</button>
+        <button class="btn btn-sm" style="background:#6d28d9;color:#fff;border-color:#5b21b6" onclick="applyDrpEvent('${ticker}')">Apply DRP</button>
+      </div>
+    </div>`;
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+  document.getElementById('drp-shares').focus();
+}
+
+function applyDrpEvent(ticker) {
+  const drpShares = parseFloat(document.getElementById('drp-shares')?.value);
+  const drpPrice  = parseFloat(document.getElementById('drp-price')?.value);
+  const date      = document.getElementById('drp-date')?.value || todayStr();
+
+  if (!drpShares || drpShares <= 0) { toast('DRP shares must be a positive number', 'error'); return; }
+  if (!drpPrice  || drpPrice  <= 0) { toast('DRP price must be a positive number', 'error'); return; }
+
+  document.getElementById('drp-modal')?.remove();
+
+  const holding = state.portfolio.find(h => h.ticker === ticker);
+  if (!holding) { toast(`No holding found for ${ticker}`, 'error'); return; }
+
+  const newShares  = holding.shares + drpShares;
+  const newAvgPrice = Math.round(
+    ((holding.shares * holding.avgPrice) + (drpShares * drpPrice)) / newShares * 10000
+  ) / 10000;
+  holding.shares   = Math.round(newShares   * 10000) / 10000;
+  holding.avgPrice = newAvgPrice;
+
+  const parcelId = Date.now();
+  (state.cgtParcels = state.cgtParcels || []).push({
+    id: parcelId, ticker, action: 'DRP', qty: drpShares, costPerShare: drpPrice,
+    date, remainingQty: drpShares, notes: 'DRP — dividend reinvestment',
+  });
+
+  state.tradeJournal.push({
+    id: parcelId + 1, date, ticker, action: 'DRP', qty: drpShares,
+    entryPrice: drpPrice, exitPrice: null, fees: 0, pnl: 0,
+    status: 'open', recId: null, recExecuted: false, closeDate: null,
+    parcelId,
+  });
+
+  scheduleSave();
+  renderPage();
+  toast(`DRP recorded: ${drpShares} shares of ${ticker} @ $${fmt(drpPrice)}`, 'success');
 }

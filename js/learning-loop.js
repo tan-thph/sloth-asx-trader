@@ -333,6 +333,11 @@ async function fetchCalibrationBlock(regime, sectors, tickers) {
     if (regime) params.set('regime', regime);
     if (sectors && sectors.length) params.set('sectors', sectors.join(','));
     if (tickers && tickers.length) params.set('tickers', tickers.join(','));
+    // Sprint 44: regime-change penalty — tell backend when the regime last flipped
+    const flippedAt = localStorage.getItem('regime_flipped_at');
+    const flippedTo = localStorage.getItem('regime_flipped_to');
+    if (flippedAt) params.set('flipped_at', flippedAt);
+    if (flippedTo) params.set('flipped_to', flippedTo);
     const resp = await fetch(`${API}/api/learning/calibration?${params}`);
     if (!resp.ok) return '';
     const data = await resp.json();

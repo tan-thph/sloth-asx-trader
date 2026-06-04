@@ -85,6 +85,7 @@
   .badge-hold { background: #fef9c3; color: #854d0e; }
   .badge-trim { background: #ffedd5; color: #c2410c; }
   .badge-topup{ background: #dbeafe; color: #1d4ed8; }
+  .badge-drp  { background: #ede9fe; color: #6d28d9; }
   .badge-executed { background: #dbeafe; color: #1d4ed8; }
   .badge-skipped { background: var(--bg-secondary); color: var(--text-secondary); border: 0.5px solid var(--border-medium); }
   .badge-pending { background: #fef3c7; color: #92400e; }
@@ -97,6 +98,7 @@
     .badge-hold { background: #713f12; color: #fde68a; }
     .badge-trim { background: #7c2d12; color: #fed7aa; }
     .badge-topup{ background: #1e3a5f; color: #93c5fd; }
+    .badge-drp  { background: #3b0764; color: #c4b5fd; }
     .badge-executed { background: #1e3a5f; color: #93c5fd; }
     .badge-pending { background: #451a03; color: #fde68a; }
     .badge-open { background: #1e3a5f; color: #93c5fd; }
@@ -310,3 +312,6 @@
     .grid-4 { grid-template-columns: 1fr 1fr !important; }
     .metrics-grid { grid-template-columns: 1fr 1fr; }
   }
+
+/* Traceability panel arrow rotation */
+details[open] .trace-arrow { transform: rotate(90deg); }

@@ -44,8 +44,26 @@ const nowSydney      = () => new Date().toLocaleTimeString('en-AU',{timeZone:'Au
 const todayStr       = () => { const d=new Date(); return d.toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'}).split('/').map((p,i)=>i===2?p:(p.length===1?'0'+p:p)).join('-'); };
 const getApiKey      = () => state.settings.apiKey || localStorage.getItem('asx_api_key') || '';
 
+// Single canonical copy — previously duplicated in recommendations.js and performance.js.
+// SELL/TRIM recs frame stop ABOVE and target BELOW entry (inverse of BUY/TOP_UP),
+// so a profitable trim must not read as 'stop_hit'. Prefer the action; fall back
+// to stop-vs-target geometry when action is unavailable.
+function _detectExitReason(exitPrice, stopLoss, target, action) {
+  if (!exitPrice || exitPrice <= 0) return 'manual';
+  const isShort = (action === 'SELL' || action === 'TRIM') ||
+                  (!action && stopLoss && target && stopLoss > target);
+  if (isShort) {
+    if (stopLoss && exitPrice >= stopLoss * 0.995) return 'stop_hit';
+    if (target   && exitPrice <= target   * 1.005) return 'target_hit';
+    return 'manual';
+  }
+  if (stopLoss && exitPrice <= stopLoss * 1.005) return 'stop_hit';
+  if (target   && exitPrice >= target   * 0.995) return 'target_hit';
+  return 'manual';
+}
+
 function actionBadge(a) {
-  const map = { BUY:'badge-buy', SELL:'badge-sell', HOLD:'badge-hold', TRIM:'badge-trim', TOP_UP:'badge-topup' };
+  const map = { BUY:'badge-buy', SELL:'badge-sell', HOLD:'badge-hold', TRIM:'badge-trim', TOP_UP:'badge-topup', DRP:'badge-drp' };
   const cls = map[a] || 'badge-hold';
   const label = a === 'TOP_UP' ? 'TOP UP' : a;
   return `<span class="badge ${cls}">${label}</span>`;

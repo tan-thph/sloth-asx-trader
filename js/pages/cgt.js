@@ -384,7 +384,7 @@ function renderCGT() {
                 estNetCgt = grossG - (eligible && grossG > 0 ? grossG * 0.5 : 0);
               }
               html += '<tr>'
-                + '<td class="text-xs text-muted">#' + p.id + '</td>'
+                + '<td class="text-xs text-muted">#' + p.id + (p.action === 'DRP' ? ' <span class="badge badge-drp" style="font-size:9px;padding:1px 5px">DRP</span>' : '') + '</td>'
                 + '<td class="text-xs">' + p.date + '</td>'
                 + '<td class="text-xs">' + held + 'd</td>'
                 + '<td>' + (eligible ? '<span class="badge badge-executed">50% ✓</span>' : '<span class="badge badge-pending">' + (365-held) + 'd left</span>') + '</td>'

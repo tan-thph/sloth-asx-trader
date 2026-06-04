@@ -143,6 +143,8 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 ```js
 state.portfolio:          [{ ticker, shares, avgPrice, currentPrice, sector }]
 state.tradeJournal:       [{ id, date, ticker, action, qty, entryPrice, exitPrice, fees, pnl, status, recId, recExecuted, closeDate }]
+  -- action values: BUY | SELL | TOP_UP | TRIM | HOLD | DRP
+  -- DRP entries have fees:0, pnl:0, status:'open', recId:null, recExecuted:false, and parcelId set
 state.recHistory:         [{ id, date, ticker, action, confidence, ensembleConfidence, priceRange, target, stopLoss, qty, executed, outcome, actualProfit, regime, _learningId, _thesis?, _stopAlertedAt?, _targetAlertedAt? }]
 state.recommendations:    pending recs (same shape as recHistory entries with status='pending')
 state.liveSignals:        { TICKER: { current_price, rsi_14, bb_*, atr_14, adv_20 (AUD), volume_avg_20 (shares), score, ... } }
@@ -334,6 +336,9 @@ Settings page → Telegram section. Enter bot token (from `@BotFather`) and chat
 ### Enable local LLM for portfolio analysis (no API spend)
 Settings page → Display → "Use local LLM for analysis" toggle. Routes `'portfolio'` agentType calls to `POST /api/debate/quick-analysis` (Ollama) instead of Claude API. Only generates BUY/TOP_UP/HOLD — SELL/TRIM require the full Claude path. Recs show `🔒 Local` badge. Disable when you need SELL recommendations or regime-change analysis.
 
+### Record a DRP event (dividend reinvestment plan)
+Portfolio page → click **DRP** button on a holding row → enter shares issued, price per share, and settlement date → Apply DRP. Updates the holding's `avgPrice` (weighted), adds a `state.cgtParcels` entry with `action:'DRP'`, and logs to `state.tradeJournal`. CGT page shows an indigo DRP badge on DRP parcels. The `applyDrpEvent()` function in `portfolio.js` handles the state mutation.
+
 ### Run tests
 ```bash
 python test_app.py   # all Python tests
@@ -425,7 +430,7 @@ The Vitest suite (`tests/`) uses `vm.runInThisContext` to load browser-global sc
 | **FastAPI migration** | Half-day refactor of every route. Current Flask + gthread is fast enough. | Native async, auto-generated OpenAPI docs, faster I/O concurrency. |
 | **Walk-forward backtesting** | ~~Requires vectorised OHLCV replay engine + parameter grid.~~ **Shipped Sprint 20.** `POST /api/backtest/walk-forward`; Walk-Forward tab in Backtest page. | Robust strategy parameter tuning. |
 | **Mobile / responsive layout** | Needs CSS breakpoint pass on every card/table — compact mode toggle (shipped Sprint 13) helps on small screens but doesn't reflow columns. | Phone-friendly read-only mode during market hours. |
-| **DRP parcel tracking** | Dividend income forecast assumes no DRP (dividend reinvestment); DRP parcels need their own CGT lot management. | Accurate CGT cost-base for DRP investors. |
+| ~~**DRP parcel tracking**~~ | **SHIPPED Sprint 44.** `applyDrpEvent()` in `portfolio.js`; DRP badge in CGT page; `action:'DRP'` in `state.cgtParcels` and `state.tradeJournal`. | Accurate CGT cost-base for DRP investors. |
 | **Vitest frontend tests** | ~~JS test infrastructure needs setting up (jsdom, mocking globals).~~ **Shipped Sprint 19.** `npm run test:js` — 127 tests (Sprint 41 added Plan A/B coverage). | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
 | **Hoist `_detectExitReason` into `utils.js`** | Currently duplicated in two page files; dedup risks the fragile script order. | Single source of truth for exit classification. |
 | **`pip install feedparser`** | Optional dep; RSS falls back to a built-in XML parser when absent (logs a warning each scan). | More robust news-feed parsing. |

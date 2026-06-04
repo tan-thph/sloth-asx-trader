@@ -105,8 +105,13 @@ def _fetch_stooq_history(ticker: str, period: str = "6mo") -> pd.DataFrame:
         f"&i=d"
     )
     try:
-        from core import _HTTP_SESSION
-        resp = _HTTP_SESSION.get(url, timeout=12)
+        from core import _HTTP_SESSION, _stooq_sem
+        import time as _time
+        with _stooq_sem:
+            try:
+                resp = _HTTP_SESSION.get(url, timeout=12)
+            finally:
+                _time.sleep(1.0)
         if resp.status_code != 200 or not resp.text.strip():
             return pd.DataFrame()
         df = pd.read_csv(io.StringIO(resp.text))
@@ -360,6 +365,14 @@ FACTOR_WEIGHTS = {
     "momentum": 10,
     "rs":       10,
 }
+_fw_total = sum(FACTOR_WEIGHTS.values())
+if _fw_total != 100:
+    import warnings as _warn
+    _warn.warn(
+        f"FACTOR_WEIGHTS sum to {_fw_total}, not 100 — scanner scores will be wrong. "
+        "Fix the values in indicators.py.",
+        stacklevel=2,
+    )
 
 def _simple_rsi(closes: np.ndarray, period: int = 14) -> float:
     if len(closes) < period + 2:
