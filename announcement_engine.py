@@ -306,7 +306,9 @@ def init_db(db_path: Optional[str | Path] = None) -> None:
     databases created before this column was introduced.
     """
     path = str(db_path or DB_PATH_DEFAULT)
-    with sqlite3.connect(path) as conn:
+    with sqlite3.connect(path, timeout=30) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_CREATE_TABLE_SQL)
         # Safe migrations — no-op if column already exists
         for col_def, label in [
@@ -334,6 +336,10 @@ def get_db(db_path: Optional[str | Path] = None) -> Generator[sqlite3.Connection
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute("PRAGMA cache_size=-65536")
+    conn.execute("PRAGMA temp_store=MEMORY")
     try:
         yield conn
         conn.commit()
