@@ -1,5 +1,22 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-04 (Sprint 46 + hotfixes shipped)
+**Last Updated:** 2026-06-04 (Sprint 47 shipped)
+
+## 0. Shipped — Sprint 47 (2026-06-04)
+
+| Fix | Area | Detail |
+|---|---|---|
+| **Fix 1 — maxTokens 6000→8000** | AI Pipeline | `callClaude('portfolio')` in `analysis.js` now passes `maxTokens: 8000`, matching the `_AGENT_MAX_TOKENS.portfolio` default in `claude-client.js`. Removes token truncation on large portfolios. |
+| **Fix 2 — ACTIVE_REGIME at top of message** | AI Pipeline | `ACTIVE_REGIME:` line moved to line 3 of the user message (after account settings, before Holdings). Previously appended at the very end after 7,000+ chars of indicator data. Uses `__REGIME_PLACEHOLDER__`/`__CONF_PLACEHOLDER__` in the static template, resolved after `fetchAndClassifyRegime()`. Regime transition note inlined into the regime line. |
+| **Fix 3 — Stop ATR aligned to regime engine** | AI Pipeline | Rule 3 in `ANALYSIS_SYSTEM_PROMPT` now says "use stopAtrMultiple from ACTIVE RULE OVERRIDES" instead of hardcoded 1.5×. `rulesCtx` injects the regime-aware `_regimeStopMult` (from `getRegimeModifiers().stopAtrMult`: 2.5–4.0×) via `__STOP_MULT_PLACEHOLDER__`. Claude's R:R gate now uses the same stop distance the quant engine applies. |
+| **Fix 4 — Tell Claude qty=0** | AI Pipeline | Rule 4 now instructs Claude to set qty=0. Section 7 check (b) updated to SKIP (quant engine handles cash feasibility). Output schema qty field annotated as "always 0 — quant engine sets final qty". Saves ~40-60 output tokens per rec. |
+| **Fix 5 — Indicator block tiering** | Token efficiency | `_isCandidate(s, t)` helper splits tickers into Tier 1 (full 12-line block) and Tier 2 (1-line compact summary). Tier 2 fires for stable holds with no active setup. Conditions: watchlist (always Tier 1), RSI<38/>68, BB<0.12/>0.88, score>=65/<30, pre-earnings, volSpike (VZ>2.5), unrealised P&L <-8% or >25%. |
+| **Fix 6 — Rules before indicators** | AI Pipeline | `${rulesCtx}` now precedes `${indicatorCtx}` in the user message template. Claude reads operative thresholds before processing 7,500+ chars of indicator data. |
+| **Fix 7 — Lessons top 2 sectors** | AI Pipeline | Lessons fetch now weights sectors by portfolio value and sends the top 2 as a comma-separated `sector` param (was: first sector only). `routes/learning.py` `lessons_list()` endpoint updated to split comma-separated sector and use `sector IN (...)` SQL for multi-sector match. |
+| **Fix 8 — Rec history days-ago** | AI Pipeline | `recentRecs` formatter now appends `(Nd ago)` after each date, e.g. `2026-06-01 (3d ago)`. Claude no longer needs to compute recency for the 7-day anti-churn check. |
+| **Fix 9 — scenarios optional** | Token efficiency | `scenarios` field in output schema changed from required to optional. Validator: type constraint removed; p-sum check (`scenarios-p-sum` business rule) fires only when field is present. Saves ~40-60 output tokens/rec when Claude omits it. |
+| **Bonus — ⚡VOLSPIKE flag** | AI Pipeline | Ticker header line now prefixed with ` ⚡VOLSPIKE` when `volume_z_score > 3`. Visible at both Tier 1 and Tier 2. Gives Claude an immediate visual signal before the indicator block. |
+
+---
 
 ## 0. Hotfixes (2026-06-04)
 

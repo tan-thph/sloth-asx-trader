@@ -1,6 +1,6 @@
 # Sloth ASX Trader — Prompt Architecture Reference
 
-**Last Updated:** June 2026 (Sprint 46 + hotfixes)
+**Last Updated:** June 2026 (Sprint 47)
 **Model:** `claude-sonnet-4-6` · all calls via `callClaude()` in `js/claude-client.js`
 
 This document is the authoritative reference for every Claude API call in the application:
@@ -701,7 +701,7 @@ These exist in `state.liveSignals[t]` but are not currently included in any prom
 
 ## Prompt Versioning
 
-`PROMPT_VERSION = '2026-06-v7'` in `js/prompts.js`.
+`PROMPT_VERSION = '2026-06-v8'` in `js/prompts.js`.
 
 Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. The version is:
 - Stored on every `ai_learning_events` row at log time
@@ -711,6 +711,7 @@ Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. Th
 **Version history:**
 | Version | Key changes |
 |---|---|
+| `2026-06-v8` | Sprint 47: Rule 3 stop ATR changed from hardcoded 1.5× to regime-aware stopAtrMultiple from ACTIVE RULE OVERRIDES; Rule 4 instructs Claude to set qty=0 (quant engine sizes); scenarios field made optional; ACTIVE_REGIME moved to top of user message (line 3); rulesCtx moved before indicatorCtx |
 | `2026-06-v7` | Sprint 42: `unrealised_loss_large` enforcement line (≥$500 AUD check against Holdings `unrealisedPnl`); SELL/TRIM exit stop/target semantics (stop = invalidation level above sell price; target = confirmation level below sell price; explicit ban on all-three-same-value) |
 | `2026-06-v6` | Rule 17 renumbered (was duplicate Rule 16); SELL_TAG calibration injection rules (Section 6); sell tag urgency/monitor enforcement. Sprint 42 user-message additions: `Range60d: hi=${n} lo=${n}` in Returns line; optional `Account: {PERSONAL\|SUPER\|TRADING}` in date header |
 | `2026-05-v5` | Calibration algorithm in prompt; debate-block usage rule; Stage 3–4 |

@@ -141,7 +141,7 @@ const REC_SCHEMA = {
   qty:        { type: 'number',  requiredUnless: 'HOLD', min: 1, integer: true },
   confidence: { type: 'number',  required: true,  min: 0, max: 1 },
   rrRatio:    { type: 'number',  required: false, min: 0 },
-  scenarios:  { type: 'array',   required: false },
+  scenarios:  { required: false },  // optional object; p-sum validated below when present
 };
 
 // _validateField — returns an error string or null.
@@ -247,6 +247,22 @@ const _REC_BUSINESS_RULES = [
       return r.rrRatio >= 2.0;
     },
     message: r => `rrRatio ${r.rrRatio} < 2.0 minimum for ${r.action}`,
+  },
+  // scenarios p-sum: when present, bull+base+bear probabilities must sum to ~1.0 (±0.01)
+  {
+    id: 'scenarios-p-sum',
+    check: r => {
+      if (!r.scenarios || typeof r.scenarios !== 'object') return true;
+      const s = r.scenarios;
+      if (!s.bull || !s.base || !s.bear) return true;
+      const total = (s.bull.p || 0) + (s.base.p || 0) + (s.bear.p || 0);
+      return Math.abs(total - 1.0) <= 0.01;
+    },
+    message: r => {
+      const s = r.scenarios || {};
+      const total = ((s.bull?.p || 0) + (s.base?.p || 0) + (s.bear?.p || 0)).toFixed(2);
+      return `scenarios p-values sum to ${total} — must sum to 1.0 (±0.01)`;
+    },
   },
   // Anti-churn: SELL/TRIM within 7 days of a BUY/TOP_UP requires a catastrophe flag in factorsUsed[]
   {

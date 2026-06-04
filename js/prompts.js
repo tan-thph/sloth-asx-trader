@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v7';
+const PROMPT_VERSION = '2026-06-v8';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -39,8 +39,14 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   1. PROFITABLE ENTRY: Never recommend a BUY or TOP_UP where target ≤ entry_high or netProfit ≤ 0.
   2. REAL DATA ONLY: Never invent indicator values. Base every rec on data explicitly provided in the user message.
-  3. RISK/REWARD: Only recommend trades with R:R ≥ 2:1. Stop-loss at 1.5×ATR(14) below entry. Target at next confirmed S/R level.
-  4. POSITION SIZING: qty = floor(min(cash × 0.15, portfolioValue × 0.15) / entryPrice). Never exceed 15% single-position weight.
+  3. RISK/REWARD: Only recommend trades with R:R ≥ 2:1. Stop-loss at stopAtrMultiple×ATR(14)
+     below entry (BUY) or above entry (SELL/TRIM). The stopAtrMultiple is in ACTIVE RULE OVERRIDES
+     in the user message — use that value, not a fixed 1.5×. Target at next confirmed S/R level.
+  4. POSITION SIZING: Set qty = 0 in your output. Position sizing is computed deterministically
+     by the quant engine after your response using Kelly + volatility scalar + multi-constraint
+     (account-risk %, max-position %, liquidity). Never exceed 15% single-position weight —
+     the engine enforces this hard. Your job is conviction (confidence ≥ 0.62), direction
+     (priceRange, target, stopLoss), and SELL/TRIM tagging. Do not attempt to compute qty.
   5. CONVICTION THRESHOLD: Minimum confidence = 0.62. Require ≥ 3 independent non-technical factors (earnings revision, macro tailwind, valuation each count as one). Technicals are tie-breakers only — a single RSI/MACD/Stochastic/BB signal does NOT satisfy this rule. If < 3 independent factors align, omit that ticker from recs[] entirely — do NOT add a HOLD entry. recs[] must contain only actionable trades (BUY/SELL/TRIM/TOP_UP).
   6. SELL/TRIM VALIDITY: Only recommend if holding exists. priceRange[0] = limit sell price.
      netProfit for SELL/TRIM = (priceRange[0] − holding.avgPrice) × qty − brokerage.
@@ -367,7 +373,7 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   Before writing JSON, verify all checks pass. Fix any failure before output:
     (a) No SELL/TRIM contradicts a same-day BUY in recs[].
-    (b) Sum of (qty × entryPrice) for all BUY/TOP_UP recs ≤ available cash.
+    (b) SKIP — qty is set to 0; cash feasibility is enforced by the quant engine post-response.
     (c) Every rec has a non-empty invalidationCondition containing a measurable value.
     (d) Every BUY/TOP_UP with confidence ≥ 0.70 has a non-empty bearCase.
     (e) Every rec has factorsUsed[] with ≥ 3 entries, each citing a specific data point.
@@ -397,14 +403,16 @@ const ANALYSIS_SYSTEM_PROMPT =
     "priceRange":            [low, high],
     "target":                number,
     "stopLoss":              number,
-    "qty":                   number,
+    "qty":                   0,   // always 0 — quant engine sets final qty; your value is ignored
     "tranches":              number (1 = fill in one day; >1 = days to execute),
     "orderType":             "LIMIT" | "MARKET" | "VWAP",
     "limitPrice":            number (required if orderType = "LIMIT"),
     "confidence":            number (0–1),
-    "scenarios":             { "bull": {"p": number, "ret": number},
+    "scenarios":             (optional) { "bull": {"p": number, "ret": number},
                                "base": {"p": number, "ret": number},
-                               "bear": {"p": number, "ret": number} },
+                               "bear": {"p": number, "ret": number} }
+                             Omit entirely if you have low confidence in probability estimates.
+                             If included, p values must sum to exactly 1.0.,
     "expectedTimeToTarget":  number (days),
     "factorsUsed":           string[] (>=3 entries; each must cite a specific data point,
                                e.g. "EPS momentum: 3 consecutive beats (upward revision proxy)", "Macro: RBA easing benefits REITs",
@@ -463,7 +471,7 @@ const ANALYSIS_SYSTEM_PROMPT =
         "orderType": "LIMIT",
         "limitPrice": 44.50,
         "confidence": 0.74,
-        "scenarios": { "bull": {"p": 0.30, "ret": 0.12}, "base": {"p": 0.50, "ret": 0.07}, "bear": {"p": 0.20, "ret": -0.04} },
+        "scenarios": { "bull": {"p": 0.30, "ret": 0.12}, "base": {"p": 0.50, "ret": 0.07}, "bear": {"p": 0.20, "ret": -0.04} },  // optional — omit if uncertain
         "expectedTimeToTarget": 45,
         "factorsUsed": ["EPS momentum: 2Q beat trend (proxy — true 30d revision unavailable)", "Macro: AUD/USD weak — benefits unhedged exporter", "Valuation: fwdPE 10.2 vs sector 13.5x"],
         "reasoning": "Iron ore supply discipline + weak AUD drive EPS upgrade cycle. Technicals confirm.",
