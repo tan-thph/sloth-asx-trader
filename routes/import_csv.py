@@ -267,19 +267,19 @@ def import_csv():
     else:
         rows, skipped = _parse_generic(all_rows)
 
-    # Filter to BUY-only for portfolio import (SELL requires matching parcels)
+    # Split into BUY and SELL rows — SELLs returned separately for frontend FIFO matching
     sells = [r for r in rows if r["action"] == "SELL"]
     buys  = [r for r in rows if r["action"] == "BUY"]
-    for s in sells:
-        skipped.append({"row": "—", "reason": f"SELL {s['ticker']} on {s['date']} — manual SELL entry required"})
 
     # Sort chronologically
     buys.sort(key=lambda r: r["date"])
+    sells.sort(key=lambda r: r["date"])
 
     return jsonify({
         "ok":      True,
         "broker":  detected,
         "rows":    buys,
+        "sells":   sells,
         "skipped": skipped,
         "total":   len(all_rows),
     })

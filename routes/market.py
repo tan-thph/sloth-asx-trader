@@ -1072,6 +1072,40 @@ def ai_cost_summary():
     })
 
 
+@bp.route("/api/market/universe-exclude", methods=["POST"])
+def universe_exclude():
+    """Add tickers to the scan exclusion list stored in blob_store."""
+    data = request.get_json() or {}
+    tickers = [t.strip().upper() for t in data.get("tickers", []) if t.strip()]
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM blob_store WHERE key='universe_excluded'").fetchone()
+        existing = json.loads(row["value"]) if row else []
+        merged = list(set(existing + tickers))
+        conn.execute(
+            "INSERT OR REPLACE INTO blob_store (key, value) VALUES ('universe_excluded', ?)",
+            (json.dumps(merged),)
+        )
+        conn.commit()
+    return jsonify({"ok": True, "excluded": merged})
+
+
+@bp.route("/api/market/universe-exclude", methods=["DELETE"])
+def universe_unexclude():
+    """Remove tickers from the exclusion list."""
+    data = request.get_json() or {}
+    tickers = [t.strip().upper() for t in data.get("tickers", []) if t.strip()]
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM blob_store WHERE key='universe_excluded'").fetchone()
+        existing = json.loads(row["value"]) if row else []
+        merged = [t for t in existing if t not in tickers]
+        conn.execute(
+            "INSERT OR REPLACE INTO blob_store (key, value) VALUES ('universe_excluded', ?)",
+            (json.dumps(merged),)
+        )
+        conn.commit()
+    return jsonify({"ok": True, "excluded": merged})
+
+
 @bp.route("/api/market/universe-health")
 def universe_health():
     """Check ASX_UNIVERSE for stale / delisted tickers.
@@ -1082,7 +1116,7 @@ def universe_health():
 
     Heavy call — only invoke on user request; not cached.
     Returns:
-        { ok, checked_at, total, ok_count, stale: [ticker, ...] }
+        { ok, checked_at, total, ok_count, stale: [ticker, ...], excluded: [ticker, ...] }
     """
     from core import ASX_UNIVERSE
     import concurrent.futures as _cf
@@ -1090,6 +1124,15 @@ def universe_health():
     # Full universe — deduplicated
     all_tickers = list(dict.fromkeys(ASX_UNIVERSE.get("asx200", [])))
     per_ticker_timeout = int(request.args.get("timeout", 8))
+
+    # Load current exclusion list
+    excluded_list = []
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT value FROM blob_store WHERE key='universe_excluded'").fetchone()
+            excluded_list = json.loads(row["value"]) if row else []
+    except Exception:
+        pass
 
     def _check(ticker):
         try:
@@ -1132,4 +1175,5 @@ def universe_health():
         "total":      len(all_tickers),
         "ok_count":   len(all_tickers) - len(stale),
         "stale":      stale,
+        "excluded":   excluded_list,
     })

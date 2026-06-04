@@ -696,8 +696,164 @@ async function handleBrokerCSV(e) {
   if (result.skipped && result.skipped.length > 0) {
     console.warn('[BrokerCSV] Skipped rows:', result.skipped);
   }
+
+  const sells = result.sells || [];
+  if (sells.length > 0) {
+    scheduleSave();
+    renderPage();
+    _showSellImportConfirmation(sells, result.broker);
+    return;
+  }
   scheduleSave();
   renderPage();
+}
+
+function _computeSellPreview(ticker, shares, price, date, brokerage) {
+  const openParcels = (state.cgtParcels || [])
+    .filter(p => p.ticker === ticker && p.remainingQty > 0)
+    .slice()
+    .sort((a, b) => {
+      // Parse DD-MM-YYYY for correct chronological ordering
+      const pa = typeof parseDate === 'function' ? parseDate(a.date) : new Date(a.date);
+      const pb = typeof parseDate === 'function' ? parseDate(b.date) : new Date(b.date);
+      return pa - pb;
+    });
+
+  if (!openParcels.length) return null;
+
+  let remaining = shares;
+  let totalCost = 0;
+  let cgtDiscount = false;
+  let cgtWarning = false;
+
+  for (const p of openParcels) {
+    if (remaining <= 0) break;
+    const consumed = Math.min(remaining, p.remainingQty);
+    totalCost += consumed * p.costPerShare;
+    const heldDays = typeof daysBetween === 'function'
+      ? daysBetween(p.date, date)
+      : Math.floor((new Date(date.split('-').reverse().join('-')) - new Date(p.date.split('-').reverse().join('-'))) / 86400000);
+    if (heldDays >= 365) cgtDiscount = true;
+    if (heldDays >= 320 && heldDays < 365) cgtWarning = true;
+    remaining -= consumed;
+  }
+
+  const totalProceeds = shares * price;
+  const gain = totalProceeds - totalCost - brokerage;
+  return { totalCost, gain, cgtDiscount, cgtWarning, unmatched: remaining };
+}
+
+function _showSellImportConfirmation(sells, broker) {
+  document.getElementById('sell-import-dialog')?.remove();
+
+  const rows = sells.map(s => {
+    const preview = _computeSellPreview(s.ticker, s.shares, s.price, s.date, s.brokerage);
+    const noParcel = !preview;
+    const gainClass = !preview ? '' : preview.gain >= 0 ? 'color:#16a34a' : 'color:#dc2626';
+    const gainStr   = !preview ? '—' : `${preview.gain >= 0 ? '+' : ''}$${Math.abs(preview.gain).toFixed(2)}`;
+    const cgtStr    = !preview ? '—' : preview.cgtDiscount ? '<span style="color:#16a34a">✓ Yes</span>' : '<span style="color:var(--text-muted)">No</span>';
+    const warnBadge = preview?.cgtWarning ? ' <span style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 5px;font-size:10px">⏰ CGT at risk</span>' : '';
+    const noBadge   = noParcel ? '<span style="background:#fee2e2;color:#dc2626;border-radius:3px;padding:1px 5px;font-size:10px">No parcels — will skip</span>' : '';
+    const costStr   = preview ? `$${preview.totalCost.toFixed(2)}` : '—';
+    return `<tr style="opacity:${noParcel ? 0.6 : 1}">
+      <td style="padding:6px 8px;font-size:12px;font-weight:600">${s.ticker}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">${s.shares}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">$${s.price.toFixed(2)}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">${costStr}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right;${gainClass}">${gainStr}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:center">${cgtStr}${warnBadge}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">$${s.brokerage.toFixed(2)}</td>
+      <td style="padding:6px 8px;font-size:12px">${noBadge}</td>
+    </tr>`;
+  });
+
+  const dialog = document.createElement('dialog');
+  dialog.id = 'sell-import-dialog';
+  dialog.style.cssText = 'padding:0;border:none;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.35);background:var(--bg-primary);color:var(--text-primary);max-width:760px;width:95vw';
+  dialog.innerHTML = `
+    <div style="padding:20px 24px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div>
+          <div style="font-size:15px;font-weight:700">SELL Import — ${broker.charAt(0).toUpperCase()+broker.slice(1)}</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:2px">Review FIFO-matched disposals before applying. Uses current CGT method (${state.cgtMethod || 'fifo'}).</div>
+        </div>
+        <button onclick="document.getElementById('sell-import-dialog')?.remove()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--text-muted);padding:2px 6px">✕</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="border-bottom:2px solid var(--border)">
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:left">Ticker</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Shares</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Price</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Cost Basis</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Gain/Loss</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:center">CGT Discount?</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Brokerage</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted)"></th>
+          </tr></thead>
+          <tbody>${rows.join('')}</tbody>
+        </table>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">
+        <button class="btn btn-sm" onclick="document.getElementById('sell-import-dialog')?.remove()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="_applyImportedSells(${JSON.stringify(sells).replace(/"/g, '&quot;')});document.getElementById('sell-import-dialog')?.remove()">Apply SELL imports</button>
+      </div>
+    </div>`;
+  document.body.appendChild(dialog);
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
+  dialog.showModal();
+}
+
+function _applyImportedSells(sells) {
+  let applied = 0, skipped = 0;
+  for (const s of sells) {
+    const { ticker, shares, price, date, brokerage } = s;
+    const openParcels = (state.cgtParcels || []).filter(p => p.ticker === ticker && p.remainingQty > 0);
+    if (!openParcels.length) {
+      console.warn(`[SellImport] No open parcels for ${ticker} — skipped`);
+      skipped++;
+      continue;
+    }
+
+    // FIFO parcel matching via existing helper (mutates parcel.remainingQty, pushes to cgtDisposals)
+    const disposals = matchSaleAgainstParcels(ticker, shares, price, date, brokerage, state.cgtMethod || 'fifo');
+    state.cgtDisposals.push(...disposals);
+
+    // Update portfolio holding
+    const holding = state.portfolio.find(h => h.ticker === ticker);
+    if (holding) {
+      holding.shares -= shares;
+      if (holding.shares <= 0) {
+        state.portfolio = state.portfolio.filter(h => h.ticker !== ticker);
+      }
+    }
+
+    // Trade journal entry
+    const pnl = disposals.reduce((sum, d) => sum + d.grossGain, 0);
+    state.tradeJournal.push({
+      id: Date.now() + Math.random(),
+      date, ticker,
+      action: 'SELL',
+      qty: shares,
+      entryPrice: disposals[0]?.parcelCostPerShare || 0,
+      exitPrice: price,
+      fees: brokerage,
+      pnl: +pnl.toFixed(2),
+      status: 'closed',
+      recId: null,
+      recExecuted: false,
+      closeDate: date,
+      imported: true,
+    });
+    applied++;
+  }
+  state.tradeJournal.sort((a, b) => (a.date||'').localeCompare(b.date||''));
+  scheduleSave();
+  renderPage();
+  const msg = skipped > 0
+    ? `Applied ${applied} SELL import(s) · ${skipped} skipped (no parcels)`
+    : `Applied ${applied} SELL import(s)`;
+  toast(msg, applied > 0 ? 'success' : 'warning');
 }
 
 function _cycleHoldingAccount(ticker) {

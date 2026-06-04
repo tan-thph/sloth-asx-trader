@@ -480,7 +480,10 @@ function _buildTargetAllocCard(merged) {
           <div class="card-title" style="margin:0">Target Allocations &amp; Drift</div>
           <div class="text-xs text-muted" style="margin-top:2px">Set target weights; amber = drift &gt;5%, red = drift &gt;10%</div>
         </div>
-        ${hasTargets ? `<div class="text-xs text-muted">Target total: <strong style="color:${Math.abs(totalTarget - 100) > 5 ? '#d97706' : 'var(--text-primary)'}">${totalTarget.toFixed(0)}%</strong> <span class="text-muted">(ideal 100%)</span></div>` : ''}
+        <div style="display:flex;align-items:center;gap:10px">
+          ${hasTargets ? `<div class="text-xs text-muted">Target total: <strong style="color:${Math.abs(totalTarget - 100) > 5 ? '#d97706' : 'var(--text-primary)'}">${totalTarget.toFixed(0)}%</strong> <span class="text-muted">(ideal 100%)</span></div>` : ''}
+          ${hasTargets ? `<button class="btn btn-sm" onclick="showRebalanceSuggestions()" title="View deterministic rebalance suggestions">📋 Suggest Rebalance</button>` : ''}
+        </div>
       </div>
       <div style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse">
@@ -594,6 +597,121 @@ function setTargetAlloc(ticker, value) {
     state.targetAllocations[ticker] = v;
   }
   scheduleSave();
+}
+
+function _buildRebalanceSuggestions() {
+  const totalValue = (state.cash || 0) + state.portfolio.reduce(
+    (s, h) => s + h.shares * (h.currentPrice || h.avgPrice), 0);
+  if (!totalValue) return '<p style="color:var(--text-muted)">No portfolio data.</p>';
+
+  const targets = state.targetAllocations || {};
+  const today = typeof todayStr === 'function' ? todayStr() : new Date().toLocaleDateString('en-AU').split('/').map((p,i)=>i===2?p:p.padStart(2,'0')).join('-');
+  const rows = [];
+  const allTickers = new Set([
+    ...state.portfolio.map(h => h.ticker),
+    ...Object.keys(targets),
+  ]);
+
+  for (const ticker of allTickers) {
+    const holding = state.portfolio.find(h => h.ticker === ticker);
+    const targetPct = targets[ticker] != null ? Number(targets[ticker]) : 0;
+    const currentValue = holding ? holding.shares * (holding.currentPrice || holding.avgPrice) : 0;
+    const currentPct = totalValue > 0 ? (currentValue / totalValue) * 100 : 0;
+    const targetValue = totalValue * targetPct / 100;
+    const delta = targetValue - currentValue;
+    const price = holding?.currentPrice || holding?.avgPrice || 0;
+    const shares = price > 0 ? Math.floor(Math.abs(delta) / price) : 0;
+
+    if (Math.abs(currentPct - targetPct) < 1.0) continue;
+    if (shares < 1) continue;
+
+    let cgtWarning = null;
+    if (delta < 0 && holding) {
+      const openParcels = (state.cgtParcels || []).filter(p => p.ticker === ticker && p.remainingQty > 0);
+      const atRisk = openParcels.some(p => {
+        const held = typeof daysBetween === 'function'
+          ? daysBetween(p.date, today)
+          : Math.floor((Date.now() - new Date(p.date.split('-').reverse().join('-'))) / 86400000);
+        return held >= 320 && held < 365;
+      });
+      if (atRisk) cgtWarning = '⚠ CGT discount at risk';
+    }
+
+    rows.push({
+      ticker,
+      action: delta > 0 ? 'BUY' : (holding ? 'TRIM' : null),
+      currentPct: +currentPct.toFixed(1),
+      targetPct: +targetPct.toFixed(1),
+      driftPct: +(currentPct - targetPct).toFixed(1),
+      shares,
+      estimatedValue: +(shares * price).toFixed(0),
+      cgtWarning,
+    });
+  }
+
+  rows.sort((a, b) => Math.abs(b.driftPct) - Math.abs(a.driftPct));
+
+  const totalBuyValue = rows.filter(r => r.action === 'BUY').reduce((s, r) => s + r.estimatedValue, 0);
+  const cashShortfall = totalBuyValue > (state.cash || 0) ? totalBuyValue - (state.cash || 0) : 0;
+
+  const tableRows = rows.map(r => `
+    <tr>
+      <td style="padding:6px 8px;font-size:12px;font-weight:600">${r.ticker}</td>
+      <td style="padding:6px 8px;font-size:12px">
+        <span style="background:${r.action === 'BUY' ? '#16a34a' : '#ea580c'};color:#fff;border-radius:4px;padding:1px 7px;font-size:11px">${r.action}</span>
+      </td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">${r.currentPct}%</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">${r.targetPct}%</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right;font-weight:600;color:${Math.abs(r.driftPct) >= 5 ? '#dc2626' : '#d97706'}">${r.driftPct > 0 ? '+' : ''}${r.driftPct}%</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">${r.shares.toLocaleString()}</td>
+      <td style="padding:6px 8px;font-size:12px;text-align:right">$${r.estimatedValue.toLocaleString()}</td>
+      <td style="padding:6px 8px;font-size:12px">${r.cgtWarning ? `<span style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 5px;font-size:10px">${r.cgtWarning}</span>` : ''}</td>
+    </tr>`).join('');
+
+  return `
+    <div>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">Deterministic — no AI call. Review and execute each trade manually via markExecuted.</p>
+      ${cashShortfall > 0 ? `<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#92400e">⚠ BUY suggestions total $${totalBuyValue.toLocaleString()} — exceeds available cash by $${cashShortfall.toLocaleString()}. Prioritise largest drifts first.</div>` : ''}
+      ${rows.length === 0 ? '<p style="color:var(--text-muted);font-size:13px">Portfolio is within 1% of all targets — no rebalancing needed.</p>' : `
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="border-bottom:2px solid var(--border)">
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:left">Ticker</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted)">Action</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Current</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Target</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Drift</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Shares</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right">Est. Value</th>
+            <th style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text-muted)">Notes</th>
+          </tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>`}
+    </div>`;
+}
+
+function showRebalanceSuggestions() {
+  document.getElementById('rebalance-suggest-dialog')?.remove();
+  const dialog = document.createElement('dialog');
+  dialog.id = 'rebalance-suggest-dialog';
+  dialog.style.cssText = 'padding:0;border:none;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.35);background:var(--bg-primary);color:var(--text-primary);max-width:720px;width:95vw';
+  dialog.innerHTML = `
+    <div style="padding:20px 24px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div>
+          <div style="font-size:15px;font-weight:700">📋 Rebalance Suggestions</div>
+        </div>
+        <button onclick="document.getElementById('rebalance-suggest-dialog')?.remove()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--text-muted);padding:2px 6px">✕</button>
+      </div>
+      ${_buildRebalanceSuggestions()}
+      <div style="display:flex;justify-content:flex-end;margin-top:16px">
+        <button class="btn btn-sm" onclick="document.getElementById('rebalance-suggest-dialog')?.remove()">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(dialog);
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
+  dialog.showModal();
 }
 
 // ── Sector colour palette ─────────────────────────────────────────────────────

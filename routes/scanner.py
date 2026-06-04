@@ -7,6 +7,7 @@ Endpoints:
   /api/market/scan/stop    POST — cancel running scan
 """
 
+import json
 import threading
 from datetime import datetime
 
@@ -15,6 +16,7 @@ import yfinance as yf
 from flask import Blueprint, jsonify, request
 
 from core import ASX_UNIVERSE as _ASX_UNIVERSE, SECTOR_MAP as _SECTOR_MAP
+from db import get_db
 from indicators import _score_ticker
 
 
@@ -180,9 +182,18 @@ def market_scan_start():
 
     data        = request.get_json() or {}
     universe    = data.get("universe", "asx200")
-    exclude     = data.get("exclude", [])
+    exclude     = list(data.get("exclude", []))
     min_adv_aud = float(data.get("min_adv_aud", 2_000_000))
     max_results = int(data.get("max_results", 25))
+
+    # Merge per-request exclusions with persistent blob_store exclusions
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT value FROM blob_store WHERE key='universe_excluded'").fetchone()
+            if row:
+                exclude = list(set(exclude + json.loads(row["value"])))
+    except Exception:
+        pass
 
     if universe not in _ASX_UNIVERSE:
         return jsonify({"error": f"Unknown universe: {universe}"}), 400

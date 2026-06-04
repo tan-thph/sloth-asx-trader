@@ -88,10 +88,10 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 | `routes/news.py`       | ~690 | `/api/news/*`, `/api/groq/models`, `/api/google/models`, `/api/sbc-mode`, `/api/system/gpu`, `/api/ollama/start` | RSS scanner + LLM provider management + SBC toggle. Owns `_NE_OK`. |
 | `routes/claude.py`     | ~85  | `/api/claude/*`                                  | Backend proxy for the Anthropic API (opt-in). |
 | `routes/alerts.py`     | ~100 | `/api/alerts/*`                                  | Telegram off-device alerts. `POST /api/alerts/telegram` (send), `POST /api/alerts/telegram/save` (persist creds to settings table), `GET /api/alerts/config` (has_telegram?). Credentials stored in `settings` table as `tg_token`/`tg_chat_id` — never logged. |
-| `routes/import_csv.py` | ~200 | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. Returns BUY rows only; SELL rows reported as skipped (require manual entry). |
+| `routes/import_csv.py` | ~200 | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. Returns BUY rows in `rows`; SELL rows in `sells` array (no longer in `skipped`) for frontend FIFO matching. *(Sprint 46)* |
 | `routes/intraday.py`   | ~270 | `/api/intraday/<ticker>`, `/api/intraday/scan`  | ASX100 intraday day-trade strategy. `GET /api/intraday/<ticker>` — single ticker 5m analysis (2-min TTL). `POST /api/intraday/scan` — batch scan up to 100 tickers with 8-thread pool. Returns VWAP, intraday RSI, volume acceleration, setup score 0–100, `passes` bool (entry window + VWAP + RSI + score gates). |
 
-Total: **12 blueprints, ~100 routes** (including announcements blueprint). Sprint 38 added sell-outcomes, lessons, untagged, SPI200. Sprint 39 added `GET|POST /api/learning/tag-review(s)`, `GET /api/learning/tag-accuracy`, `GET /api/market/universe-health`. Sprint 41 added `POST /api/debate/quick-analysis` (local LLM analysis) + 3 static PWA routes in `asx_server.py` (`/manifest.json`, `/sw.js`, `/static/<path>`).
+Total: **12 blueprints, ~100 routes** (including announcements blueprint). Sprint 38 added sell-outcomes, lessons, untagged, SPI200. Sprint 39 added `GET|POST /api/learning/tag-review(s)`, `GET /api/learning/tag-accuracy`, `GET /api/market/universe-health`. Sprint 41 added `POST /api/debate/quick-analysis` (local LLM analysis) + 3 static PWA routes in `asx_server.py` (`/manifest.json`, `/sw.js`, `/static/<path>`). Sprint 46 added `POST|DELETE /api/market/universe-exclude` (blob_store exclusion list for scanner/intraday); SELL rows in import_csv now returned in `sells` array.
 
 ### Frontend (JS) — load order matters
 
@@ -256,7 +256,9 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 - `GET /api/learning/tag-reviews?limit=5` — up to 5 random unreviewed auto-tagged events; weekly spot-check queue on the Learning page.
 - `POST /api/learning/tag-review` — submit `{event_id, verdict:'agree'|'disagree', corrected_tag?}`; disagree updates `error_type` → `manual` and clears `_calib_cache`.
 - `GET /api/learning/tag-accuracy` — `{n, n_agree, agree_rate, label, pending_review}`. When `agree_rate < 0.60`, `_calib_compute()` restricts the `top_err` nudge to manually-reviewed events and emits `⚠AUTO_TAGS_UNRELIABLE` instead.
-- `GET /api/market/universe-health` — checks all `ASX_UNIVERSE["asx200"]` tickers via yfinance `quoteType`; returns `{stale:[...], ok_count, checked_at}`; persists `universe_verified_at` to `blob_store`. Shown in Settings → App Info with "Check Now" button.
+- `GET /api/market/universe-health` — checks all `ASX_UNIVERSE["asx200"]` tickers via yfinance `quoteType`; returns `{stale:[...], ok_count, checked_at, excluded:[...] }`; persists `universe_verified_at` to `blob_store`. Shown in Settings → App Info with "Check Now" button. *(Sprint 46: now returns `excluded` list)*
+- `POST /api/market/universe-exclude` — Body: `{tickers: [...]}`. Adds tickers to `blob_store` key `universe_excluded`. Returns `{ok, excluded: [...]}`. *(Sprint 46)*
+- `DELETE /api/market/universe-exclude` — Body: `{tickers: [...]}`. Removes tickers from exclusion list. Returns `{ok, excluded: [...]}`. *(Sprint 46)*
 
 ### Alerts (Telegram)
 - `GET /api/alerts/config` — `{has_telegram: bool}` — whether credentials are stored.
@@ -264,7 +266,7 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 - `POST /api/alerts/telegram/save` — persist `{token, chat_id}` to the `settings` table (keys `tg_token`, `tg_chat_id`). Pass empty strings to clear.
 
 ### Broker CSV import
-- `POST /api/import/csv` — multipart upload; field `file` = CSV, optional `broker` hint (`commsec`|`selfwealth`|`auto`). Returns `{ok, broker, rows:[{action,ticker,shares,price,date,brokerage}], skipped:[{row,reason}], total}`.
+- `POST /api/import/csv` — multipart upload; field `file` = CSV, optional `broker` hint (`commsec`|`selfwealth`|`auto`). Returns `{ok, broker, rows:[BUY rows], sells:[SELL rows], skipped:[{row,reason}], total}`. *(Sprint 46: SELL rows now in `sells` array, not `skipped`)*
 
 ### AI Call Log (prompt + response audit trail)
 - `POST /api/log/ai_response` — updated: accepts `{text, system_prompt, user_message, agent_type, model, usage, duration_ms}`. Writes to `ai_call_log` table + enriched file. Keeps `blob_store.last_ai_raw_response` for backward compat. Now called automatically from `callClaude()` — no manual call needed at call sites.
@@ -384,7 +386,7 @@ The Vitest suite (`tests/`) uses `vm.runInThisContext` to load browser-global sc
 
 15. **`fetch_with_retry` is not the `ttl_cache`.** They're orthogonal: `ttl_cache` serves the cached result within TTL; `fetch_with_retry` retries the live call and falls back to `_last_good` only when the call keeps failing. Both can coexist on the same function — the cache returns early before a retry is needed.
 
-16. **Broker CSV import only imports BUY rows.** SELL rows are returned in `skipped` with a human-readable reason. Matching a SELL to existing CGT parcels requires knowing lot selection (FIFO/LIFO/specific), so SELL fills must be entered via `markExecuted` as usual.
+16. **Broker CSV import returns SELL rows in `sells` array (not `skipped`).** *(Sprint 46)* `handleBrokerCSV()` shows a confirmation dialog for SELL rows; "Apply SELL imports" uses `matchSaleAgainstParcels()` (FIFO/LIFO per `state.cgtMethod`) and logs to `cgtDisposals` + `tradeJournal`. Tickers with no open parcels are skipped. Does not update `state.cash` (historical import).
 
 17. **Drawdown monitor needs portfolio history.** `renderPerformance()` computes drawdown from `state.portfolioHistory`. If `portfolioHistory` has <2 entries (e.g. fresh install), no drawdown cards are shown — this is intentional, not a bug.
 

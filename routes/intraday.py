@@ -9,6 +9,7 @@ Routes:
     POST /api/intraday/scan           Batch scan: {"tickers": ["CBA", "BHP", ...]}
 """
 
+import json
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FutureTimeout
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ import yfinance as yf
 from flask import Blueprint, jsonify, request
 
 from core import fetch_with_retry, log, ttl_cache
+from db import get_db
 from indicators import asx, safe_float
 
 bp = Blueprint("intraday", __name__)
@@ -257,6 +259,19 @@ def intraday_scan():
     """
     body    = request.get_json(silent=True) or {}
     tickers = [t.upper() for t in body.get("tickers", []) if t]
+    if not tickers:
+        return jsonify({}), 200
+
+    # Filter out blob_store-excluded tickers
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT value FROM blob_store WHERE key='universe_excluded'").fetchone()
+            if row:
+                excluded = set(json.loads(row["value"]))
+                tickers = [t for t in tickers if t not in excluded]
+    except Exception:
+        pass
+
     if not tickers:
         return jsonify({}), 200
 
