@@ -1,5 +1,19 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-04 (Sprint 46 shipped)
+**Last Updated:** 2026-06-04 (Sprint 46 + hotfixes shipped)
+
+## 0. Hotfixes (2026-06-04)
+
+| Fix | Area | Detail |
+|---|---|---|
+| **`fetch_with_retry` 4xx fix** | Reliability | `_http_status()` helper in `core.py` detects HTTP status from `requests.HTTPError`/`urllib.error.HTTPError`. 4xx errors (except 429) now break the retry loop immediately — Yahoo returning 400 Bad Request was being retried 3 times for no benefit. 429 gets a minimum 5s sleep before retry. |
+| **Auto-debate triggers removed** | UX / Reliability | `triggerCalibQualityIfStale()` removed from `analysis.js`. `triggerPostmortem()` and `fetchSkillScore()` auto-calls removed from `markExecuted()` in `recommendations.js`. Calib-quality card loads with `cache_only=1` and shows "▶ Run debate" when no cached result. `routes/debate.py` accepts `?cache_only=1` to return cached result without calling Ollama. |
+| **`currentPrice` fix in analysis prompt** | Accuracy | `portfolioJson` in `analysis.js` now uses `livePrice = state.liveSignals[ticker]?.current_price ?? h.currentPrice` consistently for ALL price-derived fields (currentPrice, value, unrealisedPnl, unrealisedPnlPct, weight). Fixes SELL/TRIM `priceRange` anchoring to stale portfolio cache price rather than the force-refreshed signal price. |
+| **Phase 8 gate in `_calib_compute()`** | Accuracy | `_calib_compute()` calibration block now uses `_mann_whitney_z(wins, losses) > 1.28` to gate Phase 8 skill weighting — was using raw mean comparison, which could flip Phase 8 on/off based on a single high-skill outlier. Aligned with `_compute_phase8_meta()` (stats endpoint). |
+| **`_HL_MAP` + `_REGIME_GROUPS` regime name alignment** | Accuracy | Phantom regime names (`bearVolatile`, `bearTrending`, `bullTrending`, `neutral`) removed from `_HL_MAP` and `_REGIME_GROUPS` in `_calib_compute()`. Now keyed on actual names from `classifyRegime()`: panic=20d, riskOff=30d, highVol=35d, trend=45d, riskOn=50d, sideways=60d. `_REGIME_GROUPS`: bearish={riskOff,panic}, bullish={riskOn,trend}, neutral={highVol,sideways}. |
+| **DB pragma parity** | Reliability | `announcement_engine.py` and `news_engine.py` local context managers now set `synchronous=NORMAL`, `mmap_size=268435456`, `cache_size=-65536`, `temp_store=MEMORY` — matching the pragmas in `db.get_db()`. Prevents WAL contention and cache-size mismatches when these engines write concurrently with the main app. |
+| **6 audit bugs** | Various | DRP multi-account fix (`applyDrpEvent()` now matches by ticker + activeAccount); `universe_excluded` / `universe_verified_at` returned by `GET /api/db/load`; auto-brief function name typo (`generateMorningBrief` → `generateMorningBriefing`); settings path fix; unrealisedPnlPct inconsistency in portfolioJson resolved by livePrice fix above. |
+
+---
 
 ## 0. Shipped — Sprint 46 (2026-06-04)
 
@@ -124,7 +138,7 @@ Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for t
 | **JS Ollama priority queue** | Reliability (Sprint 24) | `_oqEnqueue(fn, priority)` in `debate-client.js`. HIGH lane for user-initiated calls; LOW lane for auto-triggers. Prevents background auto-postmortems from blocking user's next manual debate call for minutes. |
 | **Skill-weight centering at 5** | Accuracy (Sprint 24) | `_weight()` formula: `max(0.2, min(1.8, sk/5.0))`. Old formula centered at 10 — a skill=8 trade was penalised vs unscored. Now unscored=1.0, neutral skill=1.0, high skill amplified up to 1.8×. |
 | **Hierarchical regime fallbacks** | Accuracy (Sprint 24) | Calibration falls through: specific regime → macro group (bearish/bullish/neutral) → all trades when ESS<2.5. Prevents freshly-transitioned regimes from getting no calibration signal at all. |
-| **Volatility-adaptive half-life** | Accuracy (Sprint 25) | `_HL_MAP` in `_calib_compute()`: panic=20d, bearVolatile=25d, riskOff=30d, sideways=60d, default=45d. Non-default hl shown in calibration block header (`hl=Nd`). |
+| **Volatility-adaptive half-life** | Accuracy (Sprint 25) | `_HL_MAP` in `_calib_compute()`: panic=20d, riskOff=30d, highVol=35d, trend=45d, riskOn=50d, sideways=60d, default=45d. Non-default hl shown in calibration block header (`hl=Nd`). *(Phantom regime names removed in hotfix 16bba99)* |
 | **SQLite startup maintenance** | Reliability (Sprint 25) | `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` in `init_db()`. Non-blocking; prevents index-stat decay and WAL file growth under heavy JSON blob accumulation. |
 | **Phase 6: Calibration quality debate card** | AI Quality (Sprint 26) | `GET /api/debate/calib-quality`. Backend pre-computes binomial SE + Z-scores (`_norm_cdf` via `math.erfc`, no scipy). Prompt presents statistical verdict as immutable fact — model constrained to qualitative failure-tag analysis only. Traffic-light badges (🟢/🟡/🔴) on Learning page. Auto-triggered once daily via `triggerCalibQualityIfStale()` (LOW priority queue). |
 | **Success Patterns UI card** | Analytics (Sprint 27) | Learning page card showing dominant win tags with count, win rate bars, and calibration nudge explanation. Backed by step 6b in `_calib_compute()` and `success_patterns` field in `/api/learning/stats`. 5 supported tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`. |
@@ -366,7 +380,7 @@ already exist (quant, regime, learning, dividends, CGT).
 | ✓ **Broker CSV import** | M | ★★★ | **SHIPPED** — CommSec/SelfWealth/generic detection; backend parses, normalises, returns rows. See §0. |
 | ✓ **Trade tags & notes** | S | ★★ | **SHIPPED** — `tags`/`trade_thesis` DB columns + inline input on rec cards + stored in learning events. See §0. |
 | ✓ **Morning briefing auto-generate** | M | ★★ | **SHIPPED** — `'briefing'` agent type; Dashboard "Generate Brief" button chains macro + regime + holdings. See §0. |
-| **Lessons: market-breadth scope** | M | ★★ | Add `breadth_scope` field to `ai_learning_lessons` table (e.g. `adl_below_0.3`, `high_vol`). `GET /api/learning/lessons` filters by current `advance_decline_ratio` and `asx_vol_20d` alongside existing ticker/sector/regime scopes. Example: "When ADL<0.3, ignore bullish RSI divergences." *Source: critics.md §3.1* |
+| ✓ **Lessons: market-breadth scope** | M | ★★ | **SHIPPED Sprint 44** — `breadth_scope TEXT` column added to `trading_lessons`. `GET /api/learning/lessons` accepts `adl` + `asx_vol` params and filters accordingly. Create Lesson form has a breadth-scope dropdown. `analysis.js` passes ADL + asx_vol when fetching lessons. |
 | **Lessons: auto-generate from calib-quality** | M | ★ | After `triggerCalibQualityIfStale()` completes, if the Ollama output identifies a recurring failure mode (e.g. "chasing breakouts in low volume"), surface a toast prompt: *"Create a lesson from this? [pre-filled rule]"*. Requires extracting a `suggested_lesson` field from the `/api/debate/calib-quality` structured response. *Source: critics.md §3.1* |
 
 ### 2.7 AI assistant enhancements
@@ -476,7 +490,10 @@ Single canonical copy now in `js/utils.js`. Both page files reference it via the
 28. ✓ **Sprint 42 shipped:** `high_60d`/`low_60d` forwarded to Claude in `analysis.js` (`Range60d` line); `_dtBuildRecs()` Signal #4 updated to actual Fibonacci zone (with `return_60d` fallback); Stooq price fallback (`stooq_quote` in `core.py`) wired into `_quote_cached()` and `_macro_payload()` — third line of defence when yfinance fails and `_last_good` is empty; doc fixes in `learning_loop.md` and `prompts.md` (Phase 8 live, day-trade Claude prompts marked dormant, Phase 3 neutral synthesis terminology); pre-trade checklist 6th item (profit harvest / risk management); executed-rec button immediate feedback; `max_tokens` raised to 8,000; `unrealised_loss_large` enforcement line + SELL exit semantics in `ANALYSIS_SYSTEM_PROMPT`.
 29. ✓ **Sprint 43 shipped:** §3.8 `_detectExitReason` hoisted to `utils.js`; §3.10 Stooq rate-limit semaphore; §3.9 `FACTOR_WEIGHTS` guard; §2.7 "Why this rec?" traceability panel.
 30. ✓ **Sprint 44 shipped:** §1.11 regime-change calibration penalty; §1.12 virtual-outcome speed weighting; §2.6 lessons breadth scope; §2.6 DRP parcel tracking.
-31. **Open:** §2.7 local LLM SELL/TRIM (L, ★★★), §2.6 lessons auto-generate (M, ★), §1.9 mergers/takeover CGT (no yfinance tag), §3.7 ES-modules (deferred).
+31. ✓ **Sprint 45 shipped:** Thesis drift detection (`_compute_thesis_drift`, `GET /api/learning/thesis-drift`, `renderThesisDriftCard`); stop-loss trailing ("📍 Trail" button, `trailStop()`, `_stopTrailed`/`_stopTrailedAt` flags); scheduled morning briefing (`state.settings.autoBriefTime`, `checkAutoBriefSchedule()` in `scheduler.js`).
+32. ✓ **Sprint 46 shipped:** Broker CSV SELL import (`sells[]` array, FIFO confirmation table, CGT-at-risk warnings); rebalancing suggestions modal (`_buildRebalanceSuggestions()`, no AI call); ASX universe exclusion list (`POST|DELETE /api/market/universe-exclude`, scanner/intraday filtering).
+33. ✓ **Hotfixes (2026-06-04):** `fetch_with_retry` 4xx fix (`_http_status()` helper, 429 min 5s sleep); auto-debate triggers removed (postmortem/skill/calib-quality manual-only); `currentPrice` fix in analysis prompt (`livePrice` for all portfolio fields); Phase 8 gate aligned in `_calib_compute()` (Mann-Whitney, was raw mean); `_HL_MAP`/`_REGIME_GROUPS` phantom regime names removed; DB pragma parity for announcement/news engines; 6 audit bugs (DRP multi-account, settings path, auto-brief name, etc.).
+34. **Open:** §2.7 local LLM SELL/TRIM (L, ★★★), §1.9 mergers/takeover CGT (no yfinance tag), §3.7 ES-modules (deferred).
 
 ---
 
