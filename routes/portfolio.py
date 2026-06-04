@@ -380,6 +380,34 @@ def eofy_tax_pack():
     )
 
 
+@bp.route("/api/db/git-status")
+def db_git_status():
+    """Return the last git commit date for asx_trader.db and whether it has uncommitted changes."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    if not shutil.which("git"):
+        return jsonify({"ok": False, "error": "git not available"})
+    try:
+        cwd = str(Path(__file__).parent.parent)
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%ci", "--", "asx_trader.db"],
+            capture_output=True, text=True, timeout=5,
+            cwd=cwd
+        )
+        last_commit = result.stdout.strip() or None
+        result2 = subprocess.run(
+            ["git", "status", "--porcelain", "asx_trader.db"],
+            capture_output=True, text=True, timeout=5,
+            cwd=cwd
+        )
+        is_dirty = bool(result2.stdout.strip())
+        return jsonify({"ok": True, "last_committed": last_commit, "has_uncommitted": is_dirty})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)})
+
+
 @bp.route("/api/db/status")
 def db_status():
     """Quick check — returns row counts."""

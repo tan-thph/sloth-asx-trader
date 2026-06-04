@@ -887,12 +887,12 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
                 const c = Math.abs(tkrRow[h] || 0);
                 if (c > maxCorr) { maxCorr = c; maxCorrTicker = h; }
               }
-              if (maxCorr > 0.85) {
-                const mult = 0.5;
-                return { ...r, qty: Math.max(1, Math.round(r.qty * mult)),
-                  riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
-                  _corrNote: `corr ${maxCorr.toFixed(2)} with ${maxCorrTicker} — size halved` };
-              } else if (maxCorr > 0.7) {
+              const _corrBlock = state.settings?.corrBlockThreshold ?? 0.85;
+              const _corrSoft  = Math.min(_corrBlock - 0.10, 0.75);
+              if (maxCorr >= _corrBlock) {
+                return { ...r, qty: 0, _corrBlocked: true,
+                  _corrNote: `blocked: corr ${maxCorr.toFixed(2)} with ${maxCorrTicker} ≥ threshold ${_corrBlock} — no diversification benefit` };
+              } else if (maxCorr > _corrSoft) {
                 const mult = 0.7;
                 return { ...r, qty: Math.max(1, Math.round(r.qty * mult)),
                   riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
@@ -903,6 +903,21 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           }
         }
       } catch { /* non-fatal — analysis continues without correlation adjustment */ }
+
+      // Filter hard-blocked recs and surface them in dataGaps for transparency (Item 3)
+      const _corrBlockedRecs = recs.filter(r => r._corrBlocked);
+      if (_corrBlockedRecs.length) {
+        recs = recs.filter(r => !r._corrBlocked);
+        if (_parsed?.data) {
+          if (!Array.isArray(_parsed.data.dataGaps)) _parsed.data.dataGaps = [];
+          _corrBlockedRecs.forEach(r => {
+            console.log(`[Corr] blocked ${r.ticker}: ${r._corrNote}`);
+            _parsed.data.dataGaps.push({ ticker: r.ticker, missingField: r._corrNote });
+          });
+        }
+        const note = ` [Corr-blocked ${_corrBlockedRecs.length} BUY rec(s): ${_corrBlockedRecs.map(r => r.ticker).join(', ')}]`;
+        summary = (summary ? summary + ' ' : '') + note.trim();
+      }
     }
 
     // ── Portfolio heat budget gate ─────────────────────────────────────────────

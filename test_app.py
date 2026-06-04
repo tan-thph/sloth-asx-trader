@@ -1684,13 +1684,14 @@ class TestSprint8(unittest.TestCase):
 
     # ── 3. Exact correlation-aware sizing ────────────────────────────────────
     def test_corr_sizing_in_analysis(self):
-        """analysis.js must fetch /api/risk correlation and reduce qty when |corr| > 0.7."""
+        """analysis.js must fetch /api/risk correlation and hard-block or reduce qty."""
         with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
             src = f.read()
         self.assertIn("_corrNote", src)
         self.assertIn("_corrMatrix", src)
-        self.assertIn("maxCorr > 0.85", src)
-        self.assertIn("maxCorr > 0.7", src)
+        # Sprint 49: hard-block replaces size-halving; soft gate uses corrBlockThreshold
+        self.assertIn("_corrBlocked", src)
+        self.assertIn("corrBlockThreshold", src)
 
     def test_corr_note_shown_on_rec_card(self):
         """recommendations.js must show _corrNote badge on BUY rec cards."""
@@ -5313,6 +5314,99 @@ class TestQuickAnalysisSellTrim(unittest.TestCase):
                 rec["urgency"] = "routine"
         self.assertEqual(rec["primary_driver"], "thesis_broken")
         self.assertEqual(rec["urgency"], "routine")
+
+
+class TestSprint49(unittest.TestCase):
+    """Sprint 49: correlation hard-block, DB git-status endpoint, dataGaps transparency."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        cls.client = asx_server.app.test_client()
+
+    # ── Item 1: correlation hard-block ────────────────────────────────────────
+
+    def test_corr_block_flag_in_analysis_js(self):
+        """analysis.js must contain the _corrBlocked flag and hard-block logic."""
+        src = open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8").read()
+        self.assertIn("_corrBlocked", src)
+        self.assertIn("corrBlockThreshold", src)
+        self.assertIn("no diversification benefit", src)
+
+    def test_corr_block_threshold_default_in_config_js(self):
+        """config.js must define corrBlockThreshold with default 0.85."""
+        src = open(os.path.join(ROOT, "js", "config.js"), encoding="utf-8").read()
+        self.assertIn("corrBlockThreshold", src)
+        self.assertIn("0.85", src)
+
+    def test_corr_block_input_in_settings_js(self):
+        """settings.js must have a corrBlockThreshold input."""
+        src = open(os.path.join(ROOT, "js", "pages", "settings.js"), encoding="utf-8").read()
+        self.assertIn("corrBlockThreshold", src)
+        self.assertIn("Correlation block threshold", src)
+
+    def test_corr_block_filters_recs(self):
+        """analysis.js must filter out _corrBlocked recs (not just set qty=0)."""
+        src = open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8").read()
+        self.assertIn("r._corrBlocked", src)
+        self.assertIn("recs.filter(r => !r._corrBlocked)", src)
+
+    def test_corr_block_old_size_halving_removed(self):
+        """The old size-halved comment must no longer appear in analysis.js."""
+        src = open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8").read()
+        self.assertNotIn("size halved", src)
+
+    # ── Item 2: DB git-status endpoint ───────────────────────────────────────
+
+    def test_db_git_status_route_exists(self):
+        """GET /api/db/git-status must return 200 with ok field."""
+        r = self.client.get("/api/db/git-status")
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertIn("ok", d)
+
+    def test_db_git_status_fields_when_ok(self):
+        """When ok=True, response must include last_committed and has_uncommitted."""
+        r = self.client.get("/api/db/git-status")
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        if d.get("ok"):
+            self.assertIn("last_committed", d)
+            self.assertIn("has_uncommitted", d)
+            self.assertIsInstance(d["has_uncommitted"], bool)
+
+    def test_db_git_status_no_500_when_git_unavailable(self):
+        """Endpoint must return 200 (not 500) even when git is unavailable."""
+        import unittest.mock
+        with unittest.mock.patch("shutil.which", return_value=None):
+            r = self.client.get("/api/db/git-status")
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertFalse(d.get("ok"))
+        self.assertIn("error", d)
+
+    def test_db_git_status_in_portfolio_py(self):
+        """routes/portfolio.py must define the db_git_status route."""
+        src = open(os.path.join(ROOT, "routes", "portfolio.py"), encoding="utf-8").read()
+        self.assertIn("/api/db/git-status", src)
+        self.assertIn("last_committed", src)
+        self.assertIn("has_uncommitted", src)
+
+    def test_db_git_status_display_in_settings_js(self):
+        """settings.js must show git-status in App Info card."""
+        src = open(os.path.join(ROOT, "js", "pages", "settings.js"), encoding="utf-8").read()
+        self.assertIn("settings-db-git-status", src)
+        self.assertIn("api/db/git-status", src)
+
+    # ── Item 3: _corrBlocked in dataGaps ─────────────────────────────────────
+
+    def test_corr_blocked_added_to_data_gaps(self):
+        """analysis.js must push _corrBlocked recs into _parsed.data.dataGaps."""
+        src = open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8").read()
+        self.assertIn("dataGaps", src)
+        self.assertIn("_corrNote", src)
+        # Verify the push to dataGaps exists after the corrBlocked filter
+        self.assertIn("_parsed.data.dataGaps.push", src)
 
 
 if __name__ == "__main__":

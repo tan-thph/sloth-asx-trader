@@ -148,6 +148,20 @@ python3 asx_server.py</pre>
           giving you time to act before the stop is breached. Direction-aware (BUY and SELL recs).
         </div>
       </div>
+      <div style="margin-top:14px;padding-top:12px;border-top:0.5px solid var(--border-light)">
+        <div class="form-label" style="margin-bottom:6px">Correlation block threshold (0–1, default 0.85)</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="number" min="0.5" max="1.0" step="0.01"
+            value="${state.settings.corrBlockThreshold ?? 0.85}"
+            onchange="updateSetting('corrBlockThreshold', parseFloat(this.value)); scheduleSave()"
+            style="width:80px;padding:5px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:13px">
+          <span class="text-xs text-muted">|ρ| threshold · hard-blocks BUY recs above this</span>
+        </div>
+        <div class="text-xs text-muted mt-1">
+          BUY recs with |ρ| above this vs any existing holding are hard-blocked (not sized down).
+          Soft gate fires 10pp below (e.g. −30% size at 0.75 when threshold is 0.85).
+        </div>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Auto-Analysis Scheduler</div>
@@ -329,6 +343,8 @@ python3 asx_server.py</pre>
         <span id="settings-server-ver" class="text-muted">checking…</span>
         <span class="text-muted">DB backups</span>
         <span id="settings-backup-info" class="text-muted">checking…</span>
+        <span class="text-muted">DB git</span>
+        <span id="settings-db-git-status" class="text-muted">checking…</span>
         <span class="text-muted">Universe</span>
         <span id="settings-universe-info" style="font-size:12px">
           <span id="settings-universe-date" class="text-muted">loading…</span>
@@ -708,6 +724,23 @@ async function loadSettingsAppInfo() {
     const d = await r.json();
     const el = document.getElementById('settings-backup-info');
     if (el) el.textContent = d.last_backup || 'daily auto-backup enabled';
+  } catch { /* silent */ }
+
+  // DB git commit status
+  try {
+    const gr = await fetch(`${API}/api/db/git-status`);
+    const gd = await gr.json();
+    const gitEl = document.getElementById('settings-db-git-status');
+    if (gitEl) {
+      if (gd.ok) {
+        const committed = gd.last_committed ? gd.last_committed.slice(0, 16) : 'never committed';
+        const dirty = gd.has_uncommitted ? ' ⚠ uncommitted changes' : '';
+        gitEl.textContent = committed + dirty;
+        gitEl.style.color = gd.has_uncommitted ? '#d97706' : 'var(--text-secondary)';
+      } else {
+        gitEl.textContent = gd.error || 'unavailable';
+      }
+    }
   } catch { /* silent */ }
 
   // Universe health — load last-verified date and exclusion list from blob_store

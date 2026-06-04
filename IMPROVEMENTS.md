@@ -1,5 +1,19 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-04 (Sprint 48 shipped)
+**Last Updated:** 2026-06-04 (Sprint 49 shipped)
+
+## 0. Shipped — Sprint 49 (2026-06-04)
+
+| Fix | Area | Detail |
+|---|---|---|
+| **Correlation hard-block** | Risk / Analysis | `|ρ| ≥ corrBlockThreshold` (default 0.85) now hard-blocks the BUY rec instead of size-halving. A position 90% correlated with an existing holding adds near-zero diversification and consumes heat budget — blocking is correct. Soft gate (10pp below threshold) still applies −30% size. |
+| **Configurable threshold** | Settings | `state.settings.corrBlockThreshold` (default 0.85). Editable in Settings → Telegram Alerts card (near stop-proximity %). Soft gate auto-adjusts to `threshold − 0.10`, capped at 0.75. |
+| **`_corrBlocked` flag** | Risk / Analysis | Hard-blocked recs carry `_corrBlocked: true` and `_corrNote` explaining the block. Filtered out of `recs` before downstream quant/heat-budget gates. |
+| **dataGaps transparency** | UX | `_corrBlocked` recs pushed into `_parsed.data.dataGaps` so the user sees amber "Data gaps" cards explaining why a BUY was dropped (e.g. "BHP: blocked: corr 0.91 with RIO ≥ threshold 0.85"). |
+| **DB git-status endpoint** | Backend | `GET /api/db/git-status` — returns `{ok, last_committed, has_uncommitted}`. Uses `git log` + `git status --porcelain` on `asx_trader.db`. Returns `ok: false` (not 500) when git is unavailable. |
+| **App Info DB git display** | Settings | Settings → App Info card now shows "DB git: \<date\> ⚠ uncommitted changes". Amber colour when dirty; no colour change when clean. |
+| **Tests** | Testing | `TestSprint49` (11 tests): `_corrBlocked` in source, threshold default, hard-block filter, old size-halved comment removed, settings input, git-status endpoint (ok/fields/graceful failure), portfolio.py source check, settings.js source check, dataGaps push. |
+
+---
 
 ## 0. Shipped — Sprint 48 (2026-06-04)
 
