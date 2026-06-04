@@ -1,6 +1,6 @@
 # Sloth ASX Trader — Prompt Architecture Reference
 
-**Last Updated:** June 2026 (Sprint 42)
+**Last Updated:** June 2026 (Sprint 46 + hotfixes)
 **Model:** `claude-sonnet-4-6` · all calls via `callClaude()` in `js/claude-client.js`
 
 This document is the authoritative reference for every Claude API call in the application:
@@ -46,6 +46,14 @@ callClaude(agentType, userMessage, options)    ← js/claude-client.js
 
 The `portfolio` system prompt is the only one worth optimising for cache stability — it's the most expensive (~8,700 tokens, confirmed via `cache_creation_input_tokens` in call logs) and called multiple times per trading day. All dynamic state lives in the user message; the system prompt contains zero interpolations.
 
+### Auto-trigger removal (hotfix a888eec)
+
+The following Ollama calls are **manual-only** — they are no longer triggered automatically from `runAnalysis()` or `markExecuted()`:
+- **Postmortem / skill-score**: `triggerPostmortem()` and `fetchSkillScore()` were removed from `markExecuted()`. Trigger via 🤖 / 🔬 buttons on the Learning page.
+- **Calibration quality debate**: `triggerCalibQualityIfStale()` was removed from `runAnalysis()`. The calib-quality card loads with `?cache_only=1` and shows a "▶ Run debate" button when no cached result exists.
+
+This prevents unintended Ollama calls during market hours and avoids priority-queue saturation.
+
 ---
 
 ## 1. Portfolio Analysis — `'portfolio'`
@@ -90,6 +98,7 @@ Account settings: brokerage ${n}/trade (round-trip ${2n}) | max {n} trades/day |
 LIVE PORTFOLIO STATE:
 Holdings: [{ticker, sector, shares, avgPrice, currentPrice, value, unrealisedPnl,
             unrealisedPnlPct, daysHeld, weight}]
+            ← currentPrice is the live signal price from state.liveSignals (force-refreshed via GET /api/analyse at Step 2 of runAnalysis), not the stale portfolio cache price
 Cash available: ${n} | Total invested: ${n} | Net worth: ${n}
 RBA Cash Rate: {n}% ({source}, {date})
 
@@ -224,9 +233,11 @@ SYNTHESIS: {winner} | {key_pivot}
 11. **Validator** — `validateRec()` + `validateSellTags()` + auto-repair loop (≤2 retries via `getValidatedAnalysisWithRepair`)
 12. **Learning loop** — `logRecsToLearningLoop()` fires asynchronously
 
+> **Note on `portfolioJson` and live prices (hotfix a888eec):** Before building the user message, `analysis.js` constructs `portfolioJson` using `livePrice = state.liveSignals[ticker]?.current_price ?? h.currentPrice` for **all** price-derived fields: `currentPrice`, `value`, `unrealisedPnl`, `unrealisedPnlPct`, and `weight`. This ensures SELL/TRIM recs anchor `priceRange` to the fresh signal price (force-fetched at Step 2 of `runAnalysis()`), not the potentially stale `state.portfolio[].currentPrice` cached from the last portfolio save.
+
 ### Known Issues / Improvement Notes
 
-Issues identified from call log audit (2026-06-03). All three fixed in Sprint 42.
+Issues identified from call log audit (2026-06-03). Issues 1–3 fixed in Sprint 42; issue 4 fixed in hotfix a888eec.
 
 #### ✅ 1. `max_tokens` too low — responses truncate (FIXED Sprint 42)
 **Fix:** `_AGENT_MAX_TOKENS.portfolio` raised from `6000` to `8000` in `js/claude-client.js`.
@@ -243,6 +254,9 @@ Previously observed on BXB (~$357), SHL (~$344), SGP (~$37) — all below the $5
 - `stopLoss` = price invalidating the exit thesis (stock recovers past here — 3–5% ABOVE sell price; must be above `priceRange[1]`)
 - Explicit instruction: "Do NOT set priceRange, target, and stopLoss to the same value."
 Previously, full SELL recs (e.g. CSL SELL) set all three to the sell price (e.g. `[92.56,92.56]`, target=92.56, stopLoss=92.56), triggering the `stop-below-entry` validator rule (SELL stop must be above entry) and producing a zero-distance ATR floor calculation.
+
+#### ✅ 4. Stale `currentPrice` in `portfolioJson` (FIXED hotfix a888eec)
+**Fix:** `portfolioJson` in `analysis.js` now uses `livePrice = state.liveSignals[ticker]?.current_price ?? h.currentPrice` for all price-derived fields (`currentPrice`, `value`, `unrealisedPnl`, `unrealisedPnlPct`, `weight`). Previously `h.currentPrice` came directly from the portfolio state cache, which could lag the live signal price by minutes — causing SELL/TRIM `priceRange` to be anchored to a stale price. The force-refresh of live signals at Step 2 of `runAnalysis()` now meaningfully feeds into the prompt.
 
 ---
 
@@ -718,6 +732,8 @@ Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. Th
 4. ~~**Duplicate Rule 16**~~ ✅ **Fixed** — Rule 17 (`RISK-REWARD CONTEXT`) correctly renumbered in `ANALYSIS_SYSTEM_PROMPT`. Version bumped to v6.
 
 5. ~~**`monitor` urgency for SELL**~~ ✅ **Fixed** — `validateSellTags()` in `response-validator.js` line 89 rejects `SELL + urgency:monitor` with an explicit error. The forbidden combination is also listed in `ANALYSIS_SYSTEM_PROMPT` Section 2. No further action needed.
+
+6. ~~**Stale `currentPrice` in `portfolioJson`**~~ ✅ **Fixed hotfix a888eec** — `portfolioJson` in `analysis.js` now uses `livePrice = state.liveSignals[ticker]?.current_price ?? h.currentPrice` for all price-derived fields. Fixes SELL/TRIM `priceRange` anchoring to a stale cached price instead of the just-refreshed signal price. See Known Issue #4 in Section 1.
 
 ---
 

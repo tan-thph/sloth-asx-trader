@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** June 2026 (Sprint 42)
-**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–42 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28)
+**Last Updated:** June 2026 (Sprint 46 + hotfixes)
+**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–46 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -79,7 +79,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 ### Supporting Tables
 - `rec_history` — Every Claude recommendation + `learning_id` link to `ai_learning_events`.
 - `trade_journal` — All trades (AI + manual) with `close_date`.
-- `trading_lessons` — Scoped persistent trading lessons `(lesson_text, ticker?, sector?, regime?, source)` injected into Claude user messages (Sprint 39). CRUD via `GET/POST /api/learning/lessons` and `DELETE /api/learning/lesson/<id>`.
+- `trading_lessons` — Scoped persistent trading lessons `(lesson_text, ticker?, sector?, regime?, source, breadth_scope?)` injected into Claude user messages (Sprint 39). `breadth_scope` TEXT column added Sprint 44: `adl_below_0.3`, `adl_above_0.7`, `high_vol`, `low_vol`, or null (always inject). CRUD via `GET/POST /api/learning/lessons` and `DELETE /api/learning/lesson/<id>`.
 - `tag_reviews` — Manual spot-check verdicts for Ollama auto-tagged events `(event_id UNIQUE, verdict, corrected_tag, original_tag)`. Drives `agree_rate` gate on the `top_err` calibration nudge (Sprint 41).
 - `ai_call_log` — Full prompt + response audit trail for every `callClaude()` call `(agent_type, model, system_prompt [8k cap], user_message [30k cap], response, tokens, duration_ms)`. Also written by `quick_analysis()` with `agent_type='portfolio:local'` for local LLM calls (Sprint 42). Browsable via `GET /api/log/ai_calls` and `GET /api/log/ai_call/<id>`; filter by agent type with `?agent_type=portfolio:local`.
 
@@ -93,9 +93,9 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 
 2. **Trade Executed** (`recommendations.js` → `markExecuted()`)
    - `POST /api/learning/outcome` — updates entry price, outcome fields
-   - `exit_reason` auto-detected via `_detectExitReason(exitPrice, stopLoss, target)` — sets `stop_hit`/`target_hit` (±0.5% tolerance) or falls back to `manual` (Stage 1)
-   - Auto-triggers `triggerPostmortem()` (fire-and-forget) for loss/breakeven outcomes (Stage 2)
+   - `exit_reason` auto-detected via `_detectExitReason(exitPrice, stopLoss, target)` — sets `stop_hit`/`target_hit` (±0.5% tolerance) or falls back to `manual` (Stage 1); function now lives in `js/utils.js` (hoisted Sprint 43)
    - Auto-reconciles parent BUY/TOP_UP learning events when a SELL/TRIM fully closes the position (Stage 1)
+   - **No longer auto-triggers postmortem/skill-score** — these must be initiated via the 🤖/🔬 buttons on the Learning page (hotfix a888eec)
 
 3. **Trade Closed** (`performance.js` → `syncClosedTradesToLearningLoop()`)
    - Reconciles journal against `rec_history` and patches outcome for closed trades
@@ -123,11 +123,14 @@ The half-life is **regime-adaptive** — volatile regimes force faster decay so 
 | Regime | Half-life | Rationale |
 |--------|-----------|-----------|
 | `panic` | 20d | Fast-moving; yesterday's patterns may already be invalid |
-| `bearVolatile`, `highVol` | 25d | High intraday noise; quick regime transitions |
 | `riskOff` | 30d | Sustained bear bias; still moving fast |
-| `bearTrending` | 35d | Directional but slower than volatile regimes |
-| `riskOn`, `bullTrending` | 45–50d | Momentum regimes; moderate recency bias |
-| `sideways`, `neutral` | 60d | Low volatility; historical samples remain valid longer |
+| `highVol` | 35d | High intraday noise; quick regime transitions |
+| `trend` | 45d | Directional but moderate recency bias |
+| `riskOn` | 50d | Momentum regime; moderate recency bias |
+| `sideways` | 60d | Low volatility; historical samples remain valid longer |
+| (default) | 45d | Fallback when regime string is absent or unrecognised |
+
+> **Note:** Only the six regime names produced by `classifyRegime()` are valid keys. Phantom names (`bearVolatile`, `bearTrending`, `bullTrending`, `neutral`) were previously documented but never existed in the code — they were removed in hotfix 16bba99. `_REGIME_GROUPS` for hierarchical fallback: bearish={riskOff, panic}, bullish={riskOn, trend}, neutral={highVol, sideways}.
 
 The active half-life is logged in the calibration block header when non-default:
 ```
@@ -205,7 +208,9 @@ The `_weight()` function in `_calib_compute()` applies skill weighting centered 
 sf = max(0.2, min(1.8, skill_score / 5.0))  # skill_score=5 → sf=1.0 (neutral)
 weight = time_decay × sf
 ```
-Centering at 5 means unscored events (`skill_score=NULL`) fall back to `sf=1.0` — identical to a neutral-scored trade. A high-skill trade (score=8) gets `sf=1.6`, amplifying its calibration signal; a low-skill trade (score=2) gets `sf=0.4`, down-weighting lucky wins. The old formula (`max(0.2, skill/10)`) centred at 10 and penalised all scored trades vs unscored, which was backwards. Phase 8 is fully live via `_compute_phase8_meta()` (Sprint 31): Mann-Whitney U gate (z>1.28, one-sided p<0.10) compares mean skill score for wins vs losses — when the gate fails, `sf=1.0` for all events regardless of `skill_score`. Activates automatically once 10+ scored events exist where wins score statistically higher than losses.
+Centering at 5 means unscored events (`skill_score=NULL`) fall back to `sf=1.0` — identical to a neutral-scored trade. A high-skill trade (score=8) gets `sf=1.6`, amplifying its calibration signal; a low-skill trade (score=2) gets `sf=0.4`, down-weighting lucky wins. The old formula (`max(0.2, skill/10)`) centred at 10 and penalised all scored trades vs unscored, which was backwards. Phase 8 is fully live via `_compute_phase8_meta()` (Sprint 31): Mann-Whitney U gate (z>1.28, one-sided p<0.10) compares skill scores for wins vs losses — when the gate fails, `sf=1.0` for all events regardless of `skill_score`. Activates automatically once 10+ scored events exist where wins score statistically higher than losses.
+
+> **Bug fix (hotfix 16bba99):** The Phase 8 gate now runs in **both** `_compute_phase8_meta()` (stats endpoint) and `_calib_compute()` (calibration block). Previously the calibration block used a raw mean comparison instead of the Mann-Whitney U z-score — this meant Phase 8 in the calibration block could activate on a single high-skill outlier, incorrectly amplifying or suppressing event weights. The fix aligns both code paths: `_phase8_active = _mann_whitney_z(win_skills, loss_skills) > 1.28`.
 
 **Phase 6: Calibration quality debate card** ✅ *(Sprint 26)*
 `GET /api/debate/calib-quality` — backend pre-calculates binomial SE + Z-scores per confidence band, builds a constrained prompt, calls the local Ollama model, returns per-band verdicts and qualitative analysis. Result cached in `blob_store` key `calib_quality_latest` with date; `force=1` bypasses cache.
@@ -221,13 +226,32 @@ p_noise = 2 * (1 - _norm_cdf(abs(z)))   # two-tailed
 
 Prompt instructs: *"Programmatic analysis shows p_noise=34% — do NOT identify a systemic cause. Focus only on whether the specific failure tags of the N losses share a common mechanism."*
 
-Auto-triggered once per day via `triggerCalibQualityIfStale(regime)` in `debate-client.js` (LOW priority) — fires after every Claude analysis call. Cached in `localStorage` by date to prevent redundant backend calls. Manual Refresh button on the Learning page card forces a fresh run (`force=1`).
+**Note (hotfix a888eec):** `triggerCalibQualityIfStale()` is **no longer auto-called** from `runAnalysis()`. The calib-quality card on the Learning page loads with `cache_only=1` and shows a "▶ Run debate" button when no cached result exists. The `triggerCalibQualityIfStale()` function still exists in `debate-client.js` but must be called manually via the card button. Manual Refresh button forces a fresh run (`force=1`).
+
+**Regime-flip calibration penalty** *(Sprint 44)*
+When `fetchAndClassifyRegime()` detects a regime change, it writes `regime_flipped_at` (ISO timestamp) and `regime_flipped_to` (new regime name) to `localStorage`. `fetchCalibrationBlock()` passes these as query params. In `_calib_compute()`, if `flipped_to == regime` (current regime matches the flip destination) and the flip was within 30 days and fewer than 10 trades have accumulated in the new regime, the effective half-life is halved (`hl = max(10, hl // 2)`). The calibration block emits `⚠REGIME_FLIP(Nd ago, N trades, hl=Nd)` so Claude knows the data is thin. Once 10+ trades accumulate or 30 days pass, normal HL resumes automatically.
+
+**Thesis drift detection** *(Sprint 45)*
+`_compute_thesis_drift(conn)` compares average `realized_pnl_pct` for `exit_reason='manual'` vs `exit_reason='target_hit'` closed events (both `was_executed=1`). Requires n≥5 in each bucket. When manual avg P&L lags target-hit avg by >3pp, emits `⚠EARLY_EXIT_DRAG: manual_avg=X% vs target_avg=Y%→cutting winners early` as the lowest-priority token in the calibration block (first dropped by the token budget). Also exposed directly via `GET /api/learning/thesis-drift` for the Learning page `renderThesisDriftCard()`.
+
+**Breadth-scope trading lessons** *(Sprint 44)*
+`trading_lessons` table gained a `breadth_scope TEXT` column. Valid values: `adl_below_0.3` (inject when ADL < 0.3), `adl_above_0.7` (inject when ADL > 0.7), `high_vol` (inject when `asx_vol_20d > 25%`), `low_vol` (inject when `asx_vol_20d < 12%`), or `null` (always inject). `GET /api/learning/lessons` accepts `adl=<float>` and `asx_vol=<float>` query params; lessons are filtered so only contextually relevant scope-matched lessons reach Claude. `analysis.js` reads `state.macroData.advance_decline_ratio` and `state.macroData.asx_vol_20d` to supply these params.
+
+**Auto-trigger removal** *(hotfix a888eec)*
+`triggerPostmortem()` and `fetchSkillScore()` are no longer called automatically when `markExecuted()` closes a trade. `triggerCalibQualityIfStale()` is no longer called from `runAnalysis()` / `logRecsToLearningLoop()`. All three are now **manual-only**:
+- 🤖 button on Learning page events → `triggerPostmortem()`
+- 🔬 button on Learning page events → `fetchSkillScore()`
+- "▶ Run debate" button on the calib-quality card → `triggerCalibQualityIfStale(force=true)`
+
+The calib-quality card on the Learning page loads with `cache_only=1` — it shows the last cached result immediately without making an Ollama call. The "▶ Run debate" button appears when no cached result exists (or "Refresh" when one does). This prevents auto-trigger queue saturation and unintended Ollama calls during market hours.
 
 **Confidence → position sizing (deferred)**
 The quant engine already binds Claude's calibrated confidence to Kelly position sizing via `winProb: r.confidence`. When the calibration block instructs Claude to adjust confidence (e.g. -8pp nudge), that adjusted value flows directly into the Kelly fraction and thus the share count. Adding a second linear multiplier on top would double-discount. Deferred until empirical evidence shows Kelly alone is insufficient to transmit calibration feedback into execution sizes.
 
-**Virtual outcomes / paper-trade skipped recs** ✅ *(Sprint 36)*
+**Virtual outcomes / paper-trade skipped recs** ✅ *(Sprint 36 + Sprint 44)*
 `_resolve_virtual_outcomes(conn)` runs lazily inside `_calib_compute()`. For `was_executed=0` recs ≥30 days old with non-null stop and target, it fetches OHLCV history and checks whether `high ≥ target` (virtual_win) or `low ≤ stop` (virtual_loss). Results written to `virtual_outcome` and fed back into calibration at 0.75× weight via `rows_all`. Prevents the pessimism loop where suppressed calibration produces no new outcomes. Frontend shows virtual outcome count in the calibration stats card.
+
+**Sprint 44 addition — virtual speed weighting:** `_resolve_virtual_outcomes()` now also writes `virtual_speed_weight = min(1.0, 7.0 / hold_days)` to the `ai_learning_events` row (`virtual_speed_weight REAL` column added via `_LE_MIGRATIONS`). A virtual win resolved in 7 days gets weight=1.0; one that drifted to target over 29 days gets ~0.24. In `_calib_compute()`, the effective weight for virtual rows is `0.75 × virtual_speed_weight` — fast hits are treated nearly as strongly as executed outcomes; slow drifts are further discounted. This prevents a slow-moving unexecuted rec from inflating calibration as much as a clean, fast win.
 
 ---
 
@@ -265,15 +289,18 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 | `GET /api/learning/calibration-stats`   | Read   | Brier score + reliability-diagram bins `{brier_score, n, bins:[{range,lo,hi,n,mean_confidence,actual_win_rate}]}` |
 | `GET /api/learning/digest-data`         | Read   | Structured failure data for the postmortem digest `{recent_failures, regime_stats, overall_wins, error_dist, exit_dist}` |
 | `GET /api/learning/sell-outcomes`       | Read   | Executed SELL/TRIM events with `sell_primary_driver` set and per-event `sell_verify_verdict` badges; `?force=1` triggers immediate re-resolve *(Sprint 37)* |
-| `GET /api/learning/lessons`             | Read   | Scoped lessons matching `?ticker=X&sector=Y&regime=Z` (cap 4); injected into Claude user messages *(Sprint 39)* |
-| `POST /api/learning/lessons`            | Write  | Create a lesson `{lesson_text, ticker?, sector?, regime?, source}` *(Sprint 39)* |
+| `GET /api/learning/lessons`             | Read   | Scoped lessons matching `?ticker=X&sector=Y&regime=Z&adl=<float>&asx_vol=<float>` (cap 4); filtered by `breadth_scope` column; injected into Claude user messages *(Sprint 39, breadth-scope Sprint 44)* |
+| `POST /api/learning/lessons`            | Write  | Create a lesson `{lesson_text, ticker?, sector?, regime?, source, breadth_scope?}` *(Sprint 39)* |
+| `GET /api/learning/thesis-drift`        | Read   | `{n_manual, n_target, avg_manual_pct, avg_target_pct, nudge}` — requires n≥5 per bucket; backed by `_compute_thesis_drift(conn)` *(Sprint 45)* |
 | `DELETE /api/learning/lesson/<id>`      | Write  | Hard-delete one lesson *(Sprint 39)* |
 | `GET /api/learning/untagged`            | Read   | Loss/breakeven events with no `error_type` — batch-classify queue *(Sprint 38)* |
 | `GET /api/learning/tag-reviews`         | Read   | Up to 5 random unreviewed auto-tagged events for weekly spot-check *(Sprint 41)* |
 | `POST /api/learning/tag-review`         | Write  | Submit `{event_id, verdict:'agree'\|'disagree', corrected_tag?}`; disagree updates `error_type` → manual and clears `_calib_cache` *(Sprint 41)* |
 | `GET /api/learning/tag-accuracy`        | Read   | `{n, n_agree, agree_rate, label, pending_review}` — agree_rate gates top_err nudge *(Sprint 41)* |
 | `GET /api/learning/debate-stats`        | Read   | Per-pairing adversarial-debate breakdown (consensus/partial/diverged + concede rate) |
-| `GET /api/market/universe-health`       | Read   | Checks all ASX200 tickers via yfinance quoteType (20-worker pool, per-ticker 8s timeout); persists `universe_verified_at` to blob_store *(Sprint 41)* |
+| `GET /api/market/universe-health`       | Read   | Checks all ASX200 tickers via yfinance quoteType (20-worker pool, per-ticker 8s timeout); persists `universe_verified_at` to blob_store; returns `excluded` list *(Sprint 41; Sprint 46: excluded list)* |
+| `POST /api/market/universe-exclude`     | Write  | Body: `{tickers:[...]}`. Adds to `blob_store.universe_excluded`; scanner and intraday routes filter excluded tickers *(Sprint 46)* |
+| `DELETE /api/market/universe-exclude`   | Write  | Body: `{tickers:[...]}`. Removes from exclusion list *(Sprint 46)* |
 | `GET /api/debate/status`                | Read   | Ollama health check (60s TTL in JS) |
 | `POST /api/debate`                      | Write  | Bull/Bear debate (sequential, 4h signal-hash cache) |
 | `POST /api/debate/postmortem`           | Write  | Auto-tag error_type for loss/breakeven events (single model) |
@@ -292,7 +319,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 **Key Sections:**
 - Summary cards (overall win rate, high-confidence WR, prompt version)
 - Calibration accuracy table (per confidence band, decay-weighted, n<5 warnings)
-- **Calibration Quality card** *(Sprint 26):* shows per-band verdict (🟢 noise / 🟡 uncertain / 🔴 signal) with statistical significance badges (Z-score, p_noise, ESS). Ollama's qualitative analysis shown per band. Refresh button forces `force=1` re-run. Auto-triggered once daily after analysis calls via `triggerCalibQualityIfStale()`
+- **Calibration Quality card** *(Sprint 26):* shows per-band verdict (🟢 noise / 🟡 uncertain / 🔴 signal) with statistical significance badges (Z-score, p_noise, ESS). Ollama's qualitative analysis shown per band. Card loads with `cache_only=1` — shows last cached result immediately. "▶ Run debate" button appears when no cached result exists; "Refresh" button forces `force=1` re-run. Manual-only since hotfix a888eec (auto-trigger from analysis removed)
 - Regime performance table
 - Prompt version history (with Δ vs prior version + regression detector banner)
 - **Success Patterns card** *(Sprint 27):* two-column layout — left: tag chips with count + win rate bars (color-coded per tag type); right: calibration nudge explanation when a dominant tag was injected into the last calibration block. Tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`
@@ -341,7 +368,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 - Extended signal set in debate prompt: `return_5d`, `return_20d`, `atr_pct`, `atr_14` added alongside existing RSI, BB%b, volume_z, OBV, ADX, SMA200 (D4)
 - `entry_signals_json` injected into postmortem prompts (D5) and skill-score prompts (D6)
 - Improved synthesizer JSON extraction: try full parse first, then reverse-scan for last valid `{...}` object (D2)
-- Single-model post-mortem auto-tagging (`/api/debate/postmortem`) — losses/breakevens only; **auto-triggered on close** (Stage 2)
+- Single-model post-mortem auto-tagging (`/api/debate/postmortem`) — losses/breakevens only; **manual via 🤖 button on Learning page** (Stage 2; auto-trigger removed hotfix a888eec)
 - **Adversarial two-model postmortem debate** (`/api/debate/postmortem-debate`) — user-initiated via ⚔️ button
 - Entry staleness check (`/api/debate/staleness`) — banner on recs ≥ 2 days old
 - Skill score (`/api/debate/skill`) — 🔬 button on all closed events
@@ -359,8 +386,8 @@ All phases implemented. No open future items for the debate system.
 - **`format_schema` (Sprint 23):** All JSON-producing Ollama calls now pass a JSON Schema via Ollama's native `format` parameter. The inference engine constrains token selection at the grammar level — valid JSON is guaranteed without relying on regex fallback parsers. Schemas: `_SCHEMA_POSTMORTEM`, `_SCHEMA_WIN_TAG`, `_SCHEMA_SYNTHESIS`, `_SCHEMA_EXIT_SYNTHESIS`, `_SCHEMA_PM_SYNTHESIS`, `_SCHEMA_SKILL`. Cloud callers (Groq/Gemini/Claude) are not affected — they receive schema guidance via prompt text.
 - No retry on timeout — fail immediately, caller switches to smaller model
 - Batch concurrency always 1 — Ollama queues internally; external concurrency wastes VRAM
-- **JS priority queue (Sprint 24):** `_oqEnqueue(fn, priority)` in `debate-client.js` enforces a HIGH/LOW semaphore on all Ollama backend calls. HIGH tasks (user-initiated: `fetchDebate`, manual postmortem button) insert before queued LOW tasks. LOW tasks (auto-triggered: `triggerPostmortem`, `fetchSkillScore`, auto `fetchPostmortemDebate`, `triggerCalibQualityIfStale`) are queued in arrival order. A running call is never interrupted — the priority only determines insertion point in the waiting queue.
-- **Auto calibration quality trigger (Sprint 26):** `triggerCalibQualityIfStale(regime)` in `debate-client.js` fires after every `analysis.js` `logRecsToLearningLoop()` call. Checks `localStorage._calibQualityDate` — skips if already run today. Fires `GET /api/debate/calib-quality` as a LOW-priority queued task. Sets the date key on success so it runs at most once per calendar day.
+- **JS priority queue (Sprint 24):** `_oqEnqueue(fn, priority)` in `debate-client.js` enforces a HIGH/LOW semaphore on all Ollama backend calls. HIGH tasks (user-initiated: `fetchDebate`, manual postmortem button) insert before queued LOW tasks. LOW tasks (user-initiated from Learning page: `triggerPostmortem`, `fetchSkillScore`, `triggerCalibQualityIfStale`) are queued in arrival order. A running call is never interrupted — the priority only determines insertion point in the waiting queue. *(hotfix a888eec: these were previously auto-triggered; they are now manual-only)*
+- **Calibration quality trigger (Sprint 26, manual-only since hotfix a888eec):** `triggerCalibQualityIfStale(regime)` in `debate-client.js` is no longer called automatically from `analysis.js`. It fires only when the user clicks "▶ Run debate" on the Learning page calib-quality card (`?force=1`). The card loads with `cache_only=1` on page render — shows the last cached result without an Ollama call. `GET /api/debate/calib-quality` accepts `?cache_only=1` to return cached result immediately.
 
 ### Model priority (Auto selection)
 `preferredDebateModel()` selects from pulled models in this order:
@@ -597,7 +624,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Direction-aware debate prompts (D7) | SELL/TRIM recs ask "hold vs exit" not "bull vs bear" — framing matters; wrong framing produces off-target synthesis |
 | `entry_signals_json` in postmortem/skill prompts (D5/D6) | Model can reason from actual signal values rather than inferring conditions from price/stop/target alone |
 | Calibration TTL cache 5 min (L4) | Calibration query is CPU-heavy (Python loops over 300 rows); caching avoids re-computation on every Claude call |
-| Auto-postmortem on close (Stage 2) | Removes manual ⚡ step; loss/breakeven events now classified as soon as they close, building the error pattern database faster |
+| Postmortem is manual-only (hotfix a888eec) | Auto-triggering on close caused queue saturation and unintended Ollama calls during market hours. Manual 🤖 button on the Learning page gives explicit control; the endpoint (`/api/debate/postmortem`) is unchanged |
 | Auto-detect exit reason (Stage 1) | Eliminates `exit_reason='manual'` blanket; stop_hit/target_hit now correctly detected ±0.5% so calibration has accurate exit stats |
 | Adversarial debate: user-initiated only | 3 sequential Ollama calls × up to 120s each; auto-running on every loss would block UI for minutes. 🤖 fast-path handles the common case; ⚔️ is for disputes |
 | PARTIAL verdict: keep intersection only | Higher confidence than either model's full output. A tag both agreed on is stronger signal than either individual response |
@@ -615,7 +642,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Blind adjudication (aliases not model names) | Cloud models exhibit halo-effect bias — they prefer certain model families by name regardless of reasoning quality. Random alias assignment removes this bias. `blind_swap` stored in phase_4 for audit |
 | Skill weight centered at 5, not 10 | Old formula `max(0.2, skill/10)` set neutral at 10 — a skill=8 trade (0.8×) was penalised vs unscored (1.0×). Centering at 5 makes unscored and average-skill identical (sf=1.0); high-skill amplified (sf up to 1.8); low-skill down-weighted (sf down to 0.2) |
 | Hierarchical regime fallbacks (specific → macro → all) | When a newly-transitioned regime has ESS < 2.5, falling back to a macro group (bearish/bullish/neutral) gives Claude useful signal instead of nothing. Each level is labelled so Claude knows the specificity |
-| JS priority queue: HIGH/LOW semaphore | Auto-postmortems fire on trade close and can queue multiple background calls. Without a priority gate, a burst of auto-postmortems would block the user's next manual debate for several minutes |
+| JS priority queue: HIGH/LOW semaphore | Multiple LOW-priority background calls (e.g. manual postmortems in batch) can queue up. Without a priority gate, a burst would block the user's next HIGH-priority manual debate. Auto-trigger removal (hotfix a888eec) further reduces queue saturation |
 | Volatility-adaptive half-life (panic=20d, calm=60d) | Fixed 45d assumes constant regime-shift speed. Volatile regimes invalidate historical patterns faster; calm regimes benefit from larger statistical samples. Non-default hl logged in calibration block header |
 | SQLite `PRAGMA optimize` + `wal_checkpoint(PASSIVE)` on startup | Accumulating JSON blobs (debate transcripts, call logs) degrade query planner statistics and grow the WAL file. Both pragmas are non-blocking and complete in ms — zero runtime cost |
 | Phase 6 pre-calculates Z-scores before LLM prompt | Small local models invent causal narratives for deviations that are pure noise. Pre-computing binomial SE and presenting the significance verdict as a fact constrains the model to qualitative analysis of actual failure tags |
@@ -637,7 +664,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 
 - **Stage 1–4 improvements (May 2026):**
   - Stage 1: `entry_signals_json` + `debate_synthesis_winner` columns; `_detectExitReason()` auto-detects stop/target hits; parent BUY reconcile on full position close
-  - Stage 2: auto-postmortem on loss/breakeven close; per-ticker calibration stats via `tickers` param
+  - Stage 2: postmortem endpoint (`/api/debate/postmortem`) wired; per-ticker calibration stats via `tickers` param. **Auto-trigger on close removed in hotfix a888eec — now manual-only via 🤖 button.**
   - Stage 3: explicit calibration algorithm + debate-block usage rule in system prompt; `PROMPT_VERSION='2026-05-v5'`
   - Stage 4: synthesizer returns `{winner, margin, key_pivot}`; stored in DB and shown in SYNTHESIS line
 - **D1–D7 debate improvements (May 2026):** synthesizer `num_predict` 120→180 (D1); reversed JSON scan (D2); `/no_think` suffix removed (D3); 5d/20d/ATR signals in debate + hash (D4); `entry_signals_json` in postmortem/skill prompts (D5/D6); direction-aware prompts for SELL/TRIM (D7)
@@ -651,7 +678,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **Cloud adjudicator provider picker (Sprint 22):** user can select Gemini, Groq, or Claude API explicitly; auto-detect still available; provider picker modal shown when multiple keys are configured
 - **Sprint 24 (May 2026):**
   - **Blind adjudication:** `debate_adjudicate()` randomly assigns "Analyst Alpha"/"Analyst Beta" aliases before building the cloud prompt; response parsed using `score_alpha`/`score_beta` fields; winner un-swapped via `blind_map` to canonical A/B before storage; `blind_swap`, `alias_a`, `alias_b` stored in `phase_4` transcript
-  - **JS Ollama priority queue:** `_oqEnqueue(fn, priority)` added to `debate-client.js`; HIGH lane for user-initiated calls (`fetchDebate`, manual `fetchPostmortemDebate`); LOW lane for background auto-triggers (`triggerPostmortem`, `fetchSkillScore`); manual postmortem button in Learning page passes `priority:'HIGH'`
+  - **JS Ollama priority queue:** `_oqEnqueue(fn, priority)` added to `debate-client.js`; HIGH lane for user-initiated calls (`fetchDebate`, manual `fetchPostmortemDebate`); LOW lane for Learning-page-initiated calls (`triggerPostmortem`, `fetchSkillScore`, `triggerCalibQualityIfStale`); manual postmortem button passes `priority:'HIGH'`. *(hotfix a888eec: auto-triggers removed — all three are now Learning-page-initiated)*
   - **Skill-weight centering:** `_weight()` formula changed from `max(0.2, sk/10)` to `max(0.2, min(1.8, sk/5.0))`; neutral at 5 instead of 10; unscored events remain at sf=1.0
   - **Hierarchical regime fallbacks:** `_REGIME_GROUPS` dict added to `learning.py`; calibration falls through: specific regime → macro group (bearish/bullish/neutral) → all trades when ESS < 2.5; each level labelled with specificity warning
 - **Sprint 25 (May 2026):**
@@ -661,8 +688,8 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **Confidence → sizing analysis:** Kelly already binds calibrated confidence to position size via `winProb`; second multiplier deferred as double-discount risk
 - **Sprint 26 (May 2026):**
   - **Phase 6 implemented:** `GET /api/debate/calib-quality` in `routes/debate.py`. `_norm_cdf(x)` using `math.erfc` (no scipy). `_calib_bands_raw(regime, days)` fetches recent bands. `_calib_quality_prompt(bands)` builds constrained prompt with pre-computed Z-scores, p_noise, immutable verdict facts. `_SCHEMA_CALIB_QUALITY` JSON schema enforces Ollama output. Result cached to `blob_store.calib_quality_latest`. `force=1` query param bypasses cache
-  - **Learning page Calibration Quality card:** `renderCalibQualityCard()` async function; traffic-light badges (🟢/🟡/🔴); Refresh button wired to `._force()` call; auto-called in `renderLearningPage`
-  - **Auto-trigger:** `triggerCalibQualityIfStale(regime)` added to `debate-client.js`; called from `analysis.js` after `logRecsToLearningLoop()`; LOW priority queue; localStorage date guard prevents >1 run/day
+  - **Learning page Calibration Quality card:** `renderCalibQualityCard()` async function; traffic-light badges (🟢/🟡/🔴); loads with `cache_only=1` on render (no Ollama call); "▶ Run debate" button when no cached result; "Refresh" button when cached. **Manual-only since hotfix a888eec** — auto-trigger removed
+  - **Auto-trigger (removed hotfix a888eec):** `triggerCalibQualityIfStale(regime)` was added to `debate-client.js` and called from `analysis.js` after `logRecsToLearningLoop()`; this auto-call was removed; now triggered only by the "▶ Run debate" / "Refresh" button on the Learning page card. `routes/debate.py` accepts `?cache_only=1` to return the cached result immediately without an Ollama call.
 - **Sprint 27 (May 2026):**
   - **Success tag calibration nudge:** Step 6b in `_calib_compute()`. Queries `success_tags` from closed win events. If ≥33% of tagged wins share a tag and ESS≥2.5, emits `✓tag(N/Mwins,ESS=X.X)→lean into this` in the calibration block
   - **`success_patterns` in stats:** `/api/learning/stats` now returns `success_patterns: {tag: {wins, total, win_rate}}` for all 5 supported tags with ≥1 win
@@ -710,12 +737,14 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 
 ## Next Milestones
 
-1. ✅ **Phase 8** — `_compute_phase8_meta()` live with Mann-Whitney U gate (z>1.28, one-sided p<0.10). Replaces raw mean comparison. Phase 8 activates automatically once 10+ scored events exist where wins score statistically higher than losses.
-2. ✅ **Phase 6** — `GET /api/debate/calib-quality` live; Z-scores pre-computed server-side; Learning page traffic-light card; auto-triggered daily.
-3. ✅ **Virtual outcomes** — `_resolve_virtual_outcomes()` live (Sprint 36); feeds back at 0.75× weight.
-4. ✅ **Lessons Database** — `trading_lessons` table + CRUD + Claude injection live (Sprint 39).
+1. ✅ **Phase 8** — `_compute_phase8_meta()` live with Mann-Whitney U gate (z>1.28, one-sided p<0.10). Now also in `_calib_compute()` (hotfix 16bba99). Phase 8 activates automatically once 10+ scored events exist where wins score statistically higher than losses.
+2. ✅ **Phase 6** — `GET /api/debate/calib-quality` live; Z-scores pre-computed server-side; Learning page traffic-light card. **Manual-only** (hotfix a888eec removed auto-trigger; card loads with `cache_only=1`).
+3. ✅ **Virtual outcomes** — `_resolve_virtual_outcomes()` live (Sprint 36); feeds back at 0.75× weight × `virtual_speed_weight` (Sprint 44).
+4. ✅ **Lessons Database** — `trading_lessons` table + CRUD + Claude injection + `breadth_scope` filtering live (Sprint 39, Sprint 44).
 5. ✅ **Regime-aware SELL/TRIM ATR floor** — `analysis.js` Step 3 now reads `regimeMod.stopAtrMult ?? 2.5` from `getRegimeModifiers(state.currentRegime.regime)`. Rec flagged `_stopRepaired: true` and `_stopRepairedMult: N`. *(Sprint 41)*
 6. ✅ **`high_60d` / `low_60d` for Fibonacci** — `indicators.py` `analyse_ticker()` now emits `high_60d = high.tail(60).max()` and `low_60d = low.tail(60).min()`. Signal #4 in `prompts.js` updated to use `fib_50`/`fib_618` computed from these values, with `return_60d` as fallback. *(Sprint 41)*
+7. ✅ **Thesis drift detection** — `_compute_thesis_drift(conn)` + `GET /api/learning/thesis-drift` + `renderThesisDriftCard()` on Learning page. *(Sprint 45)*
+8. ✅ **Regime-flip calibration penalty** — `fetchAndClassifyRegime()` writes flip timestamp to localStorage; `_calib_compute()` halves HL for first <10 trades; emits `⚠REGIME_FLIP` token. *(Sprint 44)*
 
 ---
 
