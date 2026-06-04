@@ -78,6 +78,15 @@ def ttl_cache(seconds: int):
 _last_good: dict[str, Any] = {}
 
 
+def _http_status(exc: Exception) -> int | None:
+    """Extract HTTP status code from requests or urllib exceptions, or None."""
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        return exc.response.status_code
+    if hasattr(exc, "code") and isinstance(exc.code, int):  # urllib.error.HTTPError
+        return exc.code
+    return None
+
+
 def fetch_with_retry(
     fn: Callable,
     *args,
@@ -91,6 +100,10 @@ def fetch_with_retry(
     On complete failure, returns the last successful result stored under
     cache_key (or raises the last exception if no prior result exists).
     Always updates _last_good[cache_key] on success.
+
+    4xx errors (except 429) are not retried — Yahoo returning 400 Bad Request
+    means the request itself is malformed; retrying wastes time and never fixes it.
+    429 and 5xx are retried with exponential backoff; 429 gets a minimum 5s sleep.
     """
     last_exc: Exception | None = None
     for attempt in range(max_retries):
@@ -101,10 +114,18 @@ def fetch_with_retry(
             return result
         except Exception as exc:
             last_exc = exc
+            status = _http_status(exc)
+            # 4xx (except 429) = client error; retrying won't help
+            if status is not None and 400 <= status < 500 and status != 429:
+                log.warning("fetch_with_retry: HTTP %s for %s — skipping retries", status, cache_key or fn)
+                break
             if attempt < max_retries - 1:
-                time.sleep(backoff ** attempt)
+                sleep_time = backoff ** attempt
+                if status == 429:
+                    sleep_time = max(sleep_time, 5.0)  # back off harder on rate-limit
+                time.sleep(sleep_time)
 
-    # All retries exhausted — serve stale data if available
+    # All retries exhausted (or short-circuited) — serve stale data if available
     if cache_key and cache_key in _last_good:
         log.warning("fetch_with_retry: all retries failed for %s — serving stale cache. err: %s", cache_key, last_exc)
         return _last_good[cache_key]
