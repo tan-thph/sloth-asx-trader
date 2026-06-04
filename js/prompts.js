@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v6';
+const PROMPT_VERSION = '2026-06-v7';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -181,6 +181,8 @@ const ANALYSIS_SYSTEM_PROMPT =
     sector_rotation       — institutional capital visibly rotating OUT of this sector (breadth data)
     franking_captured     — dividend + franking credits already received; yield support reduced
     unrealised_loss_large — position has > $500 unrealised loss eligible for EOFY crystallisation
+      ENFORCEMENT: Do NOT assign unrealised_loss_large if the actual unrealised loss is < $500 AUD.
+      Check Holdings block: unrealisedPnl for this ticker must be more negative than −$500.
     held_over_12m         — position > 12 months; CGT discount applies to any replacement BUY
     held_11_to_12m        — approaching 12-month threshold; timing the exit to optimise CGT discount
     sector_concentration  — this holding represents > 20% of portfolio's sector exposure
@@ -436,8 +438,14 @@ const ANALYSIS_SYSTEM_PROMPT =
     BUY:    New position — watchlist entry or entirely new holding.
     TOP_UP: Add to EXISTING holding — underweight, strong multi-factor thesis. qty = incremental shares only.
     SELL:   Close full position — multi-factor deterioration confirmed.
+            priceRange[0] = limit sell price. target = price that confirms the exit was correct
+            (further decline — typically 5–15% below priceRange[0] depending on thesis).
+            stopLoss = price at which the exit thesis is INVALIDATED (stock recovers past this level,
+            signalling the sell was wrong — set 3–5% ABOVE priceRange[0]; must be above priceRange[1]).
+            Do NOT set priceRange, target, and stopLoss to the same value.
     TRIM:   Reduce EXISTING holding — overweight (>15%), near fair value, or factor thesis weakening.
             qty = shares to sell (not total held).
+            Same target/stopLoss semantics as SELL: target below sell price, stopLoss above.
 
   === JSON OUTPUT SCHEMA EXAMPLE (conform exactly) ===
   {

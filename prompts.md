@@ -44,14 +44,14 @@ callClaude(agentType, userMessage, options)    ← js/claude-client.js
 | `assistant` | ❌ no | Multi-turn; context varies every call |
 | `briefing` | ❌ no | Short, one-shot, daily freshness needed |
 
-The `portfolio` system prompt is the only one worth optimising for cache stability — it's the most expensive (~2,800 tokens) and called multiple times per trading day. All dynamic state lives in the user message; the system prompt contains zero interpolations.
+The `portfolio` system prompt is the only one worth optimising for cache stability — it's the most expensive (~8,700 tokens, confirmed via `cache_creation_input_tokens` in call logs) and called multiple times per trading day. All dynamic state lives in the user message; the system prompt contains zero interpolations.
 
 ---
 
 ## 1. Portfolio Analysis — `'portfolio'`
 
 **File:** `js/analysis.js → runAnalysis()`
-**Trigger:** "Run Analysis" button · max 6,000 output tokens
+**Trigger:** "Run Analysis" button · max 8,000 output tokens
 **System prompt:** `ANALYSIS_SYSTEM_PROMPT` (static, cached) + optional regime/date modules from `buildSystemArray()` (uncached second block)
 
 ### System prompt structure (8 sections)
@@ -224,6 +224,26 @@ SYNTHESIS: {winner} | {key_pivot}
 11. **Validator** — `validateRec()` + `validateSellTags()` + auto-repair loop (≤2 retries via `getValidatedAnalysisWithRepair`)
 12. **Learning loop** — `logRecsToLearningLoop()` fires asynchronously
 
+### Known Issues / Improvement Notes
+
+Issues identified from call log audit (2026-06-03). All three fixed in Sprint 42.
+
+#### ✅ 1. `max_tokens` too low — responses truncate (FIXED Sprint 42)
+**Fix:** `_AGENT_MAX_TOKENS.portfolio` raised from `6000` to `8000` in `js/claude-client.js`.
+With 24+ holdings + full dividend/earnings/risk/technicals blocks, the 6,000-token ceiling was regularly hit — truncated JSON caused unnecessary validator repair-loop retries. The 2026-06-03_14-57-37 audit call confirmed `out=6000` with `dataGaps` cut mid-entry.
+
+#### ✅ 2. `unrealised_loss_large` applied below its own threshold (FIXED Sprint 42)
+**Fix:** Added enforcement text immediately after the `unrealised_loss_large` definition in `ANALYSIS_SYSTEM_PROMPT` Section 2:
+> `ENFORCEMENT: Do NOT assign unrealised_loss_large if the actual unrealised loss is < $500 AUD. Check Holdings block: unrealisedPnl for this ticker must be more negative than −$500.`
+Previously observed on BXB (~$357), SHL (~$344), SGP (~$37) — all below the $500 threshold.
+
+#### ✅ 3. priceRange / target / stopLoss identical on full SELL exits (FIXED Sprint 42)
+**Fix:** Added SELL-specific semantics to ACTION DEFINITIONS in `ANALYSIS_SYSTEM_PROMPT`:
+- `target` = price confirming the exit was correct (further decline, 5–15% below sell price)
+- `stopLoss` = price invalidating the exit thesis (stock recovers past here — 3–5% ABOVE sell price; must be above `priceRange[1]`)
+- Explicit instruction: "Do NOT set priceRange, target, and stopLoss to the same value."
+Previously, full SELL recs (e.g. CSL SELL) set all three to the sell price (e.g. `[92.56,92.56]`, target=92.56, stopLoss=92.56), triggering the `stop-below-entry` validator rule (SELL stop must be above entry) and producing a zero-distance ATR floor calculation.
+
 ---
 
 ## 2. Macro Brief — `'macro'`
@@ -302,7 +322,7 @@ Return only JSON.
 `_dtPreFilterWithStats()` applies four hard gates and discards tickers that fail:
 - `F1 LIQUIDITY`: `adv_20 > minAdvAud` (default $1.5M)
 - `F2 TREND`: `current_price ≥ sma_200` (or within 1.5% + `return_5d > 0`)
-- `F3 REGIME`: `adx < maxAdx` (default 30) — mean-reversion fails in strong trends
+- `F3 REGIME`: `adx < maxAdx` (default 35) — mean-reversion fails in strong trends
 - `F4 CATALYST`: no earnings within 5 trading days
 
 Only passing tickers are sent to Claude.
@@ -667,7 +687,7 @@ These exist in `state.liveSignals[t]` but are not currently included in any prom
 
 ## Prompt Versioning
 
-`PROMPT_VERSION = '2026-06-v6'` in `js/prompts.js`.
+`PROMPT_VERSION = '2026-06-v7'` in `js/prompts.js`.
 
 Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. The version is:
 - Stored on every `ai_learning_events` row at log time
@@ -677,6 +697,7 @@ Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. Th
 **Version history:**
 | Version | Key changes |
 |---|---|
+| `2026-06-v7` | Sprint 42: `unrealised_loss_large` enforcement line (≥$500 AUD check against Holdings `unrealisedPnl`); SELL/TRIM exit stop/target semantics (stop = invalidation level above sell price; target = confirmation level below sell price; explicit ban on all-three-same-value) |
 | `2026-06-v6` | Rule 17 renumbered (was duplicate Rule 16); SELL_TAG calibration injection rules (Section 6); sell tag urgency/monitor enforcement. Sprint 42 user-message additions: `Range60d: hi=${n} lo=${n}` in Returns line; optional `Account: {PERSONAL\|SUPER\|TRADING}` in date header |
 | `2026-05-v5` | Calibration algorithm in prompt; debate-block usage rule; Stage 3–4 |
 | `2026-05-v4` | Sprint 23: ESS gates; Ollama structured outputs |

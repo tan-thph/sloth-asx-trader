@@ -14,7 +14,7 @@
 const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
 const _AGENT_MAX_TOKENS = {
-  portfolio: 6000,
+  portfolio: 8000,
   analyst:   3000,
   pm:        3000,
   dayTrade:  4000,
