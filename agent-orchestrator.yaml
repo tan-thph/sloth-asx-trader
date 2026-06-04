@@ -1,0 +1,26 @@
+runtime: tmux
+agent: claude-code
+workspace: worktree
+agentRules: |-
+  Always run tests before pushing.
+  Use conventional commits (feat:, fix:, chore:, docs:, refactor:, test:).
+  Link issue numbers in commit messages.
+  Write clear commit messages that explain WHY, not just WHAT.
+
+  Use modern JavaScript (ES6+).
+  Prefer const over let, never use var.
+  Use async/await over raw Promises.
+  Use template literals for string interpolation.
+
+  Follow Python best practices:
+
+  - Use type hints for function parameters and return values
+  - Follow PEP 8 style guide
+  - Use f-strings for string formatting
+  - Use context managers (with statements) for resource management
+  - Write docstrings for classes and functions
+  - Prefer composition over inheritance
+
+  Before pushing, run these commands:
+  - npm run lint
+  - npm test

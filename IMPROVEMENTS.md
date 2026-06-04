@@ -1,5 +1,13 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-04 (Sprint 45 shipped)
+**Last Updated:** 2026-06-04 (Sprint 46 shipped)
+
+## 0. Shipped — Sprint 46 (2026-06-04)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **Broker CSV SELL import** | Workflow (M) | `POST /api/import/csv` now returns SELL rows in a `sells` array instead of `skipped`. Frontend `handleBrokerCSV()` detects `result.sells`, shows a `<dialog>` confirmation table with FIFO-computed cost basis, gain/loss, CGT discount eligibility, and per-parcel CGT-at-risk warnings (⏰ badge for parcels 320–364 days old). "Apply SELL imports" button calls `_applyImportedSells()` which uses `matchSaleAgainstParcels()` (FIFO, respects `state.cgtMethod`), updates `state.cgtDisposals`, reduces `holding.shares`, and logs to `state.tradeJournal` with `imported:true`. Tickers with no open parcels are skipped with a warning toast. |
+| **Rebalancing suggestions modal** | Risk page (M) | "📋 Suggest Rebalance" button added to Target Allocations & Drift card header (visible when targets are set). `showRebalanceSuggestions()` opens a `<dialog>` modal rendering `_buildRebalanceSuggestions()` — deterministic, no AI call. Computes drift for all tickers in portfolio + target map; filters out <1% drift and <1 share trades; sorts by largest drift; shows BUY/TRIM action, share count, estimated value, and CGT discount-at-risk warning (⚠ for parcels 320–364 days old). Cash shortfall alert shown when total BUY value exceeds `state.cash`. |
+| **ASX universe exclusion list** | Scanner (S) | `POST /api/market/universe-exclude` and `DELETE /api/market/universe-exclude` persist an exclusion list to `blob_store` key `universe_excluded`. `market_scan_start()` in `routes/scanner.py` merges blob_store exclusions with any per-request exclude list before launching the scan thread. `intraday_scan()` in `routes/intraday.py` filters excluded tickers from the input list. `universe_health()` returns `excluded` list in response. Settings page: "Check Now" shows per-ticker "Exclude" buttons next to stale tickers; excluded list rendered with "Re-include" buttons; badge shows count next to Check Now. |
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and

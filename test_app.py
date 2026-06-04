@@ -5074,5 +5074,194 @@ class TestSprint45(unittest.TestCase):
         self.assertIn("Auto-brief time", src)
 
 
+class TestSprint46(unittest.TestCase):
+    """Sprint 46: broker SELL import, rebalance suggestions, universe exclusion list."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    # ── Item 1: Broker CSV SELL import ──────────────────────────────────────
+
+    def test_import_csv_sell_rows_returned_in_sells_array(self):
+        """CSV with SELL rows must return them in 'sells' not 'skipped'."""
+        import io as _io
+        csv_data = (
+            "Date,Reference,Market,Code,Description,Price,Units,Amount,Brokerage,GST,Contract,Order Date,Credit/Debit\n"
+            "15/05/2026,REF1,ASX,BHP,SELL BHP,45.00,50,2250.00,19.95,1.99,CNT1,15/05/2026,Debit\n"
+            "10/05/2026,REF2,ASX,CBA,BUY CBA,120.00,10,1200.00,9.95,0.99,CNT2,10/05/2026,Debit\n"
+        ).encode()
+        r = self.client.post(
+            "/api/import/csv",
+            data={"file": (_io.BytesIO(csv_data), "trades.csv")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertTrue(d["ok"])
+        # SELL must be in sells, not skipped
+        self.assertIn("sells", d)
+        self.assertEqual(len(d["sells"]), 1)
+        self.assertEqual(d["sells"][0]["action"], "SELL")
+        self.assertEqual(d["sells"][0]["ticker"], "BHP")
+        # BUY in rows
+        self.assertEqual(len(d["rows"]), 1)
+        self.assertEqual(d["rows"][0]["ticker"], "CBA")
+        # SELL must NOT appear in skipped
+        for s in d.get("skipped", []):
+            self.assertNotIn("SELL BHP", s.get("reason", ""))
+
+    def test_import_csv_selfwealth_sell_in_sells(self):
+        """SelfWealth CSV with SELL row returned in 'sells' array."""
+        import io as _io
+        csv_data = (
+            "Trade Date,Settlement Date,Description,Quantity,Price,Brokerage,GST on Brokerage,Total Amount,Portfolio\n"
+            "15/05/2026,17/05/2026,SELL 50 WDS,50,4.50,9.95,0.99,225.00,Personal\n"
+        ).encode()
+        r = self.client.post(
+            "/api/import/csv",
+            data={"file": (_io.BytesIO(csv_data), "sw.csv"), "broker": "selfwealth"},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertTrue(d["ok"])
+        self.assertIn("sells", d)
+        self.assertEqual(len(d["sells"]), 1)
+        self.assertEqual(d["sells"][0]["action"], "SELL")
+        self.assertEqual(d["sells"][0]["ticker"], "WDS")
+
+    def test_import_csv_sells_sorted_chronologically(self):
+        """Multiple SELL rows must be sorted by date ascending."""
+        import io as _io
+        csv_data = (
+            "Date,Reference,Market,Code,Description,Price,Units,Amount,Brokerage,GST,Contract,Order Date,Credit/Debit\n"
+            "20/06/2026,R1,ASX,BHP,SELL BHP,46.00,10,460.00,9.95,0.99,C1,20/06/2026,Debit\n"
+            "01/06/2026,R2,ASX,BHP,SELL BHP,44.00,5,220.00,9.95,0.99,C2,01/06/2026,Debit\n"
+        ).encode()
+        r = self.client.post(
+            "/api/import/csv",
+            data={"file": (_io.BytesIO(csv_data), "trades.csv")},
+            content_type="multipart/form-data",
+        )
+        d = json.loads(r.data)
+        self.assertIn("sells", d)
+        self.assertEqual(len(d["sells"]), 2)
+        self.assertLessEqual(d["sells"][0]["date"], d["sells"][1]["date"])
+
+    # ── Item 2: Rebalancing suggestions panel ──────────────────────────────
+
+    def test_risk_js_has_build_rebalance_suggestions(self):
+        """risk.js must define _buildRebalanceSuggestions function."""
+        src = open(os.path.join(ROOT, "js", "pages", "risk.js"), encoding="utf-8").read()
+        self.assertIn("_buildRebalanceSuggestions", src)
+
+    def test_risk_js_has_show_rebalance_suggestions(self):
+        """risk.js must define showRebalanceSuggestions function."""
+        src = open(os.path.join(ROOT, "js", "pages", "risk.js"), encoding="utf-8").read()
+        self.assertIn("showRebalanceSuggestions", src)
+
+    def test_risk_js_suggest_rebalance_button(self):
+        """risk.js must include the Suggest Rebalance button."""
+        src = open(os.path.join(ROOT, "js", "pages", "risk.js"), encoding="utf-8").read()
+        self.assertIn("Suggest Rebalance", src)
+
+    def test_risk_js_cgt_warning_in_suggestions(self):
+        """_buildRebalanceSuggestions must check 320-365 day CGT window."""
+        src = open(os.path.join(ROOT, "js", "pages", "risk.js"), encoding="utf-8").read()
+        self.assertIn("CGT discount at risk", src)
+        self.assertIn("320", src)
+
+    # ── Item 3: Universe exclusion list ────────────────────────────────────
+
+    def test_universe_exclude_post_adds_to_blob_store(self):
+        """POST /api/market/universe-exclude must add tickers to blob_store."""
+        r = self.client.post(
+            "/api/market/universe-exclude",
+            data=json.dumps({"tickers": ["IPL", "XYZ"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertTrue(d["ok"])
+        self.assertIn("IPL", d["excluded"])
+        self.assertIn("XYZ", d["excluded"])
+
+    def test_universe_exclude_delete_removes_from_blob_store(self):
+        """DELETE /api/market/universe-exclude must remove tickers."""
+        # First add some tickers
+        self.client.post(
+            "/api/market/universe-exclude",
+            data=json.dumps({"tickers": ["IPL", "XYZ", "ABC"]}),
+            content_type="application/json",
+        )
+        # Now remove IPL
+        r = self.client.delete(
+            "/api/market/universe-exclude",
+            data=json.dumps({"tickers": ["IPL"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertTrue(d["ok"])
+        self.assertNotIn("IPL", d["excluded"])
+        self.assertIn("XYZ", d["excluded"])
+
+    def test_universe_exclude_deduplicates(self):
+        """Adding the same ticker twice must not create duplicates."""
+        self.client.post(
+            "/api/market/universe-exclude",
+            data=json.dumps({"tickers": ["DEDUP"]}),
+            content_type="application/json",
+        )
+        r = self.client.post(
+            "/api/market/universe-exclude",
+            data=json.dumps({"tickers": ["DEDUP"]}),
+            content_type="application/json",
+        )
+        d = json.loads(r.data)
+        self.assertEqual(d["excluded"].count("DEDUP"), 1)
+
+    def test_settings_js_has_exclude_from_universe(self):
+        """settings.js must define excludeFromUniverse function."""
+        src = open(os.path.join(ROOT, "js", "pages", "settings.js"), encoding="utf-8").read()
+        self.assertIn("excludeFromUniverse", src)
+
+    def test_settings_js_has_unexclude_from_universe(self):
+        """settings.js must define unexcludeFromUniverse function."""
+        src = open(os.path.join(ROOT, "js", "pages", "settings.js"), encoding="utf-8").read()
+        self.assertIn("unexcludeFromUniverse", src)
+
+    def test_settings_js_has_render_exclusion_list(self):
+        """settings.js must define _renderUniverseExclusionList function."""
+        src = open(os.path.join(ROOT, "js", "pages", "settings.js"), encoding="utf-8").read()
+        self.assertIn("_renderUniverseExclusionList", src)
+
+    def test_portfolio_js_has_apply_imported_sells(self):
+        """portfolio.js must define _applyImportedSells function."""
+        src = open(os.path.join(ROOT, "js", "pages", "portfolio.js"), encoding="utf-8").read()
+        self.assertIn("_applyImportedSells", src)
+
+    def test_portfolio_js_has_show_sell_import_confirmation(self):
+        """portfolio.js must define _showSellImportConfirmation function."""
+        src = open(os.path.join(ROOT, "js", "pages", "portfolio.js"), encoding="utf-8").read()
+        self.assertIn("_showSellImportConfirmation", src)
+
+    def test_scanner_imports_get_db(self):
+        """scanner.py must import get_db for exclusion filter."""
+        src = open(os.path.join(ROOT, "routes", "scanner.py"), encoding="utf-8").read()
+        self.assertIn("from db import get_db", src)
+        self.assertIn("universe_excluded", src)
+
+    def test_intraday_imports_get_db(self):
+        """intraday.py must import get_db for exclusion filter."""
+        src = open(os.path.join(ROOT, "routes", "intraday.py"), encoding="utf-8").read()
+        self.assertIn("from db import get_db", src)
+        self.assertIn("universe_excluded", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -336,7 +336,10 @@ python3 asx_server.py</pre>
             style="margin-left:8px;font-size:10px;padding:1px 8px;border-radius:3px;border:1px solid var(--border);background:var(--bg-secondary);cursor:pointer;color:var(--text-secondary)">
             Check Now
           </button>
+          <span id="settings-universe-excluded-badge" style="margin-left:6px;font-size:10px;color:var(--text-muted)"></span>
         </span>
+        <span class="text-muted" style="display:none"></span>
+        <span id="settings-universe-health-results" style="font-size:12px;grid-column:2"></span>
       </div>
     </div>
 
@@ -707,38 +710,66 @@ async function loadSettingsAppInfo() {
     if (el) el.textContent = d.last_backup || 'daily auto-backup enabled';
   } catch { /* silent */ }
 
-  // Universe health — load last-verified date from blob_store via /health or dedicated call
+  // Universe health — load last-verified date and exclusion list from blob_store
   try {
     const r = await fetch(`${API}/api/db/load`);
     const d = await r.json();
     const verifiedAt = d?.data?.universe_verified_at;
-    const el = document.getElementById('settings-universe-date');
+    const excluded   = d?.data?.universe_excluded ? JSON.parse(d.data.universe_excluded) : [];
+    const el  = document.getElementById('settings-universe-date');
+    const exEl = document.getElementById('settings-universe-excluded-badge');
     if (el) {
       el.textContent = verifiedAt
         ? `last checked ${verifiedAt.slice(0, 10)}`
         : 'never checked';
     }
+    if (exEl && excluded.length > 0) {
+      exEl.textContent = `· ${excluded.length} excluded`;
+    }
+    _renderUniverseExclusionList(excluded);
   } catch { /* silent */ }
 }
 
 async function checkUniverseHealth() {
-  const btn  = document.getElementById('universe-check-btn');
-  const date = document.getElementById('settings-universe-date');
+  const btn    = document.getElementById('universe-check-btn');
+  const date   = document.getElementById('settings-universe-date');
+  const exBadge = document.getElementById('settings-universe-excluded-badge');
+  const results = document.getElementById('settings-universe-health-results');
   if (btn)  { btn.disabled = true; btn.textContent = 'Checking…'; }
   if (date) date.textContent = 'checking…';
+  if (results) results.innerHTML = '';
   try {
     const r = await fetch(`${API}/api/market/universe-health`);
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || 'unknown error');
+    const excluded = d.excluded || [];
     if (date) {
       const staleStr = d.stale.length > 0
-        ? ` · ⚠ ${d.stale.length} stale: ${d.stale.join(', ')}`
+        ? ` · ⚠ ${d.stale.length} stale`
         : ` · ✓ all ${d.ok_count} OK`;
       date.textContent = `${d.checked_at.slice(0, 10)}${staleStr}`;
       date.style.color = d.stale.length > 0 ? '#d97706' : '#16a34a';
     }
+    if (exBadge) {
+      exBadge.textContent = excluded.length > 0 ? `· ${excluded.length} excluded` : '';
+    }
+    if (results) {
+      const staleHtml = d.stale.length > 0 ? `
+        <div style="margin-top:6px">
+          <div style="font-size:11px;font-weight:600;color:#d97706;margin-bottom:4px">⚠ Stale / delisted:</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px">
+            ${d.stale.map(t => `
+              <span style="display:inline-flex;align-items:center;gap:4px;background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:1px 6px;font-size:11px;font-family:monospace">
+                ${t}
+                <button onclick="excludeFromUniverse('${t}')" title="Exclude ${t} from scans"
+                  style="background:#f59e0b;color:#fff;border:none;border-radius:2px;padding:0 4px;cursor:pointer;font-size:10px;line-height:1.4">Exclude</button>
+              </span>`).join('')}
+          </div>
+        </div>` : '';
+      _renderUniverseExclusionList(excluded, results, staleHtml);
+    }
     if (d.stale.length > 0) {
-      toast(`⚠ ${d.stale.length} stale/delisted tickers found — review core.py ASX_UNIVERSE`, 'warning');
+      toast(`⚠ ${d.stale.length} stale/delisted tickers found`, 'warning');
     } else {
       toast(`Universe OK — all ${d.ok_count} tickers valid`, 'success');
     }
@@ -747,6 +778,60 @@ async function checkUniverseHealth() {
     toast(`Universe health check failed: ${e.message}`, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Check Now'; }
+  }
+}
+
+function _renderUniverseExclusionList(excluded, container, prefixHtml) {
+  const el = container || document.getElementById('settings-universe-health-results');
+  if (!el) return;
+  const exHtml = excluded.length > 0 ? `
+    <div style="margin-top:6px">
+      <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Excluded from scans:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${excluded.map(t => `
+          <span style="display:inline-flex;align-items:center;gap:4px;background:#f1f5f9;border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:11px;font-family:monospace">
+            ${t}
+            <button onclick="unexcludeFromUniverse('${t}')" title="Re-include ${t} in scans"
+              style="background:#64748b;color:#fff;border:none;border-radius:2px;padding:0 4px;cursor:pointer;font-size:10px;line-height:1.4">Re-include</button>
+          </span>`).join('')}
+      </div>
+    </div>` : '';
+  el.innerHTML = (prefixHtml || '') + exHtml;
+}
+
+async function excludeFromUniverse(ticker) {
+  try {
+    const r = await fetch(`${API}/api/market/universe-exclude`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tickers: [ticker] }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error('server error');
+    const exBadge = document.getElementById('settings-universe-excluded-badge');
+    if (exBadge) exBadge.textContent = `· ${d.excluded.length} excluded`;
+    _renderUniverseExclusionList(d.excluded);
+    toast(`${ticker} excluded from scans`, 'success');
+  } catch (e) {
+    toast(`Exclude failed: ${e.message}`, 'error');
+  }
+}
+
+async function unexcludeFromUniverse(ticker) {
+  try {
+    const r = await fetch(`${API}/api/market/universe-exclude`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tickers: [ticker] }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error('server error');
+    const exBadge = document.getElementById('settings-universe-excluded-badge');
+    if (exBadge) exBadge.textContent = d.excluded.length > 0 ? `· ${d.excluded.length} excluded` : '';
+    _renderUniverseExclusionList(d.excluded);
+    toast(`${ticker} re-included in scans`, 'success');
+  } catch (e) {
+    toast(`Re-include failed: ${e.message}`, 'error');
   }
 }
 
