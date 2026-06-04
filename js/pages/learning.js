@@ -119,6 +119,8 @@ async function renderLearningPage(gen) {
   renderLessonsCard().catch(() => {});
   // Async: load sell decision tracker card (Gap 3 + Gap 7)
   renderSellOutcomesCard().catch(() => {});
+  // Async: load thesis drift analytics card (Sprint 45)
+  renderThesisDriftCard().catch(() => {});
   // Async: load tag accuracy card (Gap 6)
   renderTagAccuracyCard().catch(() => {});
 }
@@ -816,13 +818,16 @@ function _renderLearningContent(d, brier) {
   // ── Sell Decision Tracker card (async — filled by renderSellOutcomesCard()) ──
   const sellOutcomesPlaceholder = `<div id="ll-sell-outcomes-card" class="card section-gap" style="min-height:60px"></div>`;
 
+  // ── Thesis Drift card (async — filled by renderThesisDriftCard()) ──
+  const thesisDriftPlaceholder = `<div id="ll-thesis-drift-card"></div>`;
+
   // ── Calibration Quality card (async — filled by renderCalibQualityCard()) ──
   const calibQualityPlaceholder = `<div id="ll-calib-quality-card"></div>`;
 
   return summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard + recentCard + failedCard + debateInsightsCard +
-    digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
+    digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
 }
 
 // ── Postmortem digest — AI summary of recent failure patterns ─────────────────
@@ -2169,6 +2174,67 @@ async function deleteLesson(id) {
       toast('Delete failed: ' + (d.error || 'unknown'), 'error');
     }
   } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Thesis Drift card (Sprint 45) ────────────────────────────────────────────
+async function renderThesisDriftCard() {
+  const el = document.getElementById('ll-thesis-drift-card');
+  if (!el || !state.serverOk) return;
+
+  try {
+    const r = await fetch(`${API}/api/learning/thesis-drift`);
+    if (!r.ok) { el.innerHTML = ''; return; }
+    const d = await r.json();
+    if (!d.ok) { el.innerHTML = ''; return; }
+
+    const nManual = d.n_manual ?? 0;
+    const nTarget = d.n_target ?? 0;
+    const hasData = nManual >= 5 && nTarget >= 5;
+
+    const fmtPct = v => v != null ? `${v >= 0 ? '+' : ''}${v.toFixed(1)}%` : '—';
+    const fmtColor = v => v == null ? 'var(--text-muted)' : v >= 0 ? '#16a34a' : '#dc2626';
+
+    let summaryHtml;
+    if (!hasData) {
+      summaryHtml = `<div class="text-xs text-muted" style="padding:6px 0">
+        Not enough closed trades yet (need ≥5 in each category — have ${nManual} manual, ${nTarget} target hits).
+      </div>`;
+    } else {
+      const drag = (d.avg_target_pct ?? 0) - (d.avg_manual_pct ?? 0);
+      const isWarning = drag > 3;
+      const summaryColor = isWarning ? '#d97706' : '#16a34a';
+      const summaryText = isWarning
+        ? `Early exits underperforming by ${drag.toFixed(1)}pp — consider holding longer`
+        : `Early exit performance healthy (gap = ${drag.toFixed(1)}pp)`;
+      summaryHtml = `
+        <div style="display:flex;gap:12px;margin-bottom:10px">
+          <div style="flex:1;padding:10px;background:var(--bg-secondary);border-radius:6px;text-align:center">
+            <div style="font-size:20px;font-weight:700;color:${fmtColor(d.avg_manual_pct)}">${fmtPct(d.avg_manual_pct)}</div>
+            <div class="text-xs text-muted">Early Exits (manual)</div>
+            <div style="font-size:10px;color:var(--text-tertiary)">n = ${nManual}</div>
+          </div>
+          <div style="flex:1;padding:10px;background:var(--bg-secondary);border-radius:6px;text-align:center">
+            <div style="font-size:20px;font-weight:700;color:${fmtColor(d.avg_target_pct)}">${fmtPct(d.avg_target_pct)}</div>
+            <div class="text-xs text-muted">Target Hits</div>
+            <div style="font-size:10px;color:var(--text-tertiary)">n = ${nTarget}</div>
+          </div>
+        </div>
+        <div style="padding:7px 10px;border-radius:6px;background:${isWarning ? '#fffbeb' : '#f0fdf4'};border:1px solid ${isWarning ? '#fde68a' : '#bbf7d0'};font-size:12px;font-weight:600;color:${summaryColor}">
+          ${isWarning ? '⚠' : '✓'} ${summaryText}
+        </div>`;
+    }
+
+    el.innerHTML = `
+      <div class="card" style="margin-top:14px">
+        <div class="card-title" style="margin-bottom:10px">Thesis Drift</div>
+        <p class="text-xs text-muted" style="margin-bottom:10px">
+          Compares avg P&amp;L of manual early exits vs positions held to target. A large gap suggests the anti-churn rules should be stronger.
+        </p>
+        ${summaryHtml}
+      </div>`;
+  } catch {
+    el.innerHTML = '';
+  }
 }
 
 // ── Sell Decision Tracker card (Gap 3 + Gap 7) ───────────────────────────────

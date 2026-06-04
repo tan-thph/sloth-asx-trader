@@ -238,6 +238,36 @@ async function autoRefreshPrices(reason) {
   if (!state.serverOk || state.portfolio.length === 0) return;
   console.log(`Auto-refreshing prices (${reason})...`);
   await refreshPrices({silent: true});
+  checkAutoBriefSchedule();
+}
+
+function checkAutoBriefSchedule() {
+  const t = state.settings?.autoBriefTime;
+  if (!t) return;
+
+  const todayKey = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+  const firedKey = 'autoBriefFiredDate';
+  if (localStorage.getItem(firedKey) === todayKey) return;
+
+  // Check if current AEST time >= configured time.
+  // AEST = UTC+10 (conservative; AEDT = UTC+11 gives 1h extra grace).
+  const nowUtc = new Date();
+  const aestOffset = 10 * 60; // minutes
+  const aestNow = new Date(nowUtc.getTime() + aestOffset * 60 * 1000);
+  const aestHHMM = aestNow.toISOString().slice(11, 16); // 'HH:MM'
+
+  if (aestHHMM < t) return;
+
+  // Brief already generated today?
+  if (window._morningBrief?.date === todayKey) {
+    localStorage.setItem(firedKey, todayKey);
+    return;
+  }
+
+  localStorage.setItem(firedKey, todayKey);
+  if (typeof generateMorningBriefing === 'function') {
+    generateMorningBriefing();
+  }
 }
 
 function startPriceRefresh() {

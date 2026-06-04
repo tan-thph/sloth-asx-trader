@@ -4888,5 +4888,191 @@ class TestSprint44(unittest.TestCase):
         self.assertNotIn("Sprint44 high vol specific", texts2)
 
 
+class TestSprint45(unittest.TestCase):
+    """Sprint 45 feature tests: thesis drift detection, stop trailing, scheduled brief."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    # ── Item 1: Thesis drift detection ──────────────────────────────────────
+
+    def test_thesis_drift_endpoint_exists(self):
+        """GET /api/learning/thesis-drift must return ok=True."""
+        r = self.client.get("/api/learning/thesis-drift")
+        self.assertEqual(r.status_code, 200)
+        data = json.loads(r.data)
+        self.assertTrue(data["ok"])
+
+    def test_thesis_drift_empty_db_returns_nulls(self):
+        """With no data, _compute_thesis_drift should return null averages and no nudge."""
+        from routes.learning import _compute_thesis_drift
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE ai_learning_events (
+                exit_reason TEXT, realized_pnl_pct REAL,
+                was_executed INTEGER, outcome_status TEXT
+            )
+        """)
+        conn.commit()
+
+        result = _compute_thesis_drift(conn)
+        self.assertIsNone(result["avg_manual_pct"])
+        self.assertIsNone(result["avg_target_pct"])
+        self.assertIsNone(result["nudge"])
+        self.assertEqual(result["n_manual"], 0)
+        self.assertEqual(result["n_target"], 0)
+        conn.close()
+
+    def test_thesis_drift_nudge_threshold(self):
+        """Nudge fires only when target_avg - manual_avg > 3pp and n >= 5 in each bucket."""
+        from routes.learning import _compute_thesis_drift
+        import sqlite3
+
+        # Build an in-memory DB with mock rows
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE ai_learning_events (
+                exit_reason TEXT, realized_pnl_pct REAL,
+                was_executed INTEGER, outcome_status TEXT
+            )
+        """)
+        # 5 manual exits at +2% avg
+        for _ in range(5):
+            conn.execute(
+                "INSERT INTO ai_learning_events VALUES (?, ?, ?, ?)",
+                ("manual", 2.0, 1, "win"),
+            )
+        # 5 target hits at +10% avg (drag = 8pp > 3pp threshold)
+        for _ in range(5):
+            conn.execute(
+                "INSERT INTO ai_learning_events VALUES (?, ?, ?, ?)",
+                ("target_hit", 10.0, 1, "win"),
+            )
+        conn.commit()
+
+        result = _compute_thesis_drift(conn)
+        self.assertEqual(result["n_manual"], 5)
+        self.assertEqual(result["n_target"], 5)
+        self.assertAlmostEqual(result["avg_manual_pct"], 2.0)
+        self.assertAlmostEqual(result["avg_target_pct"], 10.0)
+        self.assertIsNotNone(result["nudge"])
+        self.assertIn("EARLY_EXIT_DRAG", result["nudge"])
+        conn.close()
+
+    def test_thesis_drift_no_nudge_below_threshold(self):
+        """No nudge when drag <= 3pp."""
+        from routes.learning import _compute_thesis_drift
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE ai_learning_events (
+                exit_reason TEXT, realized_pnl_pct REAL,
+                was_executed INTEGER, outcome_status TEXT
+            )
+        """)
+        # drag = 4.5 - 3.0 = 1.5pp (under threshold)
+        for _ in range(5):
+            conn.execute("INSERT INTO ai_learning_events VALUES (?, ?, ?, ?)", ("manual", 3.0, 1, "win"))
+        for _ in range(5):
+            conn.execute("INSERT INTO ai_learning_events VALUES (?, ?, ?, ?)", ("target_hit", 4.5, 1, "win"))
+        conn.commit()
+
+        result = _compute_thesis_drift(conn)
+        self.assertIsNone(result["nudge"])
+        conn.close()
+
+    def test_thesis_drift_insufficient_data_no_nudge(self):
+        """No nudge when n < 5 in either bucket."""
+        from routes.learning import _compute_thesis_drift
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE ai_learning_events (
+                exit_reason TEXT, realized_pnl_pct REAL,
+                was_executed INTEGER, outcome_status TEXT
+            )
+        """)
+        for _ in range(3):
+            conn.execute("INSERT INTO ai_learning_events VALUES (?, ?, ?, ?)", ("manual", 2.0, 1, "win"))
+        for _ in range(5):
+            conn.execute("INSERT INTO ai_learning_events VALUES (?, ?, ?, ?)", ("target_hit", 15.0, 1, "win"))
+        conn.commit()
+
+        result = _compute_thesis_drift(conn)
+        self.assertIsNone(result["nudge"])
+        conn.close()
+
+    def test_calib_compute_calls_thesis_drift(self):
+        """_calib_compute source must reference _compute_thesis_drift."""
+        src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
+        self.assertIn("_compute_thesis_drift", src)
+        self.assertIn("_thesis_drift", src)
+        self.assertIn("EARLY_EXIT_DRAG", src)
+
+    def test_thesis_drift_card_in_learning_js(self):
+        """learning.js must render a Thesis Drift card with correct placeholder id."""
+        src = open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8").read()
+        self.assertIn("ll-thesis-drift-card", src)
+        self.assertIn("renderThesisDriftCard", src)
+        self.assertIn("Thesis Drift", src)
+
+    # ── Item 2: Stop trailing ────────────────────────────────────────────────
+
+    def test_trail_stop_button_in_recommendations_js(self):
+        """recommendations.js must have a Trail button and trailStop function."""
+        src = open(os.path.join(ROOT, "js", "pages", "recommendations.js"), encoding="utf-8").read()
+        self.assertIn("trailStop", src)
+        self.assertIn("Trail", src)
+        self.assertIn("_stopTrailed", src)
+        self.assertIn("_stopTrailedAt", src)
+
+    def test_trail_stop_only_tightens(self):
+        """trailStop function must check wouldTighten before updating."""
+        src = open(os.path.join(ROOT, "js", "pages", "recommendations.js"), encoding="utf-8").read()
+        self.assertIn("wouldTighten", src)
+
+    def test_trail_stop_badge_in_recommendations_js(self):
+        """recommendations.js must render a Trailed badge when _stopTrailed is set."""
+        src = open(os.path.join(ROOT, "js", "pages", "recommendations.js"), encoding="utf-8").read()
+        self.assertIn("Trailed", src)
+
+    # ── Item 3: Scheduled morning briefing ──────────────────────────────────
+
+    def test_auto_brief_time_in_config_js(self):
+        """config.js state.settings must contain autoBriefTime default."""
+        src = open(os.path.join(ROOT, "js", "config.js"), encoding="utf-8").read()
+        self.assertIn("autoBriefTime", src)
+
+    def test_check_auto_brief_schedule_function_exists(self):
+        """scheduler.js must define checkAutoBriefSchedule function."""
+        src = open(os.path.join(ROOT, "js", "scheduler.js"), encoding="utf-8").read()
+        self.assertIn("checkAutoBriefSchedule", src)
+        self.assertIn("autoBriefFiredDate", src)
+        self.assertIn("autoBriefTime", src)
+
+    def test_auto_brief_called_from_init(self):
+        """init.js must call checkAutoBriefSchedule after init sequence."""
+        src = open(os.path.join(ROOT, "js", "init.js"), encoding="utf-8").read()
+        self.assertIn("checkAutoBriefSchedule", src)
+
+    def test_auto_brief_input_in_settings_js(self):
+        """settings.js Display section must include auto-brief time input."""
+        src = open(os.path.join(ROOT, "js", "pages", "settings.js"), encoding="utf-8").read()
+        self.assertIn("autoBriefTime", src)
+        self.assertIn("Auto-brief time", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
