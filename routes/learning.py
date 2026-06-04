@@ -1184,6 +1184,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             """).fetchall()
             sell_tag_stats = [dict(r) for r in sell_tag_rows]
 
+            # Sprint 45: thesis drift — compare manual exits vs target hits.
+            _thesis_drift = _compute_thesis_drift(conn)
+
         # Gate: personalised calibration nudges require n ≥ 30 to avoid chasing noise.
         # Below that, return an ASX base-rate prior so the user message still has a
         # calibration anchor — Claude won't start from scratch for early-stage accounts.
@@ -1495,6 +1498,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         if _regime_flip_token:
             parts.insert(0, _regime_flip_token)
 
+        # Sprint 45: thesis drift nudge — lowest priority (appended last, first to drop).
+        if _thesis_drift.get("nudge"):
+            parts.append(_thesis_drift["nudge"])
+
         if not parts:
             return {"available": False, "block": None}
 
@@ -1569,6 +1576,53 @@ def learning_calibration():
     if "error" in result:
         return jsonify(result), 500
     return jsonify(result)
+
+
+# ── Thesis Drift Detection (Sprint 45) ───────────────────────────────────────
+
+def _compute_thesis_drift(conn) -> dict:
+    """Compare avg realized_pnl_pct of manual early exits vs target hits.
+
+    Returns dict with counts, averages, and a nudge token string (or None).
+    Minimum 5 events in each bucket before computing.
+    """
+    rows = conn.execute("""
+        SELECT exit_reason, realized_pnl_pct
+        FROM ai_learning_events
+        WHERE was_executed = 1
+          AND outcome_status IN ('win', 'loss', 'breakeven')
+          AND realized_pnl_pct IS NOT NULL
+          AND exit_reason IN ('manual', 'target_hit')
+    """).fetchall()
+
+    manual = [r["realized_pnl_pct"] for r in rows if r["exit_reason"] == "manual"]
+    target = [r["realized_pnl_pct"] for r in rows if r["exit_reason"] == "target_hit"]
+
+    result = {
+        "n_manual":       len(manual),
+        "n_target":       len(target),
+        "avg_manual_pct": round(sum(manual) / len(manual), 2) if manual else None,
+        "avg_target_pct": round(sum(target) / len(target), 2) if target else None,
+        "nudge":          None,
+    }
+
+    if len(manual) >= 5 and len(target) >= 5:
+        drag = result["avg_target_pct"] - result["avg_manual_pct"]
+        if drag > 3.0:
+            result["nudge"] = (
+                f"⚠EARLY_EXIT_DRAG: manual_avg={result['avg_manual_pct']:+.1f}% "
+                f"vs target_hit_avg={result['avg_target_pct']:+.1f}% "
+                f"(n_manual={len(manual)},n_target={len(target)}) "
+                f"→ hold longer before manual exits"
+            )
+    return result
+
+
+@bp.route("/api/learning/thesis-drift")
+def thesis_drift():
+    with get_db() as conn:
+        result = _compute_thesis_drift(conn)
+    return jsonify({**result, "ok": True})
 
 
 # ── Trading Lessons endpoints ─────────────────────────────────────────────────

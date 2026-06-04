@@ -52,6 +52,7 @@ const state = {
     compactMode: false,
     useLocalLLM: false,
     maxRiskBudgetPct: 5,
+    autoBriefTime: '',   // 'HH:MM' in AEST, empty = disabled
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary

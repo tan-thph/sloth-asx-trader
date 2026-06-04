@@ -43,6 +43,7 @@ async function initApp() {
   }
   renderPage();
   if (state.settings.compactMode) document.body.classList.add('compact');
+  checkAutoBriefSchedule();
 }
 
 // Init

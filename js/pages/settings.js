@@ -307,6 +307,15 @@ python3 asx_server.py</pre>
           </span>
         </label>
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border-light)">
+        <div>
+          <div style="font-size:13px;font-weight:600">Auto-brief time <span style="font-size:10px;color:var(--text-muted);font-weight:400">(AEST)</span></div>
+          <div class="text-xs text-muted">Morning briefing fires once per day on first load at or after this time. Leave blank to disable.</div>
+        </div>
+        <input type="time" value="${state.settings.autoBriefTime || ''}"
+          style="padding:4px 8px;border-radius:6px;border:1px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:13px"
+          onchange="updateSetting('autoBriefTime', this.value); scheduleSave()">
+      </div>
     </div>
 
     <div class="card">

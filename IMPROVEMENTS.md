@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-04 (Sprint 44 shipped)
+**Last Updated:** 2026-06-04 (Sprint 45 shipped)
 
 > **Scope:** This is a **private, single-user, local** decision-support tool. It is *not* a public
 > product — so multi-user auth, tenant isolation, financial-services licensing, ToS/Privacy, and
@@ -8,6 +8,16 @@
 > and **useful features** that make day-to-day trading decisions faster and more disciplined.
 
 Each item carries an effort (S/M/L/XL) and impact (★–★★★) rating for triage.
+
+---
+
+## 0. Shipped — Sprint 45 (2026-06-04)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **Thesis drift detection** | Analytics (M) | `_compute_thesis_drift(conn)` in `routes/learning.py` compares avg `realized_pnl_pct` of manual early exits vs target hits (n≥5 each). Emits `⚠EARLY_EXIT_DRAG` calibration nudge when drag >3pp. `GET /api/learning/thesis-drift` endpoint exposes the raw stats. Learning page gains async `renderThesisDriftCard()` — two stat boxes (manual vs target avg P&L) with a green/amber summary line. Nudge is lowest-priority in calibration block (first dropped by budget truncation). |
+| **Stop-loss trailing** | Workflow (S) | "📍 Trail" button added to every pending BUY/TOP_UP/SELL/TRIM rec card in `recommendations.js`. `trailStop(recId)` uses live price + ATR from `state.liveSignals` and `getRegimeModifiers().stopAtrMult` to compute a new stop. Only tightens (never loosens). Confirms via `confirm()` dialog. Marks `rec._stopTrailed = true`, `rec._stopTrailedAt = ISO string`. Re-renders page and calls `scheduleSave()`. `📍 Trailed` badge shown in rec card header when trailed. |
+| **Scheduled morning briefing** | Workflow (S) | `state.settings.autoBriefTime` ('HH:MM' AEST, empty = disabled) added to `config.js`. Settings → Display section gains a time input. `checkAutoBriefSchedule()` defined in `scheduler.js` — checks `localStorage.autoBriefFiredDate` (YYYY-MM-DD) to fire at most once per day; compares current AEST time (UTC+10 fixed offset) against configured time; calls `generateMorningBriefing()` if not already fired today. Called from `autoRefreshPrices()` (every 10–20 min) and once at end of `initApp()`. |
 
 ---
 
