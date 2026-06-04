@@ -265,8 +265,8 @@ function checkAutoBriefSchedule() {
   }
 
   localStorage.setItem(firedKey, todayKey);
-  if (typeof generateMorningBriefing === 'function') {
-    generateMorningBriefing();
+  if (typeof generateMorningBrief === 'function') {
+    generateMorningBrief();
   }
 }
 

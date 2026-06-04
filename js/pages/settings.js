@@ -714,8 +714,8 @@ async function loadSettingsAppInfo() {
   try {
     const r = await fetch(`${API}/api/db/load`);
     const d = await r.json();
-    const verifiedAt = d?.data?.universe_verified_at;
-    const excluded   = d?.data?.universe_excluded ? JSON.parse(d.data.universe_excluded) : [];
+    const verifiedAt = d?.universe_verified_at;
+    const excluded   = Array.isArray(d?.universe_excluded) ? d.universe_excluded : [];
     const el  = document.getElementById('settings-universe-date');
     const exEl = document.getElementById('settings-universe-excluded-badge');
     if (el) {

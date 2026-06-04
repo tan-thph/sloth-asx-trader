@@ -258,19 +258,20 @@ async function runAnalysis() {
   const mp = mergedPortfolio();
   const portfolioJson = JSON.stringify(mp.map(h => {
     const days = _daysHeld(h.ticker);
+    const livePrice = state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice;
     const pnlPct = h.avgPrice > 0
-      ? +((h.currentPrice / h.avgPrice - 1) * 100).toFixed(2) : null;
+      ? +((livePrice / h.avgPrice - 1) * 100).toFixed(2) : null;
     return {
       ticker: h.ticker,
       sector: h.sector,
       shares: h.shares,
       avgPrice: h.avgPrice,
-      currentPrice: state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice,
-      value: h.shares * (state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice),
-      unrealisedPnl: ((state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice) - h.avgPrice) * h.shares,
+      currentPrice: livePrice,
+      value: h.shares * livePrice,
+      unrealisedPnl: (livePrice - h.avgPrice) * h.shares,
       unrealisedPnlPct: pnlPct,
       daysHeld: days,
-      weight: ((h.shares * h.currentPrice) / portfolioValue() * 100).toFixed(1) + '%',
+      weight: ((h.shares * livePrice) / portfolioValue() * 100).toFixed(1) + '%',
     };
   }));
 

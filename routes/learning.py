@@ -1016,16 +1016,15 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
     # Volatility-adaptive half-life: fast decay in volatile/panic regimes so
     # stale data from a different market state doesn't dilute the calibration;
     # slow decay in calm/sideways regimes to preserve statistical sample power.
+    # Keyed on actual regime names emitted by classifyRegime() in regime-engine.js:
+    # riskOn, riskOff, panic, sideways, trend, highVol, unknown
     _HL_MAP = {
-        "panic":        20,
-        "bearVolatile": 25,
-        "highVol":      25,
-        "riskOff":      30,
-        "bearTrending": 35,
-        "riskOn":       45,
-        "bullTrending": 50,
-        "sideways":     60,
-        "neutral":      60,
+        "panic":    20,
+        "riskOff":  30,
+        "highVol":  35,
+        "trend":    45,
+        "riskOn":   50,
+        "sideways": 60,
     }
     hl = _HL_MAP.get(regime or "", 45)
 
@@ -1223,7 +1222,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             _loss_sk = [float(r["skill_score"]) for r in _scored_rows
                         if r["outcome_status"] in ("loss", "breakeven") and not _is_good_loss(r)]
             if _win_sk and _loss_sk:
-                _phase8_active = (sum(_win_sk) / len(_win_sk)) > (sum(_loss_sk) / len(_loss_sk))  # noqa: F841
+                _phase8_active = _mann_whitney_z(_win_sk, _loss_sk) > 1.28  # same gate as _compute_phase8_meta()
 
         # calib_rows built from rows_all (real + virtual) so virtual outcomes
         # participate in conf-band/regime/sector calibration at their 0.75× weight.
@@ -1255,9 +1254,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         # Level 2: macro group  (bearish / bullish / neutral — see _REGIME_GROUPS)
         # Level 3: all trades   (90d window, mild 0.7× discount to flag lack of specificity)
         _REGIME_GROUPS = {
-            "bearish": {"bearTrending", "bearVolatile", "riskOff", "panic"},
-            "bullish": {"bullTrending", "riskOn"},
-            "neutral": {"highVol", "sideways", "neutral"},
+            "bearish": {"riskOff", "panic"},
+            "bullish": {"riskOn", "trend"},
+            "neutral": {"highVol", "sideways"},
         }
         def _regime_macro(r_name):
             """Return the macro-group name for a regime, or None if not mapped."""

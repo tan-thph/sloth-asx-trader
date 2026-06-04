@@ -240,6 +240,8 @@ def db_load():
         "digestHistory":        blobs.get("digestHistory"),
         "termDeposits":         blobs.get("termDeposits"),
         "intraday":             blobs.get("intraday"),
+        "universe_excluded":    blobs.get("universe_excluded") or [],
+        "universe_verified_at": blobs.get("universe_verified_at"),
     })
 
 

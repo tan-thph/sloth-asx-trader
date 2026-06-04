@@ -1086,7 +1086,11 @@ function applyDrpEvent(ticker) {
 
   document.getElementById('drp-modal')?.remove();
 
-  const holding = state.portfolio.find(h => h.ticker === ticker);
+  // Match by ticker + active account so multi-account users update the right parcel
+  const acct = state.activeAccount && state.activeAccount !== 'all' ? state.activeAccount : null;
+  const holding = state.portfolio.find(h =>
+    h.ticker === ticker && (!acct || (h.account || 'personal') === acct)
+  ) || state.portfolio.find(h => h.ticker === ticker);
   if (!holding) { toast(`No holding found for ${ticker}`, 'error'); return; }
 
   const newShares  = holding.shares + drpShares;
