@@ -914,11 +914,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_bumped_to_v5(self):
-        """PROMPT_VERSION must be bumped to v7 after Sprint 42 system prompt fixes."""
+        """PROMPT_VERSION must be bumped to v8 after Sprint 47 prompt pipeline fixes."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v7'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v7 after Sprint 42 prompt fixes")
+        self.assertIn("PROMPT_VERSION = '2026-06-v8'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v8 after Sprint 47 prompt fixes")
 
     def test_calibration_algorithm_in_system_prompt(self):
         """System prompt must prescribe the calibration algorithm (confidence += adj, clamped)."""

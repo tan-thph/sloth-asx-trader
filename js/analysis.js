@@ -161,6 +161,34 @@ async function runAnalysis() {
     'Energy': 'xej', 'Real Estate': 'xrj', 'RealEstate': 'xrj',
   };
 
+  // _isCandidate — Tier 1 (full block) when ticker has an active setup; Tier 2 (compact) otherwise
+  const _isCandidate = (s, t) => {
+    if (!s) return false;
+    const rsi = s.rsi_14 ?? 50;
+    const bbPctB = s.bb_pct_b ?? 0.5;
+    const score = s.score ?? 0;
+    const unrealisedPnlPct = (() => {
+      const h = mergedPortfolio().find(h => h.ticker === t);
+      if (!h || !h.avgPrice) return 0;
+      const livePrice = state.liveSignals?.[t]?.current_price ?? h.currentPrice;
+      return ((livePrice / h.avgPrice) - 1) * 100;
+    })();
+    const preEarnings = s.pre_earnings_risk === true;
+    const volSpike = (s.volume_z_score ?? 0) > 2.5;
+    const isExtra = extraTickers.includes(t);
+    return isExtra
+      || rsi < 38
+      || rsi > 68
+      || bbPctB < 0.12
+      || bbPctB > 0.88
+      || score >= 65
+      || score <= 30
+      || preEarnings
+      || volSpike
+      || unrealisedPnlPct < -8
+      || unrealisedPnlPct > 25;
+  };
+
   // Build indicator context (full detail per ticker)
   let indicatorCtx = '';
   const loaded = allTickers.filter(t=>state.liveSignals[t]&&!state.liveSignals[t].error);
@@ -228,7 +256,16 @@ async function runAnalysis() {
         return `, NearPivot:${nearest.name}(${pct > 0 ? '+' : ''}${pct}%)`;
       })();
 
-      return `\n[${t}]${inPortfolio?'':' ★WATCHLIST★'}
+      const volSpikeFlag = (s.volume_z_score ?? 0) > 3 ? ' ⚡VOLSPIKE' : '';
+      if (!_isCandidate(s, t)) {
+        // Tier 2: compressed 1-line summary for stable holds
+        const trend = s.trend_direction || 'neutral';
+        const rsiTier2 = s.rsi_14?.toFixed(0) ?? '?';
+        const scoreTier2 = s.score?.toFixed(0) ?? '?';
+        return `\n[${t}]${volSpikeFlag}${inPortfolio ? '' : ' ★WATCHLIST★'} $${s.current_price ?? '?'} | RSI=${rsiTier2} | score=${scoreTier2} | trend=${trend} | no active setup`;
+      }
+      // Tier 1: full indicator block
+      return `\n[${t}]${volSpikeFlag}${inPortfolio?'':' ★WATCHLIST★'}
   Price=$${s.current_price} | Signal=${s.composite_signal} (${(s.confidence*100).toFixed(0)}% conf) | Trend=${s.trend_direction}${tsLabel} | ADX=${s.adx?.toFixed(1)} (${s.trend_strength})
   Momentum: RSI14=${s.rsi_14?.toFixed(1)}, RSI9=${s.rsi_9?.toFixed(1)}, MACDhist=${s.macd_hist?.toFixed(4)}${macdDir?` ${macdDir}`:''}, ROC10=${s.roc_10?.toFixed(2)}% ROC21=${s.roc_21?.toFixed(2)}%, Stoch%K=${s.stoch_k?.toFixed(1)}/%D=${s.stoch_d?.toFixed(1)}, CCI=${s.cci?.toFixed(1)}, MFI=${s.mfi?.toFixed(1)}, WillR=${s.williams_r?.toFixed(1)}
   Trend: SMA20=$${s.sma_20?.toFixed(3)}, SMA50=${s.sma_50?'$'+s.sma_50.toFixed(3):'n/a'}, SMA200=${s.sma_200?'$'+s.sma_200.toFixed(3):'n/a'}, EMA12=$${s.ema_12?.toFixed(3)}, EMA26=$${s.ema_26?.toFixed(3)}
@@ -285,9 +322,10 @@ async function runAnalysis() {
   const withPnl = state.recHistory.slice(5).filter(r => r.actualProfit != null).slice(0, 3);
   const withFeedback = state.recHistory.slice(5).filter(r => r.feedback && !withPnl.includes(r)).slice(0, 2);
   const recentRecs = [...new Set([...last5, ...withPnl, ...withFeedback])];
-  const recCtx = recentRecs.length ? '\n\nRECENT RECOMMENDATION HISTORY (last 5 + key outcomes):\n' + recentRecs.map(r =>
-    `${r.date} ${r.action} ${r.ticker} @ $${r.priceRange?.[0]||'?'} → target $${r.target||'?'} | conf=${fmt(r.confidence*100,0)}% | outcome=${r.outcome||'open'} | actualPnL=${r.actualProfit!=null?'$'+fmt(r.actualProfit):'pending'}${r.feedback?' | FEEDBACK: "'+r.feedback+'"':''}`
-  ).join('\n') : '';
+  const recCtx = recentRecs.length ? '\n\nRECENT RECOMMENDATION HISTORY (last 5 + key outcomes):\n' + recentRecs.map(r => {
+    const daysAgo = Math.floor((Date.now() - new Date(r.date)) / 86400000);
+    return `${r.date} (${daysAgo}d ago) ${r.action} ${r.ticker} @ $${r.priceRange?.[0]||'?'} → target $${r.target||'?'} | conf=${fmt(r.confidence*100,0)}% | outcome=${r.outcome||'open'} | actualPnL=${r.actualProfit!=null?'$'+fmt(r.actualProfit):'pending'}${r.feedback?' | FEEDBACK: "'+r.feedback+'"':''}`;
+  }).join('\n') : '';
 
   // Pending recs with feedback
   const pendingWithFeedback = state.recommendations.filter(r=>r.status==='pending'&&r.feedback);
@@ -467,7 +505,7 @@ ${riskRows}`;
       compositeRiskHighScore:67, compositeRiskVeryHighScore:80,
       exDivProtectDays:5, exDivFlagDays:10, cgtHoldMonthsMin:11, cgtHoldMonthsMax:12 };
     const lines = [
-      `Min confidence: ${_r.minConfidence ?? def.minConfidence} | Min R:R: ${_r.minRrRatio ?? def.minRrRatio}:1 | Stop ATR: ${_r.stopAtrMultiple ?? def.stopAtrMultiple}×ATR14`,
+      `Min confidence: ${_r.minConfidence ?? def.minConfidence} | Min R:R: ${_r.minRrRatio ?? def.minRrRatio}:1 | Stop ATR: __STOP_MULT_PLACEHOLDER__×ATR14`,
       `Max position: ${_r.maxPositionPct ?? def.maxPositionPct}% | Max sector: ${_r.maxSectorPct ?? def.maxSectorPct}% | Min independent factors: ${_r.minIndepFactors ?? def.minIndepFactors}`,
       `Bear case required above: ${_r.bearCaseThreshold ?? def.bearCaseThreshold} conf | Same-ticker BUY→SELL window: ${_r.sameTickerWindowDays ?? def.sameTickerWindowDays} days`,
       `Anti-churn: min hold ${_r.minHoldingDays ?? def.minHoldingDays}d | min profit $${_r.minChurnProfitAud ?? def.minChurnProfitAud} OR ${_r.minChurnProfitPct ?? def.minChurnProfitPct}% of position`,
@@ -484,18 +522,19 @@ ${riskRows}`;
   const _acctLabel = state.activeAccount && state.activeAccount !== 'all' ? ` | Account: ${state.activeAccount.toUpperCase()}` : '';
   const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()} | TAX_LOSS_HARVEST_ACTIVE: ${inHarvestWindow}${_acctLabel}
 Account settings: brokerage $${state.settings.brokerage}/trade (round-trip $${state.settings.brokerage * 2}) | max ${state.settings.maxTradesPerDay} trades/day | min trade $${state.settings.minTradeSize}
+ACTIVE_REGIME: __REGIME_PLACEHOLDER__ (confidence: __CONF_PLACEHOLDER__)
 
 LIVE PORTFOLIO STATE:
 Holdings: ${portfolioJson}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
 RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
-${recCtx}${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${indicatorCtx}${rulesCtx}
+${recCtx}${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${rulesCtx}${indicatorCtx}
 
 TASK:
 1. Apply any CALIBRATION adjustments above to confidence scores before output.
 2. Assess macro regime — Rule 12: if sentiment = "bearish" AND bullish < 35, block all BUY/TOP_UP.
 3. For every holding and watchlist ticker, run the Section 3 multi-factor framework. Exclude any ticker with < 3 independent non-technical factors from recs[].
-4. For each candidate rec: compute priceRange, target (next S/R), stopLoss (1.5×ATR), qty, scenarios (p sums to 1.0), invalidationCondition (must include a measurable value), bearCase (if conf ≥ 0.70), factorsUsed (≥ 3 specific data points).
+4. For each candidate rec: compute priceRange, target (next S/R), stopLoss (stopAtrMultiple×ATR from ACTIVE RULE OVERRIDES), set qty=0 (quant engine sizes), optionally scenarios (if included, p must sum to 1.0), invalidationCondition (must include a measurable value), bearCase (if conf ≥ 0.70), factorsUsed (≥ 3 specific data points).
 5. Apply Section 7 pre-flight checks. Fix all failures before writing JSON.
 6. Return JSON only — no preamble, no markdown.
 PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown'}`;
@@ -537,7 +576,20 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       const _lParams = new URLSearchParams();
       if (_activeRegime && _activeRegime !== 'unknown') _lParams.set('regime', _activeRegime);
       if (_portfolioTickers.length) _lParams.set('ticker', _portfolioTickers.slice(0, 5).join(','));
-      if (_portfolioSectors.length) _lParams.set('sector', _portfolioSectors[0]);
+      if (_portfolioSectors.length) {
+        // Weight sectors by portfolio value, send top 2 as comma-separated
+        const sectorWeights = {};
+        for (const h of mergedPortfolio()) {
+          const sec = h.sector || 'Other';
+          const livePrice = state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice;
+          sectorWeights[sec] = (sectorWeights[sec] || 0) + h.shares * livePrice;
+        }
+        const topSectors = Object.entries(sectorWeights)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 2)
+          .map(([s]) => s);
+        _lParams.set('sector', topSectors.join(','));
+      }
       _lParams.set('limit', '10');
       // Sprint 44: pass breadth metrics so backend can filter breadth-scoped lessons
       const _adl = state.macroData?.advance_decline_ratio;
@@ -600,17 +652,31 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
      _regimeDaysAgo !== null && _regimeDaysAgo <= 7)
       ? ` [TRANSITION: ${state.lastKnownRegime}→${_activeRegime} ${_regimeDaysAgo}d ago — calibration data for ${_activeRegime} may be from prior cycle]`
       : '';
-  const regimeCtx = _activeRegime && _activeRegime !== 'unknown'
-    ? `\nACTIVE_REGIME: ${_activeRegime} (confidence: ${(_regimeResult.confidence * 100).toFixed(0)}%)${_regimeTransitionNote}`
-    : '';
+
+  // Regime-aware stop multiple for R:R guidance (Fix 3B)
+  const _regimeStopMult = (() => {
+    if (typeof getRegimeModifiers === 'function' && _activeRegime) {
+      return getRegimeModifiers(_activeRegime).stopAtrMult ?? 2.5;
+    }
+    return _r.stopAtrMultiple ?? 1.5;
+  })();
+
+  // Build the regime line that replaces __REGIME_PLACEHOLDER__ at top of message (Fix 2)
+  const regimeLine = _activeRegime && _activeRegime !== 'unknown'
+    ? `${_activeRegime}${_regimeTransitionNote}`
+    : 'unknown';
 
   const fullUserMessage = userMessage
-    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote + _lessonsBlock) + regimeCtx + _debatePreamble;
+    .replace('__REGIME_PLACEHOLDER__', regimeLine)
+    .replace('__CONF_PLACEHOLDER__', ((_regimeResult.confidence ?? 0) * 100).toFixed(0) + '%')
+    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote + _lessonsBlock)
+    .replace('__STOP_MULT_PLACEHOLDER__', String(_regimeStopMult))
+    + _debatePreamble;
 
   try {
     const { text, usage: _usage } = await callClaude('portfolio', fullUserMessage, {
       systemArray: _systemArray,
-      maxTokens: 6000,
+      maxTokens: 8000,
     });
 
     console.log(`[Token audit] recHistory sent: ${recentRecs.length} entries (last5=${last5.length} withPnl=${withPnl.length} withFeedback=${withFeedback.length})`);

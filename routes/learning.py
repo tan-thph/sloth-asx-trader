@@ -1655,8 +1655,14 @@ def lessons_list():
         clauses.append("(ticker=? OR ticker IS NULL)")
         vals.append(ticker)
     if sector:
-        clauses.append("(sector=? OR sector IS NULL)")
-        vals.append(sector)
+        sector_list = [s.strip() for s in sector.split(",") if s.strip()]
+        if len(sector_list) == 1:
+            clauses.append("(sector=? OR sector IS NULL)")
+            vals.append(sector_list[0])
+        elif len(sector_list) > 1:
+            placeholders = ",".join(["?" for _ in sector_list])
+            clauses.append(f"(sector IN ({placeholders}) OR sector IS NULL)")
+            vals.extend(sector_list)
     if regime:
         clauses.append("(regime=? OR regime IS NULL)")
         vals.append(regime)
