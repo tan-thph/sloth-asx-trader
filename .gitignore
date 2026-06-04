@@ -40,5 +40,8 @@ desktop.ini
 *.swp
 *.swo
 
+# Node
+node_modules/
+
 # Logs
 *.log
