@@ -831,6 +831,11 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
       <span style="font-size:13px;color:var(--text-muted)">&times;${qty} shares</span>
     </div>
     <div style="display:grid;gap:10px;margin-bottom:16px">
+      ${action === 'BUY' ? `
+      <div>
+        <div class="form-label">Quantity (shares)</div>
+        <input id="tcd-qty" type="number" step="1" value="${qty}" min="1" style="width:100%">
+      </div>` : ''}
       <div>
         <div class="form-label">${priceLabel}</div>
         <input id="tcd-price" type="number" step="0.001" value="${Number(defaultPrice).toFixed(3)}" min="0.001" style="width:100%">
@@ -852,29 +857,34 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
 
   const priceEl  = dialog.querySelector('#tcd-price');
   const feeEl    = dialog.querySelector('#tcd-fee');
+  const qtyEl    = dialog.querySelector('#tcd-qty');  // only present for BUY
   const costLine = dialog.querySelector('#tcd-cost-line');
 
   const _upd = () => {
     const p = parseFloat(priceEl.value) || 0;
     const f = parseFloat(feeEl.value)   || 0;
-    const gross = qty * p;
+    const q = qtyEl ? (parseInt(qtyEl.value) || 0) : qty;
+    const gross = q * p;
     const net   = action === 'BUY' ? gross + f : gross - f;
     const label = action === 'BUY'
-      ? `Cost: $${net.toFixed(2)} (${qty} × $${p.toFixed(3)} + $${f.toFixed(2)} brokerage)`
-      : `Proceeds: $${(gross - f).toFixed(2)} (${qty} × $${p.toFixed(3)} − $${f.toFixed(2)} brokerage)`;
+      ? `Cost: $${net.toFixed(2)} (${q} × $${p.toFixed(3)} + $${f.toFixed(2)} brokerage)`
+      : `Proceeds: $${(gross - f).toFixed(2)} (${q} × $${p.toFixed(3)} − $${f.toFixed(2)} brokerage)`;
     costLine.textContent = label;
   };
   priceEl.addEventListener('input', _upd);
   feeEl.addEventListener('input', _upd);
+  if (qtyEl) qtyEl.addEventListener('input', _upd);
   _upd();
 
   dialog.querySelector('#tcd-confirm').onclick = () => {
-    const price = parseFloat(priceEl.value);
-    const fee   = parseFloat(feeEl.value);
-    if (!price || price <= 0)  { toast('Enter a valid price', 'error');          priceEl.focus(); return; }
-    if (isNaN(fee) || fee < 0) { toast('Enter a valid brokerage fee', 'error'); feeEl.focus();   return; }
+    const price   = parseFloat(priceEl.value);
+    const fee     = parseFloat(feeEl.value);
+    const actualQty = qtyEl ? parseInt(qtyEl.value) : qty;
+    if (!price || price <= 0)          { toast('Enter a valid price', 'error');     priceEl.focus(); return; }
+    if (isNaN(fee) || fee < 0)         { toast('Enter a valid brokerage fee', 'error'); feeEl.focus(); return; }
+    if (qtyEl && (!actualQty || actualQty < 1)) { toast('Enter a valid quantity', 'error'); qtyEl.focus(); return; }
     dialog.remove();
-    onConfirm(price, fee);
+    onConfirm(price, fee, actualQty);
   };
 
   dialog.showModal();
@@ -899,17 +909,17 @@ function executeIntradayTrade(recId) {
     action: 'BUY',
     qty:    rec.qty,
     defaultPrice: rec.priceRange[0],
-  }, (entryPrice, brokerage) => {
-    const cost = rec.qty * entryPrice + brokerage;
+  }, (entryPrice, brokerage, actualQty) => {
+    const cost = actualQty * entryPrice + brokerage;
     if (cost > state.cash) { toast('Insufficient cash for this trade', 'error'); return; }
 
     if (!state.intraday.openPositions) state.intraday.openPositions = [];
     state.intraday.openPositions.push({
       id:         rec.id,
       ticker:     rec.ticker,
-      qty:        rec.qty,
+      qty:        actualQty,
       entryPrice,
-      entryFees:  brokerage,   // stored so close P&L uses actual round-trip cost
+      entryFees:  brokerage,
       target:     rec.target,
       stop:       rec.stopLoss,
       enteredAt:  nowSydney(),
@@ -920,7 +930,7 @@ function executeIntradayTrade(recId) {
 
     scheduleSave();
     if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
-    toast(`⚡ Intraday BUY: ${rec.ticker} × ${rec.qty} @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
+    toast(`⚡ Intraday BUY: ${rec.ticker} × ${actualQty} @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
     renderPage();
   });
 }
