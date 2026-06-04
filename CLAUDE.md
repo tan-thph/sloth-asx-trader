@@ -158,7 +158,7 @@ state.settings.telegramEnabled:   bool — mirrors alerts to Telegram when true
 state.settings.tgToken / tgChatId: stored locally in state but credentials saved server-side via POST /api/alerts/telegram/save
 state.settings.drawdownAlertPct:  number — alert threshold for drawdown monitor (default 10)
 state.settings.compactMode:       bool — applies `.compact` CSS body class on startup; reduces card padding, row heights, button sizes (default false)
-state.settings.useLocalLLM:       bool — routes portfolio analysis to local Ollama via quick-analysis endpoint (BUY/HOLD only, SELL/TRIM excluded). Default false. *(Sprint 41)*
+state.settings.useLocalLLM:       bool — routes portfolio analysis to local Ollama via quick-analysis endpoint (BUY/TOP_UP/HOLD/SELL/TRIM with simplified 5-driver taxonomy). Default false. *(Sprint 41; SELL/TRIM extended Sprint 48)*
 state.settings.maxRiskBudgetPct:  number — heat budget gate: max total $ at risk to stops as % of portfolio (default 5). Set in Risk page budget input. Used by `analysis.js` to scale/block new BUY recs. *(Sprint 38)*
 state.settings.autoBriefTime:     string — 'HH:MM' AEST time to auto-fire morning briefing on first page load (empty = disabled). Stored in settings, persisted to DB. *(Sprint 45)*
 state.debate.oppositionModel:     str — opposition model for adversarial postmortem debate (⚔️ button). Auto-picks a different pulled model when empty. Set in Learning → Debate Engine card.
@@ -291,7 +291,7 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 - `POST /api/debate/staleness` — entry staleness check for recs ≥ 2 days old. Fires banner on rec card.
 - `POST /api/debate/skill` — score closed trade quality 0–10 (skill vs luck). Also populates `success_tags` for wins in the same Ollama call (Sprint 28). 🔬 button.
 - `GET /api/debate/calib-quality` — Phase 6 calibration quality card. Pre-computes binomial SE + Z-scores per calibration band, builds a constrained Ollama prompt (statistical verdict as immutable fact), returns per-band verdicts (`signal`/`uncertain`/`noise`) + qualitative analysis. Cached in `blob_store.calib_quality_latest`; `?force=1` bypasses cache; `?regime=X` scopes bands to that regime. *(Sprint 26)*
-- `POST /api/debate/quick-analysis` — lightweight portfolio analysis via local Ollama (BUY/TOP_UP/HOLD only). Body: `{userMessage, model?}`. Context truncated to 4000 chars. Returns `{ok, text, model, elapsed_ms}`. Tags each rec with `_source:'local'` for the `🔒 Local` badge. *(Sprint 41)*
+- `POST /api/debate/quick-analysis` — lightweight portfolio analysis via local Ollama (BUY/TOP_UP/HOLD/SELL/TRIM). Body: `{userMessage, model?}`. Context truncated to 6000 chars. Returns `{ok, text, model, elapsed_ms}`. Tags each rec with `_source:'local'` for the `🔒 Local` badge. SELL/TRIM use simplified 5-driver taxonomy; stop direction validated post-response. *(Sprint 41; extended Sprint 48)*
 
 ### Dividends, earnings, news, announcements
 See `asx_server.py` route table — too many to list. Search `@app.route`.
@@ -339,7 +339,7 @@ Edit `js/prompts.js`. If it's reused, add the agent type to `_AGENT_MAX_TOKENS` 
 Settings page → Telegram section. Enter bot token (from `@BotFather`) and chat ID, click Save, then Test. Enable the toggle. `fireAlert()` will mirror all desktop alerts to Telegram when enabled.
 
 ### Enable local LLM for portfolio analysis (no API spend)
-Settings page → Display → "Use local LLM for analysis" toggle. Routes `'portfolio'` agentType calls to `POST /api/debate/quick-analysis` (Ollama) instead of Claude API. Only generates BUY/TOP_UP/HOLD — SELL/TRIM require the full Claude path. Recs show `🔒 Local` badge. Disable when you need SELL recommendations or regime-change analysis.
+Settings page → Display → "Use local LLM for analysis" toggle. Routes `'portfolio'` agentType calls to `POST /api/debate/quick-analysis` (Ollama) instead of Claude API. Generates BUY/TOP_UP/HOLD/SELL/TRIM — SELL/TRIM use a simplified 5-driver taxonomy (`thesis_broken`, `stop_triggered`, `target_reached`, `time_stop`, `risk_management`). The full 9-driver Claude path is still needed for secondary_factors and advanced calibration injection. Recs show `🔒 Local` badge. *(Sprint 48: SELL/TRIM support added)*
 
 ### Record a DRP event (dividend reinvestment plan)
 Portfolio page → click **DRP** button on a holding row → enter shares issued, price per share, and settlement date → Apply DRP. Updates the holding's `avgPrice` (weighted), adds a `state.cgtParcels` entry with `action:'DRP'`, and logs to `state.tradeJournal`. CGT page shows an indigo DRP badge on DRP parcels. The `applyDrpEvent()` function in `portfolio.js` handles the state mutation.
@@ -422,7 +422,7 @@ The Vitest suite (`tests/`) uses `vm.runInThisContext` to load browser-global sc
 
 31. **Heat budget uses `maxRiskBudgetPct`, not `heatBudgetPct`.** `analysis.js` reads `state.settings.maxRiskBudgetPct || 5` (default 5%). This field is also used by the Risk page gauge. The field is NOT in `config.js` defaults — it's set at runtime via the Risk page input and persisted to DB. Using a different key name when adding budget-related settings will silently break the gate.
 
-32. **`useLocalLLM` fast-path excludes SELL/TRIM.** `_callLocalAnalysis()` in `claude-client.js` POSTs to `/api/debate/quick-analysis` which only outputs BUY/TOP_UP/HOLD. The backend's `_SCHEMA_QUICK_ANALYSIS` has no SELL/TRIM actions. If a user has `useLocalLLM=true`, SELL recommendations require disabling the toggle first. The `🔒 Local` badge on rec cards signals local-model origin.
+32. **`useLocalLLM` fast-path now supports SELL/TRIM with a simplified 5-driver taxonomy** (`thesis_broken`, `stop_triggered`, `target_reached`, `time_stop`, `risk_management`). Secondary factors and the full 9-driver set require the Claude path. Recs show `🔒 Local` badge. Exit stop direction is validated post-response: SELL/TRIM stop is corrected to entry×1.03 if the model outputs it below entry.
 
 33. **`high_60d` / `low_60d` require ≥60 bars.** `indicators.py` returns `None` for both when the ticker has fewer than 60 trading days of OHLCV history. Day-trade Signal #4 (Fibonacci zone) falls back to `return_60d` between −20% and −5% when either field is `None`. New tickers or recently listed stocks always take the fallback path.
 

@@ -2460,14 +2460,22 @@ _SCHEMA_QUICK_ANALYSIS = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "ticker":     {"type": "string"},
-                    "action":     {"type": "string", "enum": ["BUY", "TOP_UP", "HOLD"]},
-                    "confidence": {"type": "number"},
-                    "priceRange": {"type": "array", "items": {"type": "number"}},
-                    "target":     {"type": "number"},
-                    "stopLoss":   {"type": "number"},
-                    "reasoning":  {"type": "string"},
-                    "risks":      {"type": "string"},
+                    "ticker":         {"type": "string"},
+                    "action":         {"type": "string",
+                                       "enum": ["BUY", "TOP_UP", "HOLD", "SELL", "TRIM"]},
+                    "confidence":     {"type": "number"},
+                    "priceRange":     {"type": "array", "items": {"type": "number"}},
+                    "target":         {"type": "number"},
+                    "stopLoss":       {"type": "number"},
+                    "reasoning":      {"type": "string"},
+                    "risks":          {"type": "string"},
+                    # Exit fields — required only when action is SELL or TRIM
+                    "primary_driver": {"type": "string",
+                                       "enum": ["thesis_broken", "stop_triggered",
+                                                "target_reached", "time_stop",
+                                                "risk_management"]},
+                    "urgency":        {"type": "string",
+                                       "enum": ["immediate", "routine", "monitor"]},
                 },
                 "required": ["ticker", "action", "confidence", "reasoning", "risks"],
             },
@@ -2478,20 +2486,46 @@ _SCHEMA_QUICK_ANALYSIS = {
 }
 
 _LOCAL_ANALYSIS_SYSTEM = """\
-You are a conservative ASX equity analyst. Analyse the portfolio context below and output
-structured trading recommendations.
+You are a conservative ASX equity analyst. Analyse the portfolio context and output
+structured trading recommendations as JSON.
 
-RULES:
-- Only output BUY (new position), TOP_UP (add to existing), or HOLD (keep existing) actions.
-  Do NOT output SELL or TRIM — those require manual review.
-- BUY/TOP_UP require all of: priceRange [lo,hi], target (above hi), stopLoss (below lo).
-- stopLoss must be BELOW priceRange[0] for BUY/TOP_UP.
-- target must be ABOVE priceRange[1] for BUY/TOP_UP.
-- confidence: 0.60 = marginal, 0.70 = moderate, 0.80 = strong. Use 0 for HOLD.
-- Output 1-3 recommendations maximum. Prefer HOLD when uncertain.
-- qty is not required — the quant engine will calculate it.
+=== ACTIONS ===
+BUY      — new position (watchlist entry or entirely new holding)
+TOP_UP   — add to an EXISTING holding that is underweight with a strong thesis
+HOLD     — keep existing holding, no change needed (use confidence=0)
+SELL     — close a FULL existing position (multi-factor deterioration)
+TRIM     — reduce an existing holding by 25–50% (overweight or thesis weakening)
 
-Output only the JSON object. No preamble, no markdown fences.
+=== ENTRY RULES (BUY / TOP_UP) ===
+- priceRange: [lo, hi] — limit entry range
+- target: ABOVE priceRange[1] — where thesis is proven
+- stopLoss: BELOW priceRange[0] — where thesis is wrong
+- confidence: 0.62 minimum. 0.70 = moderate conviction, 0.80 = strong.
+- Only recommend when ≥ 2 independent factors align (earnings, macro, valuation, technicals).
+
+=== EXIT RULES (SELL / TRIM) ===
+- priceRange: [lo, hi] — limit sell range near current price
+- target: BELOW priceRange[0] — price that confirms the exit was correct (further decline)
+- stopLoss: ABOVE priceRange[1] — price that would INVALIDATE the exit thesis (stock recovers)
+- stopLoss MUST be ABOVE priceRange[1] for SELL/TRIM. Never set stop below entry on an exit.
+- primary_driver (required — pick ONE):
+    thesis_broken   — fundamental case has failed (earnings miss, sector headwind confirmed)
+    stop_triggered  — price has reached or is very close to the stop-loss level
+    target_reached  — price has hit the original profit target; exit to lock in gains
+    time_stop       — held ≥ 2× expected duration with < 5% gain; no upcoming catalyst
+    risk_management — position > 15% of portfolio OR sector > 30%; size reduction only
+- urgency (required):
+    immediate — execute today; meaningful further risk if delayed
+    routine   — within 1–3 sessions; no acute pressure
+    monitor   — TRIM only; conditions forming but thesis not yet confirmed
+- confidence: 0.62 minimum for SELL/TRIM. Use 0 for HOLD.
+
+=== OUTPUT RULES ===
+- Output 1–4 recommendations maximum. Prefer HOLD when uncertain.
+- qty is NOT required — the quant engine calculates it after your response.
+- For SELL/TRIM: primary_driver and urgency are REQUIRED fields.
+- For BUY/TOP_UP: primary_driver and urgency are NOT included.
+- Output only the JSON object. No preamble, no markdown fences.
 """
 
 
@@ -2502,11 +2536,13 @@ def quick_analysis():
     Accepts the assembled user message from analysis.js, prepends a stripped-down
     system prompt, and calls the local model with structured output constraints.
 
-    SELL/TRIM are excluded — they require the full Claude prompt with structured
-    tagging (sell_primary_driver, sell_secondary_factors, sell_urgency).
+    Supports BUY/TOP_UP/HOLD and SELL/TRIM with a simplified 5-driver taxonomy
+    (thesis_broken, stop_triggered, target_reached, time_stop, risk_management).
+    SELL/TRIM recs require primary_driver and urgency fields; stop direction is
+    validated post-response (stop corrected to entry×1.03 if below entry).
 
     Body:
-        userMessage  str  — assembled portfolio context from analysis.js (truncated to 4000 chars)
+        userMessage  str  — assembled portfolio context from analysis.js (truncated to 6000 chars)
         model        str  — optional model override (default: qwen3:9b)
 
     Returns:
@@ -2519,10 +2555,11 @@ def quick_analysis():
     if not raw_msg:
         return jsonify({"ok": False, "error": "userMessage required"}), 400
 
-    # Truncate to 4000 chars — local models have limited context windows.
-    # The most important context (date, regime, holdings, top signals) is always first.
-    user_ctx = raw_msg[:4000]
-    if len(raw_msg) > 4000:
+    # Truncate to 6000 chars — local models have limited context windows.
+    # Sprint 47 indicator tiering reduced message size by ~30-40%, giving headroom
+    # for exit decision context (holdings state, unrealised P&L, stop levels).
+    user_ctx = raw_msg[:6000]
+    if len(raw_msg) > 6000:
         user_ctx += "\n[...context truncated for local model...]"
 
     prompt = f"{_LOCAL_ANALYSIS_SYSTEM}\n\n{user_ctx}\n\nOutput JSON now:"
@@ -2533,7 +2570,7 @@ def quick_analysis():
         prompt,
         timeout=90,
         think=False,         # disable thinking tokens — they eat num_predict budget
-        num_predict=1500,    # enough for 3 recs with full fields
+        num_predict=1500,    # enough for 4 recs with full fields including exit fields
         format_schema=_SCHEMA_QUICK_ANALYSIS,
     )
     elapsed_ms = int((time.time() - t0) * 1000)
@@ -2543,12 +2580,25 @@ def quick_analysis():
 
     raw = result["text"].strip()
 
-    # Add _source flag to each rec so the frontend can show a badge
+    # Add _source flag and validate SELL/TRIM fields
     rec_count = 0
     try:
         parsed = json.loads(raw)
         for r in parsed.get("recs", []):
             r["_source"] = "local"
+            action = (r.get("action") or "BUY").upper()
+            if action in ("SELL", "TRIM"):
+                # Ensure required exit fields with safe defaults
+                if not r.get("primary_driver"):
+                    r["primary_driver"] = "thesis_broken"
+                if not r.get("urgency"):
+                    r["urgency"] = "routine"
+                # Validate stop direction: SELL/TRIM stop must be ABOVE entry
+                entry = (r.get("priceRange") or [None])[0]
+                stop  = r.get("stopLoss")
+                if entry and stop and stop < entry:
+                    r["stopLoss"] = round(entry * 1.03, 4)
+                    r["_stopRepaired"] = True
         rec_count = len(parsed.get("recs", []))
         text_out = json.dumps(parsed)
     except Exception:

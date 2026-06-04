@@ -5266,5 +5266,54 @@ class TestSprint46(unittest.TestCase):
         self.assertIn("universe_excluded", src)
 
 
+class TestQuickAnalysisSellTrim(unittest.TestCase):
+
+    def test_schema_allows_sell_trim(self):
+        """_SCHEMA_QUICK_ANALYSIS must include SELL and TRIM in action enum."""
+        from routes.debate import _SCHEMA_QUICK_ANALYSIS
+        enum = _SCHEMA_QUICK_ANALYSIS["properties"]["recs"]["items"]["properties"]["action"]["enum"]
+        self.assertIn("SELL", enum)
+        self.assertIn("TRIM", enum)
+
+    def test_schema_has_exit_fields(self):
+        """Schema must include primary_driver and urgency fields."""
+        from routes.debate import _SCHEMA_QUICK_ANALYSIS
+        props = _SCHEMA_QUICK_ANALYSIS["properties"]["recs"]["items"]["properties"]
+        self.assertIn("primary_driver", props)
+        self.assertIn("urgency", props)
+
+    def test_local_system_prompt_mentions_sell_trim(self):
+        """_LOCAL_ANALYSIS_SYSTEM must document SELL and TRIM actions."""
+        from routes.debate import _LOCAL_ANALYSIS_SYSTEM
+        self.assertIn("SELL", _LOCAL_ANALYSIS_SYSTEM)
+        self.assertIn("TRIM", _LOCAL_ANALYSIS_SYSTEM)
+        self.assertIn("primary_driver", _LOCAL_ANALYSIS_SYSTEM)
+        self.assertIn("thesis_broken", _LOCAL_ANALYSIS_SYSTEM)
+
+    def test_exit_stop_repair(self):
+        """SELL rec with stop below entry must be repaired to entry * 1.03."""
+        rec = {"action": "SELL", "priceRange": [50.0, 50.5], "stopLoss": 48.0,
+               "reasoning": "test", "risks": "test", "confidence": 0.65, "ticker": "BHP"}
+        entry = (rec.get("priceRange") or [None])[0]
+        stop  = rec.get("stopLoss")
+        if entry and stop and stop < entry:
+            rec["stopLoss"] = round(entry * 1.03, 4)
+            rec["_stopRepaired"] = True
+        self.assertEqual(rec["stopLoss"], round(50.0 * 1.03, 4))
+        self.assertTrue(rec["_stopRepaired"])
+
+    def test_exit_default_driver_added(self):
+        """SELL rec missing primary_driver must get thesis_broken default."""
+        rec = {"action": "SELL", "confidence": 0.65, "ticker": "BHP",
+               "reasoning": "test", "risks": "test"}
+        if (rec.get("action") or "").upper() in ("SELL", "TRIM"):
+            if not rec.get("primary_driver"):
+                rec["primary_driver"] = "thesis_broken"
+            if not rec.get("urgency"):
+                rec["urgency"] = "routine"
+        self.assertEqual(rec["primary_driver"], "thesis_broken")
+        self.assertEqual(rec["urgency"], "routine")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

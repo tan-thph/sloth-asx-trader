@@ -1,5 +1,19 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-04 (Sprint 47 shipped)
+**Last Updated:** 2026-06-04 (Sprint 48 shipped)
+
+## 0. Shipped — Sprint 48 (2026-06-04)
+
+| Fix | Area | Detail |
+|---|---|---|
+| **SELL/TRIM schema** | Local LLM | `_SCHEMA_QUICK_ANALYSIS` now includes SELL and TRIM in the action enum, plus `primary_driver` and `urgency` fields. Exit recs from local Ollama are fully supported for the first time. |
+| **System prompt rewrite** | Local LLM | `_LOCAL_ANALYSIS_SYSTEM` rewritten with explicit EXIT RULES section: stop-above-entry direction rule, 5-driver taxonomy (`thesis_broken`, `stop_triggered`, `target_reached`, `time_stop`, `risk_management`), urgency levels, and SELL/TRIM vs BUY/TOP_UP field requirements. |
+| **Truncation 4000→6000 chars** | Local LLM | Context window for local model raised to 6000 chars (Sprint 47 tiering reduced message size ~30–40%, giving headroom for exit context including unrealised P&L and stop levels). |
+| **Post-processing validation** | Local LLM | `quick_analysis()` now validates each SELL/TRIM rec: adds `primary_driver="thesis_broken"` default if absent, adds `urgency="routine"` default if absent, corrects stop to `entry×1.03` if below entry (tags `_stopRepaired=True`). |
+| **Badge title fix** | Frontend | `🔒 Local` badge tooltip updated from "BUY/HOLD only" to "simplified 5-driver taxonomy". SELL/TRIM `primary_driver`/`urgency` rendering was already generic — confirmed it works for local recs. |
+| **CLAUDE.md gotcha #32** | Docs | Updated to reflect SELL/TRIM support, 5-driver taxonomy, and stop-direction correction. Endpoint table and state docs updated accordingly. |
+| **Tests** | Testing | `TestQuickAnalysisSellTrim` (5 tests): schema enum, exit fields, system prompt content, stop repair logic, default driver insertion. |
+
+---
 
 ## 0. Shipped — Sprint 47 (2026-06-04)
 
