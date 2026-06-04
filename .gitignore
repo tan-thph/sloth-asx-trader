@@ -1,5 +1,4 @@
-# SQLite database (contains live portfolio data — do not commit)
-*.db
+# SQLite database — track main DB, exclude WAL/SHM/backups
 *.db-shm
 *.db-wal
 *.db.bak*
