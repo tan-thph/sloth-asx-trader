@@ -53,6 +53,7 @@ const state = {
     useLocalLLM: false,
     maxRiskBudgetPct: 5,
     autoBriefTime: '',   // 'HH:MM' in AEST, empty = disabled
+    corrBlockThreshold: 0.85,  // hard-block BUY when |ρ| with any holding exceeds this
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary

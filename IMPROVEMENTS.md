@@ -1,5 +1,19 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-04 (Sprint 48 shipped)
+**Last Updated:** 2026-06-04 (Sprint 49 shipped)
+
+## 0. Shipped — Sprint 49 (2026-06-04)
+
+| Fix | Area | Detail |
+|---|---|---|
+| **Correlation hard block** | Risk | `analysis.js` now reads `state.settings.corrBlockThreshold` (default 0.85) and hard-blocks BUY/TOP_UP recs with `|ρ| ≥ threshold` instead of halving size. Near-perfect correlation provides no diversification benefit. Soft gate (−30% size) fires 10pp below threshold (`_corrSoft = min(threshold − 0.10, 0.75)`). Hard-blocked recs get `_corrBlocked: true` and `qty: 0`, then are filtered out and surfaced in `dataGaps`. |
+| **corrBlockThreshold in config.js** | Risk | `state.settings.corrBlockThreshold = 0.85` added to config defaults. Persisted to DB via `scheduleSave()`. |
+| **corrBlockThreshold settings input** | Frontend | Settings → Telegram card gains a "Correlation block threshold" number input (min 0.5, max 1.0, step 0.01). Shows soft-gate hint. |
+| **_corrBlocked in dataGaps** | Transparency | Hard-blocked BUY recs are pushed to `_parsed.data.dataGaps` so the user sees why they were dropped (e.g. "blocked: corr 0.91 with RIO ≥ threshold 0.85"). Appends note to `summary`. |
+| **GET /api/db/git-status** | Backend | New endpoint in `routes/portfolio.py`. Runs `git log -1 --format=%ci -- asx_trader.db` and `git status --porcelain asx_trader.db` to return `{ok, last_committed, has_uncommitted}`. Gracefully returns `ok: false` when `git` binary is absent. |
+| **DB in git — Settings App Info** | Frontend | `settings.js` App Info card now shows "DB in git: YYYY-MM-DD HH:MM ⚠ uncommitted changes" (amber when dirty). Fetched in `loadSettingsAppInfo()` from the new endpoint. |
+| **Tests** | Testing | `TestSprint49` (11 tests): config default, analysis.js hard-block flag/filter/threshold, settings input, API endpoint shape (ok/fields/no-5xx), settings element, settings fetch, dataGaps injection. Updated `TestSprint8.test_corr_sizing_in_analysis` to reflect new hard-block pattern. |
+
+---
 
 ## 0. Shipped — Sprint 48 (2026-06-04)
 

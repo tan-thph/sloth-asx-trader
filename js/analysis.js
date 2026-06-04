@@ -865,10 +865,13 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       summary = (summary ? summary + ' ' : '') + note.trim();
     }
 
-    // ── Correlation-aware size reduction ──────────────────────────────────────
+    // ── Correlation-aware size reduction / hard block ─────────────────────────
     // Fetch exact correlation between BUY rec tickers and existing holdings.
-    // Reduces qty when |corr| > 0.7 (−30%) or > 0.85 (−50%) to limit
-    // inadvertent concentration in correlated names.
+    // Hard-blocks at |ρ| ≥ corrBlockThreshold (default 0.85): near-perfect
+    // correlation provides no diversification benefit — just doubles exposure.
+    // Soft gate at 10pp below threshold (default 0.75): size −30%.
+    const _corrBlock = state.settings?.corrBlockThreshold ?? 0.85;
+    const _corrSoft  = Math.min(_corrBlock - 0.10, 0.75);
     const _buyRecs = recs.filter(r => ['BUY','TOP_UP'].includes((r.action||'').toUpperCase()));
     if (state.serverOk && portfolioTickers.length && _buyRecs.length) {
       try {
@@ -887,12 +890,14 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
                 const c = Math.abs(tkrRow[h] || 0);
                 if (c > maxCorr) { maxCorr = c; maxCorrTicker = h; }
               }
-              if (maxCorr > 0.85) {
-                const mult = 0.5;
-                return { ...r, qty: Math.max(1, Math.round(r.qty * mult)),
-                  riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
-                  _corrNote: `corr ${maxCorr.toFixed(2)} with ${maxCorrTicker} — size halved` };
-              } else if (maxCorr > 0.7) {
+              if (maxCorr >= _corrBlock) {
+                return {
+                  ...r,
+                  qty: 0,
+                  _corrBlocked: true,
+                  _corrNote: `blocked: corr ${maxCorr.toFixed(2)} with ${maxCorrTicker} ≥ threshold ${_corrBlock} — no diversification benefit`,
+                };
+              } else if (maxCorr > _corrSoft) {
                 const mult = 0.7;
                 return { ...r, qty: Math.max(1, Math.round(r.qty * mult)),
                   riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
@@ -903,6 +908,21 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           }
         }
       } catch { /* non-fatal — analysis continues without correlation adjustment */ }
+    }
+
+    // Filter hard-blocked corr recs, surface in dataGaps for transparency (Item 3)
+    const corrBlockedRecs = recs.filter(r => r._corrBlocked);
+    if (corrBlockedRecs.length) {
+      recs = recs.filter(r => !r._corrBlocked);
+      corrBlockedRecs.forEach(r => {
+        console.log(`[Corr] blocked ${r.ticker}: ${r._corrNote}`);
+        if (_parsed?.data) {
+          if (!Array.isArray(_parsed.data.dataGaps)) _parsed.data.dataGaps = [];
+          _parsed.data.dataGaps.push({ ticker: r.ticker, missingField: r._corrNote });
+        }
+      });
+      const note = ` [Correlation-blocked ${corrBlockedRecs.length} BUY/TOP_UP rec(s) — high corr with existing holdings]`;
+      summary = (summary ? summary + ' ' : '') + note.trim();
     }
 
     // ── Portfolio heat budget gate ─────────────────────────────────────────────

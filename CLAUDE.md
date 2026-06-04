@@ -161,6 +161,7 @@ state.settings.compactMode:       bool — applies `.compact` CSS body class on 
 state.settings.useLocalLLM:       bool — routes portfolio analysis to local Ollama via quick-analysis endpoint (BUY/TOP_UP/HOLD/SELL/TRIM with simplified 5-driver taxonomy). Default false. *(Sprint 41; SELL/TRIM extended Sprint 48)*
 state.settings.maxRiskBudgetPct:  number — heat budget gate: max total $ at risk to stops as % of portfolio (default 5). Set in Risk page budget input. Used by `analysis.js` to scale/block new BUY recs. *(Sprint 38)*
 state.settings.autoBriefTime:     string — 'HH:MM' AEST time to auto-fire morning briefing on first page load (empty = disabled). Stored in settings, persisted to DB. *(Sprint 45)*
+state.settings.corrBlockThreshold: number — |ρ| at or above this value hard-blocks a BUY/TOP_UP rec (sets `_corrBlocked: true`, qty=0, filters out, added to dataGaps). Default 0.85. Soft gate fires 10pp below (`min(threshold − 0.10, 0.75)`) → −30% size. Configurable in Settings → Telegram card. *(Sprint 49)*
 state.debate.oppositionModel:     str — opposition model for adversarial postmortem debate (⚔️ button). Auto-picks a different pulled model when empty. Set in Learning → Debate Engine card.
 state._splitWarnings:             undefined | {} | { TICKER: [{date, ratio}] } — undefined = not yet checked, {} = checked (no splits), populated = splits found; cached per Portfolio page load
 state._capitalReturnWarnings:     undefined | {} | { TICKER: [{date, amount, amount_pct, label}] } — undefined = not yet checked, {} = checked (none), populated = large distributions ≥5% of price; cached per Portfolio page load
@@ -221,6 +222,7 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 ### Portfolio + persistence
 - `POST /api/db/save` — bulk save of frontend state. Persists `priceAlerts`, `watchlist`, `savedScreeners` (all survive reload).
 - `GET /api/db/load` — bulk restore; returns all blob_store keys including `watchlist` and `savedScreeners`.
+- `GET /api/db/git-status` — returns `{ok, last_committed, has_uncommitted}`. Runs `git log -1 --format=%ci -- asx_trader.db` and `git status --porcelain asx_trader.db`. Returns `ok: false` with `error` field when `git` binary unavailable. Displayed in Settings App Info card. *(Sprint 49)*
 - `GET /api/cash` / `POST /api/cash`
 - `POST /api/db/refresh-sectors`
 - `GET /api/tax/eofy-pack?year=N` — downloads a ZIP with `cgt_disposals_FY{N}-{N+1}.csv` and `trade_fees_FY{N}-{N+1}.csv`. Reads `cgtDisposals` from blob_store + trade fees from `trade_journal`. `year` defaults to current FY (Jul–Jun). Button on CGT page.
