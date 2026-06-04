@@ -1962,12 +1962,23 @@ async function renderCalibQualityCard() {
 
     try {
       const regime = (state.currentRegime?.regime || '');
+      // On auto-load always request cached data only — Ollama only fires when user clicks Run
       const url = `${API}/api/debate/calib-quality?regime=${encodeURIComponent(regime)}`
-                + (force ? '&force=1' : '');
+                + (force ? '&force=1' : '&cache_only=1');
       const r = await fetch(url, { signal: AbortSignal.timeout(120_000) });
       if (!r.ok) { el.innerHTML = ''; return; }
       const d = await r.json();
-      if (!d.ok) { el.innerHTML = ''; return; }
+      if (!d.ok || !d.bands?.length) {
+        // No cached result — show prompt to run manually
+        el.innerHTML = `<div class="card" style="margin-top:14px;padding:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span class="text-sm text-muted">Calibration Quality — no results yet</span>
+            <button class="btn btn-sm" onclick="window._runCalibQuality && window._runCalibQuality()">▶ Run debate</button>
+          </div>
+          <p class="text-xs text-muted" style="margin-top:6px">Runs a local Ollama debate to audit confidence band quality. Requires Ollama running.</p>
+        </div>`;
+        return;
+      }
       _renderCard(d);
     } catch {
       el.innerHTML = '';
@@ -2027,8 +2038,9 @@ async function renderCalibQualityCard() {
       </div>`;
   }
 
-  // Expose force-refresh for the Refresh button
+  // Expose force-refresh for the Refresh button and the "Run debate" button on empty state
   renderCalibQualityCard._force = () => _fetchAndRender(true);
+  window._runCalibQuality = () => _fetchAndRender(true);
 
   // Initial load — use cached result if available
   if (!state.serverOk) return;

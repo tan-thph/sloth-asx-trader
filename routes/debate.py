@@ -2325,8 +2325,9 @@ def debate_calib_quality():
     regime  = (request.args.get("regime") or "").strip()
     model   = (request.args.get("model")  or "qwen3:9b").strip()
     tout    = min(int(request.args.get("timeout", 45)), 90)
-    force   = request.args.get("force", "0") == "1"
-    today   = datetime.now().strftime("%Y-%m-%d")
+    force      = request.args.get("force", "0") == "1"
+    cache_only = request.args.get("cache_only", "0") == "1"
+    today      = datetime.now().strftime("%Y-%m-%d")
 
     # ── Cache check — return today's stored result unless force=1 ─────────────
     if not force:
@@ -2341,6 +2342,10 @@ def debate_calib_quality():
                     return jsonify({**stored, "ok": True, "cached": True})
         except Exception:
             pass
+
+    # cache_only=1 means the frontend only wants cached data — never run Ollama
+    if cache_only:
+        return jsonify({"ok": False, "cached": False, "error": "no cached result for today"}), 200
 
     # ── Compute per-band statistics ───────────────────────────────────────────
     try:

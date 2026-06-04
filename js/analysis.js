@@ -265,9 +265,9 @@ async function runAnalysis() {
       sector: h.sector,
       shares: h.shares,
       avgPrice: h.avgPrice,
-      currentPrice: h.currentPrice,
-      value: h.shares * h.currentPrice,
-      unrealisedPnl: (h.currentPrice - h.avgPrice) * h.shares,
+      currentPrice: state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice,
+      value: h.shares * (state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice),
+      unrealisedPnl: ((state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice) - h.avgPrice) * h.shares,
       unrealisedPnlPct: pnlPct,
       daysHeld: days,
       weight: ((h.shares * h.currentPrice) / portfolioValue() * 100).toFixed(1) + '%',
@@ -1101,10 +1101,6 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     if (typeof alertHighConviction === 'function') alertHighConviction(cappedDedupedRecs);
     // Log recommendations to the Learning Loop backend (fire-and-forget)
     logRecsToLearningLoop(cappedDedupedRecs, _activeRegime, _debateResults);
-    // Phase 6: refresh calib quality card once per trading day (LOW priority)
-    if (typeof triggerCalibQualityIfStale === 'function') {
-      triggerCalibQualityIfStale(_activeRegime).catch(() => {});
-    }
     showPage('recommendations');
   } catch(e) {
     state.analysisRunning = false;

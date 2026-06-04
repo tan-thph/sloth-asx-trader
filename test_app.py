@@ -869,13 +869,15 @@ class TestStage2AutoClassification(unittest.TestCase):
     """Regression tests for Stage 2 — Auto-classification."""
 
     def test_auto_postmortem_triggered_on_loss(self):
-        """markExecuted must fire triggerPostmortem when outcome is loss/breakeven."""
+        """Postmortem and skill scoring are manual-only — recommendations.js must NOT auto-trigger them."""
         with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("triggerPostmortem", src,
-                      "markExecuted must call triggerPostmortem on loss/breakeven")
-        self.assertIn("fetchSkillScore", src,
-                      "markExecuted must call fetchSkillScore after close")
+        # The functions are still defined in debate-client.js and callable manually;
+        # but markExecuted must not call them automatically.
+        self.assertNotIn("triggerPostmortem(res.id)", src,
+                         "triggerPostmortem must not be auto-called from markExecuted — manual only")
+        self.assertNotIn("fetchSkillScore(res.id)", src,
+                         "fetchSkillScore must not be auto-called from markExecuted — manual only")
 
     def test_calibration_accepts_tickers_param(self):
         """GET /api/learning/calibration must accept 'tickers' query param."""
@@ -3103,10 +3105,11 @@ class TestPhase6CalibQuality(unittest.TestCase):
         self.assertIn("renderCalibQualityCard", src)
 
     def test_calib_quality_auto_trigger_in_analysis(self):
-        """analysis.js must call triggerCalibQualityIfStale after analysis."""
+        """calib-quality debate is manual-only — analysis.js must NOT auto-trigger it."""
         with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("triggerCalibQualityIfStale", src)
+        self.assertNotIn("triggerCalibQualityIfStale(", src,
+                         "triggerCalibQualityIfStale must not be called from analysis.js — debates are manual only")
 
     def test_calib_quality_trigger_in_debate_client(self):
         """debate-client.js must define triggerCalibQualityIfStale with LOW priority."""

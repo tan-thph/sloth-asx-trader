@@ -1344,25 +1344,13 @@ function markExecuted(id, execPrice, execFee, execQty) {
           histEntry._learningId = res.id;
           const rh = state.recHistory.find(r => r.id === rec.id);
           if (rh) rh._learningId = res.id;
-          // #5: fire auto-postmortem on fresh-logged losses/breakevens
-          if ((outcome === 'loss' || outcome === 'breakeven') && typeof triggerPostmortem === 'function') {
-            triggerPostmortem(res.id).catch(() => {});
-          }
-          if (outcome && typeof fetchSkillScore === 'function') {
-            fetchSkillScore(res.id).catch(() => {});
-          }
+          // Postmortem and skill scoring are manual-only — use Debate Engine on Learning page
         }
       }).catch(() => {});
     }
   }
 
-  // #5: auto-postmortem on loss/breakeven when we already had a _learningId
-  if (state.serverOk && rec._learningId && (outcome === 'loss' || outcome === 'breakeven')) {
-    if (typeof triggerPostmortem === 'function') triggerPostmortem(rec._learningId).catch(() => {});
-  }
-  if (state.serverOk && rec._learningId && outcome) {
-    if (typeof fetchSkillScore === 'function') fetchSkillScore(rec._learningId).catch(() => {});
-  }
+  // Postmortem and skill scoring are manual-only — use Debate Engine on Learning page
 
   const _execIdx = state.recommendations.findIndex(r => r.id === id);
   if (_execIdx !== -1) state.recommendations.splice(_execIdx, 1);
