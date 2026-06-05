@@ -267,11 +267,11 @@ function buildRiskPage(merged, riskData) {
         ${sectorEntries.map(([sec, val]) => {
           const pct = pv > 0 ? val/pv*100 : 0;
           const warn = pct > 40 ? '#ef4444' : pct > 25 ? '#d97706' : '';
-          return `<div style="display:flex;align-items:center;gap:8px;font-size:12px">
+          return `<div style="display:flex;align-items:center;gap:6px;font-size:12px">
             <div style="width:12px;height:12px;border-radius:3px;background:${sectorColorMap[sec]};flex-shrink:0"></div>
-            <span style="flex:1">${sec}</span>
-            <span style="font-weight:600${warn?';color:'+warn:''}">${fmt(pct,1)}%</span>
-            <span class="text-muted" style="min-width:72px;text-align:right">$${fmt(val,0)}</span>
+            <span style="font-weight:500;margin-right:2px">${sec}</span>
+            <span style="font-weight:600${warn?';color:'+warn:''};white-space:nowrap">${fmt(pct,1)}%</span>
+            <span class="text-muted" style="white-space:nowrap">· $${fmt(val,0)}</span>
           </div>`;
         }).join('')}
       </div>

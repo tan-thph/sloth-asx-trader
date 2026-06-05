@@ -971,18 +971,20 @@ function _buildSectorSidebar(merged, totalValue) {
     <div style="margin-top:16px;padding-top:12px;border-top:0.5px solid var(--border-light)">
       <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Weights</div>
       <div style="display:flex;flex-direction:column;gap:5px">
-        ${merged.map((h, i) => {
-          const w = totalValue > 0 ? (h.shares * h.currentPrice / totalValue * 100) : 0;
-          const pl = h.avgPrice > 0 ? ((h.currentPrice - h.avgPrice) / h.avgPrice * 100) : 0;
-          return `<div style="display:flex;align-items:center;gap:6px;font-size:11px">
-            <span style="width:7px;height:7px;border-radius:2px;flex-shrink:0;background:${_DONUT_COLORS[i % _DONUT_COLORS.length]}"></span>
+        ${[...merged]
+          .map((h, origIdx) => ({
+            h, origIdx,
+            w: totalValue > 0 ? (h.shares * h.currentPrice / totalValue * 100) : 0,
+          }))
+          .sort((a, b) => b.w - a.w)
+          .map(({ h, w }, sortIdx) => `<div style="display:flex;align-items:center;gap:6px;font-size:11px">
+            <span style="width:7px;height:7px;border-radius:2px;flex-shrink:0;background:${_DONUT_COLORS[sortIdx % _DONUT_COLORS.length]}"></span>
             <span style="font-weight:600;flex:0 0 38px">${h.ticker}</span>
             <div style="flex:1;background:var(--bg-secondary);border-radius:2px;height:5px;overflow:hidden">
-              <div style="width:${Math.min(w,100)}%;height:100%;background:${_DONUT_COLORS[i % _DONUT_COLORS.length]};opacity:0.7"></div>
+              <div style="width:${Math.min(w,100)}%;height:100%;background:${_DONUT_COLORS[sortIdx % _DONUT_COLORS.length]};opacity:0.7"></div>
             </div>
             <span class="text-muted" style="flex:0 0 30px;text-align:right">${fmt(w,1)}%</span>
-          </div>`;
-        }).join('')}
+          </div>`).join('')}
       </div>
     </div>
   </div>`;
