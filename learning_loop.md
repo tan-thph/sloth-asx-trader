@@ -1,6 +1,6 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** June 2026 (Sprint 46 + hotfixes)
+**Last Updated:** June 2026 (Sprint 49 — virtual speed weight fix, 30d cutoff, n_virtual UI)
 **Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–46 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
@@ -30,7 +30,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `recommendation`      | TEXT       | BUY / SELL / TRIM / TOP_UP / HOLD |
 | `ai_confidence`       | REAL       | Claude's stated confidence (0–1) |
 | `ensemble_confidence` | REAL       | Quant engine confidence (0–1) |
-| `outcome_status`      | TEXT       | `win` / `loss` / `breakeven` / `open` / `skipped` / `virtual_win` / `virtual_loss` / `virtual_open` (last three set by `_resolve_virtual_outcomes()`) |
+| `outcome_status`      | TEXT       | `win` / `loss` / `breakeven` / `open` / `skipped` / `expired`. Virtual values (`virtual_win`/`virtual_loss`/`virtual_open`) are stored in the separate `virtual_outcome` column — `outcome_status` stays `open` or `skipped` for unexecuted recs. |
 | `realized_pnl_pct`    | REAL       | Exit P&L as % of cost basis |
 | `realized_pnl_aud`    | REAL       | Exit P&L in AUD |
 | `regime`              | TEXT       | Market regime at time of rec |
@@ -62,6 +62,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `sell_urgency`             | TEXT       | `immediate` / `routine` / `monitor` (TRIM only) (Sprint 29) |
 | `virtual_outcome`          | TEXT       | `virtual_win` / `virtual_loss` / `virtual_open` — lazy-resolved by `_resolve_virtual_outcomes()` for `was_executed=0` recs ≥30d old (Sprint 36) |
 | `virtual_pnl_pct`          | REAL       | Reserved for future use; NULL until entry price known (Sprint 36) |
+| `virtual_speed_weight`     | REAL       | `min(1.0, 7.0 / bars_to_resolution)` — how many daily bars elapsed until target/stop was first hit. ≤7 bars → 1.0 (fast, high-conviction); 30 bars → ~0.23 (slow drift, weaker signal). Used as multiplier inside `_weight()`: effective virtual weight = `0.75 × virtual_speed_weight`. NULL until resolved. (Sprint 44; fixed Sprint 49: now uses bars-to-hit, not elapsed time) |
 | `alternative_ticker`       | TEXT       | Set at SELL/TRIM generation when `primary_driver=better_opportunity`; used by `_resolve_sell_outcomes()` for cross-check (Sprint 37) |
 | `sell_verify_date`         | TEXT       | Date when the 25d+ sell outcome verification ran (Sprint 37) |
 | `sell_verify_verdict`      | TEXT       | `validated` / `invalidated` / `inconclusive` (Sprint 37) |
@@ -251,7 +252,9 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 **Virtual outcomes / paper-trade skipped recs** ✅ *(Sprint 36 + Sprint 44)*
 `_resolve_virtual_outcomes(conn)` runs lazily inside `_calib_compute()`. For `was_executed=0` recs ≥30 days old with non-null stop and target, it fetches OHLCV history and checks whether `high ≥ target` (virtual_win) or `low ≤ stop` (virtual_loss). Results written to `virtual_outcome` and fed back into calibration at 0.75× weight via `rows_all`. Prevents the pessimism loop where suppressed calibration produces no new outcomes. Frontend shows virtual outcome count in the calibration stats card.
 
-**Sprint 44 addition — virtual speed weighting:** `_resolve_virtual_outcomes()` now also writes `virtual_speed_weight = min(1.0, 7.0 / hold_days)` to the `ai_learning_events` row (`virtual_speed_weight REAL` column added via `_LE_MIGRATIONS`). A virtual win resolved in 7 days gets weight=1.0; one that drifted to target over 29 days gets ~0.24. In `_calib_compute()`, the effective weight for virtual rows is `0.75 × virtual_speed_weight` — fast hits are treated nearly as strongly as executed outcomes; slow drifts are further discounted. This prevents a slow-moving unexecuted rec from inflating calibration as much as a clean, fast win.
+**Sprint 44 addition — virtual speed weighting:** `_resolve_virtual_outcomes()` also writes `virtual_speed_weight = min(1.0, 7.0 / bars_to_resolution)` to the `ai_learning_events` row (`virtual_speed_weight REAL` column added via `_LE_MIGRATIONS`). `bars_to_resolution` is the 1-indexed bar number at which the target or stop was **first hit** during the daily OHLCV bar scan — NOT total elapsed time from creation to today. A virtual win resolved in 7 bars (target hit on day 7) gets weight=1.0; one where target is only hit on bar 30 gets ~0.23. Unresolved (virtual_open) uses the total bar count of the history fetch. In `_calib_compute()`, the effective weight for virtual rows is `0.75 × virtual_speed_weight` — fast hits are treated nearly as strongly as executed outcomes; slow drifts are further discounted. This prevents a slow-moving unexecuted rec from inflating calibration as much as a clean, fast win.
+
+> **Sprint 49 fix:** The original implementation incorrectly computed `hold_days = (today − creation_date)`, making a rec from 40 days ago that hit target on bar 5 get `speed_weight = 7/40 = 0.175` instead of the intended `1.0`. The fix tracks `bars_to_resolution` during the bar scan loop and uses that value. Cutoff confirmed at 30 days (was briefly 10 days in the initial implementation; corrected to match the spec). `n_virtual_resolved` count now exposed via `GET /api/learning/stats` and shown as a cyan badge on the calibration card.
 
 ---
 
@@ -267,8 +270,10 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 7. Dominant error type threshold: 33% of losses, min 3 losses (L2, lowered from 40%/4)
 7b. **Dominant success tag nudge** *(Sprint 27):* mirrors L2 for wins. If ≥33% of tagged wins share a success tag and ESS≥2.5, emits `✓tag_name(N/Mwins,ESS=X.X)→lean into this` so Claude can reinforce winning patterns, not just avoid losing ones. Threshold: ≥33% of tagged wins, min 3 wins. Supported tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`.
 8. Per-ticker stats: emits `per-ticker:BHP.AX:62%(Δ+14pp,ESS=3.2)✓strong` for portfolio tickers with >15pp delta vs overall WR (Stage 2 + Sprint 23)
-9. Returns a block labelled with date range + regime for Claude context
-10. Auto-expire (events >120 days old → `expired`) runs on write path only, not on this GET (L3)
+8b. **Sector × regime interaction** *(Sprint 28):* when current regime is known and ≥10 calib rows exist, groups rows by `sector × regime`, computes weighted WR per group, emits up to 2 sectors with |delta| ≥ 12pp vs overall WR and ESS ≥ 2.5. Format: `sector×riskOn:Materials:78%(Δ+22pp,ESS=3.1)✓,REITs:31%(Δ-25pp)⚠`. Most actionable for ASX sector rotation.
+9. Sell tag validation: emits `⚠SELL_TAG:time_stop(n=4,val=25%)→CUTTING WINNERS` or `✓SELL_TAG:target_rch(n=5,val=80%)→reliable` when a SELL driver is consistently unreliable/reliable (capped at 3 drivers, only verifiable drivers)
+10. Returns a block labelled with date range + regime for Claude context
+11. Auto-expire (events >120 days old → `expired`) runs on write path only, not on this GET (L3)
 
 Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` — never the system prompt (preserves Anthropic's server-side prompt cache).
 Target size: 30–60 tokens.
@@ -310,7 +315,7 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 | `POST /api/debate/staleness`            | Write  | Freshness check for pending recs ≥ 2 days old |
 | `POST /api/debate/skill`                | Write  | Score closed trade outcome quality 0–10 |
 | `GET  /api/debate/calib-quality`        | Read   | Calibration quality debate: pre-computes Z-scores per band, calls Ollama for qualitative root-cause, returns per-band verdicts. Cached in `blob_store.calib_quality_latest`; `?force=1` bypasses cache *(Sprint 26)* |
-| `POST /api/debate/quick-analysis`       | Write  | Local LLM portfolio analysis via Ollama (BUY/TOP_UP/HOLD only; 4000-char context limit; opt-in via `state.settings.useLocalLLM`) *(Sprint 41)* |
+| `POST /api/debate/quick-analysis`       | Write  | Local LLM portfolio analysis via Ollama (BUY/TOP_UP/HOLD/SELL/TRIM; 6000-char context limit; opt-in via `state.settings.useLocalLLM`). SELL/TRIM use simplified 5-driver taxonomy. *(Sprint 41; SELL/TRIM extended Sprint 48)* |
 
 ---
 
@@ -329,7 +334,12 @@ The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes 
 - **Auto-Tag Accuracy card** *(Sprint 41):* agree-rate badge (🟢 ≥75% / 🟡 60–75% / 🔴 <60%); "Review Batch (5)" button loads up to 5 unreviewed auto-tagged events with agree/disagree/retag UI; when <60%, emits `⚠AUTO_TAGS_UNRELIABLE` in calibration block and suppresses `top_err` nudge
 - Recent Events table (30 most recent) — features:
   - `outcomeChip` + 🛡 badge if `protective_stop`, 🛡? button if `stop_hit` loss
-  - Error tag buttons (8 tags, multi-select, auto=dashed/manual=solid border)
+  - **Error tags column** — 8 clickable tag chips (OC/MC/RM/PE/ST/PR/ES/TB), loss/breakeven rows only; auto-tagged rows show dashed border; manual solid border. When `error_type='none'` (Ollama reviewed, no systematic error found), shows a small `✓ no error` grey badge above the buttons so reviewed-clean rows are distinguishable from unreviewed ones.
+  - **Claude column** — generation-time tags logged by Claude when the rec was created (not post-hoc Ollama classification):
+    - SELL/TRIM rows: `sell_primary_driver` chip (colour-coded — red for `thes broken`, green for `target hit`, amber for `time stop`, etc.) + `sell_urgency` chip (`immediate` red / `monitor` amber / `routine` grey). Falls back to a generic grey pill for any unrecognised driver value.
+    - WIN rows: `success_tags` chips (same colour scheme as the Success Patterns card).
+    - All other rows: `—` placeholder.
+  - **"Classify All Untagged" auto-refresh** — after the batch completes, the page reloads automatically (800 ms delay) so newly-assigned tags appear without a manual Refresh click.
   - 🤖 postmortem button (loss/breakeven, re-runnable — overwrites existing tag)
   - ⚔️ adversarial debate button (loss/breakeven, user-initiated only)
   - 📜 stored-debate viewer (only shown on rows where `postmortem_debate` is non-null — opens transcript modal with no model call)
@@ -716,6 +726,19 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **`high_60d`/`low_60d` forwarded to Claude:** `analysis.js` user message now appends `| Range60d: hi=${n} lo=${n}` to the Returns line when both fields are non-null. Previously emitted by `indicators.py` but never reached the Claude prompt. Signal #4 in `_dtBuildRecs()` also updated to use the actual Fibonacci computation (`fib50 = low_60d + 0.50 × range`, `fib618 = low_60d + 0.618 × range`) with `return_60d` fallback.
   - **Multiple portfolios (account tagging):** `account: 'personal'|'super'|'trading'` field added to each holding. `state.activeAccount` ('all' by default) filters `mergedPortfolio()`. Portfolio page shows account filter tabs and colour-coded account badges (click to cycle). `analysis.js` injects `Account: SUPER` (etc.) into the Claude user message header when `activeAccount !== 'all'`. `ai_learning_events` rows do not yet capture account scope — recorded as a future enhancement when per-account calibration data is sufficient.
 
+- **Sprint 49 — Virtual outcome accuracy + UI fixes (June 2026):**
+  - **Speed weight fix:** `_resolve_virtual_outcomes()` now tracks `bars_to_resolution` (the 1-indexed bar at which target/stop was first hit) instead of total elapsed time from creation to today. A rec from 40 days ago that hit target on bar 5 now correctly gets `speed_weight = min(1.0, 7/5) = 1.0` instead of the old `7/40 = 0.175`. Unresolved (virtual_open) uses the full bar count of the OHLCV history fetch.
+  - **Cutoff corrected:** Recs must be ≥30 days old before virtual resolution — was incorrectly 10 days in the initial implementation; corrected to match the spec. Ensures trades have had time to play out before being classified as virtual_open.
+  - **`n_virtual_resolved` in stats:** `/api/learning/stats` now returns `n_virtual_resolved` (total DB count of resolved virtual outcomes). Learning page calibration card shows a cyan badge "~N virtual outcomes included" when N > 0; `virtual_speed_weight` shown in the `~W`/`~L` chip tooltip as the effective calibration weight (0.75 × speed_weight).
+  - **`virtual_speed_weight` in recent events SELECT:** `learning_stats()` recent events query now fetches `virtual_speed_weight` so the UI can render the per-event effective weight.
+  - **`virtual_speed_weight` documented in table:** column now listed in the `ai_learning_events` table above (was missing from the doc despite being live in the DB since Sprint 44).
+
+- **Post-Sprint-48 — Claude tags column in Recent Events table (June 2026):**
+  - **New "Claude" column** inserted between Error tags and the Skill column in `js/pages/learning.js`. Shows `sell_primary_driver` + `sell_urgency` chips for SELL/TRIM rows, `success_tags` chips for WIN rows, and `—` for all other rows. `DRIVER_META` and `URG_META` lookup tables provide colour-coded short labels for all 9 primary drivers and 3 urgency levels. The column surfaces data that was already logged in `ai_learning_events` but had no UI representation.
+  - **`✓ no error` badge in Error tags column** — `tagCell()` now prepends a small grey `✓ no error` span when `error_type === 'none'` so Ollama-reviewed rows are distinguishable from unreviewed ones. The 8 tag buttons are still rendered (for manual re-tagging).
+  - **Auto-refresh after "Classify All Untagged"** — `classifyAllPostmortems()` now calls `showPage('learning')` via `setTimeout(..., 800)` after the batch completes, so newly-assigned tags appear without a manual Refresh click.
+  - WIN `success_tags` display moved exclusively to the Claude column; the Error tags column is now strictly for Ollama-classified error tags on loss/breakeven rows.
+
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
 - **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
 - **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.
@@ -739,7 +762,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 
 1. ✅ **Phase 8** — `_compute_phase8_meta()` live with Mann-Whitney U gate (z>1.28, one-sided p<0.10). Now also in `_calib_compute()` (hotfix 16bba99). Phase 8 activates automatically once 10+ scored events exist where wins score statistically higher than losses.
 2. ✅ **Phase 6** — `GET /api/debate/calib-quality` live; Z-scores pre-computed server-side; Learning page traffic-light card. **Manual-only** (hotfix a888eec removed auto-trigger; card loads with `cache_only=1`).
-3. ✅ **Virtual outcomes** — `_resolve_virtual_outcomes()` live (Sprint 36); feeds back at 0.75× weight × `virtual_speed_weight` (Sprint 44).
+3. ✅ **Virtual outcomes** — `_resolve_virtual_outcomes()` live (Sprint 36); feeds back at 0.75× weight × `virtual_speed_weight` (Sprint 44). Speed weight uses `bars_to_resolution` (not elapsed time) since Sprint 49 fix; cutoff is ≥30d.
 4. ✅ **Lessons Database** — `trading_lessons` table + CRUD + Claude injection + `breadth_scope` filtering live (Sprint 39, Sprint 44).
 5. ✅ **Regime-aware SELL/TRIM ATR floor** — `analysis.js` Step 3 now reads `regimeMod.stopAtrMult ?? 2.5` from `getRegimeModifiers(state.currentRegime.regime)`. Rec flagged `_stopRepaired: true` and `_stopRepairedMult: N`. *(Sprint 41)*
 6. ✅ **`high_60d` / `low_60d` for Fibonacci** — `indicators.py` `analyse_ticker()` now emits `high_60d = high.tail(60).max()` and `low_60d = low.tail(60).min()`. Signal #4 in `prompts.js` updated to use `fib_50`/`fib_618` computed from these values, with `return_60d` as fallback. *(Sprint 41)*
