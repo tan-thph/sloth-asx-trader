@@ -1251,3 +1251,392 @@ settings: {
 | 24 | `js/claude-client.js` | Local LLM fast-path ignores user's preferred model (`qwen3:9b` hardcoded) | Low | S | ✅ FIXED |
 | 25 | `routes/debate.py` | `quick_analysis` logger uses `'parsed' in dir()` anti-pattern | Low | XS | ✅ FIXED |
 | 26 | `js/config.js` | `useLocalLLM` and `maxRiskBudgetPct` not initialized in state defaults | Low | XS | ✅ FIXED |
+
+---
+
+## Day Trading transaction recording — Post-Sprint-48 (2026-06-05)
+
+Issues identified by tracing the full data flow from Day Trading execute → Trade Journal, Performance, CGT, Portfolio, and Dashboard. Four gaps fixed in a single pass.
+
+---
+
+### Critical — data never written (silently missing from CGT, portfolio, performance attribution)
+
+## 34. `js/day-trading-analysis.js` — swing BUY creates no portfolio holding or CGT parcel ✅ FIXED
+
+**File:** `js/day-trading-analysis.js` → `executeDayTrade()`
+**Severity:** High — open swing positions invisible to CGT page; Portfolio page; drawdown monitor; NAV history
+
+### Problem
+
+`executeDayTrade()` wrote a journal entry and debited cash, but never called `applyBuyToPortfolio()`. Result:
+- No entry in `state.portfolio` → position invisible to Portfolio page, correlation filter, and NAV/drawdown monitor while the trade is open
+- No `cgtParcels` entry → CGT page has zero record of the trade
+- No `parcelId` on the journal entry → `rollbackTradeJournalEntry` cannot undo the parcel if the user deletes the entry
+
+### Fix
+
+Call `applyBuyToPortfolio(ticker, qty, price, date, fees, sector)` before writing the journal entry. Store `newParcel.id` as `parcelId` on the journal entry. Add `sector` field (sourced from `state.liveSignals`). Cash deduction unchanged — `applyBuyToPortfolio` does not touch cash.
+
+---
+
+## 35. `js/pages/day-trading.js` — swing SELL creates no CGT disposal and misses portfolio removal ✅ FIXED
+
+**File:** `js/pages/day-trading.js` → `_closeDayTrade()`
+**Severity:** High — CGT disposal record missing; portfolio holding not removed on close; `disposalIds` absent from journal entry
+
+### Problem
+
+`_closeDayTrade()` manually computed P&L (`(closePrice − entryPrice) × qty − fees`) and credited cash, but never called `applySellToPortfolio()`. Result:
+- No `cgtDisposals` entry → CGT page shows no disposal, no cost-basis calculation, no discount eligibility
+- Portfolio holding from the BUY (now written correctly after fix #34) would not be removed on close
+- Journal entry had no `disposalIds` link
+
+### Fix
+
+Call `applySellToPortfolio(ticker, qty, price, fee, date, method)` which: removes the portfolio holding, calls `matchSaleAgainstParcels()` (FIFO/LIFO), pushes to `state.cgtDisposals`, and credits cash. Use `disposalsToPnl(disposals)` for the net P&L. Store `disposalIds` on the journal entry. Cash is no longer manually credited (it's inside `applySellToPortfolio`). Fallback to manual arithmetic + manual cash credit when the holding is absent (recs executed before this fix).
+
+---
+
+## 36. `js/pages/day-trading.js` — intraday BUY never written to trade journal ✅ FIXED
+
+**File:** `js/pages/day-trading.js` → `executeIntradayTrade()`
+**Severity:** Medium — journal shows only the SELL/close leg; BUY leg is invisible while position is open
+
+### Problem
+
+`executeIntradayTrade()` only wrote to `state.intraday.openPositions`. The journal showed nothing until the position was closed — at which point only a SELL entry appeared. Any navigation to the Trade Journal page while a position was open showed no record of it.
+
+### Fix
+
+Write a `{action:'BUY', status:'open'}` journal entry immediately on execute. Store `_journalId` on the position object so `closeIntradayPosition` can patch the same entry rather than creating a duplicate SELL entry. Sector is sourced from `state.liveSignals`.
+
+---
+
+## 37. `js/pages/day-trading.js` — intraday close creates duplicate SELL entry instead of patching the BUY ✅ FIXED
+
+**File:** `js/pages/day-trading.js` → `closeIntradayPosition()`
+**Severity:** Medium — journal shows duplicate entries (one open BUY + one closed SELL); P&L on the BUY entry never updated
+
+### Problem
+
+`closeIntradayPosition()` always created a brand-new SELL entry. If an intraday BUY had been journaled at entry, you'd get two records for the same trade — one perpetually `status:'open'` and one `status:'closed'`. The BUY entry would show up in performance stats as an unclosed trade.
+
+### Fix
+
+On close, look up the open BUY entry by `pos._journalId`. If found, patch it in-place (`exitPrice`, `fees`, `pnl`, `status:'closed'`, `closeDate`, `sector`). If not found (position opened before the fix), create a fallback combined entry as before.
+
+---
+
+### Summary — Day Trading data flow fixes
+
+| # | File(s) | Issue | Severity | Effort | Status |
+|---|---|---|---|---|---|
+| 34 | `js/day-trading-analysis.js` | Swing BUY creates no portfolio holding or CGT parcel | High | S | ✅ FIXED |
+| 35 | `js/pages/day-trading.js` | Swing SELL creates no CGT disposal; portfolio holding not removed | High | S | ✅ FIXED |
+| 36 | `js/pages/day-trading.js` | Intraday BUY not written to trade journal | Medium | S | ✅ FIXED |
+| 37 | `js/pages/day-trading.js` | Intraday close creates duplicate SELL instead of patching BUY entry | Medium | S | ✅ FIXED |
+
+### Remaining gaps (not fixed — see notes)
+
+| Gap | Why deferred |
+|---|---|
+| Intraday today P&L not folded into `portfolioHistory` snapshots | Requires NAV calculation logic change; low risk in isolation but could skew drawdown monitor |
+| Sector missing on pre-fix swing entries in existing `tradeJournal` | One-time migration needed; no automatic backfill |
+| `recId` link on intraday close entries for learning loop | Intraday recs are separate from `state.recommendations`; requires learning loop wiring |
+
+---
+
+## App Auditor findings — Post-Sprint-48 (2026-06-05)
+
+Full-app audit covering all blueprints, JS engine files, security, and data integrity. Grouped by severity.
+
+---
+
+### Critical — will crash or produce wrong results at runtime
+
+## 27. `routes/market.py` — `log` missing from core import; NameError fires on every Stooq fallback
+
+**File:** `routes/market.py:34`
+**Severity:** Critical — silently breaks yfinance fallback path for both `/api/quote` and `/api/macro`
+
+### Problem
+
+```python
+from core import LOG_DIR, ttl_cache, fetch_with_retry, stooq_quote
+```
+
+`log` is absent from the import. Lines 179 and 257 call `log.warning(...)` inside the Stooq fallback branches:
+
+```python
+# Line 179 — inside _quote_cached() Stooq branch
+log.warning("quote: yfinance failed for %s — serving Stooq fallback", ticker)
+
+# Line 257 — inside _macro_payload()._fetch_symbol() Stooq branch
+log.warning("macro: yfinance failed for %s (%s) — Stooq fallback", name, sym)
+```
+
+Both call sites throw `NameError: name 'log' is not defined` the moment yfinance fails and the
+Stooq fallback fires. The fallback logic itself (price fetch, `_source: 'stooq'` tagging) never
+executes — the exception propagates to the caller. This defeats the entire third line of defence
+added in Sprint 42.
+
+### Fix
+
+Add `log` to the import:
+
+```python
+from core import LOG_DIR, ttl_cache, fetch_with_retry, stooq_quote, log
+```
+
+---
+
+## 28. `js/pages/assistant.js` — XSS on both user input and AI response (innerHTML with raw strings)
+
+**File:** `js/pages/assistant.js:29, 159`
+**Severity:** Critical — executes arbitrary JS from user-typed input or a compromised AI response
+
+### Problem
+
+Line 29 — user message injected raw:
+```js
+msgs.innerHTML += `<div class="msg msg-user">${msg}</div>`;
+```
+
+Line 159 — Claude API response injected raw:
+```js
+document.getElementById('typing').outerHTML =
+  `<div class="msg msg-ai" style="white-space:pre-wrap">${reply}</div>`;
+```
+
+`escapeHTML()` exists in `utils.js` (loads before `assistant.js`) but is not called here.
+A user who types `<img src=x onerror=alert(1)>` triggers JS execution in their own session.
+More practically, a response from a compromised or injected AI output could auto-execute code.
+
+### Fix
+
+Wrap both with `escapeHTML()`:
+
+```js
+// Line 29
+msgs.innerHTML += `<div class="msg msg-user">${escapeHTML(msg)}</div>`;
+
+// Line 159
+document.getElementById('typing').outerHTML =
+  `<div class="msg msg-ai" style="white-space:pre-wrap">${escapeHTML(reply)}</div>`;
+```
+
+`escapeHTML` uses `textContent` round-trip so it is safe for multi-line text with newlines.
+
+---
+
+### High — silently wrong results
+
+## 29. `js/quant-engine.js` — `Infinity` liquidity cap silently removed when ADV data is missing
+
+**File:** `js/quant-engine.js:101–103`
+**Severity:** High — allows a full-sized position in an illiquid stock when ADV data is absent
+
+### Problem
+
+```js
+const qtyByLiquidity = advShares > 0
+  ? Math.floor(advShares * (_ap.maxLiquidityPct ?? QUANT_CONFIG.maxLiquidityPct))
+  : Infinity;
+```
+
+When `advShares` is 0 or missing (no ADV data returned by the backend), `qtyByLiquidity` is
+set to `Infinity`. `Math.min(qtyByRisk, qtyByPosition, Infinity, qtyByKelly)` ignores the
+`Infinity` constraint, meaning liquidity is completely unconstrained. The quant engine silently
+sizes the position as though the stock has unlimited liquidity.
+
+This can happen on fresh tickers, Stooq-fallback data that returns no volume field, or any
+`analyse_ticker()` cache miss that returns partial signal data.
+
+### Fix
+
+Return a hard rejection when ADV is unavailable rather than treating it as unconstrained:
+
+```js
+const advShares = signals.volume_avg_20
+  ?? (signals.adv_20 && price > 0 ? signals.adv_20 / price : null);
+
+if (!advShares || advShares <= 0) {
+  return { ok: false, reason: 'ADV data unavailable — liquidity constraint cannot be applied' };
+}
+
+const qtyByLiquidity = Math.floor(
+  advShares * (_ap.maxLiquidityPct ?? QUANT_CONFIG.maxLiquidityPct)
+);
+```
+
+If a hard rejection is too conservative (e.g. watchlist scans where ADV is optional), use a
+conservative 1,000-share fallback cap instead of `Infinity`.
+
+---
+
+## 30. `indicators.py` — timezone mismatch in `days_to_earnings` calculation
+
+**File:** `indicators.py:715, 719`
+**Severity:** High — can throw `TypeError` at runtime or produce silently wrong `days_to_earnings`
+
+### Problem
+
+```python
+# Line 715
+days_to_earnings = (pd.Timestamp(first) - pd.Timestamp.now()).days
+
+# Line 719
+days_to_earnings = (pd.Timestamp(earn_ts.iloc[0]) - pd.Timestamp.now()).days
+```
+
+`pd.Timestamp.now()` returns a tz-naive timestamp. yfinance earnings dates (`stk.calendar`,
+`stk.earnings_history`) are tz-aware (UTC). When both are present, pandas raises:
+
+```
+TypeError: Cannot compare tz-naive and tz-aware Timestamps
+```
+
+This exception is caught by the outer `except Exception: pass` block, leaving
+`days_to_earnings = None`, which means `pre_earnings_risk` is always `False` — the 1.3×
+ATR earnings adjustment never fires even when earnings are imminent.
+
+### Fix
+
+Strip timezone from the yfinance timestamp before subtraction:
+
+```python
+days_to_earnings = (pd.Timestamp(first).tz_localize(None) - pd.Timestamp.now()).days
+# and
+days_to_earnings = (pd.Timestamp(earn_ts.iloc[0]).tz_localize(None) - pd.Timestamp.now()).days
+```
+
+Or use tz-aware `.now()`:
+
+```python
+now_utc = pd.Timestamp.utcnow()
+days_to_earnings = (pd.Timestamp(first).tz_convert('UTC') - now_utc).days
+```
+
+---
+
+### Medium — data corruption or incorrect behaviour on edge inputs
+
+## 31. `js/portfolio-helpers.js` — division by zero in CGT fee allocation when `saleQty = 0`
+
+**File:** `js/portfolio-helpers.js:235`
+**Severity:** Medium — produces `Infinity` fee-per-share that corrupts all CGT disposal records
+
+### Problem
+
+```js
+const feePerShare = saleFees / saleQty;  // line 235
+```
+
+If `saleQty` arrives as 0 (malformed broker CSV row, manual data-entry error, or rounding in
+FIFO allocation), `feePerShare = Infinity`. Every downstream calculation (`allocatedSaleFee`,
+`grossGain`, `netGain`) silently becomes `Infinity` or `NaN`. These values flow into
+`state.cgtDisposals` and persist to the DB via `saveStateToDb`.
+
+### Fix
+
+Add an early guard before the fee calculation:
+
+```js
+function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees, method) {
+  if (!saleQty || saleQty <= 0) {
+    return { disposals: [], remainder: 0, error: `Invalid sale qty: ${saleQty}` };
+  }
+  // ... rest of function
+  const feePerShare = saleFees / saleQty;
+```
+
+---
+
+## 32. `js/response-validator.js` — anti-churn 7-day guard bypassed for recs without timestamps
+
+**File:** `js/response-validator.js:273`
+**Severity:** Medium — anti-flip rule silently disabled for legacy or manually-entered recs
+
+### Problem
+
+The anti-churn rule checks whether a holding was recommended a different direction within the
+last 7 days:
+
+```js
+const sevenDaysAgo = Date.now() - 7 * 24 * 3600 * 1000;
+// ...
+const recentFlip = history.some(h =>
+  new Date(h.timestamp).getTime() > sevenDaysAgo && ...
+);
+```
+
+When `h.timestamp` is `undefined` or `null` (recs imported via CSV, or older `recHistory`
+entries before the timestamp field was added), `new Date(undefined).getTime()` returns `NaN`.
+`NaN > sevenDaysAgo` is always `false`, so the anti-churn check silently passes and the flip
+protection is disabled for those recs.
+
+### Fix
+
+Add a guard in the `history.some()` callback:
+
+```js
+const recentFlip = history.some(h => {
+  if (!h.timestamp) return false;  // no timestamp = can't determine recency, skip
+  return new Date(h.timestamp).getTime() > sevenDaysAgo && ...;
+});
+```
+
+---
+
+## 33. `js/response-validator.js` — `NaN` propagates into `ensembleConfidence` when `sig.score` is `NaN`
+
+**File:** `js/response-validator.js:359–361`
+**Severity:** Medium — `ensembleConfidence` becomes `NaN`; confidence gate at line 365 always fails
+
+### Problem
+
+```js
+const indScore = sig?.score ?? null;          // line 359
+r.ensembleConfidence = indScore != null
+  ? Math.round((0.5 * r.confidence + 0.5 * (indScore / 100)) * 100) / 100
+  : r.confidence;
+```
+
+`?? null` guards against `undefined` and `null`, but not `NaN`. If `sig.score` is explicitly
+`NaN` (returned from a partial or errored `analyse_ticker()` response), `indScore` passes the
+`!= null` check and `NaN / 100 = NaN` propagates into `ensembleConfidence`. Then:
+
+```js
+if ((r.ensembleConfidence ?? 0) < minConf && r.action !== 'HOLD') {
+  rejected.push(...);  // NaN < minConf is always false → never rejected
+}
+```
+
+A rec with bad signal data is not rejected — it passes the confidence gate unconditionally.
+
+### Fix
+
+Extend the null guard to cover `NaN`:
+
+```js
+const indScore = sig?.score;
+const hasValidScore = indScore != null && !Number.isNaN(indScore);
+r.ensembleConfidence = hasValidScore
+  ? Math.round((0.5 * r.confidence + 0.5 * (indScore / 100)) * 100) / 100
+  : r.confidence;
+```
+
+---
+
+## Summary — Post-Sprint-48 audit
+
+| # | File(s) | Issue | Severity | Effort |
+|---|---|---|---|---|
+| 27 | `routes/market.py` | `log` missing from core import → NameError on every Stooq fallback | **Critical** | XS |
+| 28 | `js/pages/assistant.js` | XSS — user input and AI response injected raw into innerHTML | **Critical** | XS |
+| 29 | `js/quant-engine.js` | `Infinity` liquidity cap when ADV missing → unconstrained position sizing | **High** | S |
+| 30 | `indicators.py` | Timezone mismatch in `days_to_earnings` → TypeError or silent `None` | **High** | S |
+| 31 | `js/portfolio-helpers.js` | Division by zero in `feePerShare` when `saleQty = 0` | Medium | XS |
+| 32 | `js/response-validator.js` | Anti-churn guard bypassed for recs with undefined timestamp | Medium | XS |
+| 33 | `js/response-validator.js` | `NaN` sig.score bypasses `ensembleConfidence` null guard → gate always passes | Medium | XS |

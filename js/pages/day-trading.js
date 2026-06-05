@@ -948,9 +948,19 @@ function executeIntradayTrade(recId) {
     };
     state.intraday.openPositions.push(newPos);
 
+    // Add a 'trading' account portfolio holding so the position appears on the Portfolio page
+    // and is included in NAV / price refresh cycles (refreshPrices loops state.portfolio).
+    const sector = (state.liveSignals?.[rec.ticker] || {}).sector || 'Other';
+    applyBuyToPortfolio(rec.ticker, qty, entryPrice, todayStr(), brokerage, sector, 'trading');
+
+    // Seed liveSignals with the entry price immediately so Live/P&L renders on the first
+    // renderPage() call after this dialog closes — before the next refreshPrices() fires.
+    if (!state.liveSignals) state.liveSignals = {};
+    if (!state.liveSignals[rec.ticker]) state.liveSignals[rec.ticker] = {};
+    state.liveSignals[rec.ticker].current_price = entryPrice;
+
     // Record BUY leg in trade journal — creates a paired entry that closeIntradayPosition
     // patches on exit, so the journal shows both legs of the round-trip trade.
-    const sector = (state.liveSignals?.[rec.ticker] || {}).sector || 'Other';
     if (!state.tradeJournal) state.tradeJournal = [];
     const intradayBuyEntry = {
       id:          Date.now(),
@@ -964,6 +974,7 @@ function executeIntradayTrade(recId) {
       pnl:         null,
       status:      'open',
       sector,
+      account:     'trading',
       notes:       'Intraday BUY',
     };
     state.tradeJournal.unshift(intradayBuyEntry);
@@ -1011,7 +1022,15 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
   if (!state.intraday.todayPnl) state.intraday.todayPnl = 0;
   state.intraday.todayPnl += net;
   state.intraday.pnlDate   = todayStr();   // stamp date so day-change reset works
-  state.cash += pos.qty * closePrice - sellFee;
+
+  // Remove the 'trading' portfolio holding and write a CGT disposal.
+  // applySellToPortfolio also credits cash internally — do not credit manually.
+  const { ok: soldOk } = applySellToPortfolio(
+    pos.ticker, pos.qty, closePrice, sellFee, todayStr(),
+    state.cgtMethod || 'FIFO', 'trading'
+  );
+  // Fallback cash credit for positions opened before the portfolio fix was deployed.
+  if (!soldOk) state.cash += pos.qty * closePrice - sellFee;
 
   // Patch the open BUY journal entry written at entry time, or create a fallback
   // combined entry for positions opened before this fix was deployed.
@@ -1040,6 +1059,7 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
       pnl:         net,
       status:      'closed',
       sector,
+      account:     'trading',
       notes:       'Intraday same-day close',
       closeDate:   todayStr(),
     });
@@ -1084,7 +1104,7 @@ function _closeDayTrade(recId) {
     const prevDisposalLen = (state.cgtDisposals || []).length;
     const { ok: soldOk, disposals } = applySellToPortfolio(
       rec.ticker, execQty, closePrice, sellFee, todayStr(),
-      state.cgtMethod || 'FIFO'
+      state.cgtMethod || 'FIFO', 'trading'
     );
 
     let net;

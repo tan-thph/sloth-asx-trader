@@ -246,6 +246,15 @@ function executeDayTrade(recId) {
       }
     }
 
+    const sector = (state.liveSignals?.[rec.ticker] || {}).sector || 'Other';
+
+    // Create portfolio holding and CGT parcel — tagged 'trading' account so it
+    // is kept separate from long-term personal/super holdings on the Portfolio page.
+    applyBuyToPortfolio(rec.ticker, qty, parseFloat(entryPrice.toFixed(3)), todayStr(), brokerage, sector, 'trading');
+    const newParcel = (state.cgtParcels || []).length
+      ? state.cgtParcels[state.cgtParcels.length - 1]
+      : null;
+
     const entry = {
       id:          Date.now(),
       date:        todayStr(),
@@ -258,12 +267,15 @@ function executeDayTrade(recId) {
       fees:        brokerage,
       pnl:         null,
       status:      'open',
+      sector,
+      account:     'trading',
+      parcelId:    newParcel ? newParcel.id : null,
       recId:       rec.id,
       recExecuted: true,
       notes:       `SwingTrade | Target:$${rec.target} | Stop:$${rec.stopLoss} | R:R ${rec.rrRatio?.toFixed(1)}x | Hold:${rec.holdDays}d`,
     };
     state.tradeJournal.unshift(entry);
-    state.cash -= cost;
+    state.cash -= cost;   // applyBuyToPortfolio does not update cash; deduct manually
     rec.status    = 'executed';
     rec._execQty  = qty;         // remember actual qty for close dialog and display
     scheduleSave();

@@ -55,6 +55,31 @@ except ImportError as _ae_err:
     _ae_err_msg = str(_ae_err)
     _AE_OK = False
 
+# ── Suppress expected yfinance noise ─────────────────────────────────────────
+# yfinance logs ERROR-level messages for ETF tickers that lack fundamentals
+# data (404 from /quoteSummary) and for symbols that have no price history
+# (delisted or unsupported like YAP=F).  These are handled gracefully by our
+# code — the log pollution just confuses debugging.  Filter them out here so
+# only genuine, unexpected yfinance failures appear in the server log.
+
+class _YfNoiseFilter(logging.Filter):
+    """Drop known-benign yfinance ERROR messages from the server log."""
+    _DROP = re.compile(
+        r"No fundamentals data found"      # ETF /quoteSummary 404
+        r"|possibly delisted"              # symbols with no price history
+        r"|No price data found"            # alternate 'no data' wording
+        r"|Quote not found for symbol"     # /quoteSummary 404 variant
+        r"|YFPricesMissingError"           # yfinance exception class name
+    )
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not self._DROP.search(record.getMessage())
+
+for _yf_logger_name in ("yfinance", "yfinance.base", "yfinance.utils",
+                         "yfinance.scrapers.history",
+                         "yfinance.scrapers.fundamentals"):
+    _lg = logging.getLogger(_yf_logger_name)
+    _lg.addFilter(_YfNoiseFilter())
+
 app = Flask(__name__)
 # Allow requests only from file:// origins and localhost (the HTML file and dev server).
 # Adjust origins if you serve the frontend from a specific domain.

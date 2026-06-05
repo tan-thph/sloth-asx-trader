@@ -104,6 +104,50 @@ def _norm_sentiment(v) -> str:
     if "bear" in s or "negative" in s or "pessimist" in s:
         return "bearish"
     return "neutral"
+
+
+def _sanitize_summary(text: str, max_len: int = 500) -> str:
+    """Detect and truncate repetition loops common in local LLM output.
+
+    Models occasionally enter a repetition loop on the summary field,
+    producing patterns like:
+      /models/models/models/...    (URL path segment looping)
+      _err_err_err_...             (error-token looping)
+      US/Iran/US/Iran/...          (entity list looping)
+      title/title/title/...        (anchor text looping)
+
+    Strategy: find the first substring of ≥4 chars that appears 3+
+    times consecutively; keep text up to the END of the first occurrence
+    (so genuine content isn't lost), then strip trailing noise chars.
+    """
+    if not text or len(text) < 20:
+        return text
+    text = text[:max_len]
+    # Match any run of 4–40 chars repeated ≥3 times in a row.
+    # re.search finds the leftmost (earliest) such repetition.
+    m = re.search(r'(.{4,40})\1{2,}', text)
+    if m:
+        # Keep everything up to (and including) the first occurrence.
+        cutoff = m.start() + len(m.group(1))
+        return text[:cutoff].rstrip(' _/-,.’‘')
+    return text
+
+
+def _strip_urls(text: str) -> str:
+    """Remove hyperlinks from article content before sending to LLM.
+
+    RSS feeds often embed full URLs in the content body. When the model
+    reads a URL like /valuation_tools/models it can enter a repetition
+    loop and output /models/models/models/... as the summary. Stripping
+    URLs removes the seed for this loop.
+    """
+    if not text:
+        return text
+    # Strip http(s) URLs and bare www. URLs
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'\bwww\.\S+', '', text)
+    # Collapse whitespace left behind by removals
+    return re.sub(r'\s{2,}', ' ', text).strip()
 logging.basicConfig(level=logging.DEBUG)
 
 # ── Optional dependency guards ────────────────────────────────────────────────
@@ -799,9 +843,13 @@ final = min(10.0, sum of applicable steps)>,\
         context_block = context_block.replace('{', '(').replace('}', ')')
 
         thinking = self._is_thinking_model()
+        # Strip URLs from content before feeding to the model — raw URLs in RSS
+        # bodies (e.g. /valuation_tools/models) are the seed for repetition loops
+        # where the model outputs /models/models/models/... in the summary field.
+        clean_content = _strip_urls((content or ""))[:content_limit]
         base_prompt = self.CLASSIFY_PROMPT.format(
             title=title[:200],
-            content=(content or "")[:content_limit],
+            content=clean_content,
             tickers=ticker_str,
             context=context_block,
         )
@@ -816,9 +864,14 @@ final = min(10.0, sum of applicable steps)>,\
         num_ctx     = 1024 if cpu_mode else 2048
 
         options: dict = {
-            "temperature": 0.1,
-            "num_predict": num_predict,
-            "num_ctx":     num_ctx,
+            "temperature":    0.1,
+            "num_predict":    num_predict,
+            "num_ctx":        num_ctx,
+            # Penalise repeated tokens — primary defence against the
+            # /models/models/ and _err_err_err_ repetition-loop bug.
+            # 1.2 is aggressive enough to break loops without degrading fluency.
+            "repeat_penalty": 1.2,
+            "repeat_last_n":  64,   # window of tokens checked for repetition
         }
         if cpu_mode:
             options["num_gpu"] = 0  # force CPU-only; omit entirely otherwise so Ollama auto-selects
@@ -1333,7 +1386,7 @@ class NewsPipeline:
                                         processed       = 1
                                     WHERE id = :id
                                 """, {
-                                    "summary":         str(result.get("summary") or "")[:500],
+                                    "summary":         _sanitize_summary(str(result.get("summary") or "")),
                                     "category":        str(result.get("category") or "other").lower()[:30],
                                     "sentiment":       _norm_sentiment(result.get("sentiment")),
                                     "score":           _safe_float(result.get("sentiment_score"), max_val=1.0),

@@ -223,12 +223,14 @@ def _macro_payload() -> dict:
         "iron_ore": ("TIO=F",    "1mo"),
         "copper":   ("HG=F",     "5d"),
         "spi200":   ("YAP=F",    "5d"),    # ASX SPI200 futures — lead indicator vs ^AXJO spot
-        # ASX sector ETFs (SPDR series) — 1mo for 5d return
-        "xmj":      ("XMJ.AX",  "1mo"),   # Materials
-        "xfj":      ("XFJ.AX",  "1mo"),   # Financials
-        "xhj":      ("XHJ.AX",  "1mo"),   # Healthcare
-        "xej":      ("XEJ.AX",  "1mo"),   # Energy
-        "xrj":      ("XRJ.AX",  "1mo"),   # Real Estate
+        # ASX sector indices — use ^AX* prefix (Yahoo Finance canonical format).
+        # XMJ.AX / XFJ.AX etc. are delisted/renamed on yfinance; ^AXMJ is the
+        # correct symbol for the ASX Materials Sector Index and so on.
+        "xmj":      ("^AXMJ",  "1mo"),   # Materials
+        "xfj":      ("^AXFJ",  "1mo"),   # Financials
+        "xhj":      ("^AXHJ",  "1mo"),   # Healthcare
+        "xej":      ("^AXEJ",  "1mo"),   # Energy
+        "xrj":      ("^AXRJ",  "1mo"),   # Real Estate
     }
     macro_data = {}
     _histories: dict = {}

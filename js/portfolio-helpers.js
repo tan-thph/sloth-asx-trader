@@ -178,7 +178,7 @@ function nextParcelId() {
   return max + 1;
 }
 
-function addParcel(ticker, date, qty, costPerShare, fees, sector) {
+function addParcel(ticker, date, qty, costPerShare, fees, sector, account) {
   state.cgtParcels.push({
     id: nextParcelId(),
     ticker: ticker.toUpperCase(),
@@ -188,12 +188,19 @@ function addParcel(ticker, date, qty, costPerShare, fees, sector) {
     costPerShare,
     fees,          // buy brokerage for this lot
     sector: sector || 'Other',
+    account: account || 'personal',   // track which account owns this parcel
   });
 }
 
-// Returns parcels for a ticker ordered by the chosen CGT method
-function getParcelsForTicker(ticker, method) {
-  const open = state.cgtParcels.filter(p => p.ticker === ticker.toUpperCase() && p.remainingQty > 0);
+// Returns parcels for a ticker ordered by the chosen CGT method.
+// account (optional): when provided, restricts to parcels from that account only.
+// Parcels created before this fix have no account field and default to 'personal'.
+function getParcelsForTicker(ticker, method, account) {
+  const open = state.cgtParcels.filter(p => {
+    if (p.ticker !== ticker.toUpperCase() || p.remainingQty <= 0) return false;
+    if (account) return (p.account || 'personal') === account;
+    return true;
+  });
   method = method || state.cgtMethod || 'fifo';
   if (method === 'fifo')     return open.sort((a,b) => parseDate(a.date) - parseDate(b.date));
   if (method === 'lifo')     return open.sort((a,b) => parseDate(b.date) - parseDate(a.date));
@@ -227,14 +234,16 @@ function daysBetween(dateStr1, dateStr2) {
 }
 
 // Match qty against parcels (FIFO/LIFO/etc), record disposals, return {disposals, totalCostBase, totalGrossGain}
-function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees, method) {
+// account (optional): when provided, only consumes parcels from that account —
+// prevents a trading-account sell from consuming personal-account parcels.
+function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees, method, account) {
   // Fix #31: guard against saleQty=0 which would produce feePerShare=Infinity and corrupt
   // all downstream CGT disposal records (grossGain/netGain become Infinity or NaN).
   if (!saleQty || saleQty <= 0) {
     return { disposals: [], remainder: 0, totalCostBase: 0, totalGrossGain: 0,
              error: `Invalid sale qty: ${saleQty}` };
   }
-  const parcels = getParcelsForTicker(ticker, method);
+  const parcels = getParcelsForTicker(ticker, method, account);
   let remaining = saleQty;
   const disposals = [];
   // Split fees proportionally across parcels by qty
@@ -304,37 +313,49 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
   return disposals;
 }
 
-function applyBuyToPortfolio(ticker, qty, price, date, fees, sector) {
+// account param (optional) — 'personal'|'super'|'trading'. Defaults to 'personal'.
+// All callers that don't pass account continue to work unchanged (personal is the default).
+function applyBuyToPortfolio(ticker, qty, price, date, fees, sector, account) {
   const symbol = ticker.toUpperCase();
-  const existing = getPortfolioHolding(symbol);
+  const acct   = account || 'personal';
+  // Find an existing holding for this ticker in the same account only
+  const existing = state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === acct);
   if(existing) {
     const totalCostVal = existing.shares * existing.avgPrice + qty * price;
     existing.shares += qty;
     existing.avgPrice = totalCostVal / existing.shares;
     if(!existing.currentPrice) existing.currentPrice = price;
   } else {
-    state.portfolio.push({ ticker: symbol, shares: qty, avgPrice: price, currentPrice: price, sector: sector || 'Other' });
+    state.portfolio.push({
+      ticker: symbol, shares: qty, avgPrice: price, currentPrice: price,
+      sector: sector || 'Other', account: acct,
+    });
   }
-  // Always record a parcel
-  addParcel(symbol, date || todayStr(), qty, price, fees || 0, sector);
+  // Always record a parcel — store the account so the portfolio lots view can separate them
+  addParcel(symbol, date || todayStr(), qty, price, fees || 0, sector, acct);
 }
 
-function applySellToPortfolio(ticker, qty, sellPrice, fees, date, method) {
+// account param (optional) — must match the account used at BUY time.
+function applySellToPortfolio(ticker, qty, sellPrice, fees, date, method, account) {
   const symbol = ticker.toUpperCase();
-  const holding = getPortfolioHolding(symbol);
+  const acct   = account || 'personal';
+  const holding = state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === acct);
   if(!holding || holding.shares < qty) return { ok: false, disposals: [] };
   holding.currentPrice = sellPrice;
   holding.shares -= qty;
   if(holding.shares <= 0) {
-    state.portfolio = state.portfolio.filter(h => h.ticker !== symbol);
+    // Remove only the matching account holding, not all holdings for this ticker
+    state.portfolio = state.portfolio.filter(
+      h => !(h.ticker === symbol && (h.account || 'personal') === acct)
+    );
   }
   state.cash += qty * sellPrice - Number(fees || 0);
 
-  // Match against parcels and record disposals
-  const disposals = matchSaleAgainstParcels(symbol, qty, sellPrice, date || todayStr(), fees || 0, method);
+  // Match against parcels and record disposals — scoped to this account so a trading-account
+  // sell never consumes personal-account parcels.
+  const disposals = matchSaleAgainstParcels(symbol, qty, sellPrice, date || todayStr(), fees || 0, method, acct);
   state.cgtDisposals.push(...disposals);
   return { ok: true, disposals };
-
 }
 
 function computeSellPnl(costBasis, sellPrice, qty, fees = 0) {
@@ -365,7 +386,7 @@ function rollbackTradeJournalEntry(t) {
       holding.avgPrice = (totalCostAfter - topupCost) / sharesAfter;
     }
     state.cash += t.qty * t.entryPrice + Number(t.fees || 0);
-    if(holding.shares <= 0) state.portfolio = state.portfolio.filter(h => h.ticker !== holding.ticker);
+    if(holding.shares <= 0) state.portfolio = state.portfolio.filter(h => !(h.ticker === holding.ticker && (h.account || 'personal') === (holding.account || 'personal')));
     // Remove matching parcel (last added for this ticker matching qty+price)
     if(t.parcelId) {
       state.cgtParcels = state.cgtParcels.filter(p => p.id !== t.parcelId);

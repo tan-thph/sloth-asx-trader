@@ -59,7 +59,9 @@ def news():
     from datetime import datetime, timedelta
 
     # Symbols to track: ASX200, sector ETFs, plus portfolio from query or DB
-    base_symbols = ["^AXJO", "XIJ.AX", "XMJ.AX", "XEJ.AX", "XHJ.AX", "XTJ.AX"]
+    # Use ^AX* prefix — the .AX suffix variants (XIJ.AX etc.) are no longer
+    # available on yfinance; the canonical Yahoo Finance format is ^AXIJ etc.
+    base_symbols = ["^AXJO", "^AXIJ", "^AXMJ", "^AXEJ", "^AXHJ", "^AXTJ"]
     try:
         portfolio_tickers = request.args.get("tickers", "")
         if portfolio_tickers:
@@ -311,19 +313,34 @@ def news_status():
     })
 
 
+_models_cache: dict = {"ts": 0.0, "payload": None}
+_MODELS_TTL = 30  # seconds — avoids hammering Ollama on every Settings page load
+
 @bp.route("/api/news/models")
 def news_models():
-    """Return available Ollama models."""
+    """Return available Ollama models (30 s TTL cache to reduce Ollama round-trips)."""
+    import time as _time
+    now = _time.monotonic()
+    if _models_cache["payload"] is not None and now - _models_cache["ts"] < _MODELS_TTL:
+        return jsonify(_models_cache["payload"])
+
     if not _NE_OK:
         return jsonify({"models": [], "available": False})
+
     cfg = _news_settings_from_db()
     llm = _ne.OllamaLLM(
         model=cfg.get("llm_model") or "",
         base_url=cfg.get("ollama_url", "http://localhost:11434"),
     )
-    available = llm.is_available()
-    models    = llm.list_models() if available else []
-    return jsonify({"models": models, "available": available})
+    # Call list_models() once — it calls /api/tags (same endpoint as is_available).
+    # Derive `available` from the result to avoid a second round-trip.
+    models    = llm.list_models()      # [] when Ollama is down or cold
+    available = bool(models) or llm.is_available()  # is_available() is a fast 3s-timeout check
+
+    payload = {"models": models, "available": available}
+    _models_cache["payload"] = payload
+    _models_cache["ts"]      = now
+    return jsonify(payload)
 
 
 @bp.route("/api/groq/models")

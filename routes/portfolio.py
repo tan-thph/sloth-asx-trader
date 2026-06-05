@@ -70,8 +70,9 @@ def db_save():
             conn.execute("DELETE FROM portfolio")
             for h in data["portfolio"]:
                 conn.execute(
-                    "INSERT INTO portfolio (ticker, shares, avg_price, current_price, sector) VALUES (?,?,?,?,?)",
-                    (h["ticker"], h["shares"], h["avgPrice"], h["currentPrice"], h.get("sector","Other"))
+                    "INSERT INTO portfolio (ticker, shares, avg_price, current_price, sector, account) VALUES (?,?,?,?,?,?)",
+                    (h["ticker"], h["shares"], h["avgPrice"], h["currentPrice"],
+                     h.get("sector", "Other"), h.get("account", "personal"))
                 )
 
         # --- trade journal ---
@@ -154,6 +155,7 @@ def db_load():
                 "avgPrice": row["avg_price"],
                 "currentPrice": row["current_price"],
                 "sector": row["sector"],
+                "account": row["account"] if "account" in row.keys() else "personal",
             })
 
         trade_journal = []

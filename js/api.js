@@ -100,9 +100,10 @@ async function fetchDividends(tickers, force = false) {
 let _saveTimer = null;
 
 function scheduleSave() {
-  // Debounce — save 1.5s after last change
+  // Debounce — save 500ms after last change (was 1500ms — shorter window = less data loss
+  // if the tab is closed before the timer fires).
   clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(saveStateToDb, 1500);
+  _saveTimer = setTimeout(saveStateToDb, 500);
 }
 
 async function saveStateToDb() {
@@ -154,12 +155,16 @@ function _validArray(v) {
 
 function _validHolding(h) {
   if (!h || typeof h !== 'object' || !h.ticker) return null;
+  const VALID_ACCOUNTS = ['personal', 'super', 'trading'];
   return {
     ticker:       String(h.ticker).toUpperCase(),
     shares:       _validNumber(h.shares, 0),
     avgPrice:     _validNumber(h.avgPrice, 0),
     currentPrice: _validNumber(h.currentPrice, 0),
     sector:       typeof h.sector === 'string' ? h.sector : 'Other',
+    // account MUST be preserved — determines which portfolio tab this holding belongs to.
+    // Omitting it collapses all accounts back to 'personal' on every reload.
+    account:      VALID_ACCOUNTS.includes(h.account) ? h.account : 'personal',
   };
 }
 

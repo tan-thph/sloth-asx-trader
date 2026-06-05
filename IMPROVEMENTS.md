@@ -1,5 +1,142 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-04 (Sprint 48 shipped)
+**Last Updated:** 2026-06-05 (Post-Sprint-48 full-app audit)
+
+## 0. Post-Sprint-48 full-app audit — improvements identified (2026-06-05)
+
+Items below were surfaced by a three-angle audit (backend Python, frontend JS, security/data
+integrity). Critical and high-severity items are documented in `FIXES.md` items 27–33.
+The following are medium-to-low severity improvements that do not warrant a fix entry.
+
+| # | Area | Issue | Severity | Effort |
+|---|---|---|---|---|
+| A | `core.py` | `_cache_store` is unbounded — no max size, no LRU eviction | Medium | S |
+| B | `core.py` | Thundering herd in `ttl_cache` — concurrent misses each compute the same expensive call | Low | S |
+| C | `routes/backtest.py` | No input validation on tickers/period/strategy/capital — invalid values cause 500s | Medium | S |
+| D | `routes/backtest.py` | Float arithmetic for money (P&L, cost, proceeds) — rounding errors accumulate across multi-trade backtests | Low | M |
+| E | `routes/learning.py` | Dynamic SQL via f-string (`f"UPDATE … SET {', '.join(fields)}"`) — whitelist exists but pattern is brittle | Low | XS |
+| F | `js/utils.js` | Merged portfolio does not guard `shares <= 0` — produces `avgPrice = Infinity` on corrupt data | Medium | XS |
+| G | `js/debate-client.js` | Concurrent cache pruning race — two `fetchDebateBatch()` calls can independently sort+delete different subsets | Low | S |
+| H | `js/learning-loop.js` | Date parsing (`parseDate()`) detects format by `parts[2].length === 4` — fragile when date strings are malformed or mixed-format | Low | S |
+
+### Detail — A: unbounded `_cache_store` in `core.py`
+
+The `_cache_store` dict accumulates one entry per unique `(fn.__name__, args, kwargs)` tuple
+and never evicts expired entries proactively — only on the next access after TTL. On a long-running
+gunicorn server scanning 200 tickers across multiple functions, this grows to thousands of entries
+and holds stale data in memory until accessed again. No maximum size guard exists.
+
+**Recommended fix:** Add a proactive expired-entry sweep and a maximum size cap inside the lock:
+
+```python
+_MAX_CACHE_SIZE = 2000
+
+def _evict_cache():
+    now = time.time()
+    expired = [k for k, v in _cache_store.items() if v[1] <= now]
+    for k in expired:
+        del _cache_store[k]
+    if len(_cache_store) > _MAX_CACHE_SIZE:
+        # Evict oldest-expiring entries
+        oldest = sorted(_cache_store.items(), key=lambda x: x[1][1])
+        for k, _ in oldest[:len(_cache_store) - _MAX_CACHE_SIZE]:
+            del _cache_store[k]
+```
+
+Call `_evict_cache()` inside `ttl_cache`'s wrapper before the cache-miss check.
+
+---
+
+### Detail — B: thundering herd in `ttl_cache` (`core.py`)
+
+Between the cache-miss check (inside the lock) and the actual function call (outside the lock),
+multiple threads can simultaneously detect a miss and each invoke the expensive yfinance/Stooq
+network call. On a 200-ticker scan with 8 threads, the same `analyse_ticker()` call can fire
+8 times in parallel for the same ticker when the TTL expires mid-scan.
+
+**Recommended fix:** Use a per-key `threading.Event` sentinel to park concurrent waiters while
+the first thread computes the value:
+
+```python
+_cache_inflight: dict = {}  # key → threading.Event
+
+# On cache miss:
+with _cache_lock:
+    if key in _cache_inflight:
+        ev = _cache_inflight[key]
+    else:
+        ev = threading.Event()
+        _cache_inflight[key] = ev
+
+if ev is not None:
+    ev.wait(timeout=seconds)  # park until first compute completes
+    with _cache_lock:
+        entry = _cache_store.get(key)
+    if entry:
+        return entry[0]
+```
+
+For this personal tool the current behaviour is acceptable (just wastes network calls) — flag for
+a future engineering pass rather than an immediate fix.
+
+---
+
+### Detail — C: missing input validation on `/api/backtest` (`routes/backtest.py`)
+
+The backtest endpoint accepts JSON without validating:
+- `tickers` is a list (could be a string or dict) and is non-empty and within a safe length
+- `period` is one of `{"3mo","6mo","1y","2y"}` — invalid value is passed to yfinance and returns empty data
+- `strategy` is one of the supported names — unrecognised strategy falls through silently
+- `capital` is numeric and within sane bounds (`float()` throws `ValueError` on non-numeric)
+
+**Recommended fix (minimal):**
+
+```python
+ALLOWED_PERIODS   = {"3mo", "6mo", "1y", "2y"}
+ALLOWED_STRATEGIES = {"rsi_trend", "macd", "bb_reversion", "momentum", "buy_hold", "sma_crossover"}
+
+data = request.get_json() or {}
+tickers = data.get("tickers", [])
+if not isinstance(tickers, list) or not tickers or len(tickers) > 100:
+    return jsonify({"error": "tickers must be a non-empty list of up to 100 items"}), 400
+
+period = data.get("period", "1y")
+if period not in ALLOWED_PERIODS:
+    return jsonify({"error": f"period must be one of {sorted(ALLOWED_PERIODS)}"}), 400
+
+strategy = data.get("strategy", "rsi_trend")
+if strategy not in ALLOWED_STRATEGIES:
+    return jsonify({"error": f"strategy must be one of {sorted(ALLOWED_STRATEGIES)}"}), 400
+
+try:
+    capital = float(data.get("capital", 50000))
+    if capital <= 0 or capital > 10_000_000:
+        raise ValueError
+except (ValueError, TypeError):
+    return jsonify({"error": "capital must be a number between 1 and 10,000,000"}), 400
+```
+
+---
+
+### Detail — F: missing `shares <= 0` guard in merged portfolio (`js/utils.js`)
+
+`mergedPortfolio()` (or its equivalent in `utils.js`) computes `avgPrice = h._totalCost / h.shares`
+after merging multiple parcels of the same ticker. If `h.shares` ends up as 0 due to data
+corruption (e.g. a zero-qty DRP entry, a reconcile bug, or a split applied twice), the result is
+`Infinity`. This propagates into `unrealisedPnl`, `weight`, and all downstream portfolio metrics.
+
+**Recommended fix:** Filter out zero-share entries after the merge step:
+
+```js
+return merged
+  .filter(h => h.shares > 0)
+  .map(h => ({
+    ...h,
+    avgPrice: h._totalCost / h.shares,
+    currentPrice: h.currentPrice ?? h.avgPrice,
+  }));
+```
+
+---
 
 ## 0. Shipped — Sprint 48 (2026-06-04)
 
@@ -473,6 +610,29 @@ Single canonical copy now in `js/utils.js`. Both page files reference it via the
 
 ### ✓ 3.10 Stooq rate-limit semaphore — `S` · ★★ **SHIPPED Sprint 43**
 `_stooq_sem = threading.BoundedSemaphore(1)` in `core.py`; both `stooq_quote()` and `_fetch_stooq_history()` acquire it with a 1-second `finally` sleep.
+
+### 3.11 `_cache_store` unbounded growth in `core.py` — `S` · ★
+`_cache_store` accumulates entries indefinitely — expired entries are only evicted on the next
+access after TTL, not proactively. On a long-running gunicorn server scanning 200 tickers, this
+grows to thousands of stale entries. Add a max-size cap (e.g. 2,000) and an expired-entry sweep
+inside the lock before the cache-miss check. Detail in §0 audit item A.
+
+### 3.12 Thundering herd in `ttl_cache` under parallel scanner load — `S` · ★
+Concurrent cache misses (e.g. 8 threads hitting the same ticker TTL simultaneously) each invoke
+the expensive yfinance call before any result is stored. A per-key `threading.Event` sentinel
+would park waiters until the first compute completes, eliminating redundant network calls under
+load. See §0 audit item B. Not urgent for personal use; flag for a future engineering pass.
+
+### 3.13 Backtest endpoint missing input validation — `S` · ★★
+`POST /api/backtest` does not validate `tickers` type/length, `period` against an allowlist,
+`strategy` against an allowlist, or `capital` numeric bounds. Invalid inputs cause silent misfires
+(empty yfinance response, unrecognised strategy fall-through) or unhandled `ValueError`. Add a
+minimal allowlist check as described in §0 audit item C.
+
+### 3.14 `js/utils.js` merged portfolio missing `shares <= 0` guard — `XS` · ★
+`avgPrice = _totalCost / shares` in `mergedPortfolio()` produces `Infinity` when a corrupt or
+doubly-applied CGT entry leaves `shares = 0`. Filter zero-share entries after the merge step.
+See §0 audit item F.
 
 ---
 

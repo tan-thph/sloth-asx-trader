@@ -23,17 +23,21 @@ function mergedPortfolio() {
     : state.portfolio.filter(h => (h.account || 'personal') === acct);
   const map = {};
   for (const h of holdings) {
-    if (!map[h.ticker]) {
-      map[h.ticker] = { ticker: h.ticker, shares: 0, _totalCost: 0, currentPrice: h.currentPrice, sector: h.sector || 'Other', account: h.account || 'personal' };
+    // Key by ticker+account so that e.g. WES held personally and WES bought as a
+    // day-trade (account='trading') appear as two separate rows, not one combined row.
+    const hAcct = h.account || 'personal';
+    const key = h.ticker + '|' + hAcct;
+    if (!map[key]) {
+      map[key] = { ticker: h.ticker, shares: 0, _totalCost: 0, currentPrice: h.currentPrice, sector: h.sector || 'Other', account: hAcct };
     }
-    map[h.ticker]._totalCost += h.shares * h.avgPrice;
-    map[h.ticker].shares += h.shares;
+    map[key]._totalCost += h.shares * h.avgPrice;
+    map[key].shares += h.shares;
     // Always take the latest currentPrice (last write wins — refreshPrices sets it uniformly)
-    map[h.ticker].currentPrice = h.currentPrice;
+    map[key].currentPrice = h.currentPrice;
     // Prefer any sector that isn't 'Other' or blank
     const incoming = h.sector && h.sector !== 'Other' ? h.sector : null;
-    if (incoming && (!map[h.ticker].sector || map[h.ticker].sector === 'Other')) {
-      map[h.ticker].sector = incoming;
+    if (incoming && (!map[key].sector || map[key].sector === 'Other')) {
+      map[key].sector = incoming;
     }
   }
   // Improvement F: filter out zero/negative share totals before computing avgPrice.

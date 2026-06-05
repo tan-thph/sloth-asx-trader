@@ -46,15 +46,13 @@ function _buildScannerHTML(s) {
   const pct      = s.total > 0 ? Math.round(s.progress / s.total * 100) : 0;
   const universeLabels = { asx20:'ASX 20', asx50:'ASX 50', asx100:'ASX 100', asx200:'ASX 200' };
 
-  // Tab nav
+  // Tab nav — uses shared .tabs / .tab / .tab.active CSS classes for consistent
+  // underline design across all pages (defined in asx_trading.css).
   const tabNav = `
-  <div style="display:flex;gap:2px;margin-bottom:14px;border-bottom:1px solid var(--border-light);padding-bottom:0">
-    ${[['opportunities','◈ Opportunities'],['screener','⊙ Technical Screener'],['compare','↔ Compare'],['factor-stability','🔬 Factor Stability']].map(([id,label]) => `
-      <button onclick="scannerSetTab('${id}')" style="padding:7px 16px;font-size:13px;font-weight:600;border:none;
-        border-bottom:2px solid ${_scannerTab===id?'var(--accent-primary)':'transparent'};
-        background:transparent;cursor:pointer;
-        color:${_scannerTab===id?'var(--accent-primary)':'var(--text-muted)'};
-        transition:color 0.15s,border-color 0.15s">${label}</button>`).join('')}
+  <div class="tabs">
+    ${[['opportunities','◈ Opportunities'],['screener','⊙ Technical Screener'],['compare','↔ Compare'],['factor-stability','🔬 Factor Stability']].map(([id,label]) =>
+      `<button class="tab${_scannerTab===id?' active':''}" onclick="scannerSetTab('${id}')">${label}</button>`
+    ).join('')}
   </div>`;
 
   if (_scannerTab === 'screener')          return tabNav + _buildScreenerHTML();

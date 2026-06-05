@@ -120,11 +120,15 @@ function renderPortfolio() {
               const _pts = state.priceTimestamps && state.priceTimestamps[h.ticker];
               const _stale = _pts && (Date.now() - new Date(_pts).getTime()) > 25 * 60 * 1000;
               const _staleBadge = _stale ? '<span class="text-xs" style="color:#f59e0b;margin-left:3px" title="Price data older than 25 min">⚠ stale</span>' : '';
-              const openParcels = state.cgtParcels.filter(p => p.ticker === h.ticker && p.remainingQty > 0);
+              // Find state.portfolio entries for this ticker in the same account only —
+              // WES personal and WES trading are separate rows and must not share an index.
+              const hAcct = h.account || 'personal';
+              // Filter parcels by account so WES trading only counts/shows its own parcels,
+              // not the personal account's parcels.
+              const openParcels = state.cgtParcels.filter(p => p.ticker === h.ticker && p.remainingQty > 0 && (p.account || 'personal') === hAcct);
               const lots = openParcels.length;
-              // Find all state.portfolio entries for this ticker
-              const rawEntries = state.portfolio.filter(e => e.ticker === h.ticker);
-              const portfolioIdx = state.portfolio.findIndex(e => e.ticker === h.ticker);
+              const rawEntries = state.portfolio.filter(e => e.ticker === h.ticker && (e.account || 'personal') === hAcct);
+              const portfolioIdx = state.portfolio.findIndex(e => e.ticker === h.ticker && (e.account || 'personal') === hAcct);
               const hasMulti = lots > 1;
               // Dividend data
               const dv = state.dividendData[h.ticker];
@@ -142,11 +146,12 @@ function renderPortfolio() {
               const _ACCT_COLORS = {personal:'#6366f1',super:'#16a34a',trading:'#d97706'};
               const acct = h.account || 'personal';
               const acctBadge = state.activeAccount === 'all'
-                ? `<td><span class="text-xs" style="background:${_ACCT_COLORS[acct]}22;color:${_ACCT_COLORS[acct]};padding:1px 5px;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();_cycleHoldingAccount('${h.ticker}')" title="Click to change account">${acct}</span></td>`
+                ? `<td><span class="text-xs" style="background:${_ACCT_COLORS[acct]}22;color:${_ACCT_COLORS[acct]};padding:1px 5px;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();_cycleHoldingAccount('${h.ticker}','${acct}')" title="Click to change account">${acct}</span></td>`
                 : '';
+              const _lotsKey = `${h.ticker}-${hAcct}`;
               return `
-                <tr style="cursor:${hasMulti?'pointer':'default'}" onclick="${hasMulti?`toggleLots('${h.ticker}')`:''}" title="${hasMulti?'Click to expand lots':''}">
-                  <td style="width:20px;text-align:center;color:var(--text-tertiary)">${hasMulti?`<span id="lots-arrow-${h.ticker}" style="font-size:10px">▶</span>`:'&nbsp;'}</td>
+                <tr style="cursor:${hasMulti?'pointer':'default'}" onclick="${hasMulti?`toggleLots('${_lotsKey}')`:''}" title="${hasMulti?'Click to expand lots':''}">
+                  <td style="width:20px;text-align:center;color:var(--text-tertiary)">${hasMulti?`<span id="lots-arrow-${_lotsKey}" style="font-size:10px">▶</span>`:'&nbsp;'}</td>
                   <td><strong>${h.ticker}</strong></td>
                   <td><span class="text-xs">${h.sector}</span></td>
                   ${acctBadge}
@@ -167,7 +172,7 @@ function renderPortfolio() {
                   </td>
                 </tr>
                 ${hasMulti ? `
-                <tr id="lots-${h.ticker}" style="display:none">
+                <tr id="lots-${_lotsKey}" style="display:none">
                   <td colspan="15" style="padding:0">
                     <table style="width:100%;background:var(--bg-secondary);border-radius:0">
                       <thead><tr>
@@ -497,9 +502,11 @@ document.addEventListener('change', e => {
   }
 });
 
-function toggleLots(ticker) {
-  const row = document.getElementById(`lots-${ticker}`);
-  const arrow = document.getElementById(`lots-arrow-${ticker}`);
+// key is `${ticker}-${account}` e.g. "WES-trading" — unique per row even when the same
+// ticker is held in multiple accounts.
+function toggleLots(key) {
+  const row = document.getElementById(`lots-${key}`);
+  const arrow = document.getElementById(`lots-arrow-${key}`);
   if (!row) return;
   const open = row.style.display !== 'none';
   row.style.display = open ? 'none' : 'table-row';
@@ -856,11 +863,14 @@ function _applyImportedSells(sells) {
   toast(msg, applied > 0 ? 'success' : 'warning');
 }
 
-function _cycleHoldingAccount(ticker) {
+function _cycleHoldingAccount(ticker, fromAccount) {
   const _cycle = {personal:'super', super:'trading', trading:'personal'};
-  state.portfolio.filter(h => h.ticker === ticker).forEach(h => {
-    h.account = _cycle[h.account || 'personal'] || 'personal';
-  });
+  // Only cycle the holding in the specific account — if the user has WES in both personal
+  // and trading, clicking the personal badge must not also cycle the trading one.
+  const acct = fromAccount || 'personal';
+  state.portfolio
+    .filter(h => h.ticker === ticker && (h.account || 'personal') === acct)
+    .forEach(h => { h.account = _cycle[acct] || 'personal'; });
   scheduleSave();
   renderPage();
 }

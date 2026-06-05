@@ -5,7 +5,13 @@ async function refreshPrices(opts = {}) {
   const {silent = false} = opts;
   if(!state.serverOk) { if(!silent) toast('Backend server not running. See Settings.','error'); return 0; }
   if(!silent) toast('Fetching live ASX prices...','info');
-  const uniqueTickers = [...new Set(state.portfolio.map(h => h.ticker))];
+  // Include intraday open position tickers so Live/P&L renders for all open positions,
+  // not just those that happen to be in state.portfolio (swing DT is now there; intraday is not).
+  const intradayTickers = (state.intraday?.openPositions || []).map(p => p.ticker);
+  const uniqueTickers = [...new Set([
+    ...state.portfolio.map(h => h.ticker),
+    ...intradayTickers,
+  ])];
   let updated = 0;
   for(const ticker of uniqueTickers) {
     try {
@@ -19,6 +25,11 @@ async function refreshPrices(opts = {}) {
           h.currentPrice = d.price;
           if(d.sector && (!h.sector || h.sector === 'Other')) h.sector = d.sector;
         });
+        // Keep liveSignals current_price fresh for intraday positions — the open positions
+        // panel reads state.liveSignals[ticker].current_price when the ticker isn't in portfolio.
+        if (!state.liveSignals) state.liveSignals = {};
+        if (!state.liveSignals[ticker]) state.liveSignals[ticker] = {};
+        state.liveSignals[ticker].current_price = d.price;
         updated++;
       }
     } catch {}

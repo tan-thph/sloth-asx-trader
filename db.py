@@ -38,12 +38,14 @@ def get_db():
 _SCHEMA = """
     CREATE TABLE IF NOT EXISTS portfolio (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        ticker        TEXT NOT NULL UNIQUE,
+        ticker        TEXT NOT NULL,
         shares        REAL NOT NULL,
         avg_price     REAL NOT NULL,
         current_price REAL NOT NULL,
         sector        TEXT DEFAULT 'Other',
-        updated_at    TEXT DEFAULT (datetime('now','localtime'))
+        account       TEXT NOT NULL DEFAULT 'personal',
+        updated_at    TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(ticker, account)
     );
 
     CREATE TABLE IF NOT EXISTS trade_journal (
@@ -274,6 +276,33 @@ def init_db():
     """Create tables on first run, then apply column-add migrations."""
     with get_db() as conn:
         conn.executescript(_SCHEMA)
+
+        # portfolio: add `account` column and replace UNIQUE(ticker) with UNIQUE(ticker, account).
+        # SQLite cannot drop constraints via ALTER TABLE, so we recreate the table.
+        # Existing rows are migrated with account='personal'. Idempotent — only runs when
+        # the account column is absent.
+        port_cols = {r[1] for r in conn.execute("PRAGMA table_info(portfolio)").fetchall()}
+        if "account" not in port_cols:
+            conn.executescript("""
+                CREATE TABLE portfolio_new (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker        TEXT NOT NULL,
+                    shares        REAL NOT NULL,
+                    avg_price     REAL NOT NULL,
+                    current_price REAL NOT NULL,
+                    sector        TEXT DEFAULT 'Other',
+                    account       TEXT NOT NULL DEFAULT 'personal',
+                    updated_at    TEXT DEFAULT (datetime('now','localtime')),
+                    UNIQUE(ticker, account)
+                );
+                INSERT INTO portfolio_new
+                    (id, ticker, shares, avg_price, current_price, sector, account, updated_at)
+                    SELECT id, ticker, shares, avg_price, current_price,
+                           COALESCE(sector,'Other'), 'personal', updated_at
+                    FROM portfolio;
+                DROP TABLE portfolio;
+                ALTER TABLE portfolio_new RENAME TO portfolio;
+            """)
 
         # rec_history: learning_id column added later
         rh_cols = {r[1] for r in conn.execute("PRAGMA table_info(rec_history)").fetchall()}
