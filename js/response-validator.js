@@ -274,8 +274,11 @@ const _REC_BUSINESS_RULES = [
       const recentBuy = recHistory.find(h => {
         if (h.ticker !== r.ticker) return false;
         if (h.action !== 'BUY' && h.action !== 'TOP_UP') return false;
-        const ts = h.timestamp ? new Date(h.timestamp).getTime() : 0;
-        return ts > sevenDaysAgo;
+        // Fix #32: no timestamp = can't determine recency — skip (don't assume recent).
+        // Also guard NaN from malformed date strings (new Date("bad").getTime() = NaN).
+        if (!h.timestamp) return false;
+        const ts = new Date(h.timestamp).getTime();
+        return !Number.isNaN(ts) && ts > sevenDaysAgo;
       });
       if (!recentBuy) return true;  // no recent buy — flip is fine
       // There WAS a recent buy — require catastrophe keyword in factorsUsed[]
@@ -356,8 +359,12 @@ function validateResponse(parsed, minConfidence) {
     // Ensemble confidence: blend AI confidence with indicator composite score
     // liveSignals[ticker].score is 0-100 from _score_ticker; normalise to 0-1
     const sig = state.liveSignals?.[r.ticker] ?? state.liveSignals?.[r.ticker + '.AX'];
-    const indScore = sig?.score ?? null;
-    r.ensembleConfidence = indScore != null
+    // Fix #33: ?? null guards undefined but NOT NaN (sig.score can be NaN from a partial
+    // analyse_ticker() response). NaN / 100 = NaN propagates into ensembleConfidence and
+    // makes the confidence gate always pass (NaN < minConf is always false).
+    const indScore = sig?.score;
+    const hasValidScore = indScore != null && !Number.isNaN(indScore);
+    r.ensembleConfidence = hasValidScore
       ? Math.round((0.5 * r.confidence + 0.5 * (indScore / 100)) * 100) / 100
       : r.confidence;
 

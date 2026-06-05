@@ -50,15 +50,35 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 _cache_lock = threading.Lock()
 _cache_store: dict = {}
+_MAX_CACHE_SIZE = 2000   # Improvement A: cap to prevent unbounded growth on long-running server
+
+
+def _evict_cache(now: float) -> None:
+    """Remove expired entries and enforce the size cap (call inside _cache_lock)."""
+    # 1. Remove entries that have already expired
+    expired = [k for k, v in _cache_store.items() if v[1] <= now]
+    for k in expired:
+        del _cache_store[k]
+    # 2. If still over the cap, evict oldest-expiring entries
+    if len(_cache_store) > _MAX_CACHE_SIZE:
+        oldest = sorted(_cache_store.items(), key=lambda x: x[1][1])
+        for k, _ in oldest[:len(_cache_store) - _MAX_CACHE_SIZE]:
+            del _cache_store[k]
 
 
 def ttl_cache(seconds: int):
-    """Memoise a function's return value for `seconds` seconds."""
+    """Memoise a function's return value for `seconds` seconds.
+
+    Thread-safe via a single lock. Improvement A: proactively evicts expired
+    entries and caps the store at _MAX_CACHE_SIZE to prevent unbounded growth
+    during long-running gunicorn sessions scanning 200+ tickers.
+    """
     def deco(fn):
         def wrapper(*args, **kwargs):
             key = (fn.__name__, args, tuple(sorted(kwargs.items())))
             now = time.time()
             with _cache_lock:
+                _evict_cache(now)                  # Improvement A: proactive eviction
                 entry = _cache_store.get(key)
                 if entry and entry[1] > now:
                     return entry[0]

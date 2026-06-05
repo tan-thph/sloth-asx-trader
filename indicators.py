@@ -712,11 +712,14 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
                 earn_dates = cal.get("Earnings Date", [])
                 if earn_dates:
                     first = earn_dates[0] if isinstance(earn_dates, (list, tuple)) else earn_dates
-                    days_to_earnings = (pd.Timestamp(first) - pd.Timestamp.now()).days
+                    # Fix #30: strip tz before subtraction — yfinance returns tz-aware
+                    # timestamps; pd.Timestamp.now() is tz-naive → TypeError on compare.
+                    # .replace(tzinfo=None) works on both tz-aware and tz-naive Timestamps.
+                    days_to_earnings = (pd.Timestamp(first).replace(tzinfo=None) - pd.Timestamp.now()).days
             elif hasattr(cal, "columns") and "Earnings Date" in cal.columns:
                 earn_ts = cal["Earnings Date"].dropna()
                 if not earn_ts.empty:
-                    days_to_earnings = (pd.Timestamp(earn_ts.iloc[0]) - pd.Timestamp.now()).days
+                    days_to_earnings = (pd.Timestamp(earn_ts.iloc[0]).replace(tzinfo=None) - pd.Timestamp.now()).days
     except Exception:
         pass
     pre_earnings_risk = bool(days_to_earnings is not None and 0 <= days_to_earnings <= 14)

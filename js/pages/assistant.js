@@ -26,7 +26,7 @@ async function sendChat() {
   input.value='';
   state.chatHistory.push({role:'user',content:msg});
   const msgs=document.getElementById('chat-messages');
-  msgs.innerHTML+=`<div class="msg msg-user">${msg}</div>`;
+  msgs.innerHTML+=`<div class="msg msg-user">${escapeHTML(msg)}</div>`;
   msgs.innerHTML+=`<div class="msg msg-ai" id="typing"><div class="loading-dots"><span></span><span></span><span></span></div></div>`;
   msgs.scrollTop=msgs.scrollHeight;
 
@@ -156,9 +156,9 @@ RESPONSE FRAMEWORK — tailor depth to the question:
       noCache: true,
     });
     state.chatHistory.push({role:'assistant',content:reply});
-    document.getElementById('typing').outerHTML=`<div class="msg msg-ai" style="white-space:pre-wrap">${reply}</div>`;
+    document.getElementById('typing').outerHTML=`<div class="msg msg-ai" style="white-space:pre-wrap">${escapeHTML(reply)}</div>`;
   } catch(err) {
-    document.getElementById('typing').outerHTML=`<div class="msg msg-ai text-danger">Error: ${err.message}</div>`;
+    document.getElementById('typing').outerHTML=`<div class="msg msg-ai text-danger">Error: ${escapeHTML(err.message)}</div>`;
   }
   msgs.scrollTop=msgs.scrollHeight;
 }

@@ -228,6 +228,12 @@ function daysBetween(dateStr1, dateStr2) {
 
 // Match qty against parcels (FIFO/LIFO/etc), record disposals, return {disposals, totalCostBase, totalGrossGain}
 function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees, method) {
+  // Fix #31: guard against saleQty=0 which would produce feePerShare=Infinity and corrupt
+  // all downstream CGT disposal records (grossGain/netGain become Infinity or NaN).
+  if (!saleQty || saleQty <= 0) {
+    return { disposals: [], remainder: 0, totalCostBase: 0, totalGrossGain: 0,
+             error: `Invalid sale qty: ${saleQty}` };
+  }
   const parcels = getParcelsForTicker(ticker, method);
   let remaining = saleQty;
   const disposals = [];

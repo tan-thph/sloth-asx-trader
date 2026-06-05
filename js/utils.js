@@ -36,7 +36,12 @@ function mergedPortfolio() {
       map[h.ticker].sector = incoming;
     }
   }
-  return Object.values(map).map(h => ({ ...h, avgPrice: h._totalCost / h.shares }));
+  // Improvement F: filter out zero/negative share totals before computing avgPrice.
+  // h.shares = 0 after data corruption (zero-qty DRP, reconcile bug, split applied twice)
+  // would produce avgPrice = Infinity which propagates into unrealisedPnl, weight, etc.
+  return Object.values(map)
+    .filter(h => h.shares > 0)
+    .map(h => ({ ...h, avgPrice: h._totalCost / h.shares }));
 }
 const sign           = n  => n >= 0 ? '+' : '-';
 const confColor      = c  => c >= 0.70 ? '#16a34a' : c >= 0.55 ? '#d97706' : '#dc2626';

@@ -45,7 +45,7 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   // Track both so the liquidity cap below can convert correctly.
   const advAud   = signals.adv_20 ?? null;                    // AUD (dollars)
   const advShares = signals.volume_avg_20
-                    ?? (advAud && signals.current_price ? advAud / signals.current_price : 0);
+                    ?? (advAud && signals.current_price ? advAud / signals.current_price : null);
   const bbUpper = signals.bb_upper;
   const sr = signals.support_resistance || {};
 
@@ -98,9 +98,14 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   const qtyByPosition = Math.floor((allocatedCash * maxPosPct) / price);
 
   // Liquidity cap (5% of 20-day average share volume — in SHARES, not dollars)
-  const qtyByLiquidity = advShares > 0
-    ? Math.floor(advShares * (_ap.maxLiquidityPct ?? QUANT_CONFIG.maxLiquidityPct))
-    : Infinity;
+  // Fix #29: reject when ADV data is unavailable rather than treating as unconstrained.
+  // Infinity liquidity cap allowed full-sized positions in illiquid/new tickers with no
+  // volume data — a silent correctness failure. Conservative 1000-share fallback would
+  // be too restrictive for watchlist scans; hard reject is safer for real trades.
+  if (!advShares || advShares <= 0) {
+    return { ok: false, reason: 'ADV data unavailable — liquidity constraint cannot be applied' };
+  }
+  const qtyByLiquidity = Math.floor(advShares * (_ap.maxLiquidityPct ?? QUANT_CONFIG.maxLiquidityPct));
 
   // ── Volatility normalisation ───────────────────────────────────────────────
   const atrPct = atr / price;

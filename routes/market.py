@@ -31,7 +31,7 @@ import requests
 import yfinance as yf
 from flask import Blueprint, jsonify, request
 
-from core import LOG_DIR, ttl_cache, fetch_with_retry, stooq_quote
+from core import LOG_DIR, ttl_cache, fetch_with_retry, stooq_quote, log
 from db import get_db, log_failed_ticker
 from indicators import analyse_ticker, asx, safe_float
 

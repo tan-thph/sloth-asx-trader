@@ -34,14 +34,50 @@ def backtest():
     }
     Returns per-trade log, equity curve, and summary stats.
     """
-    data = request.get_json()
+    data = request.get_json() or {}
+
+    # Improvement C: validate all inputs before reaching yfinance/strategy code.
+    _ALLOWED_PERIODS    = {"3mo", "6mo", "1y", "2y"}
+    _ALLOWED_STRATEGIES = {"rsi_trend", "macd", "bb_reversion", "momentum", "buy_hold",
+                           "sma_crossover"}
+    _ALLOWED_SLIPPAGE   = {"flat", "liquidity"}
+
     tickers = data.get("tickers", [])
+    if not isinstance(tickers, list) or not tickers:
+        return jsonify({"error": "tickers must be a non-empty list"}), 400
+    if len(tickers) > 100:
+        return jsonify({"error": "tickers list must contain at most 100 items"}), 400
+
     period = data.get("period", "1y")
-    starting_capital = float(data.get("capital", 50000))
+    if period not in _ALLOWED_PERIODS:
+        return jsonify({"error": f"period must be one of {sorted(_ALLOWED_PERIODS)}"}), 400
+
     strategy = data.get("strategy", "rsi_trend")
-    brokerage = float(data.get("brokerage", 10))
-    slippage_pct = float(data.get("slippage_pct", 0.10)) / 100  # e.g. 0.10 → 0.001
-    slippage_mode = data.get("slippage_mode", "flat")  # 'flat' | 'liquidity'
+    if strategy not in _ALLOWED_STRATEGIES:
+        return jsonify({"error": f"strategy must be one of {sorted(_ALLOWED_STRATEGIES)}"}), 400
+
+    slippage_mode = data.get("slippage_mode", "flat")
+    if slippage_mode not in _ALLOWED_SLIPPAGE:
+        return jsonify({"error": f"slippage_mode must be one of {sorted(_ALLOWED_SLIPPAGE)}"}), 400
+
+    try:
+        starting_capital = float(data.get("capital", 50000))
+        if starting_capital <= 0 or starting_capital > 10_000_000:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "capital must be a number between 1 and 10,000,000"}), 400
+
+    try:
+        brokerage = float(data.get("brokerage", 10))
+        if brokerage < 0 or brokerage > 1000:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "brokerage must be a number between 0 and 1000"}), 400
+
+    try:
+        slippage_pct = float(data.get("slippage_pct", 0.10)) / 100  # e.g. 0.10 → 0.001
+    except (ValueError, TypeError):
+        return jsonify({"error": "slippage_pct must be a number"}), 400
 
     def _adv_slippage(adv_aud):
         """ADV-tiered slippage rate. adv_aud = mean(close × volume) over 20d."""
@@ -49,9 +85,6 @@ def backtest():
         if adv_aud >= 2_000_000:    return 0.001   # 0.10%
         if adv_aud >= 500_000:      return 0.002   # 0.20%
         return 0.0035                               # 0.35%
-
-    if not tickers:
-        return jsonify({"error": "No tickers provided"}), 400
 
     # Map period string to days lookback
     period_days = {"3mo": 90, "6mo": 180, "1y": 252, "2y": 504}

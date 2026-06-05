@@ -5315,5 +5315,184 @@ class TestQuickAnalysisSellTrim(unittest.TestCase):
         self.assertEqual(rec["urgency"], "routine")
 
 
+class TestPostSprint48Fixes(unittest.TestCase):
+    """FIXES.md #27–33: Post-Sprint-48 audit — critical/high/medium bug fixes."""
+
+    # ── Fix #27: log import in routes/market.py ───────────────────────────────
+
+    def test_market_py_imports_log(self):
+        """routes/market.py must import 'log' from core — NameError fires on Stooq fallback."""
+        with open(os.path.join(ROOT, "routes", "market.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("from core import", src)
+        # The import line must include 'log'
+        import re
+        m = re.search(r"from core import ([^\n]+)", src)
+        self.assertIsNotNone(m)
+        imports = [s.strip() for s in m.group(1).split(",")]
+        self.assertIn("log", imports,
+                      "routes/market.py must import 'log' from core to avoid NameError on Stooq fallback")
+
+    # ── Fix #28: XSS in assistant.js ─────────────────────────────────────────
+
+    def test_assistant_js_user_input_escaped(self):
+        """assistant.js must wrap user message in escapeHTML() before inserting into DOM."""
+        with open(os.path.join(ROOT, "js", "pages", "assistant.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("escapeHTML(msg)", src,
+                      "User input must be escaped before insertion into innerHTML")
+
+    def test_assistant_js_ai_reply_escaped(self):
+        """assistant.js must wrap AI reply in escapeHTML() before inserting into DOM."""
+        with open(os.path.join(ROOT, "js", "pages", "assistant.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("escapeHTML(reply)", src,
+                      "AI response must be escaped before insertion into innerHTML")
+
+    def test_assistant_js_raw_msg_interpolation_removed(self):
+        """assistant.js must not have raw ${msg} or ${reply} in innerHTML template literals."""
+        with open(os.path.join(ROOT, "js", "pages", "assistant.js"), encoding="utf-8") as f:
+            src = f.read()
+        # The unsafe patterns must no longer exist
+        self.assertNotIn("`<div class=\"msg msg-user\">${msg}</div>`", src,
+                         "Raw ${msg} interpolation in innerHTML must be replaced with escapeHTML(msg)")
+
+    # ── Fix #29: Infinity liquidity cap in quant-engine.js ────────────────────
+
+    def test_quant_engine_rejects_on_missing_adv(self):
+        """computeTradeParams must reject (ok: false) when ADV data is unavailable."""
+        with open(os.path.join(ROOT, "js", "quant-engine.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("ADV data unavailable", src)
+        self.assertNotIn(": Infinity", src,
+                         "Infinity liquidity cap must be replaced with hard rejection")
+
+    def test_quant_engine_adv_fallback_is_null_not_zero(self):
+        """advShares fallback must be null (not 0) so the ADV guard fires correctly."""
+        with open(os.path.join(ROOT, "js", "quant-engine.js"), encoding="utf-8") as f:
+            src = f.read()
+        # The old : 0 fallback would prevent the !advShares guard from firing
+        self.assertNotIn("? advAud / signals.current_price : 0)", src)
+        self.assertIn("? advAud / signals.current_price : null)", src)
+
+    # ── Fix #30: timezone mismatch in indicators.py ───────────────────────────
+
+    def test_indicators_earnings_tz_stripped(self):
+        """indicators.py days_to_earnings must use .replace(tzinfo=None) to avoid TypeError."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn(".replace(tzinfo=None)", src,
+                      "indicators.py must strip timezone from earnings timestamp before subtraction")
+        # The old pattern (bare pd.Timestamp comparison) must not exist
+        self.assertNotIn("pd.Timestamp(first) - pd.Timestamp.now()", src)
+
+    # ── Fix #31: division by zero in portfolio-helpers.js ────────────────────
+
+    def test_portfolio_helpers_saleqty_guard(self):
+        """matchSaleAgainstParcels must return early with error when saleQty is 0 or falsy."""
+        with open(os.path.join(ROOT, "js", "portfolio-helpers.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("Invalid sale qty", src)
+        # Guard must appear BEFORE feePerShare calculation
+        guard_pos = src.find("Invalid sale qty")
+        fee_pos   = src.find("feePerShare = saleFees / saleQty")
+        self.assertLess(guard_pos, fee_pos,
+                        "saleQty guard must appear before the feePerShare division")
+
+    # ── Fix #32: anti-churn timestamp NaN guard ───────────────────────────────
+
+    def test_response_validator_antichurn_guards_timestamp(self):
+        """Anti-churn check must guard against missing and NaN timestamps explicitly."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("Number.isNaN(ts)", src,
+                      "Anti-churn must guard against NaN from malformed date strings")
+        self.assertIn("if (!h.timestamp) return false", src,
+                      "Anti-churn must short-circuit when timestamp is missing")
+
+    # ── Fix #33: NaN ensembleConfidence guard ────────────────────────────────
+
+    def test_response_validator_ensemble_nan_guard(self):
+        """ensembleConfidence must guard NaN from sig.score — ??, null doesn't cover NaN."""
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("hasValidScore", src)
+        self.assertIn("Number.isNaN(indScore)", src)
+        # The old ?? null guard must be replaced
+        self.assertNotIn("sig?.score ?? null", src,
+                         "?? null guard must be replaced — it doesn't protect against NaN")
+
+
+class TestImprovementsACF(unittest.TestCase):
+    """IMPROVEMENTS.md items A, C, F — medium/XS effort improvements."""
+
+    # ── Improvement A: bounded cache in core.py ──────────────────────────────
+
+    def test_core_cache_has_max_size_constant(self):
+        """core.py must define _MAX_CACHE_SIZE to cap unbounded cache growth."""
+        with open(os.path.join(ROOT, "core.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_MAX_CACHE_SIZE", src)
+
+    def test_core_cache_eviction_function_exists(self):
+        """core.py must define _evict_cache() to proactively remove expired entries."""
+        with open(os.path.join(ROOT, "core.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _evict_cache(", src)
+        self.assertIn("_evict_cache(now)", src)
+
+    def test_core_cache_eviction_removes_expired(self):
+        """_evict_cache must delete expired entries (v[1] <= now)."""
+        with open(os.path.join(ROOT, "core.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("v[1] <= now", src)
+
+    def test_core_cache_eviction_enforces_size_cap(self):
+        """_evict_cache must evict oldest entries when store exceeds _MAX_CACHE_SIZE."""
+        with open(os.path.join(ROOT, "core.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_MAX_CACHE_SIZE", src)
+        self.assertIn("len(_cache_store) >", src)
+
+    # ── Improvement C: backtest input validation ──────────────────────────────
+
+    def test_backtest_validates_tickers_list(self):
+        """POST /api/backtest must validate tickers is a non-empty list."""
+        with open(os.path.join(ROOT, "routes", "backtest.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("isinstance(tickers, list)", src)
+        self.assertIn("non-empty list", src)
+
+    def test_backtest_validates_period(self):
+        """POST /api/backtest must validate period against allowed set."""
+        with open(os.path.join(ROOT, "routes", "backtest.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_ALLOWED_PERIODS", src)
+        self.assertIn("not in _ALLOWED_PERIODS", src)
+
+    def test_backtest_validates_strategy(self):
+        """POST /api/backtest must validate strategy against allowed set."""
+        with open(os.path.join(ROOT, "routes", "backtest.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_ALLOWED_STRATEGIES", src)
+        self.assertIn("not in _ALLOWED_STRATEGIES", src)
+
+    def test_backtest_validates_capital(self):
+        """POST /api/backtest must validate capital is a positive number within sane bounds."""
+        with open(os.path.join(ROOT, "routes", "backtest.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("10_000_000", src)
+        self.assertIn("capital must be a number", src)
+
+    # ── Improvement F: shares <= 0 guard in utils.js ─────────────────────────
+
+    def test_merged_portfolio_filters_zero_shares(self):
+        """mergedPortfolio() must filter out zero/negative share entries before computing avgPrice."""
+        with open(os.path.join(ROOT, "js", "utils.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn(".filter(h => h.shares > 0)", src,
+                      "mergedPortfolio must filter zero-share entries to prevent avgPrice=Infinity")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
