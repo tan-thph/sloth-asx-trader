@@ -1,314 +1,177 @@
 # Sloth ASX Trader
 
-A local decision-support tool for Australian equity trading. Runs entirely on your machine — no cloud subscriptions, no SaaS fees. A Flask backend fetches market data via yfinance; a vanilla-JS single-page app provides the UI and calls the Anthropic API directly from the browser.
+A local, AI-powered decision-support tool for Australian equity trading. Runs entirely on your own machine — no subscriptions, no cloud database, no data leaving your network.
 
 ---
 
-## Quick Start
+## Overview
+
+Sloth ASX Trader combines live market data, technical analysis, and large language models to help you research trades, manage your portfolio, and review your decision-making over time. Everything is stored locally in SQLite. The AI analysis layer uses Anthropic Claude for recommendations, with optional local LLM support via Ollama for zero-API-cost operation.
+
+---
+
+## Getting Started
+
+**Requirements:** Python 3.9+, pip, a modern browser.
 
 ```bash
 pip install -r requirements.txt
 python asx_server.py
-# Then open asx_trading.html in your browser
 ```
 
-The server starts at `http://localhost:5000`. Open `asx_trading.html` directly from the filesystem — no web server needed.
+Open `asx_trading.html` in your browser. No web server needed — the file opens directly from disk.
 
-**Production (multi-worker):**
+**Production mode** (multi-worker, recommended for daily use):
 ```bash
 pip install gunicorn
 gunicorn -c gunicorn.conf.py 'asx_server:app'
 ```
 
-**API key:** paste your Anthropic key in Settings → API Key (stored in `localStorage`), or enable proxy mode to store it server-side in SQLite.
-
----
-
-## Project Structure
-
-```
-sloth-asx-trader/
-│
-├── asx_trading.html        # Single-page app entry point
-├── asx_trading.css         # All styles (CSS variables, tab underline, compact mode)
-│
-├── asx_server.py           # Flask bootstrap — blueprint registration, middleware
-├── core.py                 # Shared infra: ttl_cache, fetch_with_retry, Stooq fallback
-├── db.py                   # SQLite schema, get_db(), init_db(), WAL migrations, backup
-├── indicators.py           # All technical indicators + analyse_ticker() + _score_ticker()
-├── announcement_engine.py  # ASX announcement fetching, PDF parsing, Gemini scoring
-├── announcement_routes.py  # Blueprint: /api/announcements/*
-├── news_engine.py          # RSS fetching, TF-IDF dedup, LLM sentiment classification
-├── gunicorn.conf.py        # Production WSGI: 2 workers × 8 threads
-│
-├── routes/
-│   ├── portfolio.py        # /api/cash, /api/db/*, /api/tax/eofy-pack, splits-check, capital-returns
-│   ├── market.py           # /api/analyse, /api/quote, /api/macro, /api/risk, /api/earnings-calendar
-│   │                       # /api/seasonality, /api/log/ai_calls, /api/market/universe-health
-│   ├── learning.py         # /api/learning/* — calibration, stats, outcomes, lessons, sell-outcomes
-│   ├── debate.py           # /api/debate/* — Ollama bull/bear, postmortem, skill, calib-quality
-│   ├── backtest.py         # /api/backtest, /api/backtest/walk-forward, /api/backtest/ai-replay
-│   ├── scanner.py          # /api/market/scan*, /api/scanner/factor-stability
-│   ├── intraday.py         # /api/intraday/* — 5-minute intraday day-trade strategy
-│   ├── dividends.py        # /api/dividends/*
-│   ├── news.py             # /api/news/*, /api/groq/models, /api/google/models, /api/sbc-mode
-│   ├── alerts.py           # /api/alerts/telegram — Telegram bot push alerts
-│   ├── claude.py           # /api/claude/* — Anthropic API proxy (opt-in)
-│   └── import_csv.py       # /api/import/csv — CommSec / SelfWealth CSV parser
-│
-├── js/
-│   ├── config.js               # Global state object, API base URL, defaults
-│   ├── utils.js                # Shared helpers: fmt, toast, parseClaudeJSON, _detectExitReason
-│   ├── api.js                  # All backend fetch wrappers + scheduleSave() debounce
-│   ├── portfolio-helpers.js    # addParcel(), matchSaleAgainstParcels(), mergedPortfolio()
-│   ├── scheduler.js            # Auto-refresh timer, SBC mode (20-min interval)
-│   ├── reconcile.js            # Portfolio reconciliation vs journal
-│   ├── prices.js               # Live price refresh + stale-data badge (>25 min)
-│   ├── charts.js               # Canvas chart renderers (candlestick, sparkline, etc.)
-│   │
-│   ├── ── AI Infrastructure ──
-│   ├── claude-client.js        # Centralised callClaude() — retries, caching, agent routing
-│   ├── quant-engine.js         # Deterministic sizing: Kelly, vol scalar, VaR1d, multi-constraint
-│   ├── regime-engine.js        # Market regime classifier + strategy gates + blended size modifiers
-│   ├── learning-loop.js        # Calibration stats, fetchCalibrationBlock(), decay detection
-│   ├── prompt-modules.js       # Optional rule modules + dynamic system prompt assembly
-│   ├── response-validator.js   # Schema + business rule validation, auto-repair, SELL/TRIM taxonomy
-│   │
-│   ├── ── Core Engines ──
-│   ├── prompts.js              # All AI system prompts (ANALYSIS, MACRO, ANALYST, PM, DT, BRIEFING)
-│   ├── analysis.js             # Portfolio analysis: regime gate → Claude → quant → validate
-│   ├── strategy.js             # DT pre-filter thresholds (DT_FILTER) + AI params (DT_AI_PARAMS)
-│   ├── asx-universe.js         # ASX 20/50/100/200 ticker lists
-│   ├── day-trading-analysis.js # Day trade + universe scan orchestration
-│   ├── intraday-strategy.js    # Intraday 5m strategy parameters
-│   ├── navigation.js           # showPage(), renderPage() with error boundary
-│   ├── alerts.js               # fireAlert() — desktop + optional Telegram mirror
-│   ├── init.js                 # App bootstrap, auto-save (beforeunload keepalive + 60 s periodic)
-│   ├── debate-client.js        # Ollama debate, postmortem, skill, calib-quality wrappers
-│   │
-│   └── pages/
-│       ├── dashboard.js        # Portfolio summary, NAV chart, drawdown monitor, cash tracker
-│       ├── portfolio.js        # Holdings editor (multi-account), DRP, parcels, splits/capital-return warnings
-│       ├── macro.js            # Morning macro brief + auto-briefing
-│       ├── signals.js          # Live technical signals + seasonality + indicator alerts
-│       ├── recommendations.js  # AI recs (Setups / History / Analysis / Rules tabs)
-│       ├── day-trading.js      # Swing day-trading UI (Setups / Rules tabs)
-│       ├── intraday.js         # ⚡ Intraday 5m day-trading (entry-window gate, VWAP, RSI)
-│       ├── journal.js          # Trade journal — open/close trades, P&L, DRP entries
-│       ├── cgt.js              # CGT parcels, FIFO/LIFO/Max-gain, 12-month discount, DRP badges
-│       ├── performance.js      # P&L charts, hit rate, drawdown, sector attribution, sync to learning
-│       ├── backtest.js         # Strategy backtesting (flat + liquidity slippage) + walk-forward + AI replay
-│       ├── risk.js             # Beta, Sharpe, VaR/CVaR, correlation, target allocations, rebalance
-│       ├── assistant.js        # Free-form AI chat with portfolio context
-│       ├── news.js             # News scanner — RSS + LLM sentiment tagging
-│       ├── announcements.js    # ASX announcements — price-sensitive filter + Gemini scoring
-│       ├── scanner.js          # Market scanner (Opportunities / Screener / Compare / Factor Stability tabs)
-│       ├── watchlist.js        # Watchlist — live signals, indicator alerts
-│       ├── compare.js          # Side-by-side ticker comparison (tab inside Scanner)
-│       ├── learning.js         # Learning Loop — calibration, stats, postmortem, sell-outcomes, lessons
-│       └── settings.js         # API keys, brokerage, LLM providers, compact mode, Telegram, AI call log
-```
-
----
-
-## Architecture — AI Pipeline
-
-Every recommendation flows through four deterministic layers:
-
-```
-Signals (indicators.py)
-  → Regime Engine (regime-engine.js)   — classifies market, gates strategy, sizes position
-  → Claude (claude-client.js)          — qualitative conviction, never does arithmetic
-  → Quant Engine (quant-engine.js)     — deterministic stop/target/qty/EV from Kelly + constraints
-  → Validator (response-validator.js)  — schema + business rules, auto-repair (≤2 retries)
-  → UI
-```
-
-| Layer | Responsibility |
-|---|---|
-| **Regime Engine** | Classifies market (`riskOn/riskOff/panic/highVol/trend/sideways`) from live macro data + SPI200 futures. Panic regime returns `sizeMult=0` — no new positions. `_blendedSizeMult` linearly transitions over 30 min after a regime flip to prevent cliff-edge sizing changes. |
-| **Claude** | Qualitative conviction — what to buy/sell and why. Never does arithmetic. Injected with calibration block, active regime, lessons, and regime-aware stop ATR multiple. |
-| **Quant Engine** | Deterministic sizing: Kelly × vol scalar × multi-constraint (account-risk %, max-position %, liquidity, VaR1d). Stop = `stopAtrMult × earningsAdj × ATR14`. Rejects when `kellyFrac ≤ 0` (negative EV). |
-| **Validator** | Schema + SELL/TRIM tagging checks. Auto-repair loop (≤2 retries). HOLD recs skip target/stop/qty fields. |
-
-### Regime stop ATR multiples
-
-| Regime | `stopAtrMult` |
-|---|---|
-| riskOn / trend / sideways | 2.5× |
-| highVol | 3.0× |
-| riskOff | 3.5× |
-| panic | 4.0× |
+**API key:** paste your Anthropic key in Settings → API Key. It is stored in browser `localStorage` and never sent anywhere except the Anthropic API. An optional server-side proxy mode stores the key in SQLite instead.
 
 ---
 
 ## Features
 
 ### Portfolio Management
-- Holdings with shares, average cost, current price, sector, unrealised P&L
-- **Multi-account isolation** — separate `personal`, `super`, and `trading` accounts; same ticker held in different accounts appears as distinct rows with separate CGT parcel pools
-- **DRP parcel tracking** — Dividend Reinvestment Plan events update cost-basis and create CGT parcels with `action: 'DRP'`
-- CGT parcel tracking (FIFO / LIFO / Max-gain) with 12-month discount flag and DRP badge
-- Trade journal with open/close tracking, fee deduction, and DRP entries
-- **Stock split warnings** — checks yfinance splits data on Portfolio page load, shows amber banner
-- **Capital return warnings** — large distributions ≥5% of price flagged for CGT review
-- **EOFY tax pack** — download ZIP with CGT disposals CSV + trade fees CSV from CGT page
-- **Broker CSV import** — CommSec / SelfWealth / generic auto-detection; BUY rows added to portfolio, SELL rows matched via FIFO/LIFO against open parcels
-- Portfolio reconciliation — detects journal vs holdings mismatches
+Track your holdings across multiple accounts — personal, super, and trading. Each account maintains its own CGT parcel pool so a ticker held in two accounts is never mixed.
 
-### AI Analysis (Claude Sonnet 4.6)
-- **Morning Macro Brief** — sentiment, key drivers, bullish/bearish score from live market data; auto-scheduled at configurable AEST time
-- **Recommendations** — BUY / TOP_UP / SELL / TRIM / HOLD with confidence, rationale, CGT and franking awareness, anti-churn rules (7-day block with CATASTROPHE overrides including brokerage-exceeds-profit)
-- **Regime gate** — classifies market before every analysis run; blocks new positions in panic; applies regime-specific stop ATR multiple and size multiplier
-- **Pre-earnings adjustment** — `earningsAdj = 1.3×` on stop when `signals.pre_earnings_risk = true` (≤14 days to earnings); `📅 Pre-earnings` badge on rec card
-- **VaR1d sizing** — quant engine applies 0.75×/0.5× multiplier when portfolio VaR1d > 3.5%/5%; `📉 VaR adj` badge on rec card
-- **SELL/TRIM structured tagging** — every exit rec must include `primary_driver` (9-driver taxonomy), optional `secondary_factors` (12 tags, max 3), and `urgency` (`immediate/routine/monitor`). Auto-repair demotes `better_opportunity` without `alternativeTicker` to `risk_management`
-- **Learning Loop** — every recommendation logged; calibration feedback (decay-weighted win rates, regime-adaptive half-life, Phase 8 Mann-Whitney z-score gate) injected into every user message
-- **Local LLM fast-path** — Settings → "Use local LLM for analysis" routes portfolio analysis to Ollama (`POST /api/debate/quick-analysis`); BUY/TOP_UP/HOLD/SELL/TRIM supported; `🔒 Local` badge on recs; no API spend
-- Dynamic prompt assembly — core rules cached with `cache_control: ephemeral`; optional modules (tax-loss harvest, reporting season, high-vol, REIT/mining) appended as uncached second block
-- Exponential backoff retry (1 s / 2 s / 4 s) on HTTP 429/529
-- AI call log — full prompt + response stored in `ai_call_log` DB table; browsable via Settings → Recent AI Calls; test API key calls excluded from log
+- Holdings with live prices, unrealised P&L, and sector attribution
+- Multi-account isolation (personal / super / trading)
+- CGT parcel tracking — FIFO, LIFO, or Max-gain disposal methods
+- 12-month CGT discount flag and DRP (Dividend Reinvestment Plan) parcel support
+- Capital gains/loss summary with EOFY tax pack download (CSV)
+- Trade journal with full open/close history and brokerage deduction
+- Stock split detection and capital return warnings
+- Broker CSV import — CommSec and SelfWealth formats auto-detected
 
-### Learning Loop
-- Every rec logged to `ai_learning_events` on generation; patched with outcome on close
-- **Calibration block** — `GET /api/learning/calibration` returns a compact ~30–100 token block injected into every Claude user message: confidence-band win rates, dominant error nudge, success-tag nudge, per-ticker stats, regime warning
-- **Decay-weighted win rates** with volatility-adaptive half-life (panic=20d → calm=60d)
-- **Phase 8 Mann-Whitney z-score gate** — skill-weighting only active when z > 1.28; z-score and threshold shown in Learning UI
-- **Virtual outcomes** — unexecuted recs ≥30 days old price-checked against actual market; prevents calibration bias from executed-only sample
-- **Thesis drift nudge** — `⚠EARLY_EXIT_DRAG` emitted when manual exits lag target-hit exits by >3pp (n≥5)
-- **Sell tag spot-check** — weekly 5-event batch review (agree/disagree/retag); `agree_rate < 0.60` restricts calibration to manually-reviewed events
-- **Sell-outcome validation** — SELL/TRIM events ≥25d old price-checked; `validated/invalidated/inconclusive` verdict shown on Learning page
-- **Scoped lessons** — persistent trading lessons filtered by ticker / sector / regime / breadth; up to 4 injected per analysis call
-- **Debate engine** — local Ollama bull/bear debate, adversarial postmortem (two-model), skill scoring, calibration quality (Z-score per band, traffic-light verdicts); all manual-only via 🤖/⚔️/🔬/⚖️ buttons
+### AI Analysis (Claude Sonnet)
+Every recommendation flows through a deterministic pipeline: live signals → regime classification → Claude → position sizing → schema validation. Claude handles qualitative judgement; all arithmetic is done by code.
 
-### Day Trading (Swing, 5–15 days)
-- **Portfolio scan** — analyses holdings + custom tickers with full indicator stack
-- **Universe scanner** — scans ASX 20/50/100/200; client-side pre-filter (BB + ADV + SMA200 + ADX); top-15 sent to AI
-- Strategy signals: BB lower-band reclaim + RSI < 35 + Volume Z-Score + Fibonacci 50–61.8% zone + OBV divergence
-- **`DT_FILTER` / `DT_AI_PARAMS`** editable at runtime via Day Trading → Rules tab
+- **Portfolio recommendations** — BUY, TOP_UP, SELL, TRIM, and HOLD with confidence scores, rationale, stop-loss, target, and sized quantity
+- **Regime-aware analysis** — the market regime (risk-on, risk-off, high-vol, trend, sideways, panic) gates which strategies are active, adjusts position sizes, and widens stops in volatile conditions
+- **Anti-churn rules** — a 7-day hold gate prevents reflexive reversals; overrideable for genuine risk events
+- **Pre-earnings protection** — stop distance widens automatically when earnings are within 14 days
+- **CGT and franking awareness** — recommendations account for the 12-month discount window, tax-loss harvesting season, and franking credit capture
+- **SELL/TRIM decision tagging** — every exit recommendation includes a structured primary driver (9-driver taxonomy), supporting factors, and urgency level for learning-loop feedback
+- **Morning briefing** — macro sentiment summary with ASX200, AUD/USD, commodities, and a bullish/bearish score; auto-schedulable at a fixed AEST time
+- **Free-form assistant** — conversational AI with full portfolio context for research questions
 
-### ⚡ Intraday Day Trading (same-day, 5-minute bars)
-- ASX 20/50/100/200 universe scanner with 8-thread pool
-- VWAP, intraday RSI, volume acceleration, setup score 0–100
-- Entry window gate: 10:45–15:00 AEST only; time-stop alert at 15:00 AEST
-- `passes` flag gates actionable setups; data shown outside window for monitoring
+### Local LLM Mode
+Enable "Use local LLM for analysis" in Settings to route portfolio analysis through a locally running Ollama model at zero API cost. Recommendations are labelled with a 🔒 Local badge. Full Claude analysis remains available on demand.
 
-### Market Scanner
-- Background ASX universe scan (configurable universe, min ADV, exclude holdings)
-- **Opportunities tab** — ranked candidates with composite score
-- **Technical Screener tab** — parametric filter
-- **Compare tab** — side-by-side indicator comparison for up to N tickers (`compareFromOutside()` API for other pages)
-- **Factor Stability tab** — post-scan IC analysis for `FACTOR_WEIGHTS` tuning (`POST /api/scanner/factor-stability`)
-- Saved screener presets persisted to DB
+### Day Trading
+
+**Swing trades (5–15 day holds)**
+A dedicated scanner pre-filters the ASX 20/50/100/200 universe using Bollinger Band position, average daily volume, SMA200 proximity, and trend strength. The top candidates are sent to Claude for conviction scoring.
+
+**Intraday (same-day, 5-minute bars)**
+A separate intraday scanner monitors VWAP, intraday RSI, and volume acceleration. Entry signals are only marked actionable during the 10:45–15:00 AEST window; a time-stop alert fires at 15:00 for any open position.
+
+Both modes use fully deterministic position sizing (Kelly fraction, volatility scalar, account-risk %, liquidity cap) applied after the AI produces its conviction score — the model never sees or computes quantities.
 
 ### Live Signals
-- RSI (9 + 14), MACD + histogram, Stochastic %K/%D, Williams %R, CCI
-- Bollinger Bands (%B + bandwidth), ATR, Keltner channel, Donchian channel
-- OBV trend, MFI, VWAP (20-day), Volume Z-Score, ADV
-- ADX + ±DI, trend score, composite signal, 60-day high/low (Fibonacci zone)
-- Seasonality — 12-month average return pattern (10yr monthly history)
-- Indicator alerts — RSI above/below, BB breakout/breakdown, volume spike
+Real-time technical indicator data per ticker:
+
+- Momentum: RSI (9 + 14), MACD, Stochastic, Williams %R, CCI
+- Volatility: Bollinger Bands (%B, bandwidth), ATR, Keltner channel, Donchian channel
+- Volume: OBV, MFI, VWAP, volume Z-score, 20-day average daily value
+- Trend: ADX, ±DI, SMA crossovers, composite signal score
+- Seasonality: 12-month average return pattern from 10 years of monthly data
+- Custom alerts: RSI thresholds, Bollinger breakout/breakdown, volume spikes
+
+### Market Scanner
+Batch-scan the ASX universe and rank tickers by a composite technical score. Results are filterable by sector, minimum liquidity, and whether a ticker is already held.
+
+- **Opportunities** — ranked candidates with score, signals, and sector
+- **Technical Screener** — parametric filter across the full indicator set
+- **Compare** — side-by-side indicator comparison for any two or more tickers
+- **Factor Stability** — empirical information coefficient analysis to tune scoring weights
+- Save named screener presets for quick reuse
 
 ### Risk Dashboard
-- Per-holding: annualised volatility, Sharpe ratio, beta (vs VAS.AX), VaR 95%, CVaR 95%, max drawdown
-- Portfolio correlation heatmap (canvas)
-- **Target allocations + rebalance** — set target weight per ticker; drift card shows over/under; one-click "Suggest Rebalance" generates deterministic BUY/TRIM list with CGT discount-at-risk warnings
-- Heat budget gate — max total $ at risk to stops as % of portfolio (default 5%; configurable on Risk page)
+- Per-holding: beta (vs VAS.AX), annualised volatility, Sharpe ratio, VaR 95%, CVaR 95%, max drawdown
+- Portfolio-level correlation heatmap
+- Sector concentration warnings (>25% amber, >40% red)
+- Target allocation tracking with one-click rebalance suggestions — deterministic BUY/TRIM recommendations with CGT discount-at-risk warnings
+- Heat budget gate: caps total capital at risk to stops as a percentage of portfolio value
 
-### News Scanner
-- RSS feeds aggregated and deduplicated (TF-IDF cosine similarity)
-- LLM classification via Ollama (local), Groq, or Google Gemini
-- Sentiment tags: bullish / bearish / neutral per article
-- Repetition guard — URL stripping, `repeat_penalty: 1.2`, regex post-processor
-- Scheduled 4×/day or manual trigger
+### Performance & Backtesting
+- Realised P&L by trade, win rate, average win/loss, sector attribution
+- Portfolio NAV history and drawdown monitoring
+- Strategy backtesting with flat or liquidity-adjusted slippage
+- Walk-forward validation for out-of-sample parameter testing
+- AI replay — Claude evaluates historical signals in hindsight
 
-### Announcements
-- ASX company announcements scraped from ASX website
-- PDF text extraction (pdfplumber primary, PyMuPDF fallback)
-- Price-sensitive filter — only actionable announcements surfaced
-- Google Gemini scoring with live model picker
+### Learning Loop
+Every recommendation is logged and tracked to outcome. The system feeds calibration data back into every subsequent analysis call.
 
-### Alerts
-- Desktop notifications via browser Notifications API
-- **Telegram mirror** — optional off-device push alerts; credentials stored server-side in SQLite (never in browser)
-- Stop-proximity alert (configurable %, direction-aware for SELL/TRIM), target-hit alert — each fires once, re-arms after 2× threshold retreat
-- Drawdown monitor — alert when portfolio drawdown exceeds configurable threshold (default 10%)
+- Confidence-band accuracy tracking with decay-weighted win rates
+- Regime-adaptive calibration (shorter half-life in volatile markets)
+- Virtual outcome resolution for unexecuted recommendations
+- Sell-tag accuracy monitoring — validates whether exits were subsequently justified by price action
+- Persistent trading lessons scoped by ticker, sector, regime, or breadth condition
+- Local Ollama debate engine for trade postmortems, skill scoring, and adversarial two-model argument
+- Phase 8 statistical gate (Mann-Whitney U) before skill-weighting activates
 
-### Backtesting
-- Historical strategy replay against price data
-- Slippage modes: `flat` (fixed per trade) or `liquidity` (ADV-tiered rates)
-- **Walk-forward backtesting** — out-of-sample parameter validation
-- **AI replay** — Claude evaluates each historical signal in hindsight
+### News & Announcements
+- RSS aggregator with TF-IDF deduplication across multiple feeds
+- LLM sentiment classification — bullish / bearish / neutral per article
+- ASX company announcements with PDF text extraction and price-sensitive filter
+- Google Gemini scoring for announcement materiality
 
-### Settings
-- Anthropic API key (direct browser mode or server-side proxy mode)
-- Brokerage per trade, max trades/day, min trade size
-- LLM provider for news scanner (Ollama / Groq / Gemini)
-- SBC mode toggle (20-min refresh, auto-scan disabled)
-- Compact mode — reduced padding/row heights for small screens
-- Auto-briefing time (AEST HH:MM, fires on first page load)
-- Recent AI Calls browser — full prompt + response audit trail
-- Universe health check — verify all ASX200 tickers reachable; manage exclusion list
-- Telegram credentials — test, save, enable/disable
+### Alerts & Notifications
+- **Notification centre** — bell button captures every toast, alert, and error; full history stored in a dedicated `notifications.db`; paginated scrollable log
+- **Desktop notifications** — stop-loss proximity, target hit, drawdown threshold, high-conviction recommendations, scan results
+- **Telegram integration** — optional off-device push alerts; credentials stored server-side and never logged
+- Drawdown monitor with configurable alert threshold
 
----
-
-## AI Pipeline — Key Files
-
-| What to change | File | Where |
-|---|---|---|
-| Analysis rules (no code edit) | Recommendations → Rules tab | runtime |
-| Day trade thresholds (no code edit) | Day Trading → Rules tab | runtime |
-| SELL/TRIM tagging taxonomy | `js/response-validator.js` | `SELL_PRIMARY_DRIVERS`, `SELL_SECONDARY_FACTORS` |
-| All AI system prompts | `js/prompts.js` | `ANALYSIS_SYSTEM_PROMPT`, etc. |
-| Optional prompt modules | `js/prompt-modules.js` | `RULE_MODULES`, `assembleOptionalModules()` |
-| Regime classification thresholds | `js/regime-engine.js` | `REGIME_THRESHOLDS` |
-| Quant engine sizing | `js/quant-engine.js` | `QUANT_CONFIG` |
-| Indicator formulas | `indicators.py` | `analyse_ticker()` |
-| Scanner scoring weights | `indicators.py` | `FACTOR_WEIGHTS` |
-| Announcement engine | `announcement_engine.py` | — |
-| News RSS sources | `news_engine.py` + Settings | — |
-
----
-
-## Data & Persistence
-
-- **yfinance** — price, fundamentals, splits, dividends (no API key required)
-- **Stooq** — third-line fallback for prices when yfinance + stale cache are both empty; rate-limited to ~1 req/sec via `BoundedSemaphore`
-- **ASX sector indices** — `^AXMJ`, `^AXFJ`, `^AXHJ`, `^AXEJ`, `^AXRJ` (yfinance canonical `^AX*` prefix)
-- **SQLite** (`asx_trader.db`, WAL + `synchronous=NORMAL`) — all state: portfolio, journal, recs, settings, nav history, CGT parcels, announcements, learning events, AI call log. WAL checkpoint + `PRAGMA optimize` run on every startup.
-- Auto-save: 500 ms debounce on state changes, 60 s periodic, `fetch({ keepalive: true })` on page unload
-- DB backup: daily rotating backup (last 7 kept), path in `GET /health`
-- No external database, no cloud sync
+### Watchlist
+Monitor tickers outside your portfolio with live signals, indicator alerts, and notes. Alert conditions fire the same notification pipeline as held positions.
 
 ---
 
 ## LLM Providers
 
-| Provider | Used for | Notes |
-|---|---|---|
-| Anthropic Claude Sonnet 4.6 | Portfolio analysis, recommendations, day trading, macro brief, assistant | API key required |
-| Google Gemini | Announcements, debate adjudicator | API key required; model selectable in Settings |
-| Groq | News scanner, debate adjudicator fallback | API key required |
-| Ollama (local) | News scanner, bull/bear debate, postmortem, skill scoring, calib quality, local LLM portfolio analysis | No API key; pull a model first |
+| Provider | Used for |
+|---|---|
+| **Anthropic Claude Sonnet 4.6** | Portfolio analysis, recommendations, day trading, macro brief, assistant |
+| **Google Gemini** | ASX announcement scoring, debate adjudication |
+| **Groq** | News classification (fast inference), debate adjudication fallback |
+| **Ollama (local)** | News classification, trade debate, postmortem analysis, local portfolio analysis (no API cost) |
+
+Only the providers you configure are used. Anthropic is the only required key for core analysis functionality.
+
+---
+
+## Data & Privacy
+
+- **All data is local.** Portfolio, trades, recommendations, and settings are stored in SQLite (`asx_trader.db`). Notifications have their own separate database (`notifications.db`).
+- **Market data** is fetched from yfinance (free, no key required), with Stooq as a fallback provider.
+- **No telemetry, no cloud sync.** The app makes no outbound connections except to configured LLM APIs and market data providers.
+- The database uses WAL mode with daily rotating backups (last 7 retained).
+- Auto-save runs every 60 seconds and on page unload.
+
+---
+
+## Settings
+
+All configuration is accessible from the Settings page with no code editing required:
+
+- Anthropic API key (browser-local or server-side proxy)
+- Brokerage per trade, maximum trades per day, minimum trade size
+- LLM provider for news and debate (Ollama model, Groq, Gemini)
+- Compact mode for smaller screens
+- Morning briefing schedule (AEST time)
+- Telegram bot credentials for off-device alerts
+- SBC mode — 20-minute refresh interval and disabled auto-scan for low-power devices (Raspberry Pi, Jetson Orin)
+- Recent AI call log — full prompt and response audit trail
 
 ---
 
 ## Running Tests
 
 ```bash
-# All Python tests (536 tests — backend routes, indicators, JS syntax/function checks)
-python test_app.py
-
-# Vitest JS unit tests (110 tests — quant-engine, regime-engine, response-validator, _detectExitReason)
-npm run test:js
+python test_app.py   # 555 backend + integration tests
+npm run test:js      # 110 JS unit tests (quant engine, regime classifier, validator)
 ```
-
----
-
-## SBC / Low-Power Mode
-
-Toggle via the **PC** button in the top bar. In SBC mode:
-- Price refresh interval: 20 minutes (vs 5 minutes in PC mode)
-- Auto-scan disabled to reduce CPU load
-- Designed for Raspberry Pi 5 or Jetson Orin running headlessly
