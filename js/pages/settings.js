@@ -12,7 +12,11 @@ function renderSettings() {
           <input type="password" id="api-key-input" value="${key}" placeholder="sk-ant-...">
           <div class="text-xs text-muted mt-1">Required for AI analysis. Stored in localStorage only (never sent to server).</div>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="saveApiKey()">Save Anthropic Key</button>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="saveApiKey()">Save Anthropic Key</button>
+          <button class="btn btn-sm" id="test-api-key-btn" onclick="testApiKey()" title="Send a minimal call to verify the key works — not logged to AI call history">🔍 Test Key</button>
+          <span id="test-api-key-status" style="font-size:11px;color:var(--text-muted)"></span>
+        </div>
 
         <div style="margin-top:14px;padding-top:12px;border-top:0.5px solid var(--border-light)">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
@@ -265,6 +269,7 @@ python3 asx_server.py</pre>
             <option value="macro">macro</option>
             <option value="assistant">assistant</option>
             <option value="briefing">briefing</option>
+            <option value="test">test</option>
           </select>
           <button class="btn btn-sm" onclick="loadAICallLog()">&#8635; Refresh</button>
         </div>
@@ -405,6 +410,40 @@ function saveApiKey() {
   state.settings.apiKey=val;
   localStorage.setItem('asx_api_key',val);
   toast('API key saved','success');
+}
+
+async function testApiKey() {
+  const btn    = document.getElementById('test-api-key-btn');
+  const status = document.getElementById('test-api-key-status');
+  const key    = getApiKey();
+  if (!key) { toast('Save an API key first', 'error'); return; }
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Testing…'; }
+  if (status) status.textContent = '';
+
+  try {
+    // Minimal call — 5 tokens max, no cache, noLog so it doesn't appear in
+    // ai_call_log and doesn't pollute the real call history.
+    const { text } = await callClaude('assistant', 'Reply with the single word OK.', {
+      maxTokens: 10,
+      noCache:   true,
+      noLog:     true,
+      systemPrompt: 'You are a test responder. Reply with only the word OK.',
+    });
+    if (status) {
+      status.textContent = '✓ Key valid — Claude responded';
+      status.style.color = '#16a34a';
+    }
+    toast('API key is valid ✓', 'success');
+  } catch (err) {
+    if (status) {
+      status.textContent = `✗ ${err.message}`;
+      status.style.color = '#dc2626';
+    }
+    toast(`API key test failed: ${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔍 Test Key'; }
+  }
 }
 
 async function settingsSaveGroqKey() {

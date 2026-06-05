@@ -184,7 +184,10 @@ async function callClaude(agentType, userMessage, options = {}) {
     );
 
     // ── Fire-and-forget: log full call (prompt + response) to backend ──────────
-    // Runs after every successful callClaude — covers all agent types automatically.
+    // Skipped when options.noLog = true (e.g. API key test calls from Settings —
+    // these should not appear in ai_call_log so they don't pollute real call history).
+    if (options.noLog) return { text: responseText, usage };
+
     try {
       // Extract system prompt text from whatever form it was passed in
       let _sysText = '';
