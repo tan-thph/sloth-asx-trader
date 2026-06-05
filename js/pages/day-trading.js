@@ -813,9 +813,19 @@ function _renderDtIntradayTab() {
 // Used by executeIntradayTrade, _showCloseIntradayDialog, and executeDayTrade.
 // action: 'BUY' | 'SELL'
 // _showTradeDialog — confirms a day/intraday trade.
-// qty param is the AI-suggested quantity; the user can override it in the
-// editable "Shares" field. onConfirm receives (price, fee, actualQty).
-function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfirm) {
+//
+// BUY  (readOnlyQty = false, the default):
+//   The "Shares" field is editable — user can override the AI-suggested qty.
+//   onConfirm receives (price, fee, actualQty).
+//
+// SELL (readOnlyQty = true):
+//   The "Shares" field is shown for reference but is NOT editable — the close
+//   always uses the quantity determined by the caller (e.g. the full position).
+//   Accepting user edits here would silently change the close amount since the
+//   callers use their own closure variable for the qty, not the dialog value.
+//   Partial-close support is a separate, future feature.
+//   onConfirm still receives (price, fee, qty) for consistency.
+function _showTradeDialog({ ticker, action, qty, defaultPrice, title, readOnlyQty = false }, onConfirm) {
   const existing = document.getElementById('trade-confirm-dialog');
   if (existing) existing.remove();
 
@@ -824,10 +834,11 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
   const priceLabel  = action === 'BUY' ? 'Entry price ($)' : 'Close price ($)';
   const btnLabel    = action === 'BUY' ? '⚡ Confirm BUY' : '✓ Confirm SELL';
 
-  // Hint text shown below the qty field to remind user of the AI suggestion
-  const qtyHint = action === 'BUY'
-    ? `AI-suggested: <b>${qty}</b> shares — adjust as needed`
-    : `Full position: <b>${qty}</b> shares`;
+  // BUY: show hint reminding user they can change the AI qty.
+  // SELL: read-only — show "Closing N shares" as context only.
+  const qtyHint = readOnlyQty
+    ? `Closing full position`
+    : `AI-suggested: <b>${qty}</b> shares — adjust as needed`;
 
   const dialog = document.createElement('dialog');
   dialog.id = 'trade-confirm-dialog';
@@ -836,13 +847,15 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
       <span style="background:${actionColor};color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:5px">${action}</span>
       <span style="font-size:15px;font-weight:700">${ticker}</span>
+      ${readOnlyQty ? `<span style="font-size:13px;color:var(--text-muted)">&times;${qty} shares</span>` : ''}
     </div>
     <div style="display:grid;gap:10px;margin-bottom:16px">
+      ${!readOnlyQty ? `
       <div>
         <div class="form-label">Shares</div>
         <input id="tcd-qty" type="number" step="1" min="1" value="${qty}" style="width:100%">
         <div style="font-size:10px;color:var(--text-muted);margin-top:3px">${qtyHint}</div>
-      </div>
+      </div>` : ''}
       <div>
         <div class="form-label">${priceLabel}</div>
         <input id="tcd-price" type="number" step="0.001" value="${Number(defaultPrice).toFixed(3)}" min="0.001" style="width:100%">
@@ -862,13 +875,13 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
   document.body.appendChild(dialog);
   dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
 
-  const qtyEl    = dialog.querySelector('#tcd-qty');
+  const qtyEl    = !readOnlyQty ? dialog.querySelector('#tcd-qty') : null;
   const priceEl  = dialog.querySelector('#tcd-price');
   const feeEl    = dialog.querySelector('#tcd-fee');
   const costLine = dialog.querySelector('#tcd-cost-line');
 
   const _upd = () => {
-    const q = Math.max(0, parseInt(qtyEl.value)   || 0);
+    const q = qtyEl ? (Math.max(0, parseInt(qtyEl.value) || 0)) : qty;
     const p = parseFloat(priceEl.value) || 0;
     const f = parseFloat(feeEl.value)   || 0;
     const gross = q * p;
@@ -878,16 +891,16 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
       : `Proceeds: $${(gross - f).toFixed(2)} (${q} × $${p.toFixed(3)} − $${f.toFixed(2)} brokerage)`;
     costLine.textContent = label;
   };
-  qtyEl.addEventListener('input', _upd);
+  if (qtyEl) qtyEl.addEventListener('input', _upd);
   priceEl.addEventListener('input', _upd);
   feeEl.addEventListener('input', _upd);
   _upd();
 
   dialog.querySelector('#tcd-confirm').onclick = () => {
-    const actualQty = parseInt(qtyEl.value);
+    const actualQty = qtyEl ? parseInt(qtyEl.value) : qty;
     const price     = parseFloat(priceEl.value);
     const fee       = parseFloat(feeEl.value);
-    if (!actualQty || actualQty < 1)  { toast('Enter a valid quantity (≥ 1)', 'error'); qtyEl.focus();   return; }
+    if (!actualQty || actualQty < 1)  { toast('Enter a valid quantity (≥ 1)', 'error'); qtyEl?.focus();  return; }
     if (!price || price <= 0)         { toast('Enter a valid price', 'error');           priceEl.focus(); return; }
     if (isNaN(fee) || fee < 0)        { toast('Enter a valid brokerage fee', 'error');   feeEl.focus();   return; }
     dialog.remove();
@@ -895,8 +908,8 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
   };
 
   dialog.showModal();
-  qtyEl.focus();
-  qtyEl.select();
+  (qtyEl || priceEl).focus();
+  (qtyEl || priceEl).select();
 }
 
 // ── Execute an intraday trade ─────────────────────────────────────────────────
@@ -923,7 +936,7 @@ function executeIntradayTrade(recId) {
     if (cost > state.cash) { toast('Insufficient cash for this trade', 'error'); return; }
 
     if (!state.intraday.openPositions) state.intraday.openPositions = [];
-    state.intraday.openPositions.push({
+    const newPos = {
       id:         rec.id,
       ticker:     rec.ticker,
       qty,                       // actual qty, not AI-suggested
@@ -932,7 +945,29 @@ function executeIntradayTrade(recId) {
       target:     rec.target,
       stop:       rec.stopLoss,
       enteredAt:  nowSydney(),
-    });
+    };
+    state.intraday.openPositions.push(newPos);
+
+    // Record BUY leg in trade journal — creates a paired entry that closeIntradayPosition
+    // patches on exit, so the journal shows both legs of the round-trip trade.
+    const sector = (state.liveSignals?.[rec.ticker] || {}).sector || 'Other';
+    if (!state.tradeJournal) state.tradeJournal = [];
+    const intradayBuyEntry = {
+      id:          Date.now(),
+      date:        todayStr(),
+      ticker:      rec.ticker,
+      action:      'BUY',
+      qty,
+      entryPrice,
+      exitPrice:   null,
+      fees:        brokerage,
+      pnl:         null,
+      status:      'open',
+      sector,
+      notes:       'Intraday BUY',
+    };
+    state.tradeJournal.unshift(intradayBuyEntry);
+    newPos._journalId = intradayBuyEntry.id;   // link so close can patch the entry
 
     state.cash -= cost;
     rec.status   = 'executed';
@@ -957,6 +992,7 @@ function _showCloseIntradayDialog(posId, suggestedPrice) {
     action: 'SELL',
     qty:    pos.qty,
     defaultPrice: suggestedPrice || pos.target || pos.entryPrice,
+    readOnlyQty: true,   // closing the full position; qty is not editable here
   }, (closePrice, brokerage) => {
     closeIntradayPosition(posId, closePrice, brokerage);
   });
@@ -977,22 +1013,37 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
   state.intraday.pnlDate   = todayStr();   // stamp date so day-change reset works
   state.cash += pos.qty * closePrice - sellFee;
 
-  // Log to trade journal
+  // Patch the open BUY journal entry written at entry time, or create a fallback
+  // combined entry for positions opened before this fix was deployed.
+  const sector = (state.liveSignals?.[pos.ticker] || {}).sector || 'Other';
   if (!state.tradeJournal) state.tradeJournal = [];
-  state.tradeJournal.unshift({
-    id:          Date.now(),
-    date:        todayStr(),
-    ticker:      pos.ticker,
-    action:      'SELL',
-    qty:         pos.qty,
-    entryPrice:  pos.entryPrice,
-    exitPrice:   closePrice,
-    fees:        sellFee + buyFee,
-    pnl:         net,
-    status:      'closed',
-    notes:       'Intraday same-day close',
-    closeDate:   todayStr(),
-  });
+  const pairedBuyEntry = pos._journalId
+    ? state.tradeJournal.find(e => e.id === pos._journalId)
+    : null;
+  if (pairedBuyEntry) {
+    pairedBuyEntry.exitPrice  = closePrice;
+    pairedBuyEntry.fees       = sellFee + buyFee;
+    pairedBuyEntry.pnl        = net;
+    pairedBuyEntry.status     = 'closed';
+    pairedBuyEntry.closeDate  = todayStr();
+    pairedBuyEntry.sector     = pairedBuyEntry.sector || sector;
+  } else {
+    state.tradeJournal.unshift({
+      id:          Date.now(),
+      date:        todayStr(),
+      ticker:      pos.ticker,
+      action:      'SELL',
+      qty:         pos.qty,
+      entryPrice:  pos.entryPrice,
+      exitPrice:   closePrice,
+      fees:        sellFee + buyFee,
+      pnl:         net,
+      status:      'closed',
+      sector,
+      notes:       'Intraday same-day close',
+      closeDate:   todayStr(),
+    });
+  }
 
   state.intraday.openPositions = state.intraday.openPositions.filter(p => p.id !== posId);
 
@@ -1026,41 +1077,65 @@ function _closeDayTrade(recId) {
     action: 'SELL',
     qty:    execQty,
     defaultPrice: suggestedClose,
+    readOnlyQty: true,   // closing the full (executed) position; qty is not editable here
   }, (closePrice, sellFee) => {
-    const gross = (closePrice - entryPrice) * execQty;
-    const net   = gross - sellFee - buyFee;
+    // Use the canonical helper so the CGT page sees the disposal and portfolio
+    // holding is removed.  applySellToPortfolio also credits cash internally.
+    const prevDisposalLen = (state.cgtDisposals || []).length;
+    const { ok: soldOk, disposals } = applySellToPortfolio(
+      rec.ticker, execQty, closePrice, sellFee, todayStr(),
+      state.cgtMethod || 'FIFO'
+    );
+
+    let net;
+    if (soldOk && disposals.length) {
+      // P&L = sum of gross gains (each parcel's proceeds - cost basis - allocated sell fee).
+      // Buy fee is already embedded in each parcel's costPerShare via applyBuyToPortfolio.
+      net = disposalsToPnl(disposals);
+      // Cash already credited inside applySellToPortfolio — do not add again.
+    } else {
+      // Fallback: portfolio entry missing (swing rec executed before this fix was deployed).
+      // Fall back to manual arithmetic and credit cash the old way.
+      const gross = (closePrice - entryPrice) * execQty;
+      net = gross - sellFee - buyFee;
+      state.cash += execQty * closePrice - sellFee;
+    }
 
     // Update or create journal entry
     if (journalEntry) {
-      journalEntry.exitPrice  = closePrice;
-      journalEntry.fees       = buyFee + sellFee;
-      journalEntry.pnl        = net;
-      journalEntry.status     = 'closed';
-      journalEntry.closeDate  = todayStr();
+      journalEntry.exitPrice   = closePrice;
+      journalEntry.fees        = buyFee + sellFee;
+      journalEntry.pnl         = net;
+      journalEntry.status      = 'closed';
+      journalEntry.closeDate   = todayStr();
+      if (soldOk && disposals.length) {
+        journalEntry.disposalIds = disposals.map((_, i) => prevDisposalLen + i);
+      }
     } else {
       if (!state.tradeJournal) state.tradeJournal = [];
       state.tradeJournal.unshift({
-        id:         Date.now(),
-        date:       todayStr(),
-        ticker:     rec.ticker,
-        action:     'SELL',
-        qty:        execQty,
+        id:          Date.now(),
+        date:        todayStr(),
+        ticker:      rec.ticker,
+        action:      'SELL',
+        qty:         execQty,
         entryPrice,
-        exitPrice:  closePrice,
-        fees:       buyFee + sellFee,
-        pnl:        net,
-        status:     'closed',
-        recId:      rec.id,
-        closeDate:  todayStr(),
-        notes:      `SwingTrade close | Stop $${rec.stopLoss} | Target $${rec.target}`,
+        exitPrice:   closePrice,
+        fees:        buyFee + sellFee,
+        pnl:         net,
+        status:      'closed',
+        recId:       rec.id,
+        closeDate:   todayStr(),
+        disposalIds: soldOk && disposals.length
+          ? disposals.map((_, i) => prevDisposalLen + i)
+          : undefined,
+        notes:       `SwingTrade close | Stop $${rec.stopLoss} | Target $${rec.target}`,
       });
     }
 
     rec.status      = 'closed';
     rec._closedAt   = todayStr();
     rec._closePrice = closePrice;
-
-    state.cash += execQty * closePrice - sellFee;
     scheduleSave();
     if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
     const sign = net >= 0 ? '+' : '';
