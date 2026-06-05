@@ -1867,9 +1867,9 @@ Update the relevant entry in `IMPROVEMENTS.md` open items section to:
 
 | # | File(s) | Issue | Severity | Effort | Status |
 |---|---|---|---|---|---|
-| 38 | `js/prompts.js`, `js/quant-engine.js` | Rule 16: LLM told to do qty arithmetic → move VaR1d sizing to quant engine | High | M | Pending |
-| 39 | `js/pages/learning.js` | Phase 8 z-score not displayed; users can't see activation progress | Low | XS | Pending |
-| 40 | `js/response-validator.js` | `better_opportunity` renders without `alternativeTicker` → poisons sell-tag stats | Medium | XS | Pending |
-| 41 | `js/prompts.js` | Rule 15: no concrete CGT arithmetic example; LLMs misapply multi-step formulas | Low | XS | Pending |
-| 42 | `js/prompts.js` | Rule 22: brokerage cost not a valid anti-churn override → forced loss-maximisation | Low | XS | Pending |
-| 43 | `IMPROVEMENTS.md` | Local LLM SELL/TRIM still listed as "Open" despite shipping in Sprint 48 | Low | XS | Pending |
+| 38 ✅ | `js/prompts.js`, `js/quant-engine.js`, `js/pages/recommendations.js` | Rule 16: LLM told to do qty arithmetic → moved VaR1d sizing to quant engine; Rule 16 now emits qualitative flag only | High | M | ✅ FIXED |
+| 39 ✅ | `js/pages/learning.js` | Phase 8 z-score not displayed → added progress bar with z/threshold and % to activation | Low | XS | ✅ FIXED |
+| 40 ✅ | `js/response-validator.js` | `better_opportunity` renders without `alternativeTicker` → auto-repaired to `risk_management` + `_driverRepaired` flag | Medium | XS | ✅ FIXED |
+| 41 ✅ | `js/prompts.js` | Rule 15: no concrete CGT arithmetic example → worked example appended (bear_prob × qty × entry × bear_ret) | Low | XS | ✅ FIXED |
+| 42 ✅ | `js/prompts.js` | Rule 22: brokerage cost not a valid anti-churn override → added as item (e) in CATASTROPHE list | Low | XS | ✅ FIXED |
+| 43 ✅ | `IMPROVEMENTS.md` | Local LLM SELL/TRIM still listed as "Open" → updated to "✅ SHIPPED Sprint 48" with full description | Low | XS | ✅ FIXED |

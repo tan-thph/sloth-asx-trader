@@ -245,21 +245,39 @@ function _renderLearningContent(d, brier) {
   })();
 
   // ── Gap 2: Phase 8 skill-weighting status note (Fix #10: Mann-Whitney Z) ───
+  // Fix #39: also show z-score progress bar so users can see how close to activation
   const phase8Note = (() => {
     if (!phase8) return '';
-    const icon  = phase8.active ? '✅' : '⏸️';
-    const excl  = phase8.n_good_losses_excluded > 0
+    const icon    = phase8.active ? '✅' : '⏸️';
+    const excl    = phase8.n_good_losses_excluded > 0
       ? ` · ${phase8.n_good_losses_excluded} good-loss${phase8.n_good_losses_excluded > 1 ? 'es' : ''} excluded`
       : '';
-    // Show Mann-Whitney Z when available (Fix #10)
-    const zStr = phase8.mann_whitney_z != null
-      ? ` · MW Z=${phase8.mann_whitney_z.toFixed(2)} (threshold ${phase8.mann_whitney_threshold ?? 1.28})`
-      : (phase8.mean_skill_wins != null ? ` · wins=${phase8.mean_skill_wins}, losses=${phase8.mean_skill_losses}` : '');
-    const label = phase8.active
-      ? `Phase 8 skill-weighting active (n=${phase8.n_scored}${zStr}${excl})`
+    const color   = phase8.active ? '#16a34a' : '#d97706';
+    const label   = phase8.active
+      ? `Phase 8 skill-weighting active (n=${phase8.n_scored}${excl})`
       : `Phase 8 skill-weighting paused — ${phase8.reason}`;
-    const color = phase8.active ? '#16a34a' : '#d97706';
-    return `<div style="font-size:11px;color:${color};margin-bottom:8px">${icon} ${label}</div>`;
+
+    // z-score progress toward activation (Fix #39)
+    const z       = phase8.mann_whitney_z;
+    const thresh  = phase8.mann_whitney_threshold ?? 1.28;
+    const zProgressHtml = (() => {
+      if (z == null) return '';
+      const pct     = Math.min(100, Math.round((z / thresh) * 100));
+      const barColor = phase8.active ? '#16a34a' : z >= thresh * 0.75 ? '#f59e0b' : '#6b7280';
+      const gap     = phase8.active ? '' : ` · ${(thresh - z).toFixed(2)} more needed`;
+      return `
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <div style="font-size:10px;color:var(--text-muted);white-space:nowrap">MW Z=${z.toFixed(2)} / ${thresh}</div>
+          <div style="flex:1;max-width:120px;background:var(--bg-secondary);border-radius:3px;height:5px">
+            <div style="width:${pct}%;height:5px;border-radius:3px;background:${barColor};transition:width .3s"></div>
+          </div>
+          <div style="font-size:10px;color:var(--text-muted)">${pct}%${gap}</div>
+        </div>`;
+    })();
+
+    return `<div style="font-size:11px;color:${color};margin-bottom:8px">
+      ${icon} ${label}${zProgressHtml}
+    </div>`;
   })();
 
   // ── Calibration table ──────────────────────────────────────────────────────

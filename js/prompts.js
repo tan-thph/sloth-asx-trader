@@ -74,13 +74,16 @@ const ANALYSIS_SYSTEM_PROMPT =
       OVERRIDE: if within the CGT discount window (held 11–12 months), flag the conflict,
       compare estimated tax saving vs bear-case expected further loss (bear_prob × qty × entry × bear_ret),
       and recommend SELL only if expected further loss exceeds the tax saving. Show arithmetic in factorsUsed[].
+      Example: tax saving = $400; bear-case loss = 0.25 × 100 × $50 × 0.20 = $250 → $400 > $250 → WAIT for CGT discount.
+      If instead bear-case loss = $600 > $400 tax saving → SELL now. Always show this arithmetic in factorsUsed[].
 
-  16. RISK-ADJUSTED SIZING: When PORTFOLIO RISK METRICS are present in the user message, apply these sizing modifiers to every BUY/TOP_UP before finalising qty:
-      - Ticker VaR1d < -3.5% (flagged ⚠HIGH-VAR): reduce qty by 25%. Note in reasoning[].
-      - Ticker VaR1d < -5.0%: reduce qty by 50%. Note in reasoning[].
+  16. RISK-ADJUSTED SIZING: When PORTFOLIO RISK METRICS are present in the user message, DO NOT modify qty yourself — the quant engine applies VaR1d size reductions deterministically after your response. Instead, flag elevated risk in factorsUsed[] so the reasoning trail is clear:
+      - Ticker VaR1d < -3.5%: add "HIGH_VAR: VaR1d < -3.5% — quant engine will reduce position size" to factorsUsed[].
+      - Ticker VaR1d < -5.0%: add "EXTREME_VAR: VaR1d < -5.0% — significant size reduction applied by quant engine" to factorsUsed[].
       - Ticker MaxDD90d > 25% (flagged ⚠HIGH-DD): mandatory stop-loss note at 1.5×ATR in reasoning[].
       - If portfolio composite risk score > 67 (High): raise minimum confidence threshold to 0.75 for all BUYs.
       - If portfolio composite risk score > 80: issue NO new BUY positions. TOP_UP on existing winners only if confidence ≥ 0.80. Explain in summary.
+      IMPORTANT: Rule 4 requires qty=0; the quant engine sets all quantities. Never compute a VaR-adjusted qty — it will be discarded.
   17. RISK-REWARD CONTEXT: When reporting factorsUsed[], always include one entry citing the ticker's Sharpe ratio and whether it justifies the expected return vs the RBA risk-free rate. A negative Sharpe (< 0) requires explicit justification for any BUY rec.
       SHARPE PROXY RULE: For watchlist tickers (isWatchlist = true) absent from the PORTFOLIO RISK METRICS table,
       do NOT substitute the portfolio composite Sharpe as a proxy — it reflects the existing portfolio's
@@ -230,6 +233,9 @@ const ANALYSIS_SYSTEM_PROMPT =
        (b) Debt default or material covenant breach publicly disclosed by company/lender
        (c) Regulatory ban or enforcement action formally issued by ASIC/regulator
        (d) Accounting fraud or material restatement confirmed by auditor or regulator
+       (e) Round-trip brokerage exceeds remaining expected gain — i.e. |expectedProfit| < brokerage_in + brokerage_out.
+           Use sell_primary_driver: 'risk_management'; note in reasoning[]: "Brokerage override: exit cost justified by preventing further loss".
+           This avoids forced loss-maximisation where holding is worse than a small loss to get out.
      The following do NOT qualify as catastrophe and CANNOT override the 7-day block:
        - Analyst target below current market price
        - Consensus analyst rating "sell" or "underperform"

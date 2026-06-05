@@ -124,8 +124,19 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   }
   const qtyByKelly = Math.floor((capital * kellyFrac) / price);
 
+  // ── VaR1d risk-adjusted size modifier (Fix #38) ───────────────────────────
+  // Mirrors the intent of Rule 16 (prompts.js) deterministically so Claude never
+  // needs to do qty arithmetic. signals.var_1d is the per-ticker 1-day VaR (negative
+  // = loss, e.g. -4.2 means a -4.2% 1-day VaR at 95% confidence level).
+  // Only available when the full risk payload is fetched (portfolio analysis, not DT scans).
+  const var1d   = signals?.var_1d ?? 0;   // null/undefined → no adjustment (guard below)
+  const varMult = (signals?.var_1d != null)
+    ? (var1d < -5.0 ? 0.50 : var1d < -3.5 ? 0.75 : 1.0)
+    : 1.0;
+
   // ── Final qty ──────────────────────────────────────────────────────────────
-  const rawQty = Math.min(qtyByRisk, qtyByPosition, qtyByLiquidity, qtyByKelly);
+  const rawQtyBase = Math.min(qtyByRisk, qtyByPosition, qtyByLiquidity, qtyByKelly);
+  const rawQty = varMult < 1.0 ? Math.floor(rawQtyBase * varMult) : rawQtyBase;
   const qty = Math.max(QUANT_CONFIG.minQty, Math.floor(rawQty * volScalar));
 
   if (qty <= 0) return { ok: false, reason: 'sizing constraints reject trade (qty=0)' };
@@ -178,6 +189,7 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
     holdDays,
     winProb: p,
     ...(earningsAdj > 1 ? { _preEarningsAdj: true } : {}),
+    ...(varMult < 1.0   ? { _varAdjusted: true, _varMult: varMult } : {}),
   };
 }
 
