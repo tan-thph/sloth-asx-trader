@@ -264,8 +264,9 @@ _LE_MIGRATIONS = [
     ("sell_verify_verdict",  "TEXT"),  # validated|invalidated|inconclusive
     ("sell_verify_sold_chg", "REAL"),  # % price change of sold ticker since sell date
     ("sell_verify_alt_chg",  "REAL"),  # % price change of alternative ticker since sell date
-    # Sprint 44: speed weight — recs that hit target quickly get higher calibration weight
-    ("virtual_speed_weight", "REAL"),  # 1.0 (slow, 30d) → higher for fast hits (capped at 1.0)
+    # Sprint 44: speed weight = min(1.0, 7 / bars_to_resolution)
+    # Fast hits (≤7 bars) → 1.0; slow drift (30 bars) → ~0.23. High weight = high conviction.
+    ("virtual_speed_weight", "REAL"),  # 1.0 = fast hit (≤7 bars); ~0.23 = slow drift (30 bars)
 ]
 
 

@@ -4764,11 +4764,59 @@ class TestSprint44(unittest.TestCase):
     # ── Item 2: Virtual-outcome speed weighting ───────────────────────────────
 
     def test_virtual_speed_weight_written_by_resolve_virtual_outcomes(self):
-        """_resolve_virtual_outcomes must write virtual_speed_weight on resolved rows."""
+        """_resolve_virtual_outcomes must write virtual_speed_weight on resolved rows.
+
+        Fix: speed_weight is now 7/bars_to_resolution (days-to-hit) NOT 7/total_elapsed.
+        A rec resolved in 7 bars → weight 1.0; one drifting for 30 bars → ~0.23.
+        """
         src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
         self.assertIn("virtual_speed_weight", src)
         self.assertIn("speed_weight", src)
-        self.assertIn("7.0 / hold_days", src)
+        # Must use bars_to_resolution (not total elapsed time) for the speed formula
+        self.assertIn("7.0 / bars_to_resolution", src)
+        # Must NOT fall back to elapsed time (regression guard)
+        self.assertNotIn("7.0 / hold_days", src)
+
+    def test_virtual_outcomes_cutoff_is_30_days(self):
+        """_resolve_virtual_outcomes must use a 30-day cutoff (≥30d old per spec).
+
+        Events younger than 30 days may not have had time to play out — resolving
+        too early produces a large virtual_open population that adds noise to
+        calibration without meaningful signal.
+        """
+        src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
+        # Find _resolve_virtual_outcomes body and check the cutoff (docstring is long so use 3000)
+        idx = src.find("def _resolve_virtual_outcomes(")
+        body = src[idx:idx + 3000]
+        self.assertIn("timedelta(days=30)", body)
+        self.assertNotIn("timedelta(days=10)", body)
+
+    def test_n_virtual_resolved_in_stats_response(self):
+        """GET /api/learning/stats must return n_virtual_resolved count."""
+        src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
+        self.assertIn("n_virtual_resolved", src)
+        # Must be a DB count query, not just a variable name
+        self.assertIn("virtual_outcome IN ('virtual_win', 'virtual_loss')", src)
+
+    def test_learning_js_shows_virtual_count_in_calibration_card(self):
+        """learning.js calibration card must render virtual outcome count chip."""
+        src = open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8").read()
+        self.assertIn("nVirtualResolved", src)
+        self.assertIn("virtual outcomes included", src)
+
+    def test_virtual_chip_tooltip_shows_effective_weight(self):
+        """learning.js virtual chip tooltip must show effective calibration weight."""
+        src = open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8").read()
+        self.assertIn("_virtEffectiveWt", src)
+        self.assertIn("virtual_speed_weight", src)
+
+    def test_learning_stats_query_includes_virtual_speed_weight(self):
+        """learning_stats() recent events SELECT must include virtual_speed_weight column."""
+        src = open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8").read()
+        # virtual_speed_weight must appear in the recent events SELECT (not just virtual rows)
+        idx = src.find("SELECT id, timestamp, ticker, recommendation")
+        block = src[idx:idx + 900]  # query is ~700 chars; 900 gives safe margin
+        self.assertIn("virtual_speed_weight", block)
 
     def test_virtual_speed_weight_column_in_db_migrations(self):
         """virtual_speed_weight must be in _LE_MIGRATIONS in db.py."""

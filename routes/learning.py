@@ -502,9 +502,16 @@ def learning_stats():
                        error_type, error_type_source, debate_summary, skill_score,
                        postmortem_debate, success_tags, checklist_bypasses,
                        sell_primary_driver, sell_secondary_factors, sell_urgency,
-                       virtual_outcome
+                       virtual_outcome, virtual_speed_weight
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
+
+            # Virtual outcome count — for calibration stats card display
+            n_virtual_resolved = conn.execute("""
+                SELECT COUNT(*) FROM ai_learning_events
+                WHERE was_executed = 0
+                  AND virtual_outcome IN ('virtual_win', 'virtual_loss')
+            """).fetchone()[0]
 
             # Debate insights — events that have a stored debate_summary (for Insights card)
             debate_rows = conn.execute("""
@@ -595,6 +602,7 @@ def learning_stats():
             "debate_insights":    debate_insights,
             "phase8":             phase8,           # Gap 2: skill-weighting gate status
             "prompt_regression":  prompt_regression, # Gap 5: prompt version regression
+            "n_virtual_resolved": n_virtual_resolved, # virtual outcome count for UI display
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -924,14 +932,28 @@ def _resolve_virtual_outcomes(conn) -> int:
       1. Fetch daily OHLC from event timestamp to today via yfinance.
       2. Scan bar-by-bar: check if Daily High reached target or Daily Low reached stop.
       3. For SELL/TRIM: inverted frame — target is BELOW entry, stop is ABOVE entry.
-      4. Write virtual_outcome = 'virtual_win' | 'virtual_loss' | 'virtual_open'.
+      4. Record the bar index where the level was first hit as `bars_to_resolution`.
+      5. Write virtual_outcome = 'virtual_win' | 'virtual_loss' | 'virtual_open'.
 
     virtual_open means neither level was hit yet — event stays eligible for future
     resolution on the next calibration fetch.
 
+    virtual_speed_weight = min(1.0, 7.0 / bars_to_resolution):
+      - Target hit on bar 1–7  → weight = 1.0  (fast, high-conviction signal)
+      - Target hit on bar 14   → weight = 0.5
+      - Target hit on bar 29+  → weight ≈ 0.24 (slow drift, weaker signal)
+      - virtual_open            → weight = 1.0 default (will be recomputed on resolution)
+
+    IMPORTANT: bars_to_resolution is the number of daily bars from rec creation until
+    the target/stop is first hit — NOT total elapsed time from creation to today.
+    This correctly rewards fast target hits regardless of how old the event is.
+    Events must be ≥30d old before resolution to ensure enough bars have elapsed
+    for non-resolution to be meaningful (a rec from yesterday might just not have
+    had enough time to play out).
+
     Returns the number of events resolved this call (for debug logging).
     """
-    cutoff = (datetime.now() - timedelta(days=10)).isoformat()
+    cutoff = (datetime.now() - timedelta(days=30)).isoformat()  # ≥30d old per spec
     try:
         rows = conn.execute("""
             SELECT id, ticker, recommendation, suggested_stop, suggested_target, timestamp
@@ -978,18 +1000,28 @@ def _resolve_virtual_outcomes(conn) -> int:
             continue
 
         outcome = "virtual_open"
-        for _, bar in hist.iterrows():
+        # Track the bar index (1-indexed) at which target or stop was first hit.
+        # This is used as `hold_days` for speed_weight — rewards fast resolutions.
+        bars_to_resolution = 0
+        for i, (_, bar) in enumerate(hist.iterrows(), 1):
             if is_exit:
                 # SELL/TRIM: falling price = thesis confirmed (target below entry)
-                if bar["Low"]  <= target: outcome = "virtual_win";  break
-                if bar["High"] >= stop:   outcome = "virtual_loss"; break
+                if bar["Low"]  <= target: outcome = "virtual_win";  bars_to_resolution = i; break
+                if bar["High"] >= stop:   outcome = "virtual_loss"; bars_to_resolution = i; break
             else:
                 # BUY: rising price = thesis confirmed (target above entry)
-                if bar["High"] >= target: outcome = "virtual_win";  break
-                if bar["Low"]  <= stop:   outcome = "virtual_loss"; break
+                if bar["High"] >= target: outcome = "virtual_win";  bars_to_resolution = i; break
+                if bar["Low"]  <= stop:   outcome = "virtual_loss"; bars_to_resolution = i; break
 
-        hold_days = max(1, (datetime.now() - datetime.fromisoformat(row["timestamp"])).days)
-        speed_weight = round(min(1.0, 7.0 / hold_days), 3)
+        # virtual_open: neither level was hit — use full bar count as hold_days
+        # (the position drifted for the entire available history without resolution)
+        if not bars_to_resolution:
+            bars_to_resolution = max(1, len(hist))
+
+        # speed_weight = min(1.0, 7 / bars_to_resolution):
+        #   resolved in ≤7 bars → 1.0 (fast, high-conviction signal)
+        #   resolved in 30 bars → ~0.23 (slow drift, weaker signal)
+        speed_weight = round(min(1.0, 7.0 / bars_to_resolution), 3)
         conn.execute(
             "UPDATE ai_learning_events SET virtual_outcome=?, virtual_speed_weight=? WHERE id=?",
             (outcome, speed_weight, row["id"]))

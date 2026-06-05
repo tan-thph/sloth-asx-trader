@@ -145,6 +145,7 @@ function _renderLearningContent(d, brier) {
   const insufficientData  = d.insufficient_data ?? (closed < 10);
   const promptRegression  = d.prompt_regression  || null;  // Gap 5
   const phase8            = d.phase8             || null;  // Gap 2
+  const nVirtualResolved  = d.n_virtual_resolved ?? 0;     // virtual outcomes resolved via OHLC scan
 
   // Cache events by id so viewStoredDebate() can look up postmortem_debate JSON
   // without an extra HTTP round-trip.
@@ -276,6 +277,8 @@ function _renderLearningContent(d, brier) {
       <p class="text-xs text-muted mb-1">
         Predicted confidence vs actual win rate per band. 95% CI shown — wide intervals mean small samples.
         ${calibActive ? 'Calibration notes are injected into Claude prompts.' : '<strong style="color:#d97706">Calibration paused — need 30+ closed trades.</strong>'}
+        ${nVirtualResolved > 0 ? `<span style="margin-left:6px;font-size:10px;color:#0891b2;background:#ecfeff;border:1px solid #a5f3fc;border-radius:3px;padding:1px 5px"
+          title="Skipped/unexecuted recs where OHLC scan confirmed target or stop was hit — included in calibration at 0.75× speed-weighted discount">~${nVirtualResolved} virtual outcomes included</span>` : ''}
       </p>
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead>
@@ -552,10 +555,17 @@ function _renderLearningContent(d, brier) {
     `</div>`;
   };
 
-  // tagCell: error tags only for loss/breakeven; open/win/expired get nothing
+  // tagCell: error tags only for loss/breakeven; open/win/expired get nothing.
+  // When error_type='none' (reviewed-clean), shows a small ✓ badge so it's
+  // distinguishable from unreviewed rows, then still renders the buttons for re-tagging.
   const tagCell = (evId, currentTagStr, status, tagSource) => {
     if (!TAG_STATUSES.has(status)) return '';
-    return tagButtons(evId, currentTagStr, tagSource);
+    const noneBadge = (currentTagStr === 'none')
+      ? `<span title="Reviewed by Ollama — no systematic error found"
+               style="font-size:9px;padding:1px 5px;border-radius:2px;margin-right:3px;
+                      color:var(--text-muted);border:1px solid var(--border);display:inline-block">✓ no error</span>`
+      : '';
+    return noneBadge + tagButtons(evId, currentTagStr, tagSource);
   };
 
   const recentCard = `
@@ -584,6 +594,7 @@ function _renderLearningContent(d, brier) {
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
                 <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
+                <th style="text-align:left;padding:4px 6px" title="Claude's generation-time tags — exit driver + urgency for SELL/TRIM; win pattern tags for wins">Claude ℹ</th>
                 <th style="padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. Sk = trigger Ollama scoring">
                   <div style="display:inline-flex;align-items:center;gap:2px">
                     <span style="width:28px;flex-shrink:0"></span>
@@ -642,14 +653,61 @@ function _renderLearningContent(d, brier) {
                   : `<span id="skill-badge-${ev.id}"></span>`;
 
                 // Fix #18: virtual outcome chip — shows for unexecuted rows with resolved OHLC outcome
+                // Tooltip shows the effective calibration weight = 0.75 × speed_weight
+                // (speed_weight = min(1.0, 7/bars_to_resolution): fast hits closer to 1.0)
+                const _virtEffectiveWt = ev.virtual_speed_weight
+                  ? (0.75 * ev.virtual_speed_weight).toFixed(2) : '0.75';
                 const virtualChip = (!ev.was_executed && ev.virtual_outcome && ev.virtual_outcome !== 'virtual_open')
-                  ? `<span title="Virtual outcome (skipped rec): OHLC scan found ${ev.virtual_outcome === 'virtual_win' ? 'target hit' : 'stop hit'} — included at 0.75× weight in calibration"
+                  ? `<span title="Virtual outcome (skipped rec): OHLC scan found ${ev.virtual_outcome === 'virtual_win' ? 'target hit' : 'stop hit'} — included at ${_virtEffectiveWt}× weight in calibration (speed factor: ${ev.virtual_speed_weight ?? '1.0'})"
                        style="font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600;margin-left:3px;cursor:default;
                               background:${ev.virtual_outcome === 'virtual_win' ? '#f0fdf4' : '#fef2f2'};
                               color:${ev.virtual_outcome === 'virtual_win' ? '#15803d' : '#dc2626'};
                               border:1px solid ${ev.virtual_outcome === 'virtual_win' ? '#86efac' : '#fca5a5'}"
                      >~${ev.virtual_outcome === 'virtual_win' ? 'W' : 'L'}</span>`
                   : '';
+
+                // ── Claude's generation-time tags ─────────────────────────────────────
+                // For SELL/TRIM: sell_primary_driver + sell_urgency chips (logged at rec generation).
+                // For wins:      success_tags chips (tagged by Ollama skill scorer).
+                // For others:    em-dash placeholder.
+                const isExitRec = ['SELL','TRIM'].includes((ev.recommendation||'').toUpperCase());
+                const DRIVER_META = {
+                  thesis_broken:      { label: 'thes broken',  color: '#dc2626' },
+                  stop_triggered:     { label: 'stop hit',     color: '#ea580c' },
+                  target_reached:     { label: 'target hit',   color: '#16a34a' },
+                  time_stop:          { label: 'time stop',    color: '#ca8a04' },
+                  risk_management:    { label: 'risk mgmt',    color: '#7c3aed' },
+                  better_opportunity: { label: 'better opp',   color: '#0891b2' },
+                  position_sizing:    { label: 'pos sizing',   color: '#6366f1' },
+                  tax_optimisation:   { label: 'tax optim',    color: '#059669' },
+                  regime_change:      { label: 'regime chg',   color: '#d97706' },
+                };
+                const URG_META = {
+                  immediate: { label: 'immediate', color: '#dc2626' },
+                  monitor:   { label: 'monitor',   color: '#ca8a04' },
+                  routine:   { label: 'routine',   color: '#6b7280' },
+                };
+                const claudeTagsEl = (() => {
+                  if (isExitRec && ev.sell_primary_driver) {
+                    const dm = DRIVER_META[ev.sell_primary_driver]
+                      || { label: ev.sell_primary_driver.replace(/_/g,' '), color: '#6b7280' };
+                    const um = ev.sell_urgency
+                      ? (URG_META[ev.sell_urgency] || { label: ev.sell_urgency, color: '#6b7280' })
+                      : null;
+                    return `<div style="display:flex;gap:2px;flex-wrap:wrap;align-items:center">
+                      <span title="Exit driver: ${ev.sell_primary_driver}"
+                            style="font-size:9px;padding:1px 5px;border-radius:2px;font-weight:600;white-space:nowrap;
+                                   background:${dm.color}20;color:${dm.color};border:1px solid ${dm.color}66"
+                      >${dm.label}</span>
+                      ${um ? `<span title="Urgency: ${ev.sell_urgency}"
+                              style="font-size:9px;padding:1px 5px;border-radius:2px;font-weight:500;white-space:nowrap;
+                                     color:${um.color};border:1px solid ${um.color}55"
+                            >${um.label}</span>` : ''}
+                    </div>`;
+                  }
+                  if (ev.outcome_status === 'win' && successTagsEl) return successTagsEl;
+                  return `<span style="color:var(--text-muted);font-size:10px">—</span>`;
+                })();
 
                 // Fixed-slot button helpers — each slot is a flex cell of constant width
                 const _slot = (w, html) =>
@@ -669,9 +727,8 @@ function _renderLearningContent(d, brier) {
                   <td style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
                   <td style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}${virtualChip}</td>
                   <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
-                  <td style="padding:3px 6px">${ev.outcome_status === 'win' && successTagsEl
-                    ? successTagsEl
-                    : tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
+                  <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
+                  <td style="padding:3px 6px">${claudeTagsEl}</td>
                   <td style="padding:3px 6px;white-space:nowrap">
                     <div style="display:inline-flex;align-items:center;gap:2px">
                       ${_slot(28, skillBadgeContent)}
@@ -1293,12 +1350,13 @@ async function classifyAllPostmortems() {
       }
     }
 
-    // 4. Mark done
+    // 4. Mark done — brief pause so the "Done" state is visible, then reload the table
     if (window._classifyAllState) {
       window._classifyAllState.running = false;
       _syncClassifyUI();
       const s = window._classifyAllState;
       toast(`Batch done: ${s.tagged} tagged, ${s.noneCount} no error, ${s.failed} failed`, 'success');
+      setTimeout(() => { window._classifyAllState = null; showPage('learning'); }, 800);
     }
 
   } catch (e) {
