@@ -407,7 +407,7 @@ function _renderDtRec(r, compact = false) {
             </div>
           </div>
           <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:8px">
-            <span>Qty: <b>${r.qty != null ? r.qty + ' shares' : '?'}</b></span>
+            <span>Qty: <b>${r._execQty != null ? r._execQty : (r.qty != null ? r.qty : '?')} shares</b>${r._execQty != null && r._execQty !== r.qty ? `<span style="color:var(--text-muted);font-size:10px;margin-left:3px">(AI: ${r.qty})</span>` : ''}</span>
             <span style="color:${rrColor}">R:R <b>${rrRatio ? rrRatio.toFixed(1) : '?'}:1</b></span>
             <span>Conf: <b>${confPct}%</b></span>
           </div>
@@ -784,7 +784,7 @@ function _renderDtIntradayTab() {
                   </div>
                 </div>
                 <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:10px">
-                  <span>Qty: <b>${r.qty != null ? r.qty + ' shares' : '?'}</b></span>
+                  <span>Qty: <b>${r._execQty != null ? r._execQty : (r.qty != null ? r.qty : '?')} shares</b>${r._execQty != null && r._execQty !== r.qty ? `<span style="color:var(--text-muted);font-size:10px;margin-left:3px">(AI: ${r.qty})</span>` : ''}</span>
                   <span>Conf: <b>${Math.round((r.confidence || 0) * 100)}%</b></span>
                 </div>
                 <button class="btn btn-primary btn-sm" style="width:100%;background:#10b981;border-color:#10b981"
@@ -812,6 +812,9 @@ function _renderDtIntradayTab() {
 // Shows a <dialog> to confirm execution price + brokerage before committing.
 // Used by executeIntradayTrade, _showCloseIntradayDialog, and executeDayTrade.
 // action: 'BUY' | 'SELL'
+// _showTradeDialog — confirms a day/intraday trade.
+// qty param is the AI-suggested quantity; the user can override it in the
+// editable "Shares" field. onConfirm receives (price, fee, actualQty).
 function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfirm) {
   const existing = document.getElementById('trade-confirm-dialog');
   if (existing) existing.remove();
@@ -821,6 +824,11 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
   const priceLabel  = action === 'BUY' ? 'Entry price ($)' : 'Close price ($)';
   const btnLabel    = action === 'BUY' ? '⚡ Confirm BUY' : '✓ Confirm SELL';
 
+  // Hint text shown below the qty field to remind user of the AI suggestion
+  const qtyHint = action === 'BUY'
+    ? `AI-suggested: <b>${qty}</b> shares — adjust as needed`
+    : `Full position: <b>${qty}</b> shares`;
+
   const dialog = document.createElement('dialog');
   dialog.id = 'trade-confirm-dialog';
   dialog.style.cssText = 'border-radius:10px;border:1px solid var(--border-medium);padding:20px 24px;min-width:310px;max-width:390px;background:var(--bg-primary);color:var(--text-primary)';
@@ -828,9 +836,13 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
       <span style="background:${actionColor};color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:5px">${action}</span>
       <span style="font-size:15px;font-weight:700">${ticker}</span>
-      <span style="font-size:13px;color:var(--text-muted)">&times;${qty} shares</span>
     </div>
     <div style="display:grid;gap:10px;margin-bottom:16px">
+      <div>
+        <div class="form-label">Shares</div>
+        <input id="tcd-qty" type="number" step="1" min="1" value="${qty}" style="width:100%">
+        <div style="font-size:10px;color:var(--text-muted);margin-top:3px">${qtyHint}</div>
+      </div>
       <div>
         <div class="form-label">${priceLabel}</div>
         <input id="tcd-price" type="number" step="0.001" value="${Number(defaultPrice).toFixed(3)}" min="0.001" style="width:100%">
@@ -850,36 +862,41 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title }, onConfir
   document.body.appendChild(dialog);
   dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
 
+  const qtyEl    = dialog.querySelector('#tcd-qty');
   const priceEl  = dialog.querySelector('#tcd-price');
   const feeEl    = dialog.querySelector('#tcd-fee');
   const costLine = dialog.querySelector('#tcd-cost-line');
 
   const _upd = () => {
+    const q = Math.max(0, parseInt(qtyEl.value)   || 0);
     const p = parseFloat(priceEl.value) || 0;
     const f = parseFloat(feeEl.value)   || 0;
-    const gross = qty * p;
+    const gross = q * p;
     const net   = action === 'BUY' ? gross + f : gross - f;
     const label = action === 'BUY'
-      ? `Cost: $${net.toFixed(2)} (${qty} × $${p.toFixed(3)} + $${f.toFixed(2)} brokerage)`
-      : `Proceeds: $${(gross - f).toFixed(2)} (${qty} × $${p.toFixed(3)} − $${f.toFixed(2)} brokerage)`;
+      ? `Cost: $${net.toFixed(2)} (${q} × $${p.toFixed(3)} + $${f.toFixed(2)} brokerage)`
+      : `Proceeds: $${(gross - f).toFixed(2)} (${q} × $${p.toFixed(3)} − $${f.toFixed(2)} brokerage)`;
     costLine.textContent = label;
   };
+  qtyEl.addEventListener('input', _upd);
   priceEl.addEventListener('input', _upd);
   feeEl.addEventListener('input', _upd);
   _upd();
 
   dialog.querySelector('#tcd-confirm').onclick = () => {
-    const price = parseFloat(priceEl.value);
-    const fee   = parseFloat(feeEl.value);
-    if (!price || price <= 0)  { toast('Enter a valid price', 'error');          priceEl.focus(); return; }
-    if (isNaN(fee) || fee < 0) { toast('Enter a valid brokerage fee', 'error'); feeEl.focus();   return; }
+    const actualQty = parseInt(qtyEl.value);
+    const price     = parseFloat(priceEl.value);
+    const fee       = parseFloat(feeEl.value);
+    if (!actualQty || actualQty < 1)  { toast('Enter a valid quantity (≥ 1)', 'error'); qtyEl.focus();   return; }
+    if (!price || price <= 0)         { toast('Enter a valid price', 'error');           priceEl.focus(); return; }
+    if (isNaN(fee) || fee < 0)        { toast('Enter a valid brokerage fee', 'error');   feeEl.focus();   return; }
     dialog.remove();
-    onConfirm(price, fee);
+    onConfirm(price, fee, actualQty);
   };
 
   dialog.showModal();
-  priceEl.focus();
-  priceEl.select();
+  qtyEl.focus();
+  qtyEl.select();
 }
 
 // ── Execute an intraday trade ─────────────────────────────────────────────────
@@ -899,28 +916,31 @@ function executeIntradayTrade(recId) {
     action: 'BUY',
     qty:    rec.qty,
     defaultPrice: rec.priceRange[0],
-  }, (entryPrice, brokerage) => {
-    const cost = rec.qty * entryPrice + brokerage;
+  }, (entryPrice, brokerage, actualQty) => {
+    // actualQty is the user-entered value (may differ from AI-suggested rec.qty)
+    const qty  = actualQty || rec.qty;
+    const cost = qty * entryPrice + brokerage;
     if (cost > state.cash) { toast('Insufficient cash for this trade', 'error'); return; }
 
     if (!state.intraday.openPositions) state.intraday.openPositions = [];
     state.intraday.openPositions.push({
       id:         rec.id,
       ticker:     rec.ticker,
-      qty:        rec.qty,
+      qty,                       // actual qty, not AI-suggested
       entryPrice,
-      entryFees:  brokerage,   // stored so close P&L uses actual round-trip cost
+      entryFees:  brokerage,     // stored so close P&L uses actual round-trip cost
       target:     rec.target,
       stop:       rec.stopLoss,
       enteredAt:  nowSydney(),
     });
 
     state.cash -= cost;
-    rec.status = 'executed';
+    rec.status   = 'executed';
+    rec._execQty = qty;          // remember actual qty for display / close dialog
 
     scheduleSave();
     if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
-    toast(`⚡ Intraday BUY: ${rec.ticker} × ${rec.qty} @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
+    toast(`⚡ Intraday BUY: ${rec.ticker} × ${qty} @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
     renderPage();
   });
 }
@@ -998,13 +1018,16 @@ function _closeDayTrade(recId) {
   // Pre-fill close price with target (best case) so user edits down if needed
   const suggestedClose = rec.target || entryPrice;
 
+  // Use actual executed qty (may differ from AI-suggested rec.qty if user adjusted at entry)
+  const execQty = rec._execQty || journalEntry?.qty || rec.qty;
+
   _showTradeDialog({
     ticker: rec.ticker,
     action: 'SELL',
-    qty:    rec.qty,
+    qty:    execQty,
     defaultPrice: suggestedClose,
   }, (closePrice, sellFee) => {
-    const gross = (closePrice - entryPrice) * rec.qty;
+    const gross = (closePrice - entryPrice) * execQty;
     const net   = gross - sellFee - buyFee;
 
     // Update or create journal entry
@@ -1021,7 +1044,7 @@ function _closeDayTrade(recId) {
         date:       todayStr(),
         ticker:     rec.ticker,
         action:     'SELL',
-        qty:        rec.qty,
+        qty:        execQty,
         entryPrice,
         exitPrice:  closePrice,
         fees:       buyFee + sellFee,
@@ -1037,7 +1060,7 @@ function _closeDayTrade(recId) {
     rec._closedAt   = todayStr();
     rec._closePrice = closePrice;
 
-    state.cash += rec.qty * closePrice - sellFee;
+    state.cash += execQty * closePrice - sellFee;
     scheduleSave();
     if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
     const sign = net >= 0 ? '+' : '';

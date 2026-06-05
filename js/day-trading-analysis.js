@@ -221,14 +221,17 @@ function executeDayTrade(recId) {
     ? ((rec.priceRange[0] + rec.priceRange[1]) / 2)
     : (rec.target || 0);
 
-  // _showTradeDialog is defined in pages/day-trading.js (loads after this file)
+  // _showTradeDialog is defined in pages/day-trading.js (loads after this file).
+  // onConfirm receives (price, fee, actualQty) — user can override the AI-suggested qty.
   _showTradeDialog({
     ticker: rec.ticker,
     action: 'BUY',
     qty:    rec.qty,
     defaultPrice,
-  }, (entryPrice, brokerage) => {
-    const cost = rec.qty * entryPrice + brokerage;
+  }, (entryPrice, brokerage, actualQty) => {
+    // Use user-entered qty; fall back to AI qty if dialog didn't return one
+    const qty  = (actualQty && actualQty > 0) ? actualQty : rec.qty;
+    const cost = qty * entryPrice + brokerage;
     if (cost > state.cash) { toast('Insufficient cash', 'error'); return; }
 
     // Sector concentration warning — fire a toast if another executed DT rec
@@ -249,7 +252,7 @@ function executeDayTrade(recId) {
       timestamp:   nowSydney(),
       ticker:      rec.ticker,
       action:      'BUY',
-      qty:         rec.qty,
+      qty,                        // actual user-entered qty, not AI-suggested
       entryPrice:  parseFloat(entryPrice.toFixed(3)),
       exitPrice:   null,
       fees:        brokerage,
@@ -261,10 +264,12 @@ function executeDayTrade(recId) {
     };
     state.tradeJournal.unshift(entry);
     state.cash -= cost;
-    rec.status = 'executed';
+    rec.status    = 'executed';
+    rec._execQty  = qty;         // remember actual qty for close dialog and display
     scheduleSave();
     pushCashToDb(state.cash);
-    toast(`Executed ${rec.ticker} swing trade — ${rec.qty} shares @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
+    const qtyNote = (qty !== rec.qty) ? ` (AI suggested ${rec.qty})` : '';
+    toast(`Executed ${rec.ticker} swing trade — ${qty} shares @ $${entryPrice.toFixed(3)} (fee $${brokerage})${qtyNote}`, 'success');
     renderPage();
   });
 }
