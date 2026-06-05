@@ -117,8 +117,12 @@ def _req_end(resp):
 # modules can import them without dragging in Flask.
 from db import DB_PATH, get_db, init_db, backup_db, log_failed_ticker as _log_failed_ticker_impl
 
+# Separate notifications database (notifications.db — not mixed into trading data)
+from notifications_db import init_notif_db
+
 # Run migrations then take a backup on startup
 init_db()
+init_notif_db()
 _bak = backup_db()
 if _bak:
     log.info("DB backup: %s", _bak)
@@ -154,9 +158,10 @@ from routes.scanner   import bp as _scanner_bp
 from routes.learning  import bp as _learning_bp
 from routes.debate    import bp as _debate_bp
 from routes.news      import bp as _news_bp, _NE_OK
-from routes.alerts     import bp as _alerts_bp
-from routes.import_csv import bp as _import_csv_bp
-from routes.intraday   import bp as _intraday_bp
+from routes.alerts        import bp as _alerts_bp
+from routes.import_csv    import bp as _import_csv_bp
+from routes.intraday      import bp as _intraday_bp
+from routes.notifications import bp as _notifications_bp
 app.register_blueprint(_claude_bp)
 app.register_blueprint(_portfolio_bp)
 app.register_blueprint(_dividends_bp)
@@ -169,6 +174,7 @@ app.register_blueprint(_news_bp)
 app.register_blueprint(_alerts_bp)
 app.register_blueprint(_import_csv_bp)
 app.register_blueprint(_intraday_bp)
+app.register_blueprint(_notifications_bp)
 
 if _AE_OK:
     app.register_blueprint(ann_bp, url_prefix='/api/announcements')

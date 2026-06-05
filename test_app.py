@@ -5544,5 +5544,238 @@ class TestImprovementsACF(unittest.TestCase):
                       "mergedPortfolio must filter zero-share entries to prevent avgPrice=Infinity")
 
 
+class TestNotificationCentre(unittest.TestCase):
+    """Tests for the notification centre — separate notifications.db + /api/notifications/* routes."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib
+        import contextlib
+        import sqlite3
+
+        # Build a fresh in-memory DB for notifications (separate from the main test DB)
+        cls._notif_conn = sqlite3.connect(":memory:")
+        cls._notif_conn.row_factory = sqlite3.Row
+
+        _SCHEMA = """
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS notifications (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            type      TEXT    NOT NULL DEFAULT 'info',
+            title     TEXT    NOT NULL DEFAULT '',
+            body      TEXT    NOT NULL DEFAULT '',
+            category  TEXT    NOT NULL DEFAULT 'system',
+            timestamp TEXT    NOT NULL,
+            read      INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_notif_ts ON notifications(timestamp DESC);
+        """
+        cls._notif_conn.executescript(_SCHEMA)
+        cls._notif_conn.commit()
+
+        @contextlib.contextmanager
+        def _test_notif_db():
+            yield cls._notif_conn
+            cls._notif_conn.commit()
+
+        # Patch get_notif_db in both the module and the blueprint
+        import notifications_db
+        notifications_db.get_notif_db = _test_notif_db
+        import routes.notifications as rn
+        rn.get_notif_db = _test_notif_db
+
+        # Also install the main in-memory DB so the app starts cleanly
+        _install_in_memory_db()
+        asx_server.init_db()
+
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    @classmethod
+    def tearDownClass(cls):
+        asx_server.get_db = _orig_get_db
+        cls._notif_conn.close()
+
+    # ── POST /api/notifications ──────────────────────────────────────────────
+
+    def test_save_notification(self):
+        """POST /api/notifications must persist a notification and return ok."""
+        r = self.client.post("/api/notifications", json={
+            "type": "info", "title": "Test alert", "body": "Detail text",
+            "category": "system", "timestamp": "2026-06-06T10:00:00+00:00",
+        })
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+
+    def test_save_trims_long_fields(self):
+        """Oversized title/body must be accepted without error (server trims)."""
+        r = self.client.post("/api/notifications", json={
+            "type": "error", "title": "X" * 500, "body": "Y" * 1000, "category": "error",
+            "timestamp": "2026-06-06T10:01:00+00:00",
+        })
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+
+    # ── GET /api/notifications ───────────────────────────────────────────────
+
+    def test_list_returns_items(self):
+        """GET /api/notifications must return paginated items."""
+        # Ensure at least one item exists
+        self.client.post("/api/notifications", json={
+            "type": "success", "title": "Scan done", "body": "3 hits",
+            "category": "scan", "timestamp": "2026-06-06T10:02:00+00:00",
+        })
+        r = self.client.get("/api/notifications?limit=8&offset=0")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn("items", data)
+        self.assertIsInstance(data["items"], list)
+        self.assertIn("has_more", data)
+
+    def test_list_pagination(self):
+        """has_more must be True when more rows exist than the requested limit."""
+        # Insert 5 items
+        for i in range(5):
+            self.client.post("/api/notifications", json={
+                "type": "info", "title": f"Item {i}", "body": "",
+                "category": "system", "timestamp": f"2026-06-06T11:0{i}:00+00:00",
+            })
+        r = self.client.get("/api/notifications?limit=2&offset=0")
+        data = r.get_json()
+        self.assertEqual(len(data["items"]), 2)
+        self.assertTrue(data["has_more"])
+
+    def test_list_offset(self):
+        """Offset must skip the first N rows."""
+        r0 = self.client.get("/api/notifications?limit=100&offset=0").get_json()
+        r1 = self.client.get(f"/api/notifications?limit=100&offset={len(r0['items'])}").get_json()
+        self.assertFalse(r1["has_more"])
+
+    # ── GET /api/notifications/unread-count ──────────────────────────────────
+
+    def test_unread_count(self):
+        """GET /api/notifications/unread-count must return a numeric count."""
+        r = self.client.get("/api/notifications/unread-count")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+        self.assertIsInstance(data["count"], int)
+
+    # ── POST /api/notifications/read-all ────────────────────────────────────
+
+    def test_read_all(self):
+        """POST /api/notifications/read-all must zero unread count."""
+        self.client.post("/api/notifications", json={
+            "type": "warning", "title": "Stop hit", "body": "", "category": "price",
+            "timestamp": "2026-06-06T12:00:00+00:00",
+        })
+        r = self.client.post("/api/notifications/read-all")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+        count = self.client.get("/api/notifications/unread-count").get_json()["count"]
+        self.assertEqual(count, 0)
+
+    # ── DELETE /api/notifications ────────────────────────────────────────────
+
+    def test_clear_all(self):
+        """DELETE /api/notifications must wipe the table."""
+        self.client.post("/api/notifications", json={
+            "type": "info", "title": "To be deleted", "body": "",
+            "category": "system", "timestamp": "2026-06-06T13:00:00+00:00",
+        })
+        r = self.client.delete("/api/notifications")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+        items = self.client.get("/api/notifications").get_json()["items"]
+        self.assertEqual(len(items), 0)
+
+    # ── Frontend / structure checks ──────────────────────────────────────────
+
+    def test_notifications_js_loaded_in_html(self):
+        """asx_trading.html must load notifications.js after utils.js."""
+        with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("notifications.js", src)
+        utils_idx  = src.index("utils.js")
+        notif_idx  = src.index("notifications.js")
+        self.assertGreater(notif_idx, utils_idx,
+                           "notifications.js must load after utils.js")
+
+    def test_bell_button_in_html(self):
+        """Topbar must contain the notification bell button."""
+        with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("notif-bell-wrap", src)
+        self.assertIn("notif-badge", src)
+        self.assertIn("toggleNotifPanel", src)
+
+    def test_notifications_js_syntax(self):
+        """notifications.js must pass node --check."""
+        import subprocess
+        result = subprocess.run(
+            ["node", "--check", os.path.join(ROOT, "js", "notifications.js")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_push_notification_defined(self):
+        """notifications.js must define pushNotification."""
+        with open(os.path.join(ROOT, "js", "notifications.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function pushNotification", src)
+
+    def test_init_notification_center_defined(self):
+        """notifications.js must define initNotificationCenter."""
+        with open(os.path.join(ROOT, "js", "notifications.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function initNotificationCenter", src)
+
+    def test_load_more_defined(self):
+        """notifications.js must define _loadMoreNotifs for pagination."""
+        with open(os.path.join(ROOT, "js", "notifications.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_loadMoreNotifs", src)
+
+    def test_toast_calls_push_notification(self):
+        """toast() in utils.js must call pushNotification (guarded)."""
+        with open(os.path.join(ROOT, "js", "utils.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("pushNotification", src)
+
+    def test_fire_alert_calls_push_notification(self):
+        """fireAlert() in alerts.js must call pushNotification (guarded)."""
+        with open(os.path.join(ROOT, "js", "alerts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("pushNotification", src)
+
+    def test_separate_db_file(self):
+        """notifications_db.py must define NOTIF_DB_PATH pointing to notifications.db."""
+        import re
+        with open(os.path.join(ROOT, "notifications_db.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("notifications.db", src, "notifications_db.py must reference notifications.db")
+        # The NOTIF_DB_PATH assignment line must contain notifications.db
+        path_line = next((l for l in src.splitlines() if "NOTIF_DB_PATH" in l and "=" in l), None)
+        self.assertIsNotNone(path_line, "NOTIF_DB_PATH must be defined")
+        self.assertIn("notifications.db", path_line,
+                      "NOTIF_DB_PATH must point to notifications.db, not another file")
+
+    def test_notif_db_has_required_columns(self):
+        """notifications table must have id, type, title, body, category, timestamp, read."""
+        with open(os.path.join(ROOT, "notifications_db.py"), encoding="utf-8") as f:
+            src = f.read()
+        for col in ("id", "type", "title", "body", "category", "timestamp", "read"):
+            self.assertIn(col, src, f"Schema must include column: {col}")
+
+    def test_blueprint_registered(self):
+        """asx_server.py must register the notifications blueprint."""
+        with open(os.path.join(ROOT, "asx_server.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("routes.notifications", src)
+        self.assertIn("_notifications_bp", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
