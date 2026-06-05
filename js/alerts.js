@@ -26,6 +26,12 @@ function fireAlert(title, body, tag = 'sloth-alert', iconUrl = null) {
       console.warn('[alerts] Notification failed:', e);
     }
   }
+  // Push to notification center
+  if (typeof pushNotification === 'function') {
+    const cat = (tag.includes('stop') || tag.includes('target') || tag.includes('price'))
+      ? 'price' : (tag.includes('scan') ? 'scan' : 'trade');
+    pushNotification('warning', title, body, cat);
+  }
   // Mirror to Telegram if credentials are saved
   if (state.settings && state.settings.telegramEnabled) {
     fetch(`${API}/api/alerts/telegram`, {

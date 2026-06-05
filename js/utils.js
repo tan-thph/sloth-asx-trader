@@ -95,6 +95,11 @@ function toast(msg, type='info') {
   el.textContent=msg;
   c.appendChild(el);
   setTimeout(()=>el.remove(), 3500);
+  // Push to notification center (if loaded)
+  if (typeof pushNotification === 'function') {
+    const titles = { success: 'Success', error: 'Error', warning: 'Warning', info: 'Info' };
+    pushNotification(type, titles[type] || 'Info', msg, type === 'error' ? 'error' : 'system');
+  }
 }
 
 // _retryBtn — standardised amber retry button for error/failure cards.

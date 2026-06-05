@@ -56,6 +56,10 @@ function renderPage() {
     _renderPageUnsafe();
   } catch (err) {
     console.error('[renderPage] crashed:', err);
+    if (typeof pushNotification === 'function') {
+      pushNotification('error', 'Page crashed: ' + (state && state.page || 'unknown'),
+        String(err && err.message || err).slice(0, 200), 'error');
+    }
     const el = document.getElementById('main-content');
     if (el) {
       el.innerHTML = `

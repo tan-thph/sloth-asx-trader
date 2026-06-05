@@ -2,6 +2,7 @@
 // INIT
 // ============================================================
 async function initApp() {
+  initNotificationCenter();
   await checkServer();
   if (state.serverOk) {
     const loaded = await loadStateFromDb();
