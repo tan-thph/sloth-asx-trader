@@ -1640,3 +1640,236 @@ r.ensembleConfidence = hasValidScore
 | 31 | `js/portfolio-helpers.js` | Division by zero in `feePerShare` when `saleQty = 0` | Medium | XS |
 | 32 | `js/response-validator.js` | Anti-churn guard bypassed for recs with undefined timestamp | Medium | XS |
 | 33 | `js/response-validator.js` | `NaN` sig.score bypasses `ensembleConfidence` null guard → gate always passes | Medium | XS |
+
+---
+
+## Sprint 50 — Critics.md Review (2026-06-05)
+
+Six actionable items from a full architecture review of `prompts.js`, `quant-engine.js`, and the learning loop. Two are prompt-only edits; three are code changes; one is a documentation fix.
+
+---
+
+### Critical — architecture violation
+
+## 38. `js/prompts.js` Rule 16 — LLM told to do qty arithmetic; conflicts with quant engine architecture
+
+**Files:** `js/prompts.js` (Rule 16), `js/quant-engine.js`
+**Severity:** High — violates the "Claude never does arithmetic" design contract; LLM arithmetic is unreliable
+**Effort:** M
+
+### Problem
+
+Rule 16 in `ANALYSIS_SYSTEM_PROMPT` instructs Claude to apply VaR1d-based sizing modifiers directly:
+
+```
+16. RISK-ADJUSTED SIZING: When PORTFOLIO RISK METRICS are present, apply these sizing
+    modifiers to every BUY/TOP_UP before finalising qty:
+    - Ticker VaR1d < -3.5% (flagged ⚠HIGH-VAR): reduce qty by 25%.
+    - Ticker VaR1d < -5.0%: reduce qty by 50%.
+```
+
+This directly contradicts the architecture documented in `CLAUDE.md`:
+> "Claude: Qualitative conviction only — what to buy/sell and why. **Never does arithmetic.**"
+> "Quant engine: Deterministic sizing…"
+
+In practice, `analysis.js` Step 3 overrides Claude's `qty` output entirely (Rule 4 sets qty=0 and the quant engine recalculates). So Rule 16 is **both architecturally wrong and functionally dead weight** — Claude's VaR-adjusted qty is immediately discarded anyway. The VaR1d value exists in `signals` and is available to the quant engine at sizing time.
+
+### Fix
+
+**Step 1 — `js/prompts.js`:** Replace Rule 16's arithmetic instruction with a qualitative flag output:
+
+```
+16. RISK-ADJUSTED SIZING: When PORTFOLIO RISK METRICS show elevated VaR1d for a ticker,
+    note this risk in factorsUsed[] using one of these tags:
+    - "HIGH_VAR: VaR1d < -3.5% — position size should be reduced"
+    - "EXTREME_VAR: VaR1d < -5.0% — significant size reduction required"
+    Do NOT compute an adjusted qty — the quant engine applies the size modifier deterministically.
+```
+
+**Step 2 — `js/quant-engine.js`:** Add VaR1d multiplier in `computeTradeParams()`, after the Kelly calculation and before the `Math.min` constraints:
+
+```js
+// VaR1d risk-adjusted size modifier — mirrors Rule 16 intent deterministically.
+// signals.var_1d is the portfolio-level 1-day VaR (negative = loss, e.g. -4.2 = -4.2%)
+const var1d = signals?.var_1d ?? 0;
+const varMult = var1d < -5.0 ? 0.5
+              : var1d < -3.5 ? 0.75
+              : 1.0;
+// Apply after Kelly but before the multi-constraint Math.min
+rawQty = Math.floor(rawQty * varMult);
+if (varMult < 1.0) rec._varAdjusted = true;  // badge on rec card
+```
+
+**Step 3 — `js/analysis.js`:** Add `_varAdjusted` badge rendering on rec cards (similar to `_preEarningsAdj` badge already in place).
+
+### Key constraint
+
+`signals.var_1d` comes from `GET /api/risk` which is only fetched for full portfolio analysis, not day-trade scans. Guard: `if (signals?.var_1d == null) varMult = 1.0`.
+
+---
+
+### Medium — UI transparency
+
+## 39. `js/pages/learning.js` — Phase 8 z-score not shown in Learning Loop UI
+
+**File:** `js/pages/learning.js`
+**Severity:** Low — data already returned by API; just not displayed
+**Effort:** XS
+
+### Problem
+
+`GET /api/learning/stats` already returns `phase8_meta.mann_whitney_z` and `mann_whitney_threshold` (1.28). The Learning page shows a binary "Phase 8 Active / Inactive" indicator but not the actual z-score. Users can't see how close calibration is to activating skill-weighting, which makes the system feel like a black box.
+
+### Fix
+
+In the Phase 8 status card in `renderLearning()`, expand the display:
+
+```js
+// Current — binary
+const p8 = stats.phase8_meta;
+const p8Label = p8?.active ? '✓ Active' : '✗ Inactive';
+
+// Proposed — show z-score progress
+const z      = p8?.mann_whitney_z?.toFixed(2) ?? '—';
+const thresh = p8?.mann_whitney_threshold ?? 1.28;
+const pct    = p8?.mann_whitney_z ? Math.min(100, Math.round((p8.mann_whitney_z / thresh) * 100)) : 0;
+
+// HTML addition in the Phase 8 card:
+`<div class="text-xs text-muted" style="margin-top:4px">
+  z = ${z} of ${thresh} threshold (${pct}% of activation)
+  ${p8?.active ? '' : `· ${(thresh - (p8?.mann_whitney_z ?? 0)).toFixed(2)} more needed`}
+</div>`
+```
+
+This mirrors how Brier score and reliability bins are already shown below the calibration header.
+
+---
+
+### Easy — data quality gate
+
+## 40. `js/analysis.js` / `js/response-validator.js` — `better_opportunity` rec renders without `alternativeTicker`
+
+**File:** `js/response-validator.js` (validator schema) or `js/analysis.js` (post-processing)
+**Severity:** Medium — bad learning event written to DB; `sell_verify_verdict` resolver always returns `inconclusive` for this rec because there's no ticker to compare against
+**Effort:** XS
+
+### Problem
+
+When Claude outputs `sell_primary_driver: 'better_opportunity'` and the rec also includes `alternativeTicker: null` (or omits it entirely), the rec passes validation and enters the learning loop. But `_resolve_sell_outcomes()` in `routes/learning.py` checks `alternative_ticker` to validate the call — without it, the verdict is always `inconclusive`, polluting the sell-tag accuracy stats.
+
+### Fix
+
+In `response-validator.js`, add a `requiredWith` check for `better_opportunity` in the SELL/TRIM schema:
+
+```js
+// In the per-rec validation block, after the standard field checks:
+if ((rec.sell_primary_driver === 'better_opportunity') &&
+    (!rec.alternativeTicker || rec.alternativeTicker.trim() === '')) {
+  // Auto-repair: demote to 'risk_management' so the rec still renders
+  rec.sell_primary_driver = 'risk_management';
+  rec._driverRepaired = true;
+  repairLog.push(`${rec.ticker}: better_opportunity without alternativeTicker → demoted to risk_management`);
+}
+```
+
+Alternatively, block validation entirely (return `{ok: false}`) and let the auto-repair loop re-prompt Claude. The auto-repair approach is more conservative and matches how other schema violations are handled.
+
+---
+
+### Prompt engineering — Rule 15
+
+## 41. `js/prompts.js` Rule 15 — CGT arithmetic example missing; LLMs struggle with multi-step algebraic formulas in text
+
+**File:** `js/prompts.js` (Rule 15, CGT discount window section)
+**Severity:** Low — LLM may misapply the formula; a worked example dramatically improves reliability
+**Effort:** XS
+
+### Problem
+
+Rule 15 (lines 74–76 of `prompts.js`) contains:
+
+```
+compare estimated tax saving vs bear-case expected further loss
+(bear_prob × qty × entry × bear_ret)
+```
+
+LLMs reliably struggle with multi-step algebraic formulas embedded in prose. Without a concrete worked example, Claude is expected to substitute four numbers into the right formula while also writing JSON — error-prone.
+
+### Fix
+
+Append a filled-in worked example immediately after the formula in Rule 15:
+
+```
+Example: if tax saving = $400, and bear-case expected loss =
+0.25 (bear_prob) × 100 (qty) × $50 (entry) × 0.20 (bear_ret) = $250,
+then $400 > $250 → recommend WAIT for CGT discount.
+If instead bear-case loss = $600 > $400 tax saving → recommend SELL now.
+Show this arithmetic in factorsUsed[].
+```
+
+No code change required — `prompts.js` only.
+
+---
+
+### Prompt engineering — anti-churn rule
+
+## 42. `js/prompts.js` Rule 22 — brokerage cost not listed as valid anti-churn override
+
+**File:** `js/prompts.js` (Rule 22, CATASTROPHE definition, lines 228–239)
+**Severity:** Low — edge case where round-trip brokerage exceeds remaining upside forces holding a position that should be exited
+**Effort:** XS
+
+### Problem
+
+Rule 22's `CATASTROPHE` list that overrides the 7-day anti-churn block is:
+- Trading halt / suspension
+- Regulatory action / ASIC intervention
+- Material news contradicting thesis (profit warning, CEO resignation)
+- Force-majeure event
+
+It does not include the case where round-trip brokerage exceeds the remaining expected gain. A trader who buys into a bad trade (entry error, news not available pre-trade) must hold for 7 days even when the quant engine shows `expectedProfit < fees × 2`. This is not churn prevention — it is forced loss-maximisation.
+
+### Fix
+
+Add one bullet to the CATASTROPHE list in `prompts.js`:
+
+```
+- Round-trip brokerage exceeds remaining expected gain
+  (i.e. |expectedProfit| < brokerage_in + brokerage_out). Use sell_primary_driver:
+  'risk_management', note in reasoning[]: "Brokerage override: exit cost justified".
+```
+
+No code change required — `prompts.js` only.
+
+---
+
+### Documentation fix
+
+## 43. `IMPROVEMENTS.md` — Local LLM SELL/TRIM listed as "Open" but shipped Sprint 48
+
+**File:** `IMPROVEMENTS.md`
+**Severity:** Low — stale documentation confuses future planning
+**Effort:** XS
+
+### Problem
+
+`IMPROVEMENTS.md` lists "Local LLM SELL/TRIM support" as an open item. `CLAUDE.md` documents it as shipped in Sprint 48 (extended from Sprint 41). `routes/debate.py → quick_analysis` handles BUY/TOP_UP/HOLD/SELL/TRIM with the 5-driver taxonomy. The "Open" status is stale.
+
+### Fix
+
+Update the relevant entry in `IMPROVEMENTS.md` open items section to:
+- Change status from "Open" to "✅ Shipped Sprint 48"
+- Add note: "5-driver taxonomy: thesis_broken, stop_triggered, target_reached, time_stop, risk_management. Recs show 🔒 Local badge. Exit stop direction validated post-response."
+
+---
+
+## Summary — Sprint 50 Critics Review
+
+| # | File(s) | Issue | Severity | Effort | Status |
+|---|---|---|---|---|---|
+| 38 | `js/prompts.js`, `js/quant-engine.js` | Rule 16: LLM told to do qty arithmetic → move VaR1d sizing to quant engine | High | M | Pending |
+| 39 | `js/pages/learning.js` | Phase 8 z-score not displayed; users can't see activation progress | Low | XS | Pending |
+| 40 | `js/response-validator.js` | `better_opportunity` renders without `alternativeTicker` → poisons sell-tag stats | Medium | XS | Pending |
+| 41 | `js/prompts.js` | Rule 15: no concrete CGT arithmetic example; LLMs misapply multi-step formulas | Low | XS | Pending |
+| 42 | `js/prompts.js` | Rule 22: brokerage cost not a valid anti-churn override → forced loss-maximisation | Low | XS | Pending |
+| 43 | `IMPROVEMENTS.md` | Local LLM SELL/TRIM still listed as "Open" despite shipping in Sprint 48 | Low | XS | Pending |
