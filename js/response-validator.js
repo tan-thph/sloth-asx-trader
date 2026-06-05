@@ -61,7 +61,17 @@ const SELL_REQUIRED_SECONDARY = {
 function validateSellTags(rec) {
   const errors = [];
   const action = (rec.action || '').toUpperCase();
-  if (action !== 'SELL' && action !== 'TRIM') return { ok: true, errors };
+  if (action !== 'SELL' && action !== 'TRIM') return { ok: true, errors, repaired: null };
+
+  // Fix #40: better_opportunity without alternativeTicker — auto-repair to risk_management.
+  // Checked first so validateRec can apply the repaired rec immediately without a retry.
+  // (The old code checked fixed.sell_primary_driver which is a storage-layer field name —
+  // Claude outputs primary_driver; that bug meant Fix #40 never fired. Corrected here.)
+  if (rec.primary_driver === 'better_opportunity' &&
+      (!rec.alternativeTicker || !rec.alternativeTicker.trim())) {
+    const repaired = { ...rec, primary_driver: 'risk_management', _driverRepaired: true };
+    return { ok: true, errors: [], repaired };
+  }
 
   // ── primary_driver: required, must be in closed vocabulary ─────────────────
   if (!rec.primary_driver) {
@@ -108,11 +118,9 @@ function validateSellTags(rec) {
     }
   }
 
-  // ── better_opportunity requires an alternativeTicker ──────────────────────
+  // ── better_opportunity with valid alternativeTicker ────────────────────────
   if (rec.primary_driver === 'better_opportunity') {
-    if (!rec.alternativeTicker) {
-      errors.push('primary_driver "better_opportunity" requires alternativeTicker — specify the ticker to redeploy capital into');
-    } else if (!/^[A-Z0-9]{2,5}(\.AX)?$/.test(rec.alternativeTicker)) {
+    if (!/^[A-Z0-9]{2,5}(\.AX)?$/.test(rec.alternativeTicker)) {
       errors.push(`alternativeTicker "${rec.alternativeTicker}" is not a valid ASX ticker (2-5 uppercase alphanumeric, optional .AX)`);
     }
   }
@@ -127,7 +135,7 @@ function validateSellTags(rec) {
     }
   }
 
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, repaired: null };
 }
 
 // Fields required for actionable recs (BUY/SELL/TRIM/TOP_UP).
@@ -322,9 +330,12 @@ function validateRec(rec) {
     }
   }
 
-  // SELL/TRIM structured tagging — required dimensions (primary_driver, secondary_factors, urgency)
+  // SELL/TRIM structured tagging — primary_driver, secondary_factors, urgency.
+  // validateSellTags() handles Fix #40 auto-repair (better_opportunity → risk_management)
+  // and returns { ok, errors, repaired } — apply repaired if set.
   if (action === 'SELL' || action === 'TRIM') {
-    const { ok: sellOk, errors: sellErrors } = validateSellTags(fixed);
+    const { ok: sellOk, errors: sellErrors, repaired: sellRepaired } = validateSellTags(fixed);
+    if (sellRepaired) fixed = sellRepaired;
     if (!sellOk) {
       errors.push(...sellErrors);
       allFixed = false;   // tag errors require model regeneration, not client-side fix

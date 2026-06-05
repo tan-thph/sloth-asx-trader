@@ -3720,11 +3720,13 @@ class TestSprint30DataEnhancements(unittest.TestCase):
     # ── Addition 2: sector ETF performance in macro ───────────────────────────
 
     def test_macro_payload_has_sector_etfs(self):
-        """_macro_payload source must fetch XMJ/XFJ/XHJ/XEJ/XRJ sector ETFs."""
+        """_macro_payload source must fetch ASX sector indices (^AXMJ format)."""
         with open(os.path.join(ROOT, "routes", "market.py"), encoding="utf-8") as f:
             src = f.read()
-        for sym in ("XMJ.AX", "XFJ.AX", "XHJ.AX", "XEJ.AX", "XRJ.AX"):
-            self.assertIn(sym, src, f"_macro_payload must include {sym} sector ETF")
+        # yfinance uses ^AX* prefix for ASX sector indices (XMJ.AX / XFJ.AX etc. are
+        # delisted/renamed — correct symbols confirmed in Sprint 49).
+        for sym in ("^AXMJ", "^AXFJ", "^AXHJ", "^AXEJ", "^AXRJ"):
+            self.assertIn(sym, src, f"_macro_payload must include {sym} sector index")
 
     def test_macro_payload_builds_sectors_key(self):
         """_macro_payload must build a 'sectors' key from fetched ETF data."""
