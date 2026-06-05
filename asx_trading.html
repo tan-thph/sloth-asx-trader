@@ -73,14 +73,14 @@
       <div class="flex-row">
         <button class="btn btn-sm" id="sbc-mode-btn" onclick="toggleSbcMode()" title="Toggle SBC mode — single board computer (Jetson Orin, RPi 5): 20min refresh, no auto-scan">⬡ PC</button>
         <div class="market-pill"><div class="live-dot"></div><span id="market-time">ASX Loading...</span></div>
+        <button class="btn btn-sm" onclick="refreshPrices()">⟳ Refresh Prices</button>
+        <button class="btn btn-primary btn-sm" onclick="runAnalysis()">▶ Run Analysis</button>
         <div class="notif-bell-wrap" id="notif-bell-wrap">
           <button class="btn btn-sm notif-bell-btn" id="notif-bell-btn" onclick="toggleNotifPanel()" title="Notifications" aria-label="Notifications">
             🔔<span class="notif-badge" id="notif-badge" style="display:none">0</span>
           </button>
           <div class="notif-panel" id="notif-panel" style="display:none;flex-direction:column"></div>
         </div>
-        <button class="btn btn-sm" onclick="refreshPrices()">⟳ Refresh Prices</button>
-        <button class="btn btn-primary btn-sm" onclick="runAnalysis()">▶ Run Analysis</button>
       </div>
     </div>
     <div class="content" id="main-content"></div>
