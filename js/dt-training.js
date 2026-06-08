@@ -18,7 +18,7 @@
 /* ── Model cache (populated on first History/Model tab open) ──────────────── */
 var _dtModel      = null;  // { swing: model_obj|null, intraday: model_obj|null }
 var _dtImportances = null; // { swing: [...], intraday: [...] }
-var _dtHistItems  = [];    // current history page items
+var _dtHistItems  = null;  // null = not yet fetched; [] = fetched but empty
 var _dtHistOffset = 0;
 var _dtHistMore   = false;
 var _dtStats      = null;  // summary stats
@@ -237,13 +237,13 @@ function dtLoadModel() {
 
 /* ── Load history page ────────────────────────────────────────────────────── */
 function dtLoadHistory(reset) {
-  if (reset) { _dtHistItems = []; _dtHistOffset = 0; _dtHistMore = false; }
+  if (reset) { _dtHistItems = null; _dtHistOffset = 0; _dtHistMore = false; }
   var limit = 20;
   return fetch('/api/daytrading/history?limit=' + limit + '&offset=' + _dtHistOffset)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
-        _dtHistItems = _dtHistItems.concat(d.items || []);
+        _dtHistItems = (_dtHistItems || []).concat(d.items || []);
         _dtHistMore  = d.has_more || false;
         _dtHistOffset += limit;
       }
@@ -292,8 +292,8 @@ function dtTrain() {
 
 /* ── Render: History tab ─────────────────────────────────────────────────── */
 function renderDtHistoryTab() {
-  // Trigger async load then re-render
-  if (_dtHistItems.length === 0) {
+  // null = first open, trigger async fetch then re-render
+  if (_dtHistItems === null) {
     Promise.all([dtLoadHistory(true), dtLoadStats()]).then(function() {
       var el = document.getElementById('dt-tab-content');
       if (el && (state.dayTrading && state.dayTrading.activeTab) === 'history') {

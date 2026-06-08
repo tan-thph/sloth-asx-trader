@@ -84,7 +84,7 @@ function switchDtTab(tab) {
     el.innerHTML = _renderDtIntradayTab();
   } else if (tab === 'history') {
     // Reset page so fresh data loads
-    _dtHistItems = []; _dtHistOffset = 0; _dtHistMore = false; _dtStats = null;
+    _dtHistItems = null; _dtHistOffset = 0; _dtHistMore = false; _dtStats = null;
     el.innerHTML = renderDtHistoryTab();
   } else if (tab === 'model') {
     _dtModel = undefined;  // force re-fetch with importances
