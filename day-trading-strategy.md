@@ -607,45 +607,28 @@ Schema (key tables):
 
 ---
 
-### 14.4 Feature Set — 18 Inputs
+### 14.4 Feature Sets — Decoupled Swing (15) and Intraday (18)
 
-Every snapshot records these 18 features at trade entry time. Features are sourced from `state.liveSignals[ticker]` (populated by `GET /api/analyse/<ticker>`) and `state.macroData` (from `GET /api/macro`).
+Every snapshot records features at trade entry time. Features are sourced from `state.liveSignals[ticker]` (populated by `GET /api/analyse/<ticker>`) and `state.macroData` (from `GET /api/macro`).
 
-#### Technical indicators (13)
+Two separate training matrices are used — one per trade type. This eliminates the need for arbitrary imputation of missing intraday features on swing records.
 
-| Feature | Source field | Meaning |
-|---|---|---|
-| `rsi_14` | `signals.rsi_14` | RSI 14-period. Oversold entries cluster below 40. |
-| `bb_pct_b` | `signals.bb_pct_b` | Bollinger Band %B — 0 = lower band, 1 = upper band. Core entry trigger. |
-| `bb_bandwidth` | `signals.bb_bandwidth` | Band width normalised by mid-line. Measures current volatility regime. |
-| `atr_pct` | `signals.atr_14 / price × 100` | ATR as % of price. Normalised so a $2 ATR on a $20 stock is comparable to a $5 ATR on a $100 stock. |
-| `adx` | `signals.adx` | Trend strength 0–100. High ADX in a falling market → mean-reversion less reliable. |
-| `volume_zscore` | `signals.volume_zscore` | Standard deviations above 20-day volume mean. Institutional participation signal. |
-| `mfi_14` | `signals.mfi_14` | Money Flow Index — volume-weighted RSI. Independent of pure price momentum. |
-| `stoch_k` | `signals.stoch_k` | Stochastic %K. Measures where price sits within its recent high/low range. |
-| `williams_r` | `signals.williams_r` | Williams %R. Inverted Stochastic; negative values; close to 0 = overbought. |
-| `cci_20` | `signals.cci_20` | Commodity Channel Index 20-period. Mean-reversion signal: extreme negative = oversold. |
-| `setup_score` | `signals.score` | Composite 0–100 signal score computed by `_score_ticker()` in `indicators.py`. Reflects FACTOR_WEIGHTS. |
-| `price_vs_sma20` | `(price / sma_20 − 1) × 100` | Price distance from 20-day SMA as %. Negative = below SMA (pullback). |
-| `price_vs_sma50` | `(price / sma_50 − 1) × 100` | Price distance from 50-day SMA as %. |
+#### Swing Trade Features (15)
 
-#### Market context (3)
+| Feature | Description |
+|---------|-------------|
+| `rsi_14`, `bb_pct_b`, `bb_bandwidth`, `atr_pct`, `adx` | Momentum / volatility |
+| `volume_zscore`, `mfi_14`, `stoch_k`, `williams_r`, `cci_20` | Volume / oscillators |
+| `setup_score`, `price_vs_sma20`, `price_vs_sma50` | Trend position |
+| `asx200_5d_ret`, `adl_ratio` | Market context |
 
-| Feature | Source | Meaning |
-|---|---|---|
-| `asx200_5d_ret` | `macroData.asx200_5d_ret` | ASX200 5-day return %. Negative = broad market selling. |
-| `adl_ratio` | `macroData.advance_decline_ratio` | Fraction of ASX200 tickers above their 20-day SMA. Breadth indicator. |
-| `rba_rate` | `macroData.rba_rate` | RBA cash rate %. Higher rates = tighter financial conditions. |
+#### Intraday Trade Features (18)
+All 15 swing features plus:
+- `intraday_rsi` — RSI on 5-minute bars
+- `vwap_position` — % from VWAP
+- `volume_accel` — recent volume vs 20-bar mean
 
-#### Intraday-specific (2, null for swing trades)
-
-| Feature | Source | Meaning |
-|---|---|---|
-| `intraday_rsi` | `signals.intraday_rsi` | RSI on 5-minute bars at scan time. Oversold = ≤ 40. |
-| `vwap_position` | `signals.vwap_pct` | `(price − VWAP) / price × 100`. Negative = trading below VWAP. |
-| `volume_accel` | `signals.volume_acceleration` | Whether 5m volume is rising relative to session average. |
-
-**Note:** Swing trade snapshots have `intraday_rsi`, `vwap_position`, and `volume_accel` set to NULL (→ imputed to column mean during training). The model handles mixed swing/intraday datasets without segregating them — if the sample is large enough to stratify by trade type, do so manually by deleting swing or intraday rows from the History tab before training.
+These three are always `null` for swing trades. Separating the feature matrices eliminates the need for arbitrary imputation.
 
 ---
 
@@ -696,82 +679,64 @@ For closed trades patched via `dtCloseSnapshot()`, this is computed from actual 
 
 ---
 
-### 14.6 Training Algorithm — Logistic Regression (Pure Numpy)
+### 14.6 Training Algorithm — Ridge Regression (Pure Numpy)
 
 The training algorithm requires no external ML library. It runs entirely on `numpy`, which is already a transitive dependency of `yfinance`/`pandas`.
+
+#### Label: Continuous R-Multiple (not binary win/loss)
+
+```
+y_R = (exit_price - entry_price) / (entry_price - stop_loss)
+```
+
+A +3.5R trade is treated differently from a +0.05R squeaker.
+Negative values = losses. Threshold for win: y_R > 0.
+
+#### Algorithm: L2-Regularised Ridge Regression (pure numpy)
+- Loss: MSE + λ‖w‖² (λ = 0.05)
+- Learning rate: 0.01, epochs: 2000
+- Metrics: R² score, MAE in R-multiples
+- Minimum samples: 30 (regression needs more data than classification)
+
+Two independent models trained per run: Swing (15 features) and Intraday (18 features).
 
 #### Step 1 — Data preparation
 
 ```python
-# Load completed snapshots (outcome ≠ 'open')
-rows = conn.execute("""
-    SELECT * FROM trade_snapshots
-    WHERE outcome IN ('win', 'loss', 'breakeven')
-    ORDER BY entry_date DESC LIMIT 2000
-""").fetchall()
+# Build feature matrix (15 or 18 columns × N rows)
+X_raw = [[row[f] or np.nan for f in feat_list] for row in rows]
 
-# Build feature matrix (18 columns × N rows)
-X_raw = [[row[f] or np.nan for f in FEATURES] for row in rows]
-
-# Mean imputation: replace NaN with the column mean
-# (prevents features missing for one trade type from distorting training)
+# Mean imputation for NaN cells (uses training mean, not 0)
 col_means = np.nanmean(X_raw, axis=0)
-X_raw[np.isnan(X_raw)] = col_means[np.where(np.isnan(X_raw))[1]]
+# ...
 
-# Z-score standardisation: z = (x − μ) / σ
-# Saved to model_state for use at prediction time
+# Z-score standardisation
 means = X_raw.mean(axis=0)
 stds  = X_raw.std(axis=0)
-stds[stds < 1e-9] = 1.0        # prevent division by zero on constant columns
+stds[stds < 1e-9] = 1.0
 X = (X_raw - means) / stds
 ```
 
-Standardisation is mandatory before logistic regression. Without it, features measured on different scales (RSI 0–100, volume_zscore −3 to +3, rba_rate 0.1–5.0) would have wildly different gradient magnitudes, making the optimizer unstable.
+**Imputation guard:** Missing features are imputed to the training column mean before z-scoring. This gives Z=0 (neutral) for missing values, not an artificially negative Z (e.g., RSI has a mean of ~50; imputing 0 would give Z≈−4, which is severely biased).
 
 #### Step 2 — Information Coefficient (Spearman rank correlation)
 
-Before fitting the model, each feature's raw predictive power is measured via the **Information Coefficient (IC)** — the Spearman rank correlation between the feature and the binary outcome:
+Same as before — each feature's IC with the R-multiple target is computed. Features with IC ≈ 0 carry no signal.
+
+#### Step 3 — Ridge regression
 
 ```python
-def _spearman(a, b):
-    n = len(a)
-    ra = np.argsort(np.argsort(a)).astype(float)  # rank a
-    rb = np.argsort(np.argsort(b)).astype(float)  # rank b
-    d = ra - rb
-    return 1.0 - 6.0 * np.sum(d * d) / (n * (n**2 - 1))
-
-ics = [_spearman(X_raw[:, i], y) for i in range(len(FEATURES))]
-```
-
-The IC is computed on **raw (unstandardised) features** because rank correlation is scale-invariant. It serves two purposes:
-
-1. **Feature importance display** — the horizontal bar chart on the 🧠 Model tab shows `abs(IC)` per feature, sorted descending. Features with IC ≈ 0 carry no predictive signal in your sample.
-2. **Model diagnostics** — if the top-IC feature has `|IC| < 0.05`, the sample is too small or the rules are already optimal (no further signal to extract).
-
-Spearman is preferred over Pearson because the relationship between a technical indicator and outcome is rarely linear — it is monotone (RSI below 30 is good, RSI above 70 is bad) but the exact functional form is unknown.
-
-#### Step 3 — Gradient descent logistic regression with L2 regularisation
-
-```python
-def _logistic_regression(X, y, lr=0.05, epochs=1000, l2=0.01):
+def _ridge_regression(X, y, lr=0.01, epochs=2000, l2=0.05):
     n, p = X.shape
-    w = np.zeros(p)     # weight vector (one per feature)
-    b = 0.0             # bias term
-
+    w = np.zeros(p)
+    b = 0.0
     for _ in range(epochs):
-        # Forward pass: sigmoid(Xw + b)
-        logits = np.clip(np.dot(X, w) + b, -20, 20)
-        pred   = 1.0 / (1.0 + np.exp(-logits))
-
-        # Gradients of binary cross-entropy loss + L2 penalty
-        err = pred - y
-        dw  = np.dot(X.T, err) / n + l2 * w   # L2 penalty on weights, not bias
-        db  = np.mean(err)
-
-        # Gradient descent step
+        predictions = np.dot(X, w) + b
+        error       = predictions - y
+        dw = np.dot(X.T, error) / n + l2 * w
+        db = np.mean(error)
         w -= lr * dw
         b -= lr * db
-
     return w, b
 ```
 
@@ -779,27 +744,45 @@ def _logistic_regression(X, y, lr=0.05, epochs=1000, l2=0.01):
 
 | Parameter | Value | Reason |
 |---|---|---|
-| `lr` (learning rate) | 0.05 | Conservative for small datasets (n=15–200). Avoids overshooting the minimum. |
-| `epochs` | 1,000 | Sufficient to converge for n<500 with lr=0.05. Runtime <100ms on any modern CPU. |
-| `l2` (regularisation) | 0.01 | Prevents overfitting on small samples. Forces the model toward the prior (uniform win probability) when the signal is weak. |
-
-L2 regularisation is critical for small datasets. Without it, the model will overfit — assigning extreme weights to features that happened to correlate with outcome in 20–30 trades by chance, then performing poorly on the next 20.
-
-The logit is clipped to [−20, +20] before applying the sigmoid to prevent `exp(-logit)` overflow for extreme feature values.
+| `lr` (learning rate) | 0.01 | More conservative than logistic — MSE gradients are larger. |
+| `epochs` | 2,000 | More iterations than logistic to compensate for slower convergence. |
+| `l2` (regularisation) | 0.05 | Higher than logistic — R-multiple targets have more noise. |
 
 #### Step 4 — Model persistence
 
 After fitting, the following are serialised as JSON and stored in `model_state`:
 
 ```
-feature_names  → ordered list of feature keys (defines column→index mapping)
-weights        → fitted w vector (length 18)
-bias           → fitted b scalar
-feature_means  → μ from standardisation (length 18)
-feature_stds   → σ from standardisation (length 18)
+feature_names     → ordered list of feature keys (15 or 18)
+weights           → fitted w vector
+bias              → fitted b scalar
+feature_means     → μ from standardisation
+feature_stds      → σ from standardisation
+trade_type_scope  → 'swing' | 'intraday'
+r2_score          → R² on training set
+mae_score         → MAE in R-multiples
 ```
 
 Each training run appends a new row to `model_state`. The prediction endpoints always use `ORDER BY trained_at DESC LIMIT 1` — old model runs are retained for audit but never used.
+
+---
+
+### 14.6b Shadow Signal Logging
+
+**Problem:** If the ML only trains on trades you actually executed, the model learns a biased sample — it never sees valid setups that were blocked by heat limits, regime gates, or correlation filters.
+
+**Solution:** When a technically valid rec is rejected by the execution engine, it is logged as a *shadow* record in `trade_snapshots` with `record_type = 'shadow'` and a `shadow_reason` tag.
+
+| `shadow_reason` | Cause |
+|-----------------|-------|
+| `heat_blocked` | Rec would push portfolio heat over regime ceiling |
+| `regime_blocked` | Panic regime blocked all new longs |
+
+Shadow records are resolved lazily at training time via `_resolve_shadow_outcomes()`, which simulates the trade forward using yfinance price history (same target/stop/time-stop logic as live trade management). The resulting `r_multiple` is stored and the shadow record participates in training alongside executed records.
+
+This gives the model the full unpruned distribution of valid setups — not just the ones that happened to fit within capital constraints that day.
+
+**Note:** Shadow records count toward the Kelly phase gate threshold (200 trades). An unbiased sample of 200 is more meaningful than 200 hand-picked executions.
 
 ---
 

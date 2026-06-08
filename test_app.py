@@ -5951,26 +5951,34 @@ class TestDayTradeTraining(unittest.TestCase):
         self.assertIn("error", data)
 
     def test_train_succeeds_with_enough_samples(self):
-        """POST /api/daytrading/train with ≥ MIN_TRAIN_SAMPLES must return accuracy."""
-        # Seed enough completed trades directly into the in-memory DB
+        """POST /api/daytrading/train with ≥ MIN_TRAIN_SAMPLES must return ok=True."""
+        # Seed enough completed trades directly into the in-memory DB (need >= 30)
         rdtt = self._rdtt
         import random
         random.seed(42)
 
         rows = []
-        for i in range(20):
-            outcome = "win" if i % 2 == 0 else "loss"
+        for i in range(35):
+            entry = 40.0 + random.uniform(-3, 3)
+            stop  = entry * 0.95
+            tgt   = entry * 1.07
+            exit_p = tgt if i % 3 != 2 else stop
+            rm = round((exit_p - entry) / (entry - stop), 4)
+            outcome = "win" if rm > 0 else "loss"
             rows.append({
                 "ticker": "BHP.AX", "trade_type": "swing",
                 "entry_date": "2026-05-0" + str(i % 9 + 1),
-                "entry_price": 40.0,
+                "entry_price": entry, "stop_loss": stop, "target": tgt,
+                "exit_price": exit_p, "r_multiple": rm,
                 "rsi_14": 40 + random.random() * 20,
                 "bb_pct_b": random.random(),
                 "adx": 20 + random.random() * 15,
                 "volume_zscore": random.gauss(0, 1),
                 "setup_score": 50 + random.random() * 40,
+                "asx200_5d_ret": random.gauss(0.5, 1.5),
+                "adl_ratio": 0.5 + random.random() * 0.3,
                 "outcome": outcome,
-                "pnl_pct": (2.0 if outcome == "win" else -1.5),
+                "pnl_pct": round((exit_p - entry) / entry * 100, 2),
             })
 
         for row in rows:
@@ -5986,9 +5994,6 @@ class TestDayTradeTraining(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         data = r.get_json()
         self.assertTrue(data["ok"], msg=data.get("error", ""))
-        self.assertIn("accuracy", data)
-        self.assertGreaterEqual(data["accuracy"], 0.0)
-        self.assertLessEqual(data["accuracy"], 1.0)
         self.assertIn("feature_importances", data)
         self.assertGreater(len(data["feature_importances"]), 0)
 
@@ -6003,10 +6008,13 @@ class TestDayTradeTraining(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertIn("available", data)
         if data["available"]:
-            self.assertIn("model", data)
+            # Sprint 53: response shape changed — swing/intraday keys instead of 'model'
             self.assertIn("importances", data)
-            self.assertIn("feature_names", data["model"])
-            self.assertIn("weights", data["model"])
+            # At least one of swing/intraday must be present
+            self.assertTrue(data.get("swing") is not None or data.get("intraday") is not None)
+            model_obj = data.get("swing") or data.get("intraday")
+            self.assertIn("feature_names", model_obj)
+            self.assertIn("weights", model_obj)
 
     # ── POST /api/daytrading/predict ─────────────────────────────────────────
 
@@ -6113,7 +6121,8 @@ class TestDayTradeTraining(unittest.TestCase):
         self.assertNotIn("torch", src,   "Training must use pure numpy — no torch")
         self.assertNotIn("tensorflow", src)
         self.assertIn("numpy", src, "Training must use numpy")
-        self.assertIn("logistic_regression", src, "Must define logistic regression function")
+        # Sprint 53: ridge regression replaced logistic regression
+        self.assertIn("ridge_regression", src, "Must define ridge regression function")
         self.assertIn("spearman", src.lower(), "Must compute Spearman IC")
 
     def test_features_list_consistent(self):
@@ -6126,6 +6135,206 @@ class TestDayTradeTraining(unittest.TestCase):
         for feat in ("rsi_14", "bb_pct_b", "adx", "volume_zscore", "setup_score"):
             self.assertIn(feat, py_src, f"Feature '{feat}' must be in Python FEATURES list")
             self.assertIn(feat, js_src, f"Feature '{feat}' must be in JS dtBuildFeatures")
+
+
+class TestSprintMl53(unittest.TestCase):
+    """Sprint 53: shadow logging, ridge regression, decoupled matrices."""
+
+    @classmethod
+    def setUpClass(cls):
+        import contextlib
+        import day_trade_db as dtdb
+        import routes.day_trade_training as rdtt
+
+        cls._dt_conn = sqlite3.connect(":memory:")
+        cls._dt_conn.row_factory = sqlite3.Row
+        cls._dt_conn.executescript(dtdb._SCHEMA)
+        # Run migrations on the in-memory DB too
+        _migrations = [
+            "ALTER TABLE trade_snapshots ADD COLUMN record_type TEXT NOT NULL DEFAULT 'executed'",
+            "ALTER TABLE trade_snapshots ADD COLUMN shadow_reason TEXT",
+            "ALTER TABLE trade_snapshots ADD COLUMN r_multiple REAL",
+            "ALTER TABLE model_state ADD COLUMN trade_type_scope TEXT DEFAULT 'all'",
+            "ALTER TABLE model_state ADD COLUMN r2_score REAL",
+            "ALTER TABLE model_state ADD COLUMN mae_score REAL",
+        ]
+        for sql in _migrations:
+            try:
+                cls._dt_conn.execute(sql)
+            except Exception:
+                pass
+        cls._dt_conn.commit()
+
+        @contextlib.contextmanager
+        def _test_dt_db():
+            yield cls._dt_conn
+            cls._dt_conn.commit()
+
+        dtdb.get_dt_db  = _test_dt_db
+        rdtt.get_dt_db  = _test_dt_db
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._dt_conn.close()
+
+    def test_snapshot_accepts_record_type_shadow(self):
+        """POST /api/daytrading/snapshot with record_type='shadow' succeeds."""
+        r = self.client.post('/api/daytrading/snapshot',
+                             json={
+                                 'ticker': 'BHP',
+                                 'entry_date': '2026-06-01',
+                                 'entry_price': 45.0,
+                                 'stop_loss': 43.5,
+                                 'target': 47.5,
+                                 'record_type': 'shadow',
+                                 'shadow_reason': 'heat_blocked',
+                             },
+                             content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data['ok'])
+        self.assertIsNotNone(data['id'])
+        # Verify it was stored as shadow
+        row = self._dt_conn.execute(
+            "SELECT record_type, shadow_reason FROM trade_snapshots WHERE id=?", (data['id'],)
+        ).fetchone()
+        self.assertEqual(row['record_type'], 'shadow')
+        self.assertEqual(row['shadow_reason'], 'heat_blocked')
+
+    def test_close_stores_r_multiple(self):
+        """PATCH /close computes and stores r_multiple = (exit-entry)/(entry-stop)."""
+        # Create a snapshot
+        r = self.client.post('/api/daytrading/snapshot',
+                             json={'ticker': 'CBA', 'entry_date': '2026-06-01',
+                                   'entry_price': 100.0, 'stop_loss': 98.0, 'target': 104.0},
+                             content_type='application/json')
+        snap_id = r.get_json()['id']
+        # Close with exit_price = 104.0 → r_multiple = (104-100)/(100-98) = 2.0
+        r2 = self.client.patch(f'/api/daytrading/snapshot/{snap_id}/close',
+                               json={'exit_price': 104.0, 'exit_date': '2026-06-05',
+                                     'exit_reason': 'target'},
+                               content_type='application/json')
+        self.assertEqual(r2.status_code, 200)
+        row = self._dt_conn.execute(
+            "SELECT r_multiple FROM trade_snapshots WHERE id=?", (snap_id,)
+        ).fetchone()
+        self.assertIsNotNone(row['r_multiple'])
+        self.assertAlmostEqual(float(row['r_multiple']), 2.0, places=2)
+
+    def test_stats_includes_shadow_count(self):
+        """GET /api/daytrading/stats includes shadow_count field."""
+        r = self.client.get('/api/daytrading/stats')
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertIn('shadow_count', data)
+        self.assertIn('shadow_resolved', data)
+
+    def test_history_filters_by_record_type(self):
+        """GET /api/daytrading/history?record_type=shadow filters correctly."""
+        r = self.client.get('/api/daytrading/history?record_type=shadow')
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertIn('items', data)
+        # All returned items must be shadow
+        for item in data['items']:
+            self.assertEqual(item.get('record_type'), 'shadow')
+
+    def _seed_ridge_trades(self, n=35):
+        """Seed enough completed trades for ridge training."""
+        import random
+        random.seed(99)
+        for i in range(n):
+            entry = 10.0 + random.uniform(-2, 2)
+            stop  = entry * 0.95
+            tgt   = entry * 1.07
+            exit_p = tgt if i % 3 != 2 else stop
+            rm = (exit_p - entry) / (entry - stop)
+            outcome = 'win' if rm > 0 else 'loss'
+            self._dt_conn.execute("""
+                INSERT INTO trade_snapshots
+                (ticker, entry_date, entry_price, stop_loss, target, exit_price,
+                 r_multiple, outcome, trade_type,
+                 rsi_14, bb_pct_b, atr_pct, adx, volume_zscore,
+                 asx200_5d_ret, adl_ratio)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, ('TEST', f'2026-0{(i%9)+1}-01', entry, stop, tgt, exit_p,
+                  round(rm, 4), outcome, 'swing',
+                  40+i, 0.3, 1.5, 20, 0.5, 1.2, 0.6))
+        self._dt_conn.commit()
+
+    def test_train_ridge_succeeds(self):
+        """POST /api/daytrading/train trains ridge models when data available."""
+        self._seed_ridge_trades(35)
+        r = self.client.post('/api/daytrading/train',
+                             json={}, content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data.get('ok'))
+        # Check model was stored in model_state
+        row = self._dt_conn.execute(
+            "SELECT model_type FROM model_state ORDER BY trained_at DESC LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row['model_type'], 'ridge')
+
+    def test_model_response_has_swing_structure(self):
+        """GET /api/daytrading/model returns swing/intraday structure."""
+        r = self.client.get('/api/daytrading/model')
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data['ok'])
+        # When available, check structure
+        if data.get('available'):
+            # Must have at least swing or intraday key
+            self.assertTrue('swing' in data or 'intraday' in data)
+
+    def test_features_swing_has_15_items(self):
+        """FEATURES_SWING has exactly 15 items (no intraday-specific)."""
+        from routes.day_trade_training import FEATURES_SWING, FEATURES_INTRADAY
+        self.assertEqual(len(FEATURES_SWING), 15)
+        self.assertEqual(len(FEATURES_INTRADAY), 18)
+        # Intraday adds exactly the 3 intraday-specific features
+        extras = set(FEATURES_INTRADAY) - set(FEATURES_SWING)
+        self.assertEqual(extras, {'intraday_rsi', 'vwap_position', 'volume_accel'})
+
+    def test_dt_training_js_imputation_guard(self):
+        """dt-training.js uses mu[i] for missing features (not 0)."""
+        with open(os.path.join(ROOT, 'js', 'dt-training.js'), encoding='utf-8') as f:
+            src = f.read()
+        # The imputation guard line
+        self.assertIn('mu[i]', src)
+        # Should NOT have the old hard-zero fallback as the only option
+        self.assertIn('IMPUTATION GUARD', src)
+
+    def test_dt_training_js_has_expected_r_label(self):
+        """dt-training.js defines dtExpectedRLabel and dtWinProbLabel alias."""
+        with open(os.path.join(ROOT, 'js', 'dt-training.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('function dtExpectedRLabel', src)
+        self.assertIn('dtWinProbLabel', src)  # backward-compat alias
+
+    def test_dt_training_js_ridge_model_type(self):
+        """dt-training.js handles model_type='ridge' (no sigmoid)."""
+        with open(os.path.join(ROOT, 'js', 'dt-training.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn("model_type === 'ridge'", src)
+
+    def test_indicators_gap_window_126(self):
+        """indicators.py uses 126-day gap window."""
+        with open(os.path.join(ROOT, 'indicators.py'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('tail(126)', src)
+
+    def test_analysis_js_shadow_logging(self):
+        """analysis.js shadow-logs heat-blocked recs."""
+        with open(os.path.join(ROOT, 'js', 'analysis.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('shadow_reason', src)
+        self.assertIn('heat_blocked', src)
+        self.assertIn('dtSaveSnapshot', src)
 
 
 class TestSprintQuant(unittest.TestCase):

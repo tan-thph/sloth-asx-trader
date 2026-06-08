@@ -802,8 +802,19 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         return (action === 'BUY' || action === 'TOP_UP') ? applyRegimeModifiers(r, _activeRegime) : r;
       });
       // Drop recs hard-blocked by regime (e.g. panic → sizeMult=0)
-      const blocked = recs.filter(r => r._regimeBlocked).length;
+      const regimeBlockedRecs = recs.filter(r => r._regimeBlocked);
+      const blocked = regimeBlockedRecs.length;
       recs = recs.filter(r => !r._regimeBlocked);
+      // Shadow-log regime-blocked recs for ML bias correction
+      if (typeof dtSaveSnapshot === 'function' && regimeBlockedRecs.length > 0) {
+        regimeBlockedRecs.forEach(function(r) {
+          var sigs  = (state.liveSignals && state.liveSignals[r.ticker]) || {};
+          var price = sigs.current_price
+            || (Array.isArray(r.priceRange) ? r.priceRange[0] : 0);
+          dtSaveSnapshot(r, 'swing', sigs, state.macroData || {}, price, 0,
+            { record_type: 'shadow', shadow_reason: 'regime_blocked' });
+        });
+      }
       if (blocked > 0) {
         const note = ` [Blocked ${blocked} BUY/TOP_UP rec(s) — regime ${_activeRegime} disallows new exposure]`;
         summary = (summary ? summary + ' ' : '') + note.trim();
@@ -962,10 +973,21 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           _budgetNote: `Heat budget: $${remaining.toFixed(0)} of $${budgetAUD.toFixed(0)} remaining [${_heatLimitSource}]` };
       });
 
-      // Drop budget-blocked recs
-      const preBudgetLen = recs.length;
+      // Drop budget-blocked recs — shadow-log them first for ML bias correction
+      const budgetBlockedRecs = recs.filter(r => r._budgetBlocked);
       recs = recs.filter(r => !r._budgetBlocked);
-      const budgetDropped = preBudgetLen - recs.length;
+      const budgetDropped = budgetBlockedRecs.length;
+
+      // Fire-and-forget shadow snapshots (never blocks execution)
+      if (typeof dtSaveSnapshot === 'function' && budgetBlockedRecs.length > 0) {
+        budgetBlockedRecs.forEach(function(r) {
+          var sigs  = (state.liveSignals && state.liveSignals[r.ticker]) || {};
+          var price = sigs.current_price
+            || (Array.isArray(r.priceRange) ? r.priceRange[0] : 0);
+          dtSaveSnapshot(r, 'swing', sigs, state.macroData || {}, price, 0,
+            { record_type: 'shadow', shadow_reason: 'heat_blocked' });
+        });
+      }
 
       if (budgetScaledCount > 0 || budgetDropped > 0) {
         const parts = [];

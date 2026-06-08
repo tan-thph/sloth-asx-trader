@@ -29,7 +29,23 @@ FEATURES = [
     "intraday_rsi",  "vwap_position", "volume_accel",
 ]
 
-MIN_TRAIN_SAMPLES = 15   # minimum completed trades before training is allowed
+# Swing-only features (no intraday-specific indicators)
+FEATURES_SWING = [
+    "rsi_14", "bb_pct_b", "bb_bandwidth", "atr_pct",
+    "adx", "volume_zscore", "mfi_14", "stoch_k",
+    "williams_r", "cci_20", "setup_score",
+    "price_vs_sma20", "price_vs_sma50",
+    "asx200_5d_ret", "adl_ratio",
+]  # 15 features
+
+# Intraday features (swing + 3 intraday-specific)
+FEATURES_INTRADAY = FEATURES_SWING + [
+    "intraday_rsi", "vwap_position", "volume_accel",
+]  # 18 features
+
+# FEATURES kept for backward compatibility (same as FEATURES_INTRADAY)
+
+MIN_TRAIN_SAMPLES = 30   # increased from 15 — continuous regression needs more data
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -49,6 +65,116 @@ def _row_to_dict(row):
     return dict(row) if row else None
 
 
+def _resolve_shadow_outcomes(conn):
+    """
+    Compute r_multiple for shadow records old enough to have played out.
+    Uses yfinance to fetch post-entry price history and simulates target/stop/time-stop exits.
+    Called before training to ensure full unbiased dataset.
+    """
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    from core import log
+
+    TIME_STOP_DAYS = {
+        'riskOn': 15, 'trend': 15, 'sideways': 12, 'highVol': 10, 'riskOff': 8,
+    }
+
+    # Fetch shadows with no r_multiple that are at least 8 days old
+    rows = conn.execute("""
+        SELECT id, ticker, entry_date, entry_price, target, stop_loss, regime
+        FROM trade_snapshots
+        WHERE record_type = 'shadow'
+          AND r_multiple IS NULL
+          AND entry_date <= date('now', '-8 days')
+        LIMIT 50
+    """).fetchall()
+
+    if not rows:
+        return 0
+
+    resolved = 0
+    for row in rows:
+        try:
+            max_hold = TIME_STOP_DAYS.get(row['regime'] or '', 12)
+            entry_dt = datetime.strptime(row['entry_date'], '%Y-%m-%d')
+            # Fetch enough calendar days to cover max_hold trading days
+            end_dt  = entry_dt + timedelta(days=int(max_hold * 1.5) + 5)
+            ticker  = row['ticker']
+            if not ticker.upper().endswith('.AX'):
+                ticker = ticker + '.AX'
+
+            hist = yf.Ticker(ticker).history(
+                start=row['entry_date'],
+                end=end_dt.strftime('%Y-%m-%d'),
+                auto_adjust=True,
+            )
+            if hist.empty or row['entry_price'] is None:
+                continue
+
+            ep    = float(row['entry_price'])
+            sl    = float(row['stop_loss']) if row['stop_loss'] else ep * 0.95
+            tgt   = float(row['target'])   if row['target']    else ep * 1.05
+            denom = ep - sl
+            if abs(denom) < 1e-9:
+                continue
+
+            r_multiple   = None
+            exit_price   = None
+            exit_reason  = 'time_stop'
+            exit_date_str = None
+            trading_days = 0
+
+            for bar_dt, bar in hist.iterrows():
+                # Only count weekdays as trading days
+                if bar_dt.weekday() < 5:
+                    trading_days += 1
+                if float(bar['High']) >= tgt:
+                    r_multiple   = round((tgt - ep) / denom, 4)
+                    exit_price   = tgt
+                    exit_reason  = 'target'
+                    exit_date_str = bar_dt.strftime('%Y-%m-%d')
+                    break
+                if float(bar['Low']) <= sl:
+                    r_multiple   = round((sl - ep) / denom, 4)
+                    exit_price   = sl
+                    exit_reason  = 'stop'
+                    exit_date_str = bar_dt.strftime('%Y-%m-%d')
+                    break
+                if trading_days >= max_hold:
+                    exit_price   = float(bar['Close'])
+                    r_multiple   = round((exit_price - ep) / denom, 4)
+                    exit_reason  = 'time_stop'
+                    exit_date_str = bar_dt.strftime('%Y-%m-%d')
+                    break
+
+            if r_multiple is None and not hist.empty:
+                exit_price   = float(hist['Close'].iloc[-1])
+                r_multiple   = round((exit_price - ep) / denom, 4)
+                exit_reason  = 'time_stop'
+                exit_date_str = hist.index[-1].strftime('%Y-%m-%d')
+
+            if r_multiple is None:
+                continue
+
+            pnl_pct = round((exit_price - ep) / ep * 100, 4) if exit_price else None
+            outcome = 'win' if r_multiple > 0 else ('loss' if r_multiple < 0 else 'breakeven')
+
+            conn.execute("""
+                UPDATE trade_snapshots
+                   SET r_multiple=?, exit_price=?, exit_reason=?, outcome=?,
+                       exit_date=?, pnl_pct=?, updated_at=datetime('now')
+                 WHERE id=?
+            """, (r_multiple, exit_price, exit_reason, outcome,
+                  exit_date_str, pnl_pct, row['id']))
+            resolved += 1
+
+        except Exception as exc:
+            log.debug("shadow resolution failed for id=%s: %s", row['id'], exc)
+            continue
+
+    return resolved
+
+
 # ─── POST /api/daytrading/snapshot ────────────────────────────────────────────
 
 @bp.route("/api/daytrading/snapshot", methods=["POST"])
@@ -57,7 +183,7 @@ def dt_snapshot_save():
     d = request.get_json(force=True) or {}
 
     COLS = (
-        "ticker action trade_type target stop_loss hold_days confidence regime "
+        "ticker action trade_type record_type shadow_reason target stop_loss hold_days confidence regime "
         "entry_date entry_price qty "
         "rsi_14 rsi_9 macd_hist bb_pct_b bb_bandwidth atr_14 atr_pct "
         "price_vs_sma20 price_vs_sma50 price_vs_sma200 "
@@ -74,8 +200,8 @@ def dt_snapshot_save():
         return jsonify({"ok": False, "error": "ticker and entry_date are required"}), 400
 
     # Cast numeric fields
-    NUMERIC = {c for c in COLS if c not in ("ticker", "action", "trade_type", "regime",
-                                              "entry_date", "sector")}
+    NUMERIC = {c for c in COLS if c not in ("ticker", "action", "trade_type", "record_type",
+                                              "shadow_reason", "regime", "entry_date", "sector")}
     for c in NUMERIC:
         vals[c] = _safe(vals[c])
 
@@ -138,14 +264,27 @@ def dt_snapshot_close(snap_id):
                 else:
                     outcome = "breakeven"
 
+        # Compute r_multiple = (exit - entry) / (entry - stop)
+        r_multiple = None
+        if exit_price is not None:
+            row2 = conn.execute(
+                "SELECT entry_price, stop_loss FROM trade_snapshots WHERE id=?", (snap_id,)
+            ).fetchone()
+            if row2 and row2["entry_price"] and row2["stop_loss"]:
+                ep  = float(row2["entry_price"])
+                sl  = float(row2["stop_loss"])
+                denom = ep - sl
+                if abs(denom) > 1e-9:
+                    r_multiple = round((float(exit_price) - ep) / denom, 4)
+
         conn.execute("""
             UPDATE trade_snapshots
                SET exit_date=?, exit_price=?, exit_reason=?,
-                   actual_hold_days=?, pnl_pct=?, outcome=?,
+                   actual_hold_days=?, pnl_pct=?, outcome=?, r_multiple=?,
                    updated_at=datetime('now')
              WHERE id=?
         """, (exit_date, exit_price, exit_reason, actual_hold_days,
-              pnl_pct, outcome, snap_id))
+              pnl_pct, outcome, r_multiple, snap_id))
 
     return jsonify({"ok": True, "id": snap_id, "outcome": outcome})
 
@@ -158,12 +297,16 @@ def dt_history():
     limit   = min(int(request.args.get("limit", 20)), 100)
     offset  = int(request.args.get("offset", 0))
     outcome = request.args.get("outcome")        # 'win' | 'loss' | 'open' | '' = all
+    record_type = request.args.get("record_type")
 
     where = []
     params = []
     if outcome and outcome != "all":
         where.append("outcome = ?")
         params.append(outcome)
+    if record_type and record_type != "all":
+        where.append("record_type = ?")
+        params.append(record_type)
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
@@ -223,8 +366,19 @@ def dt_stats():
             "SELECT trained_at, n_samples, accuracy, f1_w FROM model_state ORDER BY trained_at DESC LIMIT 1"
         ).fetchone()
 
+        shadow_stats = conn.execute("""
+            SELECT
+                COUNT(*) AS shadow_total,
+                SUM(CASE WHEN r_multiple IS NOT NULL THEN 1 ELSE 0 END) AS shadow_resolved
+            FROM trade_snapshots WHERE record_type='shadow'
+        """).fetchone()
+
+        completed = int(conn.execute("""
+            SELECT COUNT(*) FROM trade_snapshots
+            WHERE outcome IN ('win', 'loss', 'breakeven')
+        """).fetchone()[0])
+
     t = dict(totals)
-    completed = (t.get("wins") or 0) + (t.get("losses") or 0) + (t.get("breakevens") or 0)
     win_rate = ((t.get("wins") or 0) / completed * 100) if completed > 0 else None
 
     return jsonify({
@@ -252,6 +406,8 @@ def dt_stats():
         "model": _row_to_dict(model_row) if model_row else None,
         "min_train_samples": MIN_TRAIN_SAMPLES,
         "ready_to_train": completed >= MIN_TRAIN_SAMPLES,
+        "shadow_count":    shadow_stats["shadow_total"] if shadow_stats else 0,
+        "shadow_resolved": shadow_stats["shadow_resolved"] if shadow_stats else 0,
     })
 
 
@@ -270,188 +426,255 @@ def dt_train():
 
 def _train_model_impl(conn):
     """
-    Fit a logistic regression (gradient descent) and persist model artefacts.
-    Returns a results dict with metrics and feature importances.
+    Train two Ridge regression models (swing / intraday) using R-multiple as target.
+    Returns a results dict. Called by POST /api/daytrading/train.
     """
     import json
     import numpy as np
-
-    rows = conn.execute("""
-        SELECT * FROM trade_snapshots
-        WHERE outcome IN ('win', 'loss', 'breakeven')
-        ORDER BY entry_date DESC
-        LIMIT 2000
-    """).fetchall()
-
-    if len(rows) < MIN_TRAIN_SAMPLES:
-        return {
-            "ok": False,
-            "error": (
-                f"Need at least {MIN_TRAIN_SAMPLES} completed trades to train "
-                f"(have {len(rows)})"
-            ),
-        }
-
-    # ── Build feature matrix ─────────────────────────────────────────────────
-    X_raw = np.array(
-        [[float(r[f]) if r[f] is not None else np.nan for f in FEATURES] for r in rows],
-        dtype=float,
-    )
-    y = np.array([1.0 if r["outcome"] == "win" else 0.0 for r in rows])
-
-    # Mean imputation for NaN cells (suppress all-NaN slice warning)
     import warnings as _warnings
-    with _warnings.catch_warnings():
-        _warnings.simplefilter("ignore", RuntimeWarning)
-        col_means = np.nanmean(X_raw, axis=0)
-    col_means = np.where(np.isnan(col_means), 0.0, col_means)
-    for j in range(X_raw.shape[1]):
-        mask = np.isnan(X_raw[:, j])
-        X_raw[mask, j] = col_means[j]
-
-    # z-score standardisation
-    means = X_raw.mean(axis=0)
-    stds = X_raw.std(axis=0)
-    stds[stds < 1e-9] = 1.0
-    X = (X_raw - means) / stds
-
-    n_wins   = int(y.sum())
-    n_losses = int(len(y) - n_wins)
-
-    # ── Information Coefficient (Spearman rank correlation) ──────────────────
-    def _spearman(a, b):
-        n = len(a)
-        if n < 3:
-            return 0.0
-        ra = np.argsort(np.argsort(a)).astype(float)
-        rb = np.argsort(np.argsort(b)).astype(float)
-        d = ra - rb
-        denom = float(n) * (float(n) * float(n) - 1.0)
-        return 0.0 if denom == 0 else 1.0 - 6.0 * float(np.sum(d * d)) / denom
-
-    ics = [_spearman(X_raw[:, i], y) for i in range(len(FEATURES))]
-
-    # ── Logistic regression (gradient descent, L2 regularisation) ────────────
-    def _logistic_regression(X, y, lr=0.05, epochs=1000, l2=0.01):
-        n, p = X.shape
-        w = np.zeros(p)
-        b = 0.0
-        for _ in range(epochs):
-            logits = np.clip(np.dot(X, w) + b, -20.0, 20.0)
-            pred = 1.0 / (1.0 + np.exp(-logits))
-            err = pred - y
-            dw = np.dot(X.T, err) / n + l2 * w
-            db = float(np.mean(err))
-            w -= lr * dw
-            b -= lr * db
-        return w, b
-
-    weights, bias = _logistic_regression(X, y)
-
-    # ── Metrics ──────────────────────────────────────────────────────────────
-    logits = np.clip(np.dot(X, weights) + bias, -20.0, 20.0)
-    y_prob = 1.0 / (1.0 + np.exp(-logits))
-    y_pred = (y_prob >= 0.5).astype(float)
-
-    accuracy  = float(np.mean(y_pred == y))
-    tp = float(np.sum((y_pred == 1) & (y == 1)))
-    fp = float(np.sum((y_pred == 1) & (y == 0)))
-    fn = float(np.sum((y_pred == 0) & (y == 1)))
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1        = (2 * precision * recall / (precision + recall)
-                 if (precision + recall) > 0 else 0.0)
-
-    # ── Persist model ─────────────────────────────────────────────────────────
     from datetime import datetime, timezone
-    trained_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    cur = conn.execute(
-        """INSERT INTO model_state
-               (trained_at, n_samples, n_features, n_wins, n_losses,
-                accuracy, precision_w, recall_w, f1_w,
-                feature_names, weights, bias, feature_means, feature_stds)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            trained_at, len(rows), len(FEATURES), n_wins, n_losses,
-            accuracy, precision, recall, f1,
-            json.dumps(FEATURES),
-            json.dumps(weights.tolist()),
-            float(bias),
-            json.dumps(means.tolist()),
-            json.dumps(stds.tolist()),
-        ),
-    )
-    model_id = cur.lastrowid
+    # First resolve any pending shadow outcomes
+    _resolve_shadow_outcomes(conn)
 
-    # ── Feature importance — sorted by |IC| ──────────────────────────────────
-    sorted_feats = sorted(
-        [(i, FEATURES[i], ics[i], float(weights[i])) for i in range(len(FEATURES))],
-        key=lambda x: abs(x[2]),
-        reverse=True,
-    )
-    for rank, (i, name, ic, w) in enumerate(sorted_feats):
-        conn.execute(
-            """INSERT INTO feature_importance
-                   (model_id, feature_name, ic, lr_weight, importance_rank)
-               VALUES (?,?,?,?,?)""",
-            (model_id, name, float(ic), w, rank + 1),
+    results = {"ok": True, "models": {}}
+
+    for scope, feat_list in [("swing", FEATURES_SWING), ("intraday", FEATURES_INTRADAY)]:
+        if scope == "swing":
+            type_filter = "trade_type IN ('swing') OR trade_type NOT IN ('intraday')"
+        else:
+            type_filter = "trade_type = 'intraday'"
+
+        rows = conn.execute(f"""
+            SELECT * FROM trade_snapshots
+            WHERE outcome IN ('win', 'loss', 'breakeven')
+              AND ({type_filter})
+            ORDER BY entry_date DESC
+            LIMIT 2000
+        """).fetchall()
+
+        if len(rows) < MIN_TRAIN_SAMPLES:
+            results["models"][scope] = {
+                "ok": False,
+                "error": (f"Need at least {MIN_TRAIN_SAMPLES} completed {scope} trades "
+                          f"(have {len(rows)})"),
+                "n_available": len(rows),
+            }
+            continue
+
+        # ── Build feature matrix ─────────────────────────────────────────────
+        X_raw = np.array(
+            [[float(r[f]) if r[f] is not None else np.nan for f in feat_list] for r in rows],
+            dtype=float,
         )
 
-    return {
-        "ok": True,
-        "n_samples": len(rows),
-        "n_wins": n_wins,
-        "n_losses": n_losses,
-        "accuracy": round(accuracy, 4),
-        "precision": round(precision, 4),
-        "recall": round(recall, 4),
-        "f1": round(f1, 4),
-        "trained_at": trained_at,
-        "feature_importances": [
-            {"feature": name, "ic": round(ic, 4), "lr_weight": round(w, 4)}
-            for _, name, ic, w in sorted_feats
-        ],
-    }
+        # Build y = r_multiple; compute from prices if stored r_multiple is missing
+        y = []
+        for r in rows:
+            rm = r['r_multiple']
+            if rm is None:
+                try:
+                    ep = float(r['entry_price'] or 0)
+                    sl = float(r['stop_loss']   or 0)
+                    ex = float(r['exit_price']  or 0)
+                    denom = ep - sl
+                    rm = (ex - ep) / denom if abs(denom) > 1e-9 else 0.0
+                except (TypeError, ValueError):
+                    rm = 0.0
+            y.append(float(rm))
+        y = np.array(y)
+
+        # ── Mean imputation for NaN cells ────────────────────────────────────
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore", RuntimeWarning)
+            col_means = np.nanmean(X_raw, axis=0)
+        col_means = np.where(np.isnan(col_means), 0.0, col_means)
+        for j in range(X_raw.shape[1]):
+            mask = np.isnan(X_raw[:, j])
+            X_raw[mask, j] = col_means[j]
+
+        # ── Z-score standardisation ─────────────────────────────────────────
+        means = X_raw.mean(axis=0)
+        stds  = X_raw.std(axis=0)
+        stds[stds < 1e-9] = 1.0
+        X = (X_raw - means) / stds
+
+        # ── Spearman IC per feature ──────────────────────────────────────────
+        def _spearman(a, b):
+            n = len(a)
+            if n < 3:
+                return 0.0
+            ra = np.argsort(np.argsort(a)).astype(float)
+            rb = np.argsort(np.argsort(b)).astype(float)
+            d  = ra - rb
+            denom = float(n) * (float(n) * float(n) - 1.0)
+            return 0.0 if denom == 0 else 1.0 - 6.0 * float(np.sum(d * d)) / denom
+
+        ics = [_spearman(X_raw[:, i], y) for i in range(len(feat_list))]
+
+        # ── Ridge regression (MSE + L2, pure numpy) ──────────────────────────
+        def _ridge_regression(X, y, lr=0.01, epochs=2000, l2=0.05):
+            n, p = X.shape
+            w = np.zeros(p)
+            b = 0.0
+            for _ in range(epochs):
+                predictions = np.dot(X, w) + b
+                error       = predictions - y
+                dw = np.dot(X.T, error) / n + l2 * w
+                db = float(np.mean(error))
+                w -= lr * dw
+                b -= lr * db
+            return w, b
+
+        weights, bias = _ridge_regression(X, y)
+
+        # ── Metrics (R², MAE) ────────────────────────────────────────────────
+        y_pred    = np.dot(X, weights) + bias
+        ss_res    = float(np.sum((y - y_pred) ** 2))
+        ss_tot    = float(np.sum((y - y.mean()) ** 2))
+        r2_score  = round(1.0 - ss_res / ss_tot if ss_tot > 1e-9 else 0.0, 4)
+        mae_score = round(float(np.mean(np.abs(y - y_pred))), 4)
+        n_positive = int(np.sum(y > 0))
+
+        # ── Persist model ────────────────────────────────────────────────────
+        trained_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        cur = conn.execute(
+            """INSERT INTO model_state
+                   (trained_at, n_samples, n_features, n_wins, n_losses,
+                    model_type, trade_type_scope, r2_score, mae_score,
+                    feature_names, weights, bias, feature_means, feature_stds)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                trained_at, len(rows), len(feat_list),
+                n_positive, int(len(rows) - n_positive),
+                'ridge', scope, r2_score, mae_score,
+                json.dumps(feat_list),
+                json.dumps(weights.tolist()),
+                float(bias),
+                json.dumps(means.tolist()),
+                json.dumps(stds.tolist()),
+            ),
+        )
+        model_id = cur.lastrowid
+
+        # ── Feature importance ───────────────────────────────────────────────
+        sorted_feats = sorted(
+            [(i, feat_list[i], ics[i], float(weights[i])) for i in range(len(feat_list))],
+            key=lambda x: abs(x[2]),
+            reverse=True,
+        )
+        for rank, (i, name, ic, w) in enumerate(sorted_feats):
+            conn.execute(
+                """INSERT INTO feature_importance
+                       (model_id, feature_name, ic, lr_weight, importance_rank)
+                   VALUES (?,?,?,?,?)""",
+                (model_id, name, float(ic), w, rank + 1),
+            )
+
+        results["models"][scope] = {
+            "ok":         True,
+            "n_samples":  len(rows),
+            "n_positive": n_positive,
+            "r2_score":   r2_score,
+            "mae_score":  mae_score,
+            "trained_at": trained_at,
+            "feature_importances": [
+                {"feature": name, "ic": round(ic, 4), "coefficient": round(w, 4)}
+                for _, name, ic, w in sorted_feats
+            ],
+        }
+
+    # Backward-compat: expose top-level ok/accuracy fields from swing model
+    swing = results["models"].get("swing", {})
+    if swing.get("ok"):
+        results["n_samples"]  = swing["n_samples"]
+        results["accuracy"]   = 0.0   # ridge doesn't have classification accuracy
+        results["r2_score"]   = swing["r2_score"]
+        results["mae_score"]  = swing["mae_score"]
+        results["trained_at"] = swing["trained_at"]
+        results["feature_importances"] = swing["feature_importances"]
+    elif results["models"].get("intraday", {}).get("ok"):
+        intra = results["models"]["intraday"]
+        results["n_samples"]  = intra["n_samples"]
+        results["accuracy"]   = 0.0
+        results["r2_score"]   = intra["r2_score"]
+        results["trained_at"] = intra["trained_at"]
+        results["feature_importances"] = intra["feature_importances"]
+    else:
+        results["ok"] = False
+        results["error"] = "; ".join(
+            m.get("error", "") for m in results["models"].values() if not m.get("ok")
+        )
+
+    return results
 
 
 # ─── GET /api/daytrading/model ────────────────────────────────────────────────
 
 @bp.route("/api/daytrading/model", methods=["GET"])
 def dt_model():
-    """Return the latest trained model (weights, means, stds) + feature importances."""
+    """Return the latest trained swing and intraday models + feature importances."""
     import json
 
     with get_dt_db() as conn:
-        model_row = conn.execute(
-            "SELECT * FROM model_state ORDER BY trained_at DESC LIMIT 1"
+        swing_row    = conn.execute(
+            "SELECT * FROM model_state WHERE trade_type_scope='swing'    ORDER BY trained_at DESC LIMIT 1"
+        ).fetchone()
+        intraday_row = conn.execute(
+            "SELECT * FROM model_state WHERE trade_type_scope='intraday' ORDER BY trained_at DESC LIMIT 1"
+        ).fetchone()
+        # Legacy fallback: 'all' scope (pre-Sprint-53 rows)
+        legacy_row = conn.execute(
+            "SELECT * FROM model_state WHERE trade_type_scope='all' OR trade_type_scope IS NULL ORDER BY trained_at DESC LIMIT 1"
         ).fetchone()
 
-        if not model_row:
-            return jsonify({
-                "ok": True,
-                "available": False,
-                "min_train_samples": MIN_TRAIN_SAMPLES,
-            })
+        def _load_model(row):
+            if not row:
+                return None
+            m = dict(row)
+            for key in ("feature_names", "weights", "feature_means", "feature_stds"):
+                if m.get(key):
+                    m[key] = json.loads(m[key])
+            # Always report model_type as 'ridge' for new models
+            if not m.get("model_type"):
+                m["model_type"] = "logistic"
+            return m
 
-        model_id = model_row["id"]
-        importances = conn.execute(
-            """SELECT feature_name, ic, lr_weight, importance_rank
-               FROM feature_importance WHERE model_id=? ORDER BY importance_rank""",
-            (model_id,)
-        ).fetchall()
+        def _load_importances(row):
+            if not row:
+                return []
+            return [dict(r) for r in conn.execute(
+                "SELECT feature_name, ic, lr_weight, importance_rank FROM feature_importance WHERE model_id=? ORDER BY importance_rank",
+                (row["id"],)
+            ).fetchall()]
 
-    m = dict(model_row)
-    # Parse JSON fields so they're arrays, not strings
-    for key in ("feature_names", "weights", "feature_means", "feature_stds"):
-        if m.get(key):
-            m[key] = json.loads(m[key])
+        swing_m    = _load_model(swing_row)
+        intraday_m = _load_model(intraday_row)
+        # Fallback: if no typed models, use legacy 'all' model for swing
+        if swing_m is None and intraday_m is None and legacy_row:
+            swing_m = _load_model(legacy_row)
+
+        available = swing_m is not None or intraday_m is not None
+
+        swing_importances    = _load_importances(swing_row)
+        intraday_importances = _load_importances(intraday_row)
+
+    if not available:
+        return jsonify({
+            "ok": True,
+            "available": False,
+            "min_train_samples": MIN_TRAIN_SAMPLES,
+        })
 
     return jsonify({
-        "ok": True,
+        "ok":        True,
         "available": True,
-        "model": m,
-        "importances": [dict(r) for r in importances],
+        "swing":     swing_m,
+        "intraday":  intraday_m,
+        "importances": {
+            "swing":    swing_importances,
+            "intraday": intraday_importances,
+        },
     })
 
 

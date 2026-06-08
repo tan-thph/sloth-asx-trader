@@ -16,7 +16,8 @@
  */
 
 /* ── Model cache (populated on first History/Model tab open) ──────────────── */
-var _dtModel      = null;  // latest trained model from GET /api/daytrading/model
+var _dtModel      = null;  // { swing: model_obj|null, intraday: model_obj|null }
+var _dtImportances = null; // { swing: [...], intraday: [...] }
 var _dtHistItems  = [];    // current history page items
 var _dtHistOffset = 0;
 var _dtHistMore   = false;
@@ -75,11 +76,18 @@ function dtPredictLocal(features, model) {
 
   var logit = bias;
   for (var i = 0; i < fn.length; i++) {
-    var raw = (features[fn[i]] != null) ? parseFloat(features[fn[i]]) : 0;
+    // IMPUTATION GUARD: use training mean for missing values so Z-score = 0 (neutral),
+    // not artificially negative. Passing 0 for RSI (mean≈50) gives Z ≈ −4 — wrong.
+    var raw = (features[fn[i]] != null) ? parseFloat(features[fn[i]]) : (mu[i] || 0);
     var std = (sig[i] && sig[i] > 1e-9) ? sig[i] : 1;
     var z   = (raw - mu[i]) / std;
     logit  += z * w[i];
   }
+  // Ridge regression: return raw logit as expected R-multiple (no sigmoid)
+  if (model.model_type === 'ridge') {
+    return logit;
+  }
+  // Legacy logistic regression: apply sigmoid for win probability
   logit = Math.max(-20, Math.min(20, logit));
   return 1 / (1 + Math.exp(-logit));
 }
@@ -93,8 +101,9 @@ function dtPredictLocal(features, model) {
  * macroData  — state.macroData (may be null/stale)
  * entryPrice — actual executed price (overrides rec.priceRange)
  * execQty    — actual executed quantity
+ * opts       — optional { record_type, shadow_reason }
  */
-function dtSaveSnapshot(rec, tradeType, signals, macroData, entryPrice, execQty) {
+function dtSaveSnapshot(rec, tradeType, signals, macroData, entryPrice, execQty, opts) {
   if (!rec || !rec.ticker) return Promise.resolve(null);
 
   var s = signals   || {};
@@ -105,9 +114,11 @@ function dtSaveSnapshot(rec, tradeType, signals, macroData, entryPrice, execQty)
 
   // Macro snapshot fields not in dtBuildFeatures
   var body = Object.assign({
-    ticker:      rec.ticker,
-    action:      rec.action || 'BUY',
-    trade_type:  tradeType || 'swing',
+    ticker:        rec.ticker,
+    action:        rec.action || 'BUY',
+    trade_type:    tradeType || 'swing',
+    record_type:   (opts && opts.record_type)   || 'executed',
+    shadow_reason: (opts && opts.shadow_reason) || null,
     target:      rec.target   || null,
     stop_loss:   rec.stopLoss || null,
     hold_days:   rec.holdDays || null,
@@ -210,13 +221,18 @@ function dtLoadModel() {
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok && d.available) {
-        _dtModel = d.model;
+        _dtModel = {
+          swing:    d.swing    || null,
+          intraday: d.intraday || null,
+        };
+        _dtImportances = d.importances || { swing: [], intraday: [] };
       } else {
         _dtModel = null;
+        _dtImportances = null;
       }
       return _dtModel;
     })
-    .catch(function() { _dtModel = null; return null; });
+    .catch(function() { _dtModel = null; _dtImportances = null; return null; });
 }
 
 /* ── Load history page ────────────────────────────────────────────────────── */
@@ -253,7 +269,11 @@ function dtTrain() {
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
-        toast('Model trained — accuracy ' + (d.accuracy * 100).toFixed(1) + '% on ' + d.n_samples + ' trades', 'success');
+        var swingOk = d.models && d.models.swing && d.models.swing.ok;
+        var trainMsg = swingOk
+          ? 'Model trained — R²=' + (d.r2_score || 0).toFixed(3) + ' on ' + (d.n_samples || '?') + ' trades'
+          : 'Model trained on ' + (d.n_samples || '?') + ' trades';
+        toast(trainMsg, 'success');
         // Refresh model cache and re-render
         dtLoadModel().then(function() {
           var el = document.getElementById('dt-tab-content');
@@ -439,20 +459,23 @@ function renderDtModelTab() {
 
   var modelSection = '';
   if (_dtModel) {
-    var m = _dtModel;
-    var acc     = m.accuracy   != null ? (m.accuracy   * 100).toFixed(1) + '%' : '—';
-    var prec    = m.precision_w != null ? (m.precision_w * 100).toFixed(1) + '%' : '—';
-    var rec     = m.recall_w   != null ? (m.recall_w   * 100).toFixed(1) + '%' : '—';
-    var f1      = m.f1_w       != null ? (m.f1_w       * 100).toFixed(1) + '%' : '—';
+    // Use swing model for display; fallback to intraday
+    var m = (_dtModel.swing || _dtModel.intraday) || {};
+    var r2  = m.r2_score  != null ? m.r2_score.toFixed(4)  : '—';
+    var mae = m.mae_score != null ? m.mae_score.toFixed(4)  : '—';
+    var modelTypeLabel = (m.model_type === 'ridge') ? 'Ridge Regression' : 'Logistic Regression';
 
-    // Feature importance chart
+    // Feature importance chart — use swing importances
     var importHTML = '';
-    if (_dtModel._importances && _dtModel._importances.length) {
-      var maxIC = Math.max.apply(null, _dtModel._importances.map(function(x) { return Math.abs(x.ic); }));
+    var importSrc = (_dtImportances && _dtImportances.swing && _dtImportances.swing.length)
+      ? _dtImportances.swing
+      : (_dtImportances && _dtImportances.intraday ? _dtImportances.intraday : []);
+    if (importSrc.length) {
+      var maxIC = Math.max.apply(null, importSrc.map(function(x) { return Math.abs(x.ic); }));
       if (maxIC < 0.001) maxIC = 0.001;
       importHTML = '<div style="margin-top:12px">' +
         '<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:8px">Feature Importance (Spearman IC)</div>' +
-        _dtModel._importances.slice(0, 12).map(function(f) {
+        importSrc.slice(0, 12).map(function(f) {
           var barWidth = Math.min(100, Math.abs(f.ic) / maxIC * 100).toFixed(0);
           var icColor  = f.ic > 0 ? '#059669' : '#dc2626';
           var icSign   = f.ic >= 0 ? '+' : '';
@@ -469,13 +492,11 @@ function renderDtModelTab() {
 
     modelSection = `
       <div class="card" style="padding:14px;margin-bottom:12px">
-        <div style="font-weight:600;margin-bottom:10px">Current Model — Logistic Regression</div>
+        <div style="font-weight:600;margin-bottom:10px">Current Model — ${modelTypeLabel}</div>
         <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">Trained: ${m.trained_at || '—'} · ${m.n_samples || '—'} samples (${m.n_wins || 0}W / ${m.n_losses || 0}L)</div>
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
-          ${_dtStatCard('Accuracy', acc, '#3b82f6')}
-          ${_dtStatCard('Precision', prec, '#8b5cf6')}
-          ${_dtStatCard('Recall', rec, '#f59e0b')}
-          ${_dtStatCard('F1 Score', f1, '#06b6d4')}
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:10px">
+          ${_dtStatCard('R² Score', r2, '#3b82f6')}
+          ${_dtStatCard('MAE (R)', mae, '#8b5cf6')}
         </div>
         ${importHTML}
       </div>`;
@@ -521,36 +542,37 @@ function renderDtModelTab() {
 
 /* Load importances into _dtModel after dtLoadModel() ─────────────────────── */
 function dtLoadModelWithImportances() {
-  return fetch('/api/daytrading/model')
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.ok && d.available) {
-        _dtModel = d.model;
-        _dtModel._importances = d.importances || [];
-      } else {
-        _dtModel = null;
-      }
-      return _dtModel;
-    })
-    .catch(function() { _dtModel = null; return null; });
+  // Delegates to dtLoadModel which now loads both models + importances
+  return dtLoadModel();
 }
 
-/* ── Win probability label for Setups tab ────────────────────────────────── */
 /**
- * Returns an HTML string showing the model's win probability for a rec,
- * or an empty string if the model is not available.
+ * Returns an HTML badge with the expected R-multiple from the ML model.
+ * Green ≥ +0.6R, amber +0.15 to +0.59R, red < +0.15R.
+ * Returns '' if no model or no signals available.
  */
-function dtWinProbLabel(rec) {
-  if (!_dtModel || !rec) return '';
-  var s = (state.liveSignals && state.liveSignals[rec.ticker]) || {};
-  var m = state.macroData || {};
-  var features = dtBuildFeatures(s, m);
-  var prob = dtPredictLocal(features, _dtModel);
-  if (prob == null) return '';
-  var pct  = Math.round(prob * 100);
-  var color = pct >= 60 ? '#059669' : pct >= 45 ? '#f59e0b' : '#dc2626';
-  return `<span title="Model P(win) from ${_dtModel.n_samples} historical trades" style="background:${color}22;color:${color};border:1px solid ${color}44;border-radius:4px;font-size:10px;padding:1px 6px;font-weight:600;white-space:nowrap">📊 ${pct}% win</span>`;
+function dtExpectedRLabel(rec) {
+  if (!_dtModel) return '';
+  var tradeType = rec.tradeType || 'swing';
+  var model = (tradeType === 'intraday' && _dtModel.intraday)
+    ? _dtModel.intraday
+    : (_dtModel.swing || _dtModel.intraday);
+  if (!model) return '';
+
+  var sigs     = (state.liveSignals && state.liveSignals[rec.ticker]) || {};
+  var features = dtBuildFeatures(sigs, state.macroData || {});
+  var expectedR = dtPredictLocal(features, model);
+  if (expectedR === null || isNaN(expectedR)) return '';
+
+  var color = expectedR >= 0.6 ? '#10b981' : expectedR >= 0.15 ? '#f59e0b' : '#ef4444';
+  var label = (expectedR >= 0 ? '+' : '') + expectedR.toFixed(2) + 'R';
+  return '<span style="background:' + color + ';color:#000;font-size:10px;font-weight:700;'
+       + 'padding:2px 7px;border-radius:4px" title="Expected R-multiple — ridge regression ML model">'
+       + '📊 ' + label + '</span>';
 }
+
+// Backward-compat alias — day-trading.js calls dtWinProbLabel(r)
+function dtWinProbLabel(rec) { return dtExpectedRLabel(rec); }
 
 /* ── Initialise on startup (non-blocking) ────────────────────────────────── */
 // Silently load model + stats so predictions are ready when the DT page opens.

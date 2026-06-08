@@ -80,7 +80,10 @@ CREATE TABLE IF NOT EXISTS trade_snapshots (
     sector_5d_ret    REAL,
 
     created_at       TEXT    DEFAULT (datetime('now')),
-    updated_at       TEXT    DEFAULT (datetime('now'))
+    updated_at       TEXT    DEFAULT (datetime('now')),
+    record_type      TEXT    NOT NULL DEFAULT 'executed',   -- 'executed' | 'shadow'
+    shadow_reason    TEXT,   -- 'heat_blocked' | 'regime_blocked' | 'manual_skip'
+    r_multiple       REAL    -- (exit_price - entry_price) / (entry_price - stop_loss)
 );
 
 CREATE INDEX IF NOT EXISTS idx_dts_ticker  ON trade_snapshots(ticker);
@@ -101,6 +104,9 @@ CREATE TABLE IF NOT EXISTS model_state (
     recall_w     REAL,
     f1_w         REAL,
     model_type   TEXT    DEFAULT 'logistic_regression',
+    trade_type_scope TEXT    DEFAULT 'all',   -- 'swing' | 'intraday' | 'all'
+    r2_score         REAL,
+    mae_score        REAL,
     feature_names TEXT,   -- JSON array of column names
     weights       TEXT,   -- JSON array of LR coefficients
     bias          REAL,
@@ -139,3 +145,18 @@ def init_dt_db():
     """Create schema. Safe to call on every startup."""
     with get_dt_db() as conn:
         conn.executescript(_SCHEMA)
+        # Runtime migrations — safe to run on existing installs (ALTER TABLE IF NOT EXISTS
+        # is not supported in SQLite, so we catch the "duplicate column" error)
+        _migrations = [
+            "ALTER TABLE trade_snapshots ADD COLUMN record_type TEXT NOT NULL DEFAULT 'executed'",
+            "ALTER TABLE trade_snapshots ADD COLUMN shadow_reason TEXT",
+            "ALTER TABLE trade_snapshots ADD COLUMN r_multiple REAL",
+            "ALTER TABLE model_state ADD COLUMN trade_type_scope TEXT DEFAULT 'all'",
+            "ALTER TABLE model_state ADD COLUMN r2_score REAL",
+            "ALTER TABLE model_state ADD COLUMN mae_score REAL",
+        ]
+        for _sql in _migrations:
+            try:
+                conn.execute(_sql)
+            except Exception:
+                pass   # column already exists
