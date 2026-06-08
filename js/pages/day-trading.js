@@ -7,6 +7,42 @@ const _DT_SIGNALS = ['BB Primary', 'RSI<35', 'Vol Z-Score', 'Fib Zone', 'OBV div
 // Keywords used to match AI-returned signal strings (case-insensitive)
 const _DT_SIG_KEYS = ['bb', 'rsi', 'vol', 'fib', 'obv'];
 
+// ── Time-based exit helpers ───────────────────────────────────────────────
+
+// Approximate trading days elapsed from entryDateStr (YYYY-MM-DD) to today.
+// Formula: calendarDays × (5/7) — sufficient precision for a 8–15 day window.
+function _dtTradingDaysElapsed(entryDateStr) {
+  if (!entryDateStr) return 0;
+  var entry = new Date(entryDateStr);
+  var calendarMs = Date.now() - entry.getTime();
+  if (calendarMs < 0) return 0;
+  return Math.floor((calendarMs / 86400000) * 5 / 7);
+}
+
+// Regime-aware max hold in trading days. Uses CURRENT regime (not entry regime).
+// highVol/riskOff: mean-reversion must happen fast or the trade is failing.
+// riskOn/trend:    slow grind — give it room to work before forcing exit.
+function _dtMaxHoldDays() {
+  var TIME_STOP_DAYS = { riskOn: 15, trend: 15, sideways: 12, highVol: 10, riskOff: 8 };
+  var regime = (state.currentRegime && state.currentRegime.regime) || 'sideways';
+  return TIME_STOP_DAYS[regime] != null ? TIME_STOP_DAYS[regime] : 12;
+}
+
+// Returns HTML badge for time-stop warning on executed swing recs.
+// Warn at 80% of limit (amber), alert at 100% (red). Returns '' when not near limit.
+function _dtTimeStopBadge(r) {
+  if (!r || r.status !== 'executed' || !r.date) return '';
+  var days = _dtTradingDaysElapsed(r.date);
+  var maxDays = _dtMaxHoldDays();
+  var pct = maxDays > 0 ? days / maxDays : 0;
+  if (pct >= 1.0) {
+    return '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Time stop exceeded — close by EOD">⏰ TIME STOP ' + days + 'd/' + maxDays + 'd</span>';
+  } else if (pct >= 0.8) {
+    return '<span style="background:#f59e0b;color:#000;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Approaching time stop — monitor closely">⏱ ' + days + 'd/' + maxDays + 'd</span>';
+  }
+  return '';
+}
+
 function renderDayTradingPage(gen) {
   const el = document.getElementById('main-content');
   el.innerHTML = _renderDayTrading();
@@ -402,6 +438,7 @@ function _renderDtRec(r, compact = false) {
             ${isStale    ? `<span style="background:#ef444422;color:#ef4444;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Setup is ${recAgeDays}d old — signals may no longer be valid">⚠ STALE ${recAgeDays}d</span>` : ''}
             ${r.holdDays ? `<span style="font-size:11px;color:var(--text-muted)">${r.holdDays}d hold est.</span>` : ''}
             ${isPending && typeof dtWinProbLabel === 'function' ? dtWinProbLabel(r) : ''}
+            ${isExecuted ? _dtTimeStopBadge(r) : ''}
           </div>
           <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">${sigDots}</div>
           <div style="font-size:11px;color:var(--text-muted);display:flex;gap:10px;flex-wrap:wrap">${filterIcons}</div>
@@ -591,6 +628,17 @@ function _renderDtIntradayTab() {
   const recs = id.recommendations || [];
   const pending = recs.filter(r => r.status === 'pending');
   const scanInfo = id.lastScan;
+
+  // SPI defensive mode: check if any scan result flagged spi_defensive
+  const _spiDefensive = (id.recommendations || []).some(function(r) { return r.spi_defensive; });
+  const _spiChg = (id.lastScan && id.recommendations && id.recommendations[0] && id.recommendations[0].spi_chg != null)
+    ? id.recommendations[0].spi_chg : null;
+  const spiWarningBanner = (_spiDefensive && _spiChg != null)
+    ? `<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#92400e">
+        ⚠ <strong>SPI200 Defensive Mode</strong> — Futures ${_spiChg.toFixed(1)}% ≤ −1.5% before 11:00 AEST.
+        VWAP Discount entries (Mode B) are disabled. Only VWAP Recapture setups would qualify.
+       </div>`
+    : '';
 
   // ── Config card ──────────────────────────────────────────────────────────
   const configCard = `
@@ -818,6 +866,7 @@ function _renderDtIntradayTab() {
       }).join('');
 
   return `
+    ${spiWarningBanner}
     ${configCard}
     ${actionBar}
     ${positionsCard}

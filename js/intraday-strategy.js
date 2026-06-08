@@ -138,7 +138,11 @@ async function runIntradayScan() {
     const r = await fetch(`${API}/api/intraday/scan`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ tickers }),
+      body:    JSON.stringify({
+        tickers,
+        spi_chg: (state.macroData && typeof state.macroData.spi200_futures_chg === 'number')
+          ? state.macroData.spi200_futures_chg : 0,
+      }),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();

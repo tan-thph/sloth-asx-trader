@@ -157,6 +157,27 @@ The stop-loss ATR multiplier is not fixed — it scales with the current market 
 
 **Structural stop placement:** After computing the raw ATR-based stop, check whether it falls within **0.5% of a round number** ($10.00, $5.00, $2.50, $1.00) or the 200-day SMA. If so, place the stop just below that level. Round numbers and the 200-day SMA carry disproportionate sell-order density — stops placed above them are frequently hunted.
 
+#### 4.x Overnight Gap Risk Floor
+
+ASX positions are exposed to overnight gap risk from US market moves, commodity shocks, and corporate announcements. A stock can open below the stop before the market opens.
+
+**Enhanced risk-per-share formula:**
+
+```
+RiskPerShare = max(ATR-based stop distance, Gap95 distance)
+
+where Gap95 distance = current price × 95th-percentile overnight gap %
+      computed from rolling 252 trading days of Open/Close data
+```
+
+**Example:**
+- ATR stop distance: $0.50
+- Gap95 (2.5% of $20.00): $0.50 → no change
+- Gap99 (4.2% of $20.00): $0.84 → activates when gap99 > ATR stop
+
+When Gap95 > ATR stop, position sizing uses Gap95 automatically (`_gapRiskActive: true` flag on rec).
+Tickers with `gap95_pct` unavailable fall back to ATR-only sizing.
+
 **Expected noise formula (reference):**
 ```
 Expected noise over N days ≈ ATR_14 × √N
@@ -235,6 +256,28 @@ Exit the entire position if **any** of these trigger:
 - If the **regime flips to `riskOff` or `panic`** while holding an open swing position, immediately advance to Step 2 (Chandelier trailing stop) on the full position — do not wait for a mechanical trigger.
 - **Rationale:** The mean-reversion thesis was entered in a neutral or bullish regime. A regime flip invalidates the macro context that underpinned the trade. Holding the full position through a regime transition is a thesis mismatch, not a discipline failure to hold.
 - The regime-change alert fires automatically (`fireAlert()`) when a flip to `panic` or `riskOff` is detected — use this as the trigger to review all open swing positions.
+
+### Time-Based Exit (Dynamic)
+
+Mean reversion is time-sensitive. If a setup fails to deliver, holding longer destroys the trade's edge.
+
+**Regime-aware hold limits (trading days):**
+
+| Regime | Max Hold |
+|--------|----------|
+| riskOn | 15 days |
+| trend | 15 days |
+| sideways | 12 days |
+| highVol | 10 days |
+| riskOff | 8 days |
+
+**Rules:**
+1. Hold limit uses the **current regime** at check time (not entry regime).
+2. A 80% threshold triggers an amber ⏱ warning badge on the rec card.
+3. A 100% threshold triggers a red ⏰ TIME STOP badge — close position by EOD.
+4. Time stop only fires when **both** are true: partial profit not taken AND trailing stop not triggered.
+
+The rationale: in highVol/riskOff environments, mean reversion must happen immediately (within 8–10 days) or the trade is likely to fail. In riskOn/trend markets, slow grinders need 15 days before being force-closed.
 
 ### Recording the Exit
 
@@ -328,6 +371,17 @@ Intraday stop/target alerts are checked via `checkIntradayStopTarget()` on every
 - `state.intraday.todayPnl` accumulates net P&L from all same-day closes.
 - **Resets automatically on the next page load after midnight** — `pnlDate` is compared to `todayStr()` on DB restore; stale values are zeroed.
 
+### 8.8 SPI200 Futures Defensive Overlay
+
+Large negative SPI200 futures moves create opening-session selling pressure that makes VWAP Discount entries (Mode B) lower quality.
+
+**Rule:** When `spi200_futures_chg ≤ −1.5%` AND time is before 11:00 AEST:
+- Mode B (VWAP Discount) setups are disabled (`passes = false`)
+- Mode A (VWAP Recapture) would remain enabled when implemented
+- An amber warning banner appears in the Intraday tab
+
+The threshold of −1.5% was chosen based on the enhancement review. Threshold sensitivities (−1.0%, −2.0%) can be evaluated via the backtest tab.
+
 ---
 
 ## 9. Market Regime Awareness
@@ -345,6 +399,21 @@ The regime engine classifies the market into six named states using macro data, 
 | **`panic`** | Circuit-breaker territory; ADR < 0.15 | All recs blocked (qty=0, `_regimeBlocked='panic'`). Cash only. | 4.0× ATR (moot) |
 
 **ASX-specific rule:** Always check the XJO trend on the Macro page before running a scan. A valid individual setup has a significantly lower hit rate when the broad market is in a downtrend.
+
+#### Regime-Aware Heat Budget
+
+The portfolio heat budget (total $ at risk across open positions as % of net worth) is dynamically capped by market regime:
+
+| Regime | Max Heat |
+|--------|----------|
+| riskOn | 6% |
+| trend | 5% |
+| sideways | 5% |
+| highVol | 3% |
+| riskOff | 2% |
+| panic | 0% (all BUY/TOP_UP blocked) |
+
+The **effective limit** = min(user setting, regime ceiling). During riskOff, new positions are rare. During panic, no new longs are permitted regardless of user setting.
 
 **SPI200 futures lead indicator:** The SPI200 futures price (`spi200_futures_chg` on the Macro page) reflects what institutional participants expect the ASX200 to open at — it votes in the regime classifier as a same-session lead indicator. A futures drop of −1.5%+ adds a `riskOff` vote even before the ASX opens.
 
@@ -580,7 +649,20 @@ Every snapshot records these 18 features at trade entry time. Features are sourc
 
 ---
 
-### 14.5 Label Construction
+### 14.5 Kelly Phase Gate
+
+The system applies a phased Kelly fraction based on the number of completed trades in `day_trade_history.db`:
+
+| Phase | Trades | Kelly Fraction |
+|-------|--------|---------------|
+| 1 | < 200 | 0.10 (10%) |
+| 2 | ≥ 200 | 0.25 (25%) |
+
+Phase 1 uses a conservative 0.10 Kelly because win-rate and R:R estimates are noisy on small samples. Phase 2 unlocks the standard 0.25 Kelly once statistics stabilise across sufficient out-of-sample trades.
+
+The `_kellyPhase` and `nCompletedTrades` fields are returned by `computeTradeParams()` and shown in the Day Trading Model tab.
+
+### 14.6 Label Construction
 
 ```
 outcome = 'win'        if  pnl_pct > +0.5%

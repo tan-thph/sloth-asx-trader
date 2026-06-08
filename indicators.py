@@ -736,6 +736,21 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
             "volume": int(row["Volume"]),
         })
 
+    # ── Overnight gap risk percentiles ────────────────────────────────────────
+    # Gap% = abs(Open_t − Close_{t-1}) / Close_{t-1} — measures jump risk
+    gap95_pct = None
+    gap99_pct = None
+    try:
+        if len(hist) >= 20:
+            _gaps = (hist['Open'] - hist['Close'].shift(1)).abs() / hist['Close'].shift(1)
+            _gaps = _gaps.dropna()
+            _recent_gaps = _gaps.tail(252)
+            if len(_recent_gaps) >= 20:
+                gap95_pct = round(float(_recent_gaps.quantile(0.95)), 5)
+                gap99_pct = round(float(_recent_gaps.quantile(0.99)), 5)
+    except Exception:
+        pass
+
     return {
         "ticker":      ticker.upper(),
         "asx_ticker":  t,
@@ -825,6 +840,10 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         # Earnings proximity
         "days_to_earnings": days_to_earnings,
         "pre_earnings_risk": pre_earnings_risk,
+
+        # Overnight gap risk percentiles (252-day rolling)
+        "gap95_pct":       gap95_pct,
+        "gap99_pct":       gap99_pct,
 
         # Fundamentals
         "fundamentals": fundamentals,

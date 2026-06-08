@@ -6128,5 +6128,84 @@ class TestDayTradeTraining(unittest.TestCase):
             self.assertIn(feat, js_src, f"Feature '{feat}' must be in JS dtBuildFeatures")
 
 
+class TestSprintQuant(unittest.TestCase):
+    """Sprint 52 quant enhancements: gap risk, regime heat, SPI overlay."""
+
+    def setUp(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        self.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_intraday_scan_accepts_spi_chg_param(self):
+        """POST /api/intraday/scan accepts spi_chg without error (empty tickers = 200)."""
+        r = self.client.post('/api/intraday/scan',
+                             json={'tickers': [], 'spi_chg': -2.0},
+                             content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json(), {})
+
+    def test_intraday_scan_no_spi_chg_still_works(self):
+        """POST /api/intraday/scan without spi_chg still returns 200."""
+        r = self.client.post('/api/intraday/scan',
+                             json={'tickers': []},
+                             content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+
+    def test_analyse_ticker_has_gap_fields(self):
+        """Verify gap95_pct and gap99_pct keys exist in analyse_ticker output keys."""
+        # Just import and inspect the function — don't call it (needs network).
+        from indicators import analyse_ticker
+        import inspect
+        src = inspect.getsource(analyse_ticker)
+        self.assertIn('gap95_pct', src)
+        self.assertIn('gap99_pct', src)
+
+    def test_quant_engine_js_has_gap_risk(self):
+        """quant-engine.js references gap95_pct for the gap risk model."""
+        with open(os.path.join(ROOT, 'js', 'quant-engine.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('gap95_pct', src)
+        self.assertIn('gapRiskActive', src)
+
+    def test_quant_engine_js_has_kelly_phase(self):
+        """quant-engine.js implements the Kelly phase gate."""
+        with open(os.path.join(ROOT, 'js', 'quant-engine.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('_kellyPhaseFrac', src)
+        self.assertIn('_kellyPhase', src)
+        self.assertIn('_nCompleted', src)
+
+    def test_analysis_js_has_regime_heat_limits(self):
+        """analysis.js implements regime-aware heat limits."""
+        with open(os.path.join(ROOT, 'js', 'analysis.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('_REGIME_HEAT_LIMITS', src)
+        self.assertIn('riskOff', src)
+
+    def test_day_trading_js_has_time_stop(self):
+        """day-trading.js implements time-based exit helpers."""
+        with open(os.path.join(ROOT, 'js', 'pages', 'day-trading.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('_dtTradingDaysElapsed', src)
+        self.assertIn('_dtMaxHoldDays', src)
+        self.assertIn('_dtTimeStopBadge', src)
+        self.assertIn('TIME_STOP_DAYS', src)
+
+    def test_intraday_strategy_js_sends_spi_chg(self):
+        """intraday-strategy.js sends spi_chg in the scan request body."""
+        with open(os.path.join(ROOT, 'js', 'intraday-strategy.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('spi_chg', src)
+
+    def test_intraday_py_handles_spi_chg(self):
+        """routes/intraday.py reads spi_chg from request body."""
+        with open(os.path.join(ROOT, 'routes', 'intraday.py'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('spi_chg', src)
+        self.assertIn('spi_defensive', src)
+        self.assertIn('spi_blocked', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

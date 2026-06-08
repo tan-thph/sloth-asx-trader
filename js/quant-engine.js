@@ -67,8 +67,15 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
     : {};
   const earningsAdj = signals.pre_earnings_risk ? 1.3 : 1.0;
   const stopMultiple = userStopMult ?? regimeMod.stopAtrMult ?? QUANT_CONFIG.stopAtrMultiple;
-  const stopDist = stopMultiple * earningsAdj * atr;
-  const stopLoss = +(price - stopDist).toFixed(4);
+  const atrStopDist = stopMultiple * earningsAdj * atr;
+  // ── Overnight gap risk floor ───────────────────────────────────────────────
+  // gap95_pct is the 95th-percentile overnight gap from 252-day history (decimal,
+  // e.g. 0.025 = 2.5%). RiskPerShare = max(ATR stop, gap95 floor).
+  const gap95Pct  = (signals && signals.gap95_pct) ? signals.gap95_pct : 0;
+  const gap95Dist = gap95Pct * price;
+  const gapRiskActive = gap95Dist > atrStopDist && gap95Dist > 0;
+  const stopDist  = Math.max(atrStopDist, gap95Dist);
+  const stopLoss  = +(price - stopDist).toFixed(4);
 
   // ── Target ─────────────────────────────────────────────────────────────────
   const targetCandidates = [
@@ -118,7 +125,17 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   const b = rrRatio;
   // Allow negative Kelly through so we can reject on negative EV before minQty applies.
   const kellyFull = b > 0 ? (p * b - q) / b : 0;
-  const kellyFrac = kellyFull * (_ap.kellyFraction ?? QUANT_CONFIG.kellyFraction);
+  // ── Kelly phase gate ──────────────────────────────────────────────────────
+  // Phase 1 (<200 completed trades): cap Kelly at 0.10. High uncertainty —
+  // win-rate and R:R estimates are noisy on small samples.
+  // Phase 2 (≥200 trades): unlock up to 0.25 Kelly when statistics stabilise.
+  // _dtStats is loaded by dt-training.js; safe to read at call time (post-load).
+  var _nCompleted = (typeof _dtStats !== 'undefined' && _dtStats && typeof _dtStats.completed === 'number')
+    ? _dtStats.completed : 0;
+  var _kellyPhaseFrac = _nCompleted >= 200 ? 0.25 : 0.10;
+  var _kellyPhase = _nCompleted >= 200 ? 2 : 1;
+  const configuredFrac = _ap.kellyFraction != null ? _ap.kellyFraction : QUANT_CONFIG.kellyFraction;
+  const kellyFrac = kellyFull * Math.min(configuredFrac, _kellyPhaseFrac);
   if (kellyFrac <= 0) {
     return { ok: false, reason: `negative expected value (Kelly=${kellyFull.toFixed(3)}) — skip` };
   }
@@ -190,6 +207,11 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
     winProb: p,
     ...(earningsAdj > 1 ? { _preEarningsAdj: true } : {}),
     ...(varMult < 1.0   ? { _varAdjusted: true, _varMult: varMult } : {}),
+    _gapRiskActive:      gapRiskActive,
+    gap95Pct:            +gap95Pct.toFixed(5),
+    _kellyPhase:         _kellyPhase,
+    _kellyPhaseFrac:     _kellyPhaseFrac,
+    nCompletedTrades:    _nCompleted,
   };
 }
 

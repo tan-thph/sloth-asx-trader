@@ -910,7 +910,14 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // user-configured heat budget (Risk page → "Set budget", stored in
     // state.settings.maxRiskBudgetPct, default 5% of net worth).
     {
-      const budgetPct   = parseFloat(state.settings.maxRiskBudgetPct || 5);
+      // Regime-aware heat limit: tighter caps during stress regimes.
+      // Effective limit = min(user setting, regime ceiling).
+      const _REGIME_HEAT_LIMITS = { riskOn: 6, trend: 5, sideways: 5, highVol: 3, riskOff: 2, panic: 0 };
+      const _curRegimeName  = (state.currentRegime && state.currentRegime.regime) || 'sideways';
+      const _regimeHeatPct  = _REGIME_HEAT_LIMITS[_curRegimeName] != null ? _REGIME_HEAT_LIMITS[_curRegimeName] : 5;
+      const _userHeatPct    = parseFloat(state.settings.maxRiskBudgetPct || 5);
+      const budgetPct       = Math.min(_userHeatPct, _regimeHeatPct);
+      const _heatLimitSource = _regimeHeatPct <= _userHeatPct ? `regime:${_curRegimeName}` : 'user';
       const totalValue  = totalNetWorth();
       const budgetAUD   = totalValue * budgetPct / 100;
 
@@ -937,7 +944,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         if (remaining <= 0) {
           budgetBlockedCount++;
           return { ...r, qty: 0, _budgetBlocked: true,
-            _budgetNote: `Heat budget exhausted ($${budgetAUD.toFixed(0)} limit, $0 remaining)` };
+            _budgetNote: `Heat budget exhausted ($${budgetAUD.toFixed(0)} limit, $0 remaining) [${_heatLimitSource}]` };
         }
 
         // Rec partially fits — scale qty to remaining capacity
@@ -946,13 +953,13 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         if (scaledQty < 1) {
           budgetBlockedCount++;
           return { ...r, qty: 0, _budgetBlocked: true,
-            _budgetNote: `Heat budget: $${remaining.toFixed(0)} remaining < 1-share risk ($${riskPerShare.toFixed(0)})` };
+            _budgetNote: `Heat budget: $${remaining.toFixed(0)} remaining < 1-share risk ($${riskPerShare.toFixed(0)}) [${_heatLimitSource}]` };
         }
         budgetScaledCount++;
         const scaledRisk = +(scaledQty * riskPerShare).toFixed(2);
         consumed += scaledRisk;
         return { ...r, qty: scaledQty, riskAUD: scaledRisk, _budgetScaled: true,
-          _budgetNote: `Heat budget: $${remaining.toFixed(0)} of $${budgetAUD.toFixed(0)} remaining` };
+          _budgetNote: `Heat budget: $${remaining.toFixed(0)} of $${budgetAUD.toFixed(0)} remaining [${_heatLimitSource}]` };
       });
 
       // Drop budget-blocked recs
