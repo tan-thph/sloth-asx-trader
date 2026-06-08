@@ -443,5 +443,397 @@ R:R ratio:                     __________    (must be ≥ 2.0)
 
 ---
 
+---
+
+## 14. Statistical Learning System — Trade History and Predictive Model
+
+### 14.1 Purpose
+
+The rule-based filters in §2 and §3 define which setups are *structurally valid*. They do not distinguish between valid setups that have historically worked well for **you** and valid setups that have not. Two traders using identical entry rules on the same ticker on the same day will accumulate different outcome distributions because execution timing, position sizing decisions, and individual judgement at exit create different samples.
+
+The learning system is a **personalised win-probability estimator**. It records your own trades — entry signals, market context, and final outcome — then trains a statistical model on that personal history. The model answers one question:
+
+> *Given these 18 technical and contextual features at entry time, what fraction of my past trades with similar features ended as wins?*
+
+This is distinct from the Claude AI analysis (qualitative conviction) and from the regime gate (structural macro filter). The learning model operates on your realised outcomes — the other two layers operate on forward-looking analysis. All three run in parallel.
+
+**No external API is called. All computation is deterministic Python/numpy running on your local machine.**
+
+---
+
+### 14.2 Architecture and Data Flow
+
+```
+Trade Execution
+    │
+    ▼
+dtSaveSnapshot()                    ← js/dt-training.js
+    │  fires immediately after execute; fire-and-forget (never blocks the trade)
+    │
+    ▼
+POST /api/daytrading/snapshot       ← routes/day_trade_training.py
+    │  persists 18 features + metadata to day_trade_history.db
+    │
+    │  (trade runs…)
+    │
+Trade Close
+    │
+    ▼
+dtCloseSnapshot()                   ← js/dt-training.js
+    │  called from _closeDayTrade() and closeIntradayPosition()
+    │
+    ▼
+PATCH /api/daytrading/snapshot/<id>/close
+    │  writes exit_price, pnl_pct, outcome ('win'|'loss'|'breakeven'), exit_reason
+    │
+    ▼
+day_trade_history.db                ← day_trade_db.py (SQLite, WAL, separate from asx_trader.db)
+    │
+    │  [when you click Train Model]
+    │
+    ▼
+POST /api/daytrading/train
+    │
+    ├── Load completed snapshots (outcome ≠ 'open')
+    ├── Build 18-column feature matrix X  (NaN → column-mean imputation)
+    ├── Binary label y: 1 = win (pnl_pct > 0.5%), 0 = loss/breakeven
+    ├── Standardise X: z = (x − μ) / σ  (column-wise)
+    ├── Compute IC: Spearman rank correlation per feature with y
+    ├── Fit: gradient-descent logistic regression with L2 regularisation
+    ├── Evaluate: accuracy, precision, recall, F1 on full training set
+    └── Persist: model weights, bias, μ, σ → model_state table; IC → feature_importance table
+    │
+    ▼
+GET /api/daytrading/model           ← loads on Day Trading page open
+    │  returns feature_names, weights[], bias, means[], stds[]
+    │  cached in window._dtModel (JavaScript)
+    │
+    ▼
+dtPredictLocal(features, _dtModel)  ← client-side in dt-training.js
+    │  no server round-trip per setup
+    │
+    ▼
+📊 X% win badge on each pending setup card (Setups tab)
+```
+
+The model is **not retrained automatically**. You control when to retrain via the 🧠 Model tab → **Train Model** button. Retrain after every 10–20 new completed trades.
+
+---
+
+### 14.3 Separate Database
+
+The learning data lives in `day_trade_history.db` — a dedicated SQLite database, physically separate from the main `asx_trader.db`. This isolation is deliberate:
+
+- Training data is append-only and never needs transactional consistency with portfolio or recommendation state.
+- The main DB can be backed up / restored independently without touching historical trade snapshots.
+- The WAL mode and `synchronous=NORMAL` settings are identical to the main DB.
+
+Schema (key tables):
+
+| Table | Purpose |
+|---|---|
+| `trade_snapshots` | One row per trade. Entry fields populated on execute; exit fields patched on close. |
+| `model_state` | One row per training run. Stores serialised weights, bias, μ, σ as JSON. Only the latest row is used for predictions. |
+| `feature_importance` | Per-feature IC and LR coefficient for each training run. Used by the Model tab bar chart. |
+
+---
+
+### 14.4 Feature Set — 18 Inputs
+
+Every snapshot records these 18 features at trade entry time. Features are sourced from `state.liveSignals[ticker]` (populated by `GET /api/analyse/<ticker>`) and `state.macroData` (from `GET /api/macro`).
+
+#### Technical indicators (13)
+
+| Feature | Source field | Meaning |
+|---|---|---|
+| `rsi_14` | `signals.rsi_14` | RSI 14-period. Oversold entries cluster below 40. |
+| `bb_pct_b` | `signals.bb_pct_b` | Bollinger Band %B — 0 = lower band, 1 = upper band. Core entry trigger. |
+| `bb_bandwidth` | `signals.bb_bandwidth` | Band width normalised by mid-line. Measures current volatility regime. |
+| `atr_pct` | `signals.atr_14 / price × 100` | ATR as % of price. Normalised so a $2 ATR on a $20 stock is comparable to a $5 ATR on a $100 stock. |
+| `adx` | `signals.adx` | Trend strength 0–100. High ADX in a falling market → mean-reversion less reliable. |
+| `volume_zscore` | `signals.volume_zscore` | Standard deviations above 20-day volume mean. Institutional participation signal. |
+| `mfi_14` | `signals.mfi_14` | Money Flow Index — volume-weighted RSI. Independent of pure price momentum. |
+| `stoch_k` | `signals.stoch_k` | Stochastic %K. Measures where price sits within its recent high/low range. |
+| `williams_r` | `signals.williams_r` | Williams %R. Inverted Stochastic; negative values; close to 0 = overbought. |
+| `cci_20` | `signals.cci_20` | Commodity Channel Index 20-period. Mean-reversion signal: extreme negative = oversold. |
+| `setup_score` | `signals.score` | Composite 0–100 signal score computed by `_score_ticker()` in `indicators.py`. Reflects FACTOR_WEIGHTS. |
+| `price_vs_sma20` | `(price / sma_20 − 1) × 100` | Price distance from 20-day SMA as %. Negative = below SMA (pullback). |
+| `price_vs_sma50` | `(price / sma_50 − 1) × 100` | Price distance from 50-day SMA as %. |
+
+#### Market context (3)
+
+| Feature | Source | Meaning |
+|---|---|---|
+| `asx200_5d_ret` | `macroData.asx200_5d_ret` | ASX200 5-day return %. Negative = broad market selling. |
+| `adl_ratio` | `macroData.advance_decline_ratio` | Fraction of ASX200 tickers above their 20-day SMA. Breadth indicator. |
+| `rba_rate` | `macroData.rba_rate` | RBA cash rate %. Higher rates = tighter financial conditions. |
+
+#### Intraday-specific (2, null for swing trades)
+
+| Feature | Source | Meaning |
+|---|---|---|
+| `intraday_rsi` | `signals.intraday_rsi` | RSI on 5-minute bars at scan time. Oversold = ≤ 40. |
+| `vwap_position` | `signals.vwap_pct` | `(price − VWAP) / price × 100`. Negative = trading below VWAP. |
+| `volume_accel` | `signals.volume_acceleration` | Whether 5m volume is rising relative to session average. |
+
+**Note:** Swing trade snapshots have `intraday_rsi`, `vwap_position`, and `volume_accel` set to NULL (→ imputed to column mean during training). The model handles mixed swing/intraday datasets without segregating them — if the sample is large enough to stratify by trade type, do so manually by deleting swing or intraday rows from the History tab before training.
+
+---
+
+### 14.5 Label Construction
+
+```
+outcome = 'win'        if  pnl_pct > +0.5%
+outcome = 'breakeven'  if  -0.5% ≤ pnl_pct ≤ +0.5%
+outcome = 'loss'       if  pnl_pct < -0.5%
+```
+
+Binary label for model training:
+```
+y = 1  if outcome == 'win'
+y = 0  if outcome == 'loss' or 'breakeven'
+```
+
+The 0.5% threshold is deliberate: ASX brokerage round-trip (2× $10 on a $5,000 position = 0.4%) means any "win" below 0.5% is economically a breakeven or worse after slippage. Treating breakeven as a loss makes the model conservative — it only counts genuine positive outcomes.
+
+`pnl_pct` is computed at close:
+```
+pnl_pct = (exit_price − entry_price) / entry_price × 100
+```
+
+For closed trades patched via `dtCloseSnapshot()`, this is computed from actual fill prices, not indicative values.
+
+**Exit reason** is inferred from price geometry at close:
+
+| Exit reason | Condition |
+|---|---|
+| `target` | `closePrice ≥ target × 0.99` |
+| `stop` | `closePrice ≤ stopLoss × 1.01` |
+| `time_stop` | Intraday 15:00 AEST auto-close |
+| `manual` | Everything else |
+
+---
+
+### 14.6 Training Algorithm — Logistic Regression (Pure Numpy)
+
+The training algorithm requires no external ML library. It runs entirely on `numpy`, which is already a transitive dependency of `yfinance`/`pandas`.
+
+#### Step 1 — Data preparation
+
+```python
+# Load completed snapshots (outcome ≠ 'open')
+rows = conn.execute("""
+    SELECT * FROM trade_snapshots
+    WHERE outcome IN ('win', 'loss', 'breakeven')
+    ORDER BY entry_date DESC LIMIT 2000
+""").fetchall()
+
+# Build feature matrix (18 columns × N rows)
+X_raw = [[row[f] or np.nan for f in FEATURES] for row in rows]
+
+# Mean imputation: replace NaN with the column mean
+# (prevents features missing for one trade type from distorting training)
+col_means = np.nanmean(X_raw, axis=0)
+X_raw[np.isnan(X_raw)] = col_means[np.where(np.isnan(X_raw))[1]]
+
+# Z-score standardisation: z = (x − μ) / σ
+# Saved to model_state for use at prediction time
+means = X_raw.mean(axis=0)
+stds  = X_raw.std(axis=0)
+stds[stds < 1e-9] = 1.0        # prevent division by zero on constant columns
+X = (X_raw - means) / stds
+```
+
+Standardisation is mandatory before logistic regression. Without it, features measured on different scales (RSI 0–100, volume_zscore −3 to +3, rba_rate 0.1–5.0) would have wildly different gradient magnitudes, making the optimizer unstable.
+
+#### Step 2 — Information Coefficient (Spearman rank correlation)
+
+Before fitting the model, each feature's raw predictive power is measured via the **Information Coefficient (IC)** — the Spearman rank correlation between the feature and the binary outcome:
+
+```python
+def _spearman(a, b):
+    n = len(a)
+    ra = np.argsort(np.argsort(a)).astype(float)  # rank a
+    rb = np.argsort(np.argsort(b)).astype(float)  # rank b
+    d = ra - rb
+    return 1.0 - 6.0 * np.sum(d * d) / (n * (n**2 - 1))
+
+ics = [_spearman(X_raw[:, i], y) for i in range(len(FEATURES))]
+```
+
+The IC is computed on **raw (unstandardised) features** because rank correlation is scale-invariant. It serves two purposes:
+
+1. **Feature importance display** — the horizontal bar chart on the 🧠 Model tab shows `abs(IC)` per feature, sorted descending. Features with IC ≈ 0 carry no predictive signal in your sample.
+2. **Model diagnostics** — if the top-IC feature has `|IC| < 0.05`, the sample is too small or the rules are already optimal (no further signal to extract).
+
+Spearman is preferred over Pearson because the relationship between a technical indicator and outcome is rarely linear — it is monotone (RSI below 30 is good, RSI above 70 is bad) but the exact functional form is unknown.
+
+#### Step 3 — Gradient descent logistic regression with L2 regularisation
+
+```python
+def _logistic_regression(X, y, lr=0.05, epochs=1000, l2=0.01):
+    n, p = X.shape
+    w = np.zeros(p)     # weight vector (one per feature)
+    b = 0.0             # bias term
+
+    for _ in range(epochs):
+        # Forward pass: sigmoid(Xw + b)
+        logits = np.clip(np.dot(X, w) + b, -20, 20)
+        pred   = 1.0 / (1.0 + np.exp(-logits))
+
+        # Gradients of binary cross-entropy loss + L2 penalty
+        err = pred - y
+        dw  = np.dot(X.T, err) / n + l2 * w   # L2 penalty on weights, not bias
+        db  = np.mean(err)
+
+        # Gradient descent step
+        w -= lr * dw
+        b -= lr * db
+
+    return w, b
+```
+
+**Hyperparameter rationale:**
+
+| Parameter | Value | Reason |
+|---|---|---|
+| `lr` (learning rate) | 0.05 | Conservative for small datasets (n=15–200). Avoids overshooting the minimum. |
+| `epochs` | 1,000 | Sufficient to converge for n<500 with lr=0.05. Runtime <100ms on any modern CPU. |
+| `l2` (regularisation) | 0.01 | Prevents overfitting on small samples. Forces the model toward the prior (uniform win probability) when the signal is weak. |
+
+L2 regularisation is critical for small datasets. Without it, the model will overfit — assigning extreme weights to features that happened to correlate with outcome in 20–30 trades by chance, then performing poorly on the next 20.
+
+The logit is clipped to [−20, +20] before applying the sigmoid to prevent `exp(-logit)` overflow for extreme feature values.
+
+#### Step 4 — Model persistence
+
+After fitting, the following are serialised as JSON and stored in `model_state`:
+
+```
+feature_names  → ordered list of feature keys (defines column→index mapping)
+weights        → fitted w vector (length 18)
+bias           → fitted b scalar
+feature_means  → μ from standardisation (length 18)
+feature_stds   → σ from standardisation (length 18)
+```
+
+Each training run appends a new row to `model_state`. The prediction endpoints always use `ORDER BY trained_at DESC LIMIT 1` — old model runs are retained for audit but never used.
+
+---
+
+### 14.7 Prediction — Client-Side Inference
+
+After `GET /api/daytrading/model` loads the model into `window._dtModel`, all predictions run entirely in the browser with no server round-trip:
+
+```javascript
+function dtPredictLocal(features, model) {
+    var fn   = model.feature_names;  // ordered list of 18 names
+    var w    = model.weights;
+    var mu   = model.feature_means;
+    var sig  = model.feature_stds;
+    var bias = model.bias;
+
+    // Apply the same standardisation the training used
+    var logit = bias;
+    for (var i = 0; i < fn.length; i++) {
+        var raw = features[fn[i]] ?? 0;    // null/undefined → 0
+        var z   = (raw - mu[i]) / sig[i];  // z-score
+        logit  += z * w[i];
+    }
+
+    // Clamp and apply sigmoid
+    logit = Math.max(-20, Math.min(20, logit));
+    return 1 / (1 + Math.exp(-logit));     // P(win) ∈ (0, 1)
+}
+```
+
+The returned value is the model's estimated **P(win)** for the setup given its entry features. This is displayed as the **📊 X% win** badge on each pending Setups card.
+
+**Colour coding of the badge:**
+
+| P(win) | Badge colour | Interpretation |
+|---|---|---|
+| ≥ 60% | Green | Historically profitable feature combination |
+| 45–59% | Amber | Mixed signal; no strong historical edge |
+| < 45% | Red | Historically weak feature combination — consider passing |
+
+The badge is informational, not a gate. A red badge means your personal history with similar setups has been poor — it does not block execution.
+
+---
+
+### 14.8 Using the System in Practice
+
+#### Building a usable dataset
+
+Minimum 15 completed trades are required before training is enabled. Realistically, 30–50 trades are needed before the IC estimates stabilise. Below 30 trades, the model will overfit and the ICs will be noisy.
+
+**Do not cherry-pick.** Let all completed trades flow into the DB automatically — including losses. A model trained only on winners has a 100% win rate on training data and no predictive power.
+
+#### Retraining cadence
+
+Retrain after every **10–20 new completed trades** or after a **regime transition** (the historical distribution of entry conditions shifts). The 🧠 Model tab shows the training timestamp and sample count — if it is more than 3 months old or has fewer than 20 samples, retrain before relying on the badge scores.
+
+#### Interpreting feature importances
+
+The bar chart sorts features by `|IC|` (absolute Spearman correlation with outcome). The sign matters:
+
+| IC sign | Meaning |
+|---|---|
+| Positive | Higher feature value → higher historical win rate |
+| Negative | Lower feature value → higher historical win rate |
+
+**Example interpretations:**
+
+- `bb_pct_b IC = −0.18` → setups where %B is lower (deeper in the lower band) have historically won more often. Your entries are better when they are more oversold.
+- `adx IC = −0.12` → lower ADX at entry correlates with wins. Mean-reversion works better in ranging markets for you — consistent with the §2.3 regime filter.
+- `asx200_5d_ret IC = +0.09` → setups entered after a rising market outperform those entered during market drawdowns. The broad market context matters.
+- `rsi_14 IC ≈ 0` → RSI at entry has no discriminatory power in your sample. Either your RSI threshold is already well-calibrated, or RSI adds no information beyond `bb_pct_b` for your particular trade timing.
+
+If `|IC| < 0.03` for all features after 50+ trades, your entry rules are already near-optimal for the signals you are tracking — the model cannot find additional edge. This is a valid and useful finding.
+
+#### Separating swing and intraday models
+
+The current implementation trains a single model on both trade types. If you want separate models:
+
+1. Go to 📋 History tab.
+2. Delete all swing (or all intraday) records using the ✕ buttons or the Clear All button.
+3. Train the model on the remaining type.
+4. Export the weights mentally (note which features matter) and restore the full history.
+
+A future enhancement could expose a `trade_type` filter on the train endpoint. For now, if your intraday and swing volumes are both ≥15 completed trades, the mixed-model approach is adequate — the `intraday_rsi` and `vwap_position` features will naturally receive low or zero IC for swing-dominated samples, and the model self-adjusts.
+
+---
+
+### 14.9 Model Reliability Boundaries
+
+The model is a **low-sample pattern detector**, not a calibrated probability estimator. Treat it accordingly.
+
+| Condition | Reliability |
+|---|---|
+| n < 15 completed trades | No model available. Rule-based filters only. |
+| n = 15–29 | Model trains but ICs and weights are unreliable. Treat badge as directional, not quantitative. |
+| n = 30–49 | Moderate reliability. Top 3–4 features are likely stable; tail features are noise. |
+| n ≥ 50 | Reasonable reliability. Retrain every 10–20 new trades to stay current. |
+| n ≥ 100 | Good reliability. Accuracy should meaningfully exceed 50% if a real edge exists. |
+
+**The model cannot account for regime shifts.** If you built most of your dataset in a `riskOn` regime and are now trading in `riskOff`, the feature distributions differ and the model is stale. Add `regime` as a hard filter (only trade when regime matches the majority of training data) or retrain after the regime settles.
+
+**Accuracy around 50% is normal and expected.** Day trading mean-reversion on a 5–15 day horizon has an inherently noisy outcome distribution. A model that achieves 55–60% accuracy on hold-out data is genuinely useful. An apparent accuracy of 80%+ on a small sample (< 30 trades) is almost certainly overfitting.
+
+---
+
+### 14.10 What the System Does Not Do
+
+| Capability | Available? | Notes |
+|---|---|---|
+| Auto-adjust entry thresholds | No | FACTOR_WEIGHTS in `indicators.py` are static. The model augments, not replaces, the signal score. |
+| Predict magnitude of profit | No | Binary win/loss only. Expected P&L is a separate calculation. |
+| Call any external API | No | Pure numpy, local DB, no network calls. |
+| Learn from other traders' data | No | Model is trained exclusively on your own trade history. |
+| Optimise the entry rules in §2–§3 | No | Rule optimisation requires a different approach (e.g., the walk-forward backtest in §Performance). |
+| Retrain automatically | No | Manual trigger only — protects against training on mid-regime noise. |
+
+---
+
 *Not financial advice. For personal research and strategy development only.*
 *Always conduct your own due diligence. Past technical patterns do not guarantee future results.*
