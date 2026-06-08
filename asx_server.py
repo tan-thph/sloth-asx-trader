@@ -120,9 +120,13 @@ from db import DB_PATH, get_db, init_db, backup_db, log_failed_ticker as _log_fa
 # Separate notifications database (notifications.db — not mixed into trading data)
 from notifications_db import init_notif_db
 
+# Day trading history + ML training database (day_trade_history.db)
+from day_trade_db import init_dt_db
+
 # Run migrations then take a backup on startup
 init_db()
 init_notif_db()
+init_dt_db()
 _bak = backup_db()
 if _bak:
     log.info("DB backup: %s", _bak)
@@ -161,7 +165,8 @@ from routes.news      import bp as _news_bp, _NE_OK
 from routes.alerts        import bp as _alerts_bp
 from routes.import_csv    import bp as _import_csv_bp
 from routes.intraday      import bp as _intraday_bp
-from routes.notifications import bp as _notifications_bp
+from routes.notifications       import bp as _notifications_bp
+from routes.day_trade_training  import bp as _dt_training_bp
 app.register_blueprint(_claude_bp)
 app.register_blueprint(_portfolio_bp)
 app.register_blueprint(_dividends_bp)
@@ -175,6 +180,7 @@ app.register_blueprint(_alerts_bp)
 app.register_blueprint(_import_csv_bp)
 app.register_blueprint(_intraday_bp)
 app.register_blueprint(_notifications_bp)
+app.register_blueprint(_dt_training_bp)
 
 if _AE_OK:
     app.register_blueprint(ann_bp, url_prefix='/api/announcements')

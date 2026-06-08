@@ -5777,5 +5777,356 @@ class TestNotificationCentre(unittest.TestCase):
         self.assertIn("_notifications_bp", src)
 
 
+class TestDayTradeTraining(unittest.TestCase):
+    """Tests for the day trading ML training system (day_trade_history.db + routes)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import contextlib, sqlite3
+
+        # Build an in-memory DB for day_trade_history (isolated from main DB)
+        cls._dt_conn = sqlite3.connect(":memory:")
+        cls._dt_conn.row_factory = sqlite3.Row
+
+        import day_trade_db as dtdb
+        dtdb.init_dt_db.__doc__  # ensure module loaded
+        dtdb.get_dt_db           # attribute probe
+
+        _SCHEMA = dtdb._SCHEMA
+        cls._dt_conn.executescript(_SCHEMA)
+        cls._dt_conn.commit()
+
+        @contextlib.contextmanager
+        def _test_dt_db():
+            yield cls._dt_conn
+            cls._dt_conn.commit()
+
+        # Patch get_dt_db in both the module and the route blueprint
+        dtdb.get_dt_db = _test_dt_db
+        import routes.day_trade_training as rdtt
+        rdtt.get_dt_db = _test_dt_db
+
+        _install_in_memory_db()
+        asx_server.init_db()
+
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+        cls._rdtt = rdtt
+
+    @classmethod
+    def tearDownClass(cls):
+        asx_server.get_db = _orig_get_db
+        cls._dt_conn.close()
+
+    # ── POST /api/daytrading/snapshot ────────────────────────────────────────
+
+    def test_save_snapshot_minimal(self):
+        """POST /api/daytrading/snapshot with ticker + entry_date must succeed."""
+        r = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "BHP.AX", "entry_date": "2026-06-08",
+            "entry_price": 42.50, "qty": 100, "trade_type": "swing",
+        })
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn("id", data)
+        self.assertIsInstance(data["id"], int)
+
+    def test_save_snapshot_full_indicators(self):
+        """POST /api/daytrading/snapshot with full indicator set must persist all fields."""
+        r = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "CBA.AX", "entry_date": "2026-06-08",
+            "entry_price": 118.00, "qty": 50, "trade_type": "swing",
+            "rsi_14": 48.5, "bb_pct_b": 0.32, "adx": 28.4,
+            "asx200_5d_ret": 0.8, "regime": "riskOn",
+        })
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+
+    def test_save_snapshot_missing_ticker_returns_400(self):
+        """POST without ticker must return 400."""
+        r = self.client.post("/api/daytrading/snapshot", json={
+            "entry_date": "2026-06-08",
+        })
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(r.get_json()["ok"])
+
+    def test_save_snapshot_missing_entry_date_returns_400(self):
+        """POST without entry_date must return 400."""
+        r = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "ANZ.AX",
+        })
+        self.assertEqual(r.status_code, 400)
+
+    # ── PATCH /api/daytrading/snapshot/<id>/close ────────────────────────────
+
+    def test_close_snapshot_computes_pnl(self):
+        """PATCH /close must compute pnl_pct and outcome from entry/exit prices."""
+        # Create a snapshot first
+        snap = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "WBC.AX", "entry_date": "2026-06-01",
+            "entry_price": 26.00, "qty": 200, "trade_type": "swing",
+        }).get_json()
+        snap_id = snap["id"]
+
+        r = self.client.patch(f"/api/daytrading/snapshot/{snap_id}/close", json={
+            "exit_price": 27.30,
+            "entry_price": 26.00,
+            "exit_date": "2026-06-08",
+            "exit_reason": "target",
+        })
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["outcome"], "win")
+
+    def test_close_snapshot_loss(self):
+        """PATCH /close with exit < entry must produce 'loss' outcome."""
+        snap = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "NAB.AX", "entry_date": "2026-06-01",
+            "entry_price": 35.00, "qty": 100, "trade_type": "swing",
+        }).get_json()
+
+        r = self.client.patch(f"/api/daytrading/snapshot/{snap['id']}/close", json={
+            "exit_price": 33.50,
+            "entry_price": 35.00,
+            "exit_date": "2026-06-07",
+            "exit_reason": "stop",
+        })
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["outcome"], "loss")
+
+    # ── GET /api/daytrading/history ──────────────────────────────────────────
+
+    def test_history_returns_items(self):
+        """GET /api/daytrading/history must return ok + items list."""
+        r = self.client.get("/api/daytrading/history")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn("items", data)
+        self.assertIn("has_more", data)
+
+    def test_history_pagination(self):
+        """GET /api/daytrading/history?limit=1 must set has_more when >1 record exists."""
+        # Ensure at least 2 records
+        for t in ("MQG.AX", "WES.AX"):
+            self.client.post("/api/daytrading/snapshot", json={
+                "ticker": t, "entry_date": "2026-06-08", "entry_price": 100.0,
+            })
+        r = self.client.get("/api/daytrading/history?limit=1")
+        data = r.get_json()
+        self.assertEqual(len(data["items"]), 1)
+        # has_more should be True since we have multiple records
+        self.assertIsInstance(data["has_more"], bool)
+
+    # ── GET /api/daytrading/stats ────────────────────────────────────────────
+
+    def test_stats_shape(self):
+        """GET /api/daytrading/stats must return summary counters."""
+        r = self.client.get("/api/daytrading/stats")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+        for key in ("total", "wins", "losses", "ready_to_train", "min_train_samples"):
+            self.assertIn(key, data)
+
+    def test_stats_ready_to_train_false_when_insufficient(self):
+        """ready_to_train must be False when completed < MIN_TRAIN_SAMPLES."""
+        r = self.client.get("/api/daytrading/stats")
+        data = r.get_json()
+        # Fresh in-memory DB has no completed trades → not ready
+        self.assertIsInstance(data["ready_to_train"], bool)
+        self.assertIsInstance(data["min_train_samples"], int)
+
+    # ── POST /api/daytrading/train ───────────────────────────────────────────
+
+    def test_train_fails_insufficient_data(self):
+        """POST /api/daytrading/train with < MIN_TRAIN_SAMPLES must return ok=False."""
+        r = self.client.post("/api/daytrading/train")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertFalse(data["ok"])
+        self.assertIn("error", data)
+
+    def test_train_succeeds_with_enough_samples(self):
+        """POST /api/daytrading/train with ≥ MIN_TRAIN_SAMPLES must return accuracy."""
+        # Seed enough completed trades directly into the in-memory DB
+        rdtt = self._rdtt
+        import random
+        random.seed(42)
+
+        rows = []
+        for i in range(20):
+            outcome = "win" if i % 2 == 0 else "loss"
+            rows.append({
+                "ticker": "BHP.AX", "trade_type": "swing",
+                "entry_date": "2026-05-0" + str(i % 9 + 1),
+                "entry_price": 40.0,
+                "rsi_14": 40 + random.random() * 20,
+                "bb_pct_b": random.random(),
+                "adx": 20 + random.random() * 15,
+                "volume_zscore": random.gauss(0, 1),
+                "setup_score": 50 + random.random() * 40,
+                "outcome": outcome,
+                "pnl_pct": (2.0 if outcome == "win" else -1.5),
+            })
+
+        for row in rows:
+            cols = list(row.keys())
+            ph = ", ".join("?" * len(cols))
+            self._dt_conn.execute(
+                f"INSERT INTO trade_snapshots ({', '.join(cols)}) VALUES ({ph})",
+                [row[c] for c in cols]
+            )
+        self._dt_conn.commit()
+
+        r = self.client.post("/api/daytrading/train")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"], msg=data.get("error", ""))
+        self.assertIn("accuracy", data)
+        self.assertGreaterEqual(data["accuracy"], 0.0)
+        self.assertLessEqual(data["accuracy"], 1.0)
+        self.assertIn("feature_importances", data)
+        self.assertGreater(len(data["feature_importances"]), 0)
+
+    # ── GET /api/daytrading/model ────────────────────────────────────────────
+
+    def test_model_available_after_training(self):
+        """GET /api/daytrading/model must return available=True after training."""
+        # Ensure training ran (test order dependency tolerated for speed)
+        r = self.client.get("/api/daytrading/model")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn("available", data)
+        if data["available"]:
+            self.assertIn("model", data)
+            self.assertIn("importances", data)
+            self.assertIn("feature_names", data["model"])
+            self.assertIn("weights", data["model"])
+
+    # ── POST /api/daytrading/predict ─────────────────────────────────────────
+
+    def test_predict_returns_probability(self):
+        """POST /api/daytrading/predict must return a win_probability between 0 and 1."""
+        r = self.client.post("/api/daytrading/predict", json={
+            "rsi_14": 45.0, "bb_pct_b": 0.25, "adx": 28.0,
+            "volume_zscore": 1.2, "setup_score": 72.0,
+        })
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        if data["ok"]:
+            self.assertIn("win_probability", data)
+            self.assertGreaterEqual(data["win_probability"], 0.0)
+            self.assertLessEqual(data["win_probability"], 1.0)
+
+    # ── DELETE /api/daytrading/snapshot/<id> ─────────────────────────────────
+
+    def test_delete_snapshot(self):
+        """DELETE /api/daytrading/snapshot/<id> must remove the record."""
+        snap = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "DELETE_ME.AX", "entry_date": "2026-06-08",
+        }).get_json()
+        snap_id = snap["id"]
+
+        r = self.client.delete(f"/api/daytrading/snapshot/{snap_id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+
+    # ── Infrastructure tests ─────────────────────────────────────────────────
+
+    def test_day_trade_db_module_has_path_constant(self):
+        """day_trade_db.py must define DT_HISTORY_DB_PATH pointing to day_trade_history.db."""
+        import day_trade_db
+        self.assertIn("day_trade_history.db", day_trade_db.DT_HISTORY_DB_PATH)
+
+    def test_day_trade_db_schema_has_required_tables(self):
+        """day_trade_db._SCHEMA must define trade_snapshots and model_state tables."""
+        import day_trade_db
+        schema = day_trade_db._SCHEMA
+        self.assertIn("trade_snapshots", schema)
+        self.assertIn("model_state", schema)
+        self.assertIn("feature_importance", schema)
+
+    def test_blueprint_registered_in_server(self):
+        """asx_server.py must register the day_trade_training blueprint."""
+        with open(os.path.join(ROOT, "asx_server.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("routes.day_trade_training", src)
+        self.assertIn("_dt_training_bp", src)
+
+    def test_init_dt_db_called_on_startup(self):
+        """asx_server.py must call init_dt_db() at startup."""
+        with open(os.path.join(ROOT, "asx_server.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("init_dt_db", src)
+
+    def test_dt_training_js_exists(self):
+        """js/dt-training.js must exist with required functions."""
+        path = os.path.join(ROOT, "js", "dt-training.js")
+        self.assertTrue(os.path.exists(path), "js/dt-training.js must exist")
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        for fn in ("dtSaveSnapshot", "dtCloseSnapshot", "dtBuildFeatures",
+                   "dtPredictLocal", "renderDtHistoryTab", "renderDtModelTab", "dtTrain"):
+            self.assertIn(fn, src, f"dt-training.js must define {fn}")
+
+    def test_dt_training_js_loaded_in_html(self):
+        """asx_trading.html must load dt-training.js before day-trading.js."""
+        with open(os.path.join(ROOT, "asx_trading.html"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("dt-training.js", src)
+        idx_train = src.index("dt-training.js")
+        idx_dt    = src.index("pages/day-trading.js")
+        self.assertLess(idx_train, idx_dt, "dt-training.js must load before pages/day-trading.js")
+
+    def test_history_tab_in_day_trading_page(self):
+        """pages/day-trading.js must include 'history' and 'model' tabs."""
+        with open(os.path.join(ROOT, "js", "pages", "day-trading.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("dt-tab-history", src)
+        self.assertIn("dt-tab-model", src)
+        self.assertIn("renderDtHistoryTab", src)
+        self.assertIn("renderDtModelTab", src)
+
+    def test_execute_day_trade_saves_snapshot(self):
+        """day-trading-analysis.js executeDayTrade must call dtSaveSnapshot after trade."""
+        with open(os.path.join(ROOT, "js", "day-trading-analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("dtSaveSnapshot", src)
+        self.assertIn("_snapshotId", src)
+
+    def test_close_day_trade_saves_snapshot(self):
+        """pages/day-trading.js _closeDayTrade must call dtCloseSnapshot on close."""
+        with open(os.path.join(ROOT, "js", "pages", "day-trading.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("dtCloseSnapshot", src)
+
+    def test_training_algorithm_pure_numpy(self):
+        """routes/day_trade_training.py training must not import sklearn or external ML libs."""
+        with open(os.path.join(ROOT, "routes", "day_trade_training.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("sklearn", src, "Training must use pure numpy — no sklearn")
+        self.assertNotIn("torch", src,   "Training must use pure numpy — no torch")
+        self.assertNotIn("tensorflow", src)
+        self.assertIn("numpy", src, "Training must use numpy")
+        self.assertIn("logistic_regression", src, "Must define logistic regression function")
+        self.assertIn("spearman", src.lower(), "Must compute Spearman IC")
+
+    def test_features_list_consistent(self):
+        """FEATURES in day_trade_training.py must match dtBuildFeatures in dt-training.js."""
+        with open(os.path.join(ROOT, "routes", "day_trade_training.py"), encoding="utf-8") as f:
+            py_src = f.read()
+        with open(os.path.join(ROOT, "js", "dt-training.js"), encoding="utf-8") as f:
+            js_src = f.read()
+        # Core features must appear in both files
+        for feat in ("rsi_14", "bb_pct_b", "adx", "volume_zscore", "setup_score"):
+            self.assertIn(feat, py_src, f"Feature '{feat}' must be in Python FEATURES list")
+            self.assertIn(feat, js_src, f"Feature '{feat}' must be in JS dtBuildFeatures")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

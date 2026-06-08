@@ -282,6 +282,14 @@ function executeDayTrade(recId) {
     pushCashToDb(state.cash);
     const qtyNote = (qty !== rec.qty) ? ` (AI suggested ${rec.qty})` : '';
     toast(`Executed ${rec.ticker} swing trade — ${qty} shares @ $${entryPrice.toFixed(3)} (fee $${brokerage})${qtyNote}`, 'success');
+
+    // Record ML training snapshot (fire-and-forget — failure never blocks execution)
+    if (typeof dtSaveSnapshot === 'function') {
+      const signals = (state.liveSignals && state.liveSignals[rec.ticker]) || {};
+      dtSaveSnapshot(rec, 'swing', signals, state.macroData || {}, entryPrice, qty)
+        .then(function(snapId) { if (snapId) rec._snapshotId = snapId; scheduleSave(); });
+    }
+
     renderPage();
   });
 }

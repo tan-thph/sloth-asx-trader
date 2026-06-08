@@ -21,9 +21,15 @@ function _renderDayTrading() {
       <button class="tab ${activeTab === 'setups'   ? 'active' : ''}" id="dt-tab-setups"   onclick="switchDtTab('setups')">Setups</button>
       <button class="tab ${activeTab === 'intraday' ? 'active' : ''}" id="dt-tab-intraday" onclick="switchDtTab('intraday')">⚡ Intraday</button>
       <button class="tab ${activeTab === 'rules'    ? 'active' : ''}" id="dt-tab-rules"    onclick="switchDtTab('rules')">⚙ Rules</button>
+      <button class="tab ${activeTab === 'history'  ? 'active' : ''}" id="dt-tab-history"  onclick="switchDtTab('history')">📋 History</button>
+      <button class="tab ${activeTab === 'model'    ? 'active' : ''}" id="dt-tab-model"    onclick="switchDtTab('model')">🧠 Model</button>
     </div>
     <div id="dt-tab-content">
-      ${activeTab === 'setups' ? _renderDtSetupsTab() : activeTab === 'intraday' ? _renderDtIntradayTab() : _renderDtRulesTab()}
+      ${activeTab === 'setups'   ? _renderDtSetupsTab()
+        : activeTab === 'intraday' ? _renderDtIntradayTab()
+        : activeTab === 'history'  ? renderDtHistoryTab()
+        : activeTab === 'model'    ? renderDtModelTab()
+        : _renderDtRulesTab()}
     </div>
   `;
 }
@@ -40,6 +46,19 @@ function switchDtTab(tab) {
     _renderDtExtraChips();
   } else if (tab === 'intraday') {
     el.innerHTML = _renderDtIntradayTab();
+  } else if (tab === 'history') {
+    // Reset page so fresh data loads
+    _dtHistItems = []; _dtHistOffset = 0; _dtHistMore = false; _dtStats = null;
+    el.innerHTML = renderDtHistoryTab();
+  } else if (tab === 'model') {
+    _dtModel = undefined;  // force re-fetch with importances
+    _dtStats = null;
+    Promise.all([dtLoadModelWithImportances(), dtLoadStats()]).then(function() {
+      if ((state.dayTrading && state.dayTrading.activeTab) === 'model') {
+        el.innerHTML = renderDtModelTab();
+      }
+    });
+    el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted)">Loading model…</div>';
   } else {
     el.innerHTML = _renderDtRulesTab();
   }
@@ -382,6 +401,7 @@ function _renderDtRec(r, compact = false) {
             ${isClosed   ? `<span style="background:#059669;color:#fff;font-size:10px;padding:2px 7px;border-radius:4px">CLOSED</span>` : ''}
             ${isStale    ? `<span style="background:#ef444422;color:#ef4444;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Setup is ${recAgeDays}d old — signals may no longer be valid">⚠ STALE ${recAgeDays}d</span>` : ''}
             ${r.holdDays ? `<span style="font-size:11px;color:var(--text-muted)">${r.holdDays}d hold est.</span>` : ''}
+            ${isPending && typeof dtWinProbLabel === 'function' ? dtWinProbLabel(r) : ''}
           </div>
           <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">${sigDots}</div>
           <div style="font-size:11px;color:var(--text-muted);display:flex;gap:10px;flex-wrap:wrap">${filterIcons}</div>
@@ -987,6 +1007,19 @@ function executeIntradayTrade(recId) {
     scheduleSave();
     if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
     toast(`⚡ Intraday BUY: ${rec.ticker} × ${qty} @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
+
+    // Record ML training snapshot for intraday trade
+    if (typeof dtSaveSnapshot === 'function') {
+      const itSig = Object.assign({}, (state.liveSignals && state.liveSignals[rec.ticker]) || {}, {
+        intraday_rsi:        rec._intradayRsi || null,
+        vwap_pct:            rec._vwapPct     || null,
+        volume_acceleration: rec._volumeAccel || null,
+        score:               rec.setupScore   || null,
+      });
+      dtSaveSnapshot(rec, 'intraday', itSig, state.macroData || {}, entryPrice, qty)
+        .then(function(snapId) { if (snapId) newPos._snapshotId = snapId; scheduleSave(); });
+    }
+
     renderPage();
   });
 }
@@ -1066,6 +1099,22 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
   }
 
   state.intraday.openPositions = state.intraday.openPositions.filter(p => p.id !== posId);
+
+  // Record close outcome in ML snapshot
+  if (typeof dtCloseSnapshot === 'function' && pos._snapshotId) {
+    const pnlPct = pos.entryPrice ? (closePrice - pos.entryPrice) / pos.entryPrice * 100 : null;
+    const exitReason = typeof dtInferExitReason === 'function'
+      ? dtInferExitReason(closePrice, pos.entryPrice, pos.target, pos.stop, 'BUY')
+      : 'manual';
+    dtCloseSnapshot(pos._snapshotId, {
+      exit_price: closePrice,
+      entry_price: pos.entryPrice,
+      exit_date: todayStr(),
+      exit_reason: exitReason,
+      actual_hold_days: 0,
+      pnl_pct: pnlPct,
+    });
+  }
 
   scheduleSave();
   if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
@@ -1156,6 +1205,26 @@ function _closeDayTrade(recId) {
     rec.status      = 'closed';
     rec._closedAt   = todayStr();
     rec._closePrice = closePrice;
+
+    // Record close outcome in ML snapshot
+    if (typeof dtCloseSnapshot === 'function' && rec._snapshotId) {
+      const pnlPct = entryPrice ? (closePrice - entryPrice) / entryPrice * 100 : null;
+      const holdDays = journalEntry && journalEntry.date
+        ? Math.round((Date.now() - new Date(journalEntry.date).getTime()) / 86400000)
+        : null;
+      const exitReason = typeof dtInferExitReason === 'function'
+        ? dtInferExitReason(closePrice, entryPrice, rec.target, rec.stopLoss, 'BUY')
+        : 'manual';
+      dtCloseSnapshot(rec._snapshotId, {
+        exit_price: closePrice,
+        entry_price: entryPrice,
+        exit_date: todayStr(),
+        exit_reason: exitReason,
+        actual_hold_days: holdDays,
+        pnl_pct: pnlPct,
+      });
+    }
+
     scheduleSave();
     if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
     const sign = net >= 0 ? '+' : '';
