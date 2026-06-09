@@ -449,7 +449,7 @@ def _train_model_impl(conn):
             SELECT * FROM trade_snapshots
             WHERE outcome IN ('win', 'loss', 'breakeven')
               AND ({type_filter})
-            ORDER BY entry_date DESC
+            ORDER BY entry_date ASC, created_at ASC
             LIMIT 2000
         """).fetchall()
 
@@ -513,6 +513,7 @@ def _train_model_impl(conn):
         ics = [_spearman(X_raw[:, i], y) for i in range(len(feat_list))]
 
         # ── Ridge regression (MSE + L2, pure numpy) ──────────────────────────
+        # Defined here so _fit_and_predict_fold (OOS block below) can call it.
         def _ridge_regression(X, y, lr=0.01, epochs=2000, l2=0.05):
             n, p = X.shape
             w = np.zeros(p)
@@ -526,6 +527,74 @@ def _train_model_impl(conn):
                 b -= lr * db
             return w, b
 
+        # ── Out-of-sample evaluation (§0.I) ──────────────────────────────────
+        # Fit transforms on train rows only to avoid leakage; collect held-out
+        # predictions across folds; then refit on all rows for deployment.
+
+        def _fit_and_predict_fold(X_tr_raw, y_tr, X_te_raw):
+            """Standardise + impute on train only; return OOS predictions."""
+            # Impute train NaNs
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", RuntimeWarning)
+                tr_col_means = np.nanmean(X_tr_raw, axis=0)
+            tr_col_means = np.where(np.isnan(tr_col_means), 0.0, tr_col_means)
+            Xtr = X_tr_raw.copy()
+            Xte = X_te_raw.copy()
+            for j in range(Xtr.shape[1]):
+                Xtr[np.isnan(Xtr[:, j]), j] = tr_col_means[j]
+                Xte[np.isnan(Xte[:, j]), j] = tr_col_means[j]
+            # Standardise on train
+            tr_means = Xtr.mean(axis=0)
+            tr_stds  = Xtr.std(axis=0)
+            tr_stds[tr_stds < 1e-9] = 1.0
+            Xtr = (Xtr - tr_means) / tr_stds
+            Xte = (Xte - tr_means) / tr_stds
+            w, b = _ridge_regression(Xtr, y_tr)
+            return np.dot(Xte, w) + b
+
+        n = len(rows)
+        oos_preds = np.full(n, np.nan)
+
+        if n >= 60:
+            # Expanding-window walk-forward: 4 folds
+            cv_method = 'walk_forward'
+            n_folds = 4
+            fold_size = n // (n_folds + 1)
+            start = fold_size  # first train window
+            for k in range(n_folds):
+                train_end = start + k * fold_size
+                test_start = train_end
+                test_end   = min(test_start + fold_size, n)
+                if test_start >= n:
+                    break
+                oos_preds[test_start:test_end] = _fit_and_predict_fold(
+                    X_raw[:train_end], y[:train_end],
+                    X_raw[test_start:test_end],
+                )
+        else:
+            # Single chronological holdout: train on first 70%, test on last 30%
+            cv_method = 'holdout'
+            split = int(n * 0.70)
+            oos_preds[split:] = _fit_and_predict_fold(
+                X_raw[:split], y[:split], X_raw[split:],
+            )
+
+        # Compute OOS metrics on held-out rows only
+        mask = ~np.isnan(oos_preds)
+        n_test = int(mask.sum())
+        if n_test >= 2:
+            y_te   = y[mask]
+            p_te   = oos_preds[mask]
+            ss_r   = float(np.sum((y_te - p_te) ** 2))
+            ss_t   = float(np.sum((y_te - y_te.mean()) ** 2))
+            r2_oos  = round(1.0 - ss_r / ss_t if ss_t > 1e-9 else 0.0, 4)
+            mae_oos = round(float(np.mean(np.abs(y_te - p_te))), 4)
+        else:
+            r2_oos = mae_oos = None
+            cv_method = 'insufficient'
+            n_test = 0
+
+        # ── Final model fit — all rows ────────────────────────────────────────
         weights, bias = _ridge_regression(X, y)
 
         # ── Metrics (R², MAE) ────────────────────────────────────────────────
@@ -542,12 +611,14 @@ def _train_model_impl(conn):
             """INSERT INTO model_state
                    (trained_at, n_samples, n_features, n_wins, n_losses,
                     model_type, trade_type_scope, r2_score, mae_score,
+                    r2_oos, mae_oos, n_test, cv_method,
                     feature_names, weights, bias, feature_means, feature_stds)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 trained_at, len(rows), len(feat_list),
                 n_positive, int(len(rows) - n_positive),
                 'ridge', scope, r2_score, mae_score,
+                r2_oos, mae_oos, n_test, cv_method,
                 json.dumps(feat_list),
                 json.dumps(weights.tolist()),
                 float(bias),
@@ -577,6 +648,10 @@ def _train_model_impl(conn):
             "n_positive": n_positive,
             "r2_score":   r2_score,
             "mae_score":  mae_score,
+            "r2_oos":     r2_oos,
+            "mae_oos":    mae_oos,
+            "n_test":     n_test,
+            "cv_method":  cv_method,
             "trained_at": trained_at,
             "feature_importances": [
                 {"feature": name, "ic": round(ic, 4), "coefficient": round(w, 4)}
@@ -591,6 +666,10 @@ def _train_model_impl(conn):
         results["accuracy"]   = 0.0   # ridge doesn't have classification accuracy
         results["r2_score"]   = swing["r2_score"]
         results["mae_score"]  = swing["mae_score"]
+        results["r2_oos"]     = swing.get("r2_oos")
+        results["mae_oos"]    = swing.get("mae_oos")
+        results["n_test"]     = swing.get("n_test")
+        results["cv_method"]  = swing.get("cv_method")
         results["trained_at"] = swing["trained_at"]
         results["feature_importances"] = swing["feature_importances"]
     elif results["models"].get("intraday", {}).get("ok"):

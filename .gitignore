@@ -27,6 +27,7 @@ ai_responses/
 key.txt
 *.key
 secrets.json
+ngrok.yml
 
 # OS files
 .DS_Store

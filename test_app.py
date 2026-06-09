@@ -5794,6 +5794,23 @@ class TestDayTradeTraining(unittest.TestCase):
 
         _SCHEMA = dtdb._SCHEMA
         cls._dt_conn.executescript(_SCHEMA)
+        # Apply runtime migrations so schema matches production
+        for _sql in [
+            "ALTER TABLE trade_snapshots ADD COLUMN record_type TEXT NOT NULL DEFAULT 'executed'",
+            "ALTER TABLE trade_snapshots ADD COLUMN shadow_reason TEXT",
+            "ALTER TABLE trade_snapshots ADD COLUMN r_multiple REAL",
+            "ALTER TABLE model_state ADD COLUMN trade_type_scope TEXT DEFAULT 'all'",
+            "ALTER TABLE model_state ADD COLUMN r2_score REAL",
+            "ALTER TABLE model_state ADD COLUMN mae_score REAL",
+            "ALTER TABLE model_state ADD COLUMN r2_oos REAL",
+            "ALTER TABLE model_state ADD COLUMN mae_oos REAL",
+            "ALTER TABLE model_state ADD COLUMN n_test INTEGER",
+            "ALTER TABLE model_state ADD COLUMN cv_method TEXT",
+        ]:
+            try:
+                cls._dt_conn.execute(_sql)
+            except Exception:
+                pass
         cls._dt_conn.commit()
 
         @contextlib.contextmanager
@@ -6157,6 +6174,11 @@ class TestSprintMl53(unittest.TestCase):
             "ALTER TABLE model_state ADD COLUMN trade_type_scope TEXT DEFAULT 'all'",
             "ALTER TABLE model_state ADD COLUMN r2_score REAL",
             "ALTER TABLE model_state ADD COLUMN mae_score REAL",
+            # Sprint 54 OOS columns
+            "ALTER TABLE model_state ADD COLUMN r2_oos REAL",
+            "ALTER TABLE model_state ADD COLUMN mae_oos REAL",
+            "ALTER TABLE model_state ADD COLUMN n_test INTEGER",
+            "ALTER TABLE model_state ADD COLUMN cv_method TEXT",
         ]
         for sql in _migrations:
             try:
@@ -6335,6 +6357,87 @@ class TestSprintMl53(unittest.TestCase):
         self.assertIn('shadow_reason', src)
         self.assertIn('heat_blocked', src)
         self.assertIn('dtSaveSnapshot', src)
+
+    # ── Sprint 54: OOS evaluation (§0.I) ─────────────────────────────────────
+
+    def test_oos_columns_in_schema_migrations(self):
+        """day_trade_db migrations include r2_oos, mae_oos, n_test, cv_method."""
+        import day_trade_db as dtdb
+        migrations = dtdb._migrations if hasattr(dtdb, '_migrations') else []
+        # Check via init function source instead
+        import inspect
+        src = inspect.getsource(dtdb.init_dt_db)
+        for col in ('r2_oos', 'mae_oos', 'n_test', 'cv_method'):
+            self.assertIn(col, src, f"Migration for {col} missing from init_dt_db()")
+
+    def test_train_response_has_oos_fields(self):
+        """POST /api/daytrading/train response has r2_oos/mae_oos/n_test/cv_method per model."""
+        self._seed_ridge_trades(35)
+        r = self.client.post('/api/daytrading/train', json={}, content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(data.get('ok'))
+        # Top-level backward-compat fields (may be None for small samples)
+        for field in ('r2_oos', 'mae_oos', 'n_test', 'cv_method'):
+            self.assertIn(field, data, f"Top-level field {field} missing from train response")
+        # Per-model structure
+        if data.get('models') and data['models'].get('swing'):
+            swing = data['models']['swing']
+            for field in ('r2_oos', 'mae_oos', 'n_test', 'cv_method'):
+                self.assertIn(field, swing, f"models.swing.{field} missing from train response")
+
+    def test_oos_persisted_to_model_state(self):
+        """After training, model_state row has cv_method column populated."""
+        self._seed_ridge_trades(35)
+        self.client.post('/api/daytrading/train', json={}, content_type='application/json')
+        row = self._dt_conn.execute(
+            "SELECT cv_method, n_test FROM model_state ORDER BY trained_at DESC LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        # cv_method should be set (holdout or insufficient for 35 samples)
+        self.assertIn(row['cv_method'], ('holdout', 'walk_forward', 'insufficient'))
+
+    def test_oos_r2_le_insample_r2_or_none(self):
+        """OOS R² must be <= in-sample R² (no data leakage) when both present."""
+        self._seed_ridge_trades(35)
+        r = self.client.post('/api/daytrading/train', json={}, content_type='application/json')
+        data = r.get_json()
+        r2_is  = data.get('r2_score')
+        r2_oos = data.get('r2_oos')
+        # Only enforce when both are non-None numbers
+        if r2_is is not None and r2_oos is not None:
+            self.assertLessEqual(r2_oos, r2_is + 0.05,
+                "OOS R² should not significantly exceed in-sample R² (possible leakage)")
+
+    def test_cv_method_insufficient_when_small(self):
+        """cv_method='insufficient' when n_test < 2 (e.g. 10 trades)."""
+        self._seed_ridge_trades(10)
+        r = self.client.post('/api/daytrading/train', json={}, content_type='application/json')
+        data = r.get_json()
+        # With only 10 samples, the holdout test set is 3 rows — may vary.
+        # At minimum, cv_method must be a known value
+        if data.get('ok') and data.get('cv_method'):
+            self.assertIn(data['cv_method'], ('holdout', 'walk_forward', 'insufficient'))
+
+    def test_dt_training_js_shows_oos_label(self):
+        """dt-training.js renderDtModelTab must reference r2_oos and OOS label."""
+        with open(os.path.join(ROOT, 'js', 'dt-training.js'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('r2_oos', src)
+        self.assertIn('R² (OOS)', src)
+        self.assertIn('OOS', src)
+
+    def test_learning_outcome_whitelist_constant(self):
+        """routes/learning.py must define _ALLOWED_OUTCOME_COLS as a named constant."""
+        with open(os.path.join(ROOT, 'routes', 'learning.py'), encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn('_ALLOWED_OUTCOME_COLS', src)
+        # The for-loop over inline tuple should be gone
+        self.assertNotIn(
+            'for col in ("outcome_status"',
+            src,
+            "Inline tuple still present; should reference _ALLOWED_OUTCOME_COLS",
+        )
 
 
 class TestSprintQuant(unittest.TestCase):

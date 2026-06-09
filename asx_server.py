@@ -198,6 +198,19 @@ from indicators import (
 
 # ── Flask routes ────────────────────────────────────────────────────────────────
 
+# ── App HTML + assets (served from Flask so a single ngrok tunnel covers UI + API) ──
+@app.route('/')
+def serve_index():
+    return send_from_directory('.', 'asx_trading.html')
+
+@app.route('/asx_trading.css')
+def serve_css():
+    return send_from_directory('.', 'asx_trading.css', mimetype='text/css')
+
+@app.route('/js/<path:f>')
+def serve_js(f):
+    return send_from_directory('js', f, mimetype='application/javascript')
+
 # PWA static assets
 @app.route('/manifest.json')
 def serve_manifest():
@@ -289,4 +302,30 @@ if __name__ == "__main__":
         print("  Announcements: enabled (10:30 AM + 3:00 PM AEST, price-sensitive only)")
     else:
         print(f"  Announcements: disabled — {_ae_err_msg}")
+    # ── ngrok tunnel (optional — silently skipped if ngrok not installed) ────
+    import subprocess as _sp, threading as _th
+    def _start_ngrok():
+        try:
+            proc = _sp.Popen(
+                ["ngrok", "http", "5000"],
+                stdout=_sp.PIPE, stderr=_sp.STDOUT,
+            )
+            # Wait briefly then read the public URL from the ngrok local API
+            import time as _time, urllib.request as _ur, json as _json
+            _time.sleep(2)
+            try:
+                resp = _ur.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=3)
+                tunnels = _json.loads(resp.read()).get("tunnels", [])
+                url = next((t["public_url"] for t in tunnels if t["proto"] == "https"), None)
+                if url:
+                    print(f"\n  ngrok:  {url}")
+                    print( "          (share this URL to access from other devices)\n")
+            except Exception:
+                pass
+            proc.wait()
+        except FileNotFoundError:
+            pass   # ngrok not installed — no tunnel
+    _th.Thread(target=_start_ngrok, daemon=True).start()
+    # ─────────────────────────────────────────────────────────────────────────
+
     app.run(host="0.0.0.0", port=5000, debug=False)

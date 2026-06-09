@@ -1,0 +1,13 @@
+[Unit]
+Description=Sloth ASX Trader — gunicorn app server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/sloth-asx-trader
+ExecStart=%h/.local/bin/gunicorn -c gunicorn.conf.py asx_server:app
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

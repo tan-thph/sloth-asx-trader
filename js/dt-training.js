@@ -19,6 +19,7 @@
 var _dtModel      = null;  // { swing: model_obj|null, intraday: model_obj|null }
 var _dtImportances = null; // { swing: [...], intraday: [...] }
 var _dtHistItems  = null;  // null = not yet fetched; [] = fetched but empty
+var _dtHistLoading = false; // true = fetch already in flight — prevents duplicate requests
 var _dtHistOffset = 0;
 var _dtHistMore   = false;
 var _dtStats      = null;  // summary stats
@@ -246,10 +247,16 @@ function dtLoadHistory(reset) {
         _dtHistItems = (_dtHistItems || []).concat(d.items || []);
         _dtHistMore  = d.has_more || false;
         _dtHistOffset += limit;
+      } else {
+        // Don't leave _dtHistItems as null — that would keep the UI in "Loading…" forever.
+        _dtHistItems = _dtHistItems || [];
       }
       return d;
     })
-    .catch(function() { return null; });
+    .catch(function() {
+      _dtHistItems = _dtHistItems || [];
+      return null;
+    });
 }
 
 /* ── Load stats ───────────────────────────────────────────────────────────── */
@@ -270,8 +277,11 @@ function dtTrain() {
     .then(function(d) {
       if (d.ok) {
         var swingOk = d.models && d.models.swing && d.models.swing.ok;
-        var trainMsg = swingOk
-          ? 'Model trained — R²=' + (d.r2_score || 0).toFixed(3) + ' on ' + (d.n_samples || '?') + ' trades'
+        var swingM  = (d.models && d.models.swing) || {};
+        var r2disp  = swingM.r2_oos  != null ? 'OOS R²=' + swingM.r2_oos.toFixed(3)
+                    : d.r2_score     != null ? 'R²=' + d.r2_score.toFixed(3) : null;
+        var trainMsg = swingOk && r2disp
+          ? 'Model trained — ' + r2disp + ' on ' + (d.n_samples || '?') + ' trades'
           : 'Model trained on ' + (d.n_samples || '?') + ' trades';
         toast(trainMsg, 'success');
         // Refresh model cache and re-render
@@ -292,14 +302,20 @@ function dtTrain() {
 
 /* ── Render: History tab ─────────────────────────────────────────────────── */
 function renderDtHistoryTab() {
-  // null = first open, trigger async fetch then re-render
+  // null = not yet fetched — start a single load and show a spinner.
+  // _dtHistLoading guards against multiple concurrent fetches when renderPage()
+  // is called repeatedly (e.g. from runDayTradeAnalysis) before the first resolves.
   if (_dtHistItems === null) {
-    Promise.all([dtLoadHistory(true), dtLoadStats()]).then(function() {
-      var el = document.getElementById('dt-tab-content');
-      if (el && (state.dayTrading && state.dayTrading.activeTab) === 'history') {
-        el.innerHTML = renderDtHistoryTab();
-      }
-    });
+    if (!_dtHistLoading) {
+      _dtHistLoading = true;
+      Promise.all([dtLoadHistory(true), dtLoadStats()]).then(function() {
+        _dtHistLoading = false;
+        var el = document.getElementById('dt-tab-content');
+        if (el && (state.dayTrading && state.dayTrading.activeTab) === 'history') {
+          el.innerHTML = renderDtHistoryTab();
+        }
+      });
+    }
     return _dtHistLoadingHTML();
   }
 
@@ -461,8 +477,11 @@ function renderDtModelTab() {
   if (_dtModel) {
     // Use swing model for display; fallback to intraday
     var m = (_dtModel.swing || _dtModel.intraday) || {};
-    var r2  = m.r2_score  != null ? m.r2_score.toFixed(4)  : '—';
-    var mae = m.mae_score != null ? m.mae_score.toFixed(4)  : '—';
+    var r2Oos  = m.r2_oos  != null ? m.r2_oos.toFixed(4)  : null;
+    var maeOos = m.mae_oos != null ? m.mae_oos.toFixed(4)  : null;
+    var r2     = m.r2_score  != null ? m.r2_score.toFixed(4)  : '—';
+    var mae    = m.mae_score != null ? m.mae_score.toFixed(4)  : '—';
+    var cvLabel = m.cv_method === 'walk_forward' ? 'walk-forward' : m.cv_method === 'holdout' ? 'holdout' : null;
     var modelTypeLabel = (m.model_type === 'ridge') ? 'Ridge Regression' : 'Logistic Regression';
 
     // Feature importance chart — use swing importances
@@ -494,10 +513,19 @@ function renderDtModelTab() {
       <div class="card" style="padding:14px;margin-bottom:12px">
         <div style="font-weight:600;margin-bottom:10px">Current Model — ${modelTypeLabel}</div>
         <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">Trained: ${m.trained_at || '—'} · ${m.n_samples || '—'} samples (${m.n_wins || 0}W / ${m.n_losses || 0}L)</div>
-        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:10px">
-          ${_dtStatCard('R² Score', r2, '#3b82f6')}
-          ${_dtStatCard('MAE (R)', mae, '#8b5cf6')}
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:8px">
+          ${r2Oos != null
+            ? _dtStatCard('R² (OOS)', r2Oos, parseFloat(r2Oos) >= 0.1 ? '#059669' : parseFloat(r2Oos) >= 0 ? '#3b82f6' : '#dc2626')
+            : _dtStatCard('R² Score', r2, '#3b82f6')}
+          ${maeOos != null
+            ? _dtStatCard('MAE OOS', maeOos, '#8b5cf6')
+            : _dtStatCard('MAE (R)', mae, '#8b5cf6')}
         </div>
+        ${r2Oos != null ? `
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;line-height:1.5">
+          OOS = ${cvLabel || 'held-out'} · n_test=${m.n_test || 0} &nbsp;|&nbsp; Train fit: R²=${r2} MAE=${mae}
+          <span style="opacity:0.7">(in-sample overstates skill)</span>
+        </div>` : ''}
         ${importHTML}
       </div>`;
   } else {

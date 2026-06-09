@@ -1,0 +1,13 @@
+[Unit]
+Description=Sloth ASX Trader — ngrok tunnel
+After=network.target sloth-app.service
+Requires=sloth-app.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ngrok start --all --config %h/.config/ngrok/ngrok.yml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

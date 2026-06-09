@@ -83,8 +83,8 @@ function switchDtTab(tab) {
   } else if (tab === 'intraday') {
     el.innerHTML = _renderDtIntradayTab();
   } else if (tab === 'history') {
-    // Reset page so fresh data loads
-    _dtHistItems = null; _dtHistOffset = 0; _dtHistMore = false; _dtStats = null;
+    // Reset so fresh data loads on next render; clear loading flag so the fetch can start.
+    _dtHistItems = null; _dtHistOffset = 0; _dtHistMore = false; _dtStats = null; _dtHistLoading = false;
     el.innerHTML = renderDtHistoryTab();
   } else if (tab === 'model') {
     _dtModel = undefined;  // force re-fetch with importances

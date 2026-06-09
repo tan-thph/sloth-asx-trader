@@ -20,6 +20,16 @@ from flask import Blueprint, jsonify, request
 
 from db import get_db
 
+# Columns that /api/learning/outcome is allowed to update (§0.E SQL whitelist)
+_ALLOWED_OUTCOME_COLS = (
+    "outcome_status", "realized_pnl_pct", "realized_pnl_aud",
+    "holding_period_days", "exit_reason", "error_type", "notes",
+    "actual_entry_price", "actual_exit_price", "sector",
+    "skill_score", "debate_summary", "prompt_hash",
+    "tags", "trade_thesis", "rr_ratio",
+    "success_tags", "checklist_bypasses",
+)
+
 # ── Calibration TTL cache (L4) ────────────────────────────────────────────────
 # Keyed by (regime, sectors_str, tickers_str, days); evicted after 5 minutes.
 # Fix #8: _calib_lock serialises reads and writes so concurrent gunicorn threads
@@ -302,12 +312,7 @@ def learning_outcome():
         with get_db() as conn:
             # Build update dynamically so callers can send partial patches
             fields, vals = [], []
-            for col in ("outcome_status", "realized_pnl_pct", "realized_pnl_aud",
-                        "holding_period_days", "exit_reason", "error_type", "notes",
-                        "actual_entry_price", "actual_exit_price", "sector",
-                        "skill_score", "debate_summary", "prompt_hash",
-                        "tags", "trade_thesis", "rr_ratio",
-                        "success_tags", "checklist_bypasses"):
+            for col in _ALLOWED_OUTCOME_COLS:
                 if col in data:
                     fields.append(f"{col}=?")
                     vals.append(data[col])

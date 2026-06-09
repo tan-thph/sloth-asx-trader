@@ -1,7 +1,7 @@
 // ============================================================
 // CONFIG
 // ============================================================
-const API = 'http://localhost:5000';
+const API = (location.protocol === 'file:') ? 'http://localhost:5000' : location.origin;
 
 // ============================================================
 // STATE
@@ -40,7 +40,7 @@ const state = {
     riskCapitalPct: 30,
     apiCostPerRun: 0.08,
     apiKey: '',
-    serverUrl: 'http://localhost:5000',
+    serverUrl: (location.protocol === 'file:') ? 'http://localhost:5000' : location.origin,
     scheduleEnabled: false,
     scheduleWindowStart: '10:00',
     scheduleWindowEnd: '15:45',

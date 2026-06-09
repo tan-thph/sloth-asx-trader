@@ -1,5 +1,103 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-05 (Post-Sprint-48 full-app audit)
+**Last Updated:** 2026-06-09 (Post-Sprint-53 ML-engine audit)
+
+## 0. Post-Sprint-53 audit — ML evaluation gap (2026-06-09)
+
+Surfaced by an architecture + bug audit after Sprints 50–53 landed (ML training engine,
+quant enhancements, notifications). The headline item (I) is the only one rated high-value;
+J and K are restatements of existing low-severity items scoped to the parts that matter.
+
+| # | Area | Issue | Severity | Effort |
+|---|---|---|---|---|
+| ✓ **I** | `routes/day_trade_training.py` | **ML model reports in-sample R²/MAE** — **SHIPPED Sprint 54.** OOS R²/MAE now computed via walk-forward CV (n≥60) or chronological holdout (n<60). UI promotes OOS R² as primary stat. | ~~High~~ | ~~M~~ |
+| J | `js/pages/cgt.js` | Float math for CGT disposal cost-base / gains (`cgt.js:378-383`). Negligible for personal scale, but it is the one path with an external consumer (ATO reporting). Sub-scope of roadmap item D. | Low | M |
+| K | `test_app.py` | Frontend orchestration (`analysis.js` pipeline: correlation gate → heat budget → validator repair) is covered only by string-presence assertions, not behaviour. A flipped `>=`/`>` or broken ticker key stays green. | Low | M |
+
+### Detail — I: ML engine reports in-sample fit (no out-of-sample evaluation)
+
+**Where:** `routes/day_trade_training.py → _train_model_impl()`.
+
+```python
+weights, bias = _ridge_regression(X, y)          # trained on ALL rows
+y_pred  = np.dot(X, weights) + bias              # scored on the SAME rows
+r2_score = 1.0 - ss_res / ss_tot                 # → in-sample R²
+```
+
+Standardisation (`means`/`stds`) and NaN mean-imputation (`col_means`) are also fit on the
+full matrix. The reported R²/MAE — and the R² shown in the Day-Trade Training UI
+(`js/dt-training.js:281,477,511`) — therefore reflect fit, not forecast skill. With a
+small sample (`MIN_TRAIN_SAMPLES = 30`) and a multi-feature ridge, in-sample R² can look
+healthy while true out-of-sample R² is ~0 or negative.
+
+This matters more than the usual "add a test" item because the model's output is meant to
+*inform real trades*. The project already enforces this discipline elsewhere — look-ahead-bias
+removal (§1.1) and the walk-forward backtester (§1.7, Sprint 20) — so the ML engine is the
+one place the standard isn't yet applied.
+
+#### Implementation plan — out-of-sample evaluation for the ML engine
+
+**Goal:** report an honest out-of-sample (OOS) R²/MAE alongside the in-sample number, using a
+*time-ordered* split (trades are sequential — random shuffling would leak future regimes into
+past predictions). Deploy the full-data model as today; only the *reported metric* changes.
+
+**Step 1 — Schema (`day_trade_db.py`)**
+Add columns to `model_state` via the existing `ALTER TABLE` migration block (lines ~154-156):
+`r2_oos REAL`, `mae_oos REAL`, `n_test INTEGER`, `cv_method TEXT` (`'walk_forward'` | `'holdout'` | `'insufficient'`).
+Keep `r2_score`/`mae_score` as the in-sample values for backward compatibility.
+
+**Step 2 — Evaluation in `_train_model_impl` (per scope, before the final fit)**
+1. Re-sort `rows` **chronologically ascending** by `entry_date` (current query is `DESC`).
+   The split must respect time order.
+2. Choose method by sample size:
+   - `n ≥ 60` → **expanding-window walk-forward**: 4–5 folds. Fold *k* trains on the first
+     `start + k·step` rows, tests on the next `step` rows.
+   - `30 ≤ n < 60` → **single chronological holdout**: train on first 70%, test on last 30%.
+   - `n < 30` → already blocked by `MIN_TRAIN_SAMPLES`; set `cv_method='insufficient'`,
+     leave OOS metrics `NULL`.
+3. **Critical — fit transforms on train fold only** to avoid the leakage that a naïve split
+   would introduce: compute `col_means` (imputation), `means`/`stds` (z-score), and
+   `_ridge_regression` weights from the **train rows of that fold**, then apply them to the
+   held-out rows. Do *not* reuse the full-data `means`/`stds` for scoring test rows.
+4. Collect held-out predictions across folds → compute aggregate OOS R² and MAE.
+
+**Step 3 — Final model unchanged**
+After evaluation, refit on **all** rows for deployment (standard practice: evaluate OOS,
+ship the full-data model). Persist in-sample R²/MAE *and* `r2_oos`/`mae_oos`/`n_test`/`cv_method`.
+
+**Step 4 — UI (`js/dt-training.js`)**
+Promote OOS R² to the primary stat card; relabel the existing R² as "Train fit (in-sample)"
+and show it secondary/muted. Add a one-line caption: *"OOS = walk-forward held-out; train fit
+overstates skill."* Show `cv_method` + `n_test` so the user knows how much it was validated on.
+
+**Step 5 — Tests (`test_app.py`)**
+- `r2_oos` present in the `/api/daytrading/train` response and persisted to `model_state`.
+- Leakage guard: on a synthetic dataset, OOS R² computed with per-fold standardisation is
+  **not greater than** in-sample R² (sanity: holdout ≤ train fit on noise).
+- `cv_method` is `'insufficient'` and OOS metrics are `NULL` when `30 ≤ n < 60`… i.e. assert
+  each branch sets the expected `cv_method`.
+- Schema migration: `model_state` gains the four new columns (idempotent `ALTER TABLE`).
+
+**Effort:** ~M (½ day). Self-contained in two files (`day_trade_training.py`, `day_trade_db.py`)
+plus a UI label tweak and tests. No change to feature engineering, persistence shape (additive),
+or the deployed model's weights.
+
+**Acceptance:** training run returns and displays an OOS R² that is generally lower than the
+in-sample R²; the UI no longer presents the optimistic number as the headline metric.
+
+---
+
+## 0. Shipped — Sprint 54 (2026-06-09)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **ML OOS evaluation (§0.I)** | Day Trade ML (M) | `routes/day_trade_training.py` `_train_model_impl()` now evaluates honest out-of-sample R²/MAE before the final all-data fit. Walk-forward CV (4 folds, n≥60) or single chronological 70/30 holdout (30≤n<60). `_fit_and_predict_fold()` helper fits imputation + z-score standardisation on train rows only — no leakage into test rows. OOS fields `r2_oos`, `mae_oos`, `n_test`, `cv_method` (`walk_forward`/`holdout`/`insufficient`) persisted to `model_state` and returned in the `/api/daytrading/train` response. |
+| **UI: OOS R² as primary stat** | Day Trade UI (XS) | `renderDtModelTab()` in `js/dt-training.js` promotes OOS R² to the primary stat card (green ≥0.1, blue ≥0, red <0). In-sample R²/MAE shown in a secondary muted caption with the note "in-sample overstates skill". Train toast now reports "OOS R²=N.NNN" when available. |
+| **History tab stuck-loading fix** | Day Trade UI (XS) | `_dtHistLoading` guard in `dt-training.js` prevents duplicate concurrent fetches when `_dtHistItems === null`. Fetch failure always resolves `_dtHistItems` to `[]` so the History tab shows empty state instead of an infinite spinner. `switchDtTab('history')` resets both `_dtHistItems` and `_dtHistLoading`. |
+| **SQL whitelist constant (§0.E)** | Backend (XS) | `_ALLOWED_OUTCOME_COLS` named constant extracted from the inline `for col in (...)` tuple in `routes/learning.py → learning_outcome()`. Intention is now explicit; future column additions must go through the constant. |
+| **Schema migrations** | DB (XS) | `day_trade_db.init_dt_db()` adds 4 new `model_state` columns via the existing safe `ALTER TABLE` migration block: `r2_oos REAL`, `mae_oos REAL`, `n_test INTEGER`, `cv_method TEXT`. |
+| **Tests** | Testing | 8 new tests in `TestDayTradeTraining` (Sprint 54 block): schema migration presence, OOS fields in train response, OOS persisted to `model_state`, OOS R² ≤ in-sample R² leakage guard, `cv_method` branch coverage, UI source assertions for `r2_oos`/`R² (OOS)` labels, `_ALLOWED_OUTCOME_COLS` constant presence, inline tuple absence. Both test class setups updated with Sprint 54 migration columns. |
+
+---
 
 ## 0. Post-Sprint-48 full-app audit — improvements identified (2026-06-05)
 
@@ -9,12 +107,12 @@ The following are medium-to-low severity improvements that do not warrant a fix 
 
 | # | Area | Issue | Severity | Effort |
 |---|---|---|---|---|
-| A | `core.py` | `_cache_store` is unbounded — no max size, no LRU eviction | Medium | S |
+| ✓ A | `core.py` | `_cache_store` is unbounded — **ALREADY SHIPPED** (eviction + `_MAX_CACHE_SIZE` in `core.py`). | ~~Medium~~ | ~~S~~ |
 | B | `core.py` | Thundering herd in `ttl_cache` — concurrent misses each compute the same expensive call | Low | S |
-| C | `routes/backtest.py` | No input validation on tickers/period/strategy/capital — invalid values cause 500s | Medium | S |
+| ✓ C | `routes/backtest.py` | No input validation on tickers/period/strategy/capital — **ALREADY SHIPPED** (`ALLOWED_PERIODS`/`ALLOWED_STRATEGIES` guards in `routes/backtest.py`). | ~~Medium~~ | ~~S~~ |
 | D | `routes/backtest.py` | Float arithmetic for money (P&L, cost, proceeds) — rounding errors accumulate across multi-trade backtests | Low | M |
-| E | `routes/learning.py` | Dynamic SQL via f-string (`f"UPDATE … SET {', '.join(fields)}"`) — whitelist exists but pattern is brittle | Low | XS |
-| F | `js/utils.js` | Merged portfolio does not guard `shares <= 0` — produces `avgPrice = Infinity` on corrupt data | Medium | XS |
+| ✓ E | `routes/learning.py` | Dynamic SQL whitelist — **SHIPPED Sprint 54.** `_ALLOWED_OUTCOME_COLS` named constant extracted; `for col in _ALLOWED_OUTCOME_COLS` replaces inline tuple. | ~~Low~~ | ~~XS~~ |
+| ✓ F | `js/utils.js` | Merged portfolio does not guard `shares <= 0` — **ALREADY SHIPPED** (`filter(h => h.shares > 0)` at `utils.js:44-48`). | ~~Medium~~ | ~~XS~~ |
 | G | `js/debate-client.js` | Concurrent cache pruning race — two `fetchDebateBatch()` calls can independently sort+delete different subsets | Low | S |
 | H | `js/learning-loop.js` | Date parsing (`parseDate()`) detects format by `parts[2].length === 4` — fragile when date strings are malformed or mixed-format | Low | S |
 
@@ -686,6 +784,101 @@ See §0 audit item F.
 33. ✓ **Hotfixes (2026-06-04):** `fetch_with_retry` 4xx fix (`_http_status()` helper, 429 min 5s sleep); auto-debate triggers removed (postmortem/skill/calib-quality manual-only); `currentPrice` fix in analysis prompt (`livePrice` for all portfolio fields); Phase 8 gate aligned in `_calib_compute()` (Mann-Whitney, was raw mean); `_HL_MAP`/`_REGIME_GROUPS` phantom regime names removed; DB pragma parity for announcement/news engines; 6 audit bugs (DRP multi-account, settings path, auto-brief name, etc.).
 34. ✓ **Sprint 48 shipped:** §2.7 local LLM SELL/TRIM — `_SCHEMA_QUICK_ANALYSIS` extended with SELL/TRIM, `primary_driver`, `urgency`; `_LOCAL_ANALYSIS_SYSTEM` rewritten with EXIT RULES + 5-driver taxonomy; post-processing validates driver, corrects stop direction. See Sprint 48 changelog above.
 35. **Open:** §1.9 mergers/takeover CGT (no yfinance corporate-action tag), §3.7 ES-modules (deferred — high risk, use Vite on feature branch).
+
+---
+
+## 6. Deployment — remote multi-device access via ngrok ✓ SHIPPED Sprint 55 (2026-06-09)
+
+Goal: reach the app from phone / laptop / tablet for **personal use**, while keeping the
+data private. The app has **no built-in authentication**, so the tunnel's edge auth is the
+*only* line of defence for portfolio data and the Anthropic key — it is non-negotiable here.
+
+### Design: one same-origin HTTPS tunnel
+Serve the HTML + JS *from Flask* so a single ngrok tunnel covers UI and API on one origin.
+Eliminates CORS, makes API calls origin-relative, and HTTPS unlocks the PWA "Add to Home
+Screen" (`manifest.json`/`sw.js`, Sprint 41, require HTTPS — ngrok provides it). State lives
+server-side in SQLite (`/api/db/save`/`load`), so every device shares one portfolio.
+
+```
+Phone / laptop / tablet
+  └─ https://<you>.ngrok-free.app ──(ngrok edge: Google-OAuth gate)──► ngrok agent on Pi
+                                                                        └─► gunicorn 127.0.0.1:5000
+                                                                              └─► Flask: HTML+JS+API, SQLite
+```
+
+### Code changes (3, additive)
+1. **`js/config.js`** — origin-relative API base (preserves `file://` local use):
+   ```js
+   const API = (location.protocol === 'file:') ? 'http://localhost:5000' : location.origin;
+   ```
+   Apply the same to `serverUrl` (line ~43).
+2. **`asx_server.py`** — serve the app (add near the PWA static routes, ~line 201):
+   ```python
+   @app.route('/')
+   def index():
+       return send_from_directory('.', 'asx_trading.html')
+
+   @app.route('/js/<path:f>')
+   def serve_js(f):
+       return send_from_directory('js', f)
+   ```
+   Add routes for any css/image dirs the HTML references (grep `asx_trading.html` for `src=`/`href=`).
+3. **CORS** — no change once same-origin; keep the localhost entries for `file://` dev.
+
+### Security gate (mandatory — the only auth)
+ngrok edge **OAuth restricted to one Google account**. Each device logs in once; the edge
+session cookie rides `fetch()` calls automatically. Direct Anthropic calls go to
+`api.anthropic.com` (not through the tunnel), so OAuth doesn't interfere. Also switch to
+**proxy mode** (`POST /api/claude/settings` once + `state.settings.useBackendProxy=true`) so
+the Anthropic key lives once on the Pi, not in every device's localStorage.
+
+```yaml
+# ~/.config/ngrok/ngrok.yml   (OUTSIDE the repo — NEVER commit; holds the authtoken)
+version: "3"
+agent:
+  authtoken: <agent-authtoken-from-dashboard>
+endpoints:
+  - name: sloth
+    url: https://<your-reserved-domain>.ngrok-free.app
+    upstream:
+      url: 5000
+    traffic_policy:
+      on_http_request:
+        - actions:
+            - type: oauth
+              config:
+                provider: google
+                allow_emails: [ tanthien.pt@gmail.com ]
+```
+Fallback if OAuth is fussy on a device: swap `oauth` for `basic-auth`.
+
+### Stable URL + always-on
+- Reserve the **one free static domain** (ngrok dashboard → Domains) so the URL survives
+  restarts and the PWA install stays valid.
+- Two systemd **user** services on the Pi:
+  - `sloth-app.service` → `ExecStart=gunicorn -c gunicorn.conf.py asx_server:app`
+  - `sloth-ngrok.service` → `ExecStart=ngrok start --all --config %h/.config/ngrok/ngrok.yml`
+  - `systemctl --user enable --now sloth-app sloth-ngrok` + `loginctl enable-linger tanth`.
+
+### Bring-up order
+1. Make the 3 code changes; keep `python test_app.py` + `npm run test:js` green.
+2. `ngrok config add-authtoken <token>` (writes to `~/.config/ngrok/`, keeps it out of the repo).
+3. Reserve the static domain; write `ngrok.yml` with the OAuth gate.
+4. Start gunicorn; confirm `curl -s localhost:5000/` returns the HTML.
+5. `ngrok start sloth`; open the https URL on a phone → Google login → app loads.
+6. Install as PWA; enable proxy mode; **rotate the authtoken** (it was shared in plaintext during planning).
+7. Enable the systemd services + linger.
+
+### Caveats
+- **Free tier:** one static domain; OAuth gating included; bandwidth generous but not unlimited.
+- **The gate is everything** — never disable OAuth/basic-auth "just to test"; the portfolio is
+  world-readable for that window.
+- **`/api/db/git-status` runs `git`/subprocess** — harmless read-only, but exposed; the auth gate
+  is what keeps it safe.
+- **Service worker caching** (`sw.js`) can serve stale assets after a deploy — bump its cache
+  version or hard-refresh after updates.
+- **Secret hygiene:** the authtoken belongs only in `~/.config/ngrok/ngrok.yml` (outside the repo),
+  never in `config.js`, `IMPROVEMENTS.md`, or any committed file.
 
 ---
 

@@ -154,6 +154,11 @@ def init_dt_db():
             "ALTER TABLE model_state ADD COLUMN trade_type_scope TEXT DEFAULT 'all'",
             "ALTER TABLE model_state ADD COLUMN r2_score REAL",
             "ALTER TABLE model_state ADD COLUMN mae_score REAL",
+            # Sprint 54 — out-of-sample evaluation (§0.I)
+            "ALTER TABLE model_state ADD COLUMN r2_oos REAL",
+            "ALTER TABLE model_state ADD COLUMN mae_oos REAL",
+            "ALTER TABLE model_state ADD COLUMN n_test INTEGER",
+            "ALTER TABLE model_state ADD COLUMN cv_method TEXT",
         ]
         for _sql in _migrations:
             try:
