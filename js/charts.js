@@ -1,4 +1,12 @@
 // ============================================================
+// THEME HELPER — reads CSS custom properties so all canvas draws follow theme
+// ============================================================
+function chartColor(token, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+  return v || fallback;
+}
+
+// ============================================================
 // CANVAS SIZING — fit container at devicePixelRatio (crisp on mobile)
 // ============================================================
 function _fitCanvas(canvas, cssHeight, fallbackWidth = 600) {
@@ -297,10 +305,8 @@ async function drawHistoryChart() {
   const px = v => pad.t + ch - ((v - minV) / range) * ch;
   const py = i => pad.l + (i / (data.length - 1)) * cw;
 
-  // Dark mode detection
-  const isDark = window.matchMedia('(prefers-color-scheme:dark)').matches;
-  const gridCol = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)';
-  const textCol = isDark ? '#888' : '#999';
+  const gridCol = chartColor('--chart-grid', 'rgba(0,0,0,0.07)');
+  const textCol = chartColor('--text-tertiary', '#999');
 
   ctx.clearRect(0, 0, w, h);
 
@@ -350,13 +356,17 @@ async function drawHistoryChart() {
   ctx.lineTo(py(0), pad.t + ch);
   ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
 
-  if (benchArr) drawLine(benchArr, '#94a3b8', true);
-  drawLine(nwArr, '#3b82f6', false);
-  drawLine(pvArr, '#22c55e', false);
-  drawLine(cashArr, '#f59e0b', true);
+  const c1 = chartColor('--chart-1', '#3b82f6');
+  const c2 = chartColor('--chart-2', '#f59e0b');
+  const c3 = chartColor('--chart-3', '#22c55e');
+  const c6 = chartColor('--chart-6', '#94a3b8');
+  if (benchArr) drawLine(benchArr, c6, true);
+  drawLine(nwArr, c1, false);
+  drawLine(pvArr, c3, false);
+  drawLine(cashArr, c2, true);
 
   // Dots at last point
-  [['#3b82f6', nwArr], ['#22c55e', pvArr], ['#f59e0b', cashArr]].forEach(([col, arr]) => {
+  [[c1, nwArr], [c3, pvArr], [c2, cashArr]].forEach(([col, arr]) => {
     const lastX = py(arr.length - 1), lastY = px(arr[arr.length - 1]);
     ctx.beginPath(); ctx.arc(lastX, lastY, 4, 0, Math.PI*2);
     ctx.fillStyle = col; ctx.fill();
@@ -369,7 +379,7 @@ async function drawHistoryChart() {
     }
     if (lastBenchIdx >= 0) {
       ctx.beginPath(); ctx.arc(py(lastBenchIdx), px(benchArr[lastBenchIdx]), 4, 0, Math.PI*2);
-      ctx.fillStyle = '#94a3b8'; ctx.fill();
+      ctx.fillStyle = c6; ctx.fill();
     }
   }
 }
@@ -564,7 +574,7 @@ function drawCandleChart(canvasId, chartData, options = {}) {
 
   // ── Grid lines ──────────────────────────────────────────────────────────
   const gridSteps = 5;
-  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  ctx.strokeStyle = chartColor('--chart-grid', 'rgba(0,0,0,0.07)');
   ctx.lineWidth   = 0.5;
   for (let g = 0; g <= gridSteps; g++) {
     const y = priceY0 + (g / gridSteps) * PRICE_H;
@@ -601,10 +611,10 @@ function drawCandleChart(canvasId, chartData, options = {}) {
   }
 
   // ── SMA20 (amber) ────────────────────────────────────────────────────────
-  drawLine(sma20Series, '#f59e0b', 1.2);
+  drawLine(sma20Series, chartColor('--chart-2', '#f59e0b'), 1.2);
 
   // ── SMA50 (purple) ───────────────────────────────────────────────────────
-  if (sma50Series) drawLine(sma50Series, '#a78bfa', 1.2);
+  if (sma50Series) drawLine(sma50Series, chartColor('--chart-5', '#a78bfa'), 1.2);
 
   // ── Pivot lines + RIGHT-SIDE labels (own zone, no collision) ─────────────
   if (pivots && showPivots) {
@@ -643,7 +653,7 @@ function drawCandleChart(canvasId, chartData, options = {}) {
     chartData.forEach((d, i) => {
       const x    = xAt(i);
       const up   = d.close >= d.open;
-      const col  = up ? '#16a34a' : '#dc2626';
+      const col  = up ? chartColor('--up', '#16a34a') : chartColor('--down', '#dc2626');
       const bodyTop    = pyAt(Math.max(d.open, d.close));
       const bodyBottom = pyAt(Math.min(d.open, d.close));
       const bodyH = Math.max(bodyBottom - bodyTop, 1);
@@ -659,11 +669,11 @@ function drawCandleChart(canvasId, chartData, options = {}) {
 
   // ── Line mode ─────────────────────────────────────────────────────────────
   if (mode === 'line') {
-    drawLine(closes, '#3b82f6', 1.5);
+    drawLine(closes, chartColor('--chart-1', '#3b82f6'), 1.5);
   }
 
   // ── Y-axis price labels — LEFT side, right-aligned ──────────────────────
-  ctx.fillStyle = 'rgba(148,163,184,0.85)';
+  ctx.fillStyle = chartColor('--text-tertiary', '#94a3b8');
   ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
   for (let g = 0; g <= gridSteps; g++) {
     const v = priceMax - (g / gridSteps) * priceRange;
@@ -673,7 +683,7 @@ function drawCandleChart(canvasId, chartData, options = {}) {
   }
 
   // ── X-axis date labels ───────────────────────────────────────────────────
-  ctx.fillStyle = 'rgba(148,163,184,0.7)';
+  ctx.fillStyle = chartColor('--text-tertiary', '#94a3b8');
   ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
   const labelEvery = Math.max(1, Math.round(n / 6));
   chartData.forEach((d, i) => {
@@ -791,12 +801,12 @@ function drawPriceChart(canvasId, chartData, sma20, sma50, bbUpper, bbLower) {
   // Price line
   ctx.beginPath();
   chartData.forEach((d,i)=>{ const x=py(i),y=px(d.close); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
-  ctx.strokeStyle='#3b82f6'; ctx.lineWidth=1.5; ctx.stroke();
+  ctx.strokeStyle=chartColor('--chart-1','#3b82f6'); ctx.lineWidth=1.5; ctx.stroke();
 
   // SMA20
   if(sma20) {
     ctx.beginPath(); ctx.moveTo(4,px(sma20));
     chartData.forEach((_,i)=>ctx.lineTo(py(i),px(sma20)));
-    ctx.strokeStyle='#f59e0b'; ctx.lineWidth=1; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle=chartColor('--chart-2','#f59e0b'); ctx.lineWidth=1; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
   }
 }

@@ -1,3 +1,20 @@
+// Apply theme: 'auto' clears data-theme (OS-native), 'light'/'dark' sets it.
+// Also updates the <meta name="theme-color"> for PWA chrome.
+function _applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === 'auto') {
+    delete root.dataset.theme;
+  } else {
+    root.dataset.theme = theme;
+  }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) {
+    const isDark = theme === 'dark' ||
+      (theme === 'auto' && window.matchMedia('(prefers-color-scheme:dark)').matches);
+    meta.content = isDark ? '#17181c' : '#ffffff';
+  }
+}
+
 // Escape untrusted text before inserting into innerHTML — guards against
 // malformed RSS headlines, AI output, or external API strings breaking layout.
 function escapeHTML(s) {

@@ -288,6 +288,19 @@ python3 asx_server.py</pre>
       <div class="card-title">Display</div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0">
         <div>
+          <div style="font-size:13px;font-weight:600">Theme</div>
+          <div class="text-xs text-muted">Override the colour scheme or follow your OS setting</div>
+        </div>
+        <div style="display:flex;gap:4px">
+          ${['auto','light','dark'].map(t => {
+            const active = (state.settings.theme || 'auto') === t;
+            const lbl = {auto:'Auto',light:'Light',dark:'Dark'}[t];
+            return `<button class="btn btn-sm${active ? ' btn-primary' : ''}" onclick="settingsSetTheme('${t}')">${lbl}</button>`;
+          }).join('')}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border-light)">
+        <div>
           <div style="font-size:13px;font-weight:600">Compact mode</div>
           <div class="text-xs text-muted">Reduces card padding and table row heights for more content on screen</div>
         </div>
@@ -468,6 +481,13 @@ function updateSetting(key,value) {
   scheduleSave();
   toast('Setting updated','success');
 }
+function settingsSetTheme(theme) {
+  state.settings.theme = theme;
+  _applyTheme(theme);
+  scheduleSave();
+  renderPage();
+}
+
 function settingsToggleCompact(val) {
   state.settings.compactMode = !!val;
   document.body.classList.toggle('compact', !!val);

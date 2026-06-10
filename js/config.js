@@ -50,6 +50,7 @@ const state = {
     sbcMode: false,
     stopProximityPct: 3,
     compactMode: false,
+    theme: 'auto',          // 'auto' | 'light' | 'dark'
     useLocalLLM: false,
     maxRiskBudgetPct: 5,
     autoBriefTime: '',   // 'HH:MM' in AEST, empty = disabled
