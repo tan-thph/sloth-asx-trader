@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-09 (Post-Sprint-53 ML-engine audit)
+**Last Updated:** 2026-06-10 (Sprint 59: §G debate cache race, §H parseDate hardening, §2.7 calib-quality lessons; §K marked shipped)
 
 ## 0. Post-Sprint-53 audit — ML evaluation gap (2026-06-09)
 
@@ -11,7 +11,7 @@ J and K are restatements of existing low-severity items scoped to the parts that
 |---|---|---|---|---|
 | ✓ **I** | `routes/day_trade_training.py` | **ML model reports in-sample R²/MAE** — **SHIPPED Sprint 54.** OOS R²/MAE now computed via walk-forward CV (n≥60) or chronological holdout (n<60). UI promotes OOS R² as primary stat. | ~~High~~ | ~~M~~ |
 | J | `js/pages/cgt.js` | Float math for CGT disposal cost-base / gains (`cgt.js:378-383`). Negligible for personal scale, but it is the one path with an external consumer (ATO reporting). Sub-scope of roadmap item D. | Low | M |
-| K | `test_app.py` | Frontend orchestration (`analysis.js` pipeline: correlation gate → heat budget → validator repair) is covered only by string-presence assertions, not behaviour. A flipped `>=`/`>` or broken ticker key stays green. | Low | M |
+| ✓ K | `test_app.py` | Frontend orchestration — **SHIPPED Sprint 57.** `_applyCorrSizing` and `_applyHeatBudget` extracted as pure helpers in `analysis.js`; 17 Vitest behavioural tests in `tests/analysis-pipeline.test.js` cover thresholds, scaling, blocking, and budget accumulation. | ~~Low~~ | ~~M~~ |
 
 ### Detail — I: ML engine reports in-sample fit (no out-of-sample evaluation)
 
@@ -86,6 +86,17 @@ in-sample R²; the UI no longer presents the optimistic number as the headline m
 
 ---
 
+## 0. Shipped — Sprint 59 (2026-06-10)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **§G — debate cache prune race** | Frontend (XS) | `_debatePruning` boolean flag in `js/debate-client.js` ensures only one concurrent caller runs the prune loop. Second concurrent caller skips the prune (entry was just added; it will be pruned on the next write after the flag clears). |
+| **§H — `parseDate()` hardening** | Frontend (XS) | `detectStrategyDecay()` in `js/learning-loop.js` now uses a regex `^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$` to detect DD-MM-YYYY or DD/MM/YYYY; falls through to `new Date(s)` for ISO; NaN guard returns 0 instead of `NaN`. |
+| **§2.7 — lessons from calib-quality** | Learning Loop (S) | `/api/debate/calib-quality` Ollama prompt now requests an optional `suggested_lesson` field (single actionable rule) when a `likely_systemic` band has ≥40% dominant tag. Learning page calib-quality card renders an amber banner with pre-filled text and a "+ Create lesson" button that POSTs to `/api/learning/lessons` with `source:'calib_quality'`. |
+| **§K — mark shipped** | Docs (XS) | Marked §K (analysis pipeline Vitest tests) as shipped in IMPROVEMENTS.md (delivered Sprint 57). |
+
+---
+
 ## 0. Shipped — Sprint 54 (2026-06-09)
 
 | Fix / Feature | Area | Detail |
@@ -113,8 +124,8 @@ The following are medium-to-low severity improvements that do not warrant a fix 
 | D | `routes/backtest.py` | Float arithmetic for money (P&L, cost, proceeds) — rounding errors accumulate across multi-trade backtests | Low | M |
 | ✓ E | `routes/learning.py` | Dynamic SQL whitelist — **SHIPPED Sprint 54.** `_ALLOWED_OUTCOME_COLS` named constant extracted; `for col in _ALLOWED_OUTCOME_COLS` replaces inline tuple. | ~~Low~~ | ~~XS~~ |
 | ✓ F | `js/utils.js` | Merged portfolio does not guard `shares <= 0` — **ALREADY SHIPPED** (`filter(h => h.shares > 0)` at `utils.js:44-48`). | ~~Medium~~ | ~~XS~~ |
-| G | `js/debate-client.js` | Concurrent cache pruning race — two `fetchDebateBatch()` calls can independently sort+delete different subsets | Low | S |
-| H | `js/learning-loop.js` | Date parsing (`parseDate()`) detects format by `parts[2].length === 4` — fragile when date strings are malformed or mixed-format | Low | S |
+| ✓ G | `js/debate-client.js` | Concurrent cache pruning race — **SHIPPED Sprint 59.** `_debatePruning` flag prevents two concurrent callers from independently sorting+deleting overlapping subsets. | ~~Low~~ | ~~S~~ |
+| ✓ H | `js/learning-loop.js` | Date parsing (`parseDate()`) — **SHIPPED Sprint 59.** Replaced `parts[2].length === 4` heuristic with `String.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/)` covering both `-` and `/` separators; NaN guard on fallback path. | ~~Low~~ | ~~S~~ |
 
 ### Detail — A: unbounded `_cache_store` in `core.py`
 
@@ -647,7 +658,7 @@ already exist (quant, regime, learning, dividends, CGT).
 | ✓ **Trade tags & notes** | S | ★★ | **SHIPPED** — `tags`/`trade_thesis` DB columns + inline input on rec cards + stored in learning events. See §0. |
 | ✓ **Morning briefing auto-generate** | M | ★★ | **SHIPPED** — `'briefing'` agent type; Dashboard "Generate Brief" button chains macro + regime + holdings. See §0. |
 | ✓ **Lessons: market-breadth scope** | M | ★★ | **SHIPPED Sprint 44** — `breadth_scope TEXT` column added to `trading_lessons`. `GET /api/learning/lessons` accepts `adl` + `asx_vol` params and filters accordingly. Create Lesson form has a breadth-scope dropdown. `analysis.js` passes ADL + asx_vol when fetching lessons. |
-| **Lessons: auto-generate from calib-quality** | M | ★ | After `triggerCalibQualityIfStale()` completes, if the Ollama output identifies a recurring failure mode (e.g. "chasing breakouts in low volume"), surface a toast prompt: *"Create a lesson from this? [pre-filled rule]"*. Requires extracting a `suggested_lesson` field from the `/api/debate/calib-quality` structured response. *Source: critics.md §3.1* |
+| ✓ **Lessons: auto-generate from calib-quality** | M | ★ | **SHIPPED Sprint 59.** `_SCHEMA_CALIB_QUALITY` gains optional `suggested_lesson` field; prompt instructs Ollama to populate it only when a `likely_systemic` band has ≥40% dominant tag. Learning page calib-quality card shows an amber "Suggested lesson" banner with "+ Create lesson" button; one click POSTs to `/api/learning/lessons` with `source:'calib_quality'`. |
 
 ### 2.7 AI assistant enhancements
 
@@ -1103,6 +1114,229 @@ Checklist:
 Do Phase 1 first (cheap, high impact, CSS-only, tests unaffected). Phase 2 is the biggest lever but
 the largest change surface — table-by-table with browser verification. No automated visual test
 exists, so mobile QA is manual on real devices.
+
+---
+
+## 8. Pipeline integrity & strategy enforcement — deep-dive audit (planned, 2026-06-10)
+
+Source: code-level audit of the learning loop (`routes/learning.py`), the prompts
+(`js/prompts.js`), and the day-trading strategy (`js/strategy.js`, `js/day-trading-analysis.js`,
+`js/intraday-strategy.js`, `routes/day_trade_training.py`). The architecture is sound; these six
+items close the gaps between what the docs/prompts *claim* and what the code *enforces*.
+
+| # | Item | Effort | Risk | Files |
+|---|---|---|---|---|
+| 8.1 | Wire the response validator into the live path | ~1 h | Low | `analysis.js`, `response-validator.js` |
+| 8.2 | Fix the Section 7 qty/netProfit contradiction | ~1 h | Low | `prompts.js`, `analysis.js` |
+| 8.3 | Apply calibration adjustments deterministically | ~2 h | Med | `analysis.js`, `learning-loop.js`, `prompts.js` |
+| 8.4 | Implement the §2.7/2.8/2.9 swing filters | ~½ day | Low | `strategy.js`, `day-trading-analysis.js`, `indicators.py` |
+| 8.5 | Structured tool-schema output for Claude calls | ~½ day | Med | `claude-client.js`, `prompts.js`, `analysis.js` |
+| 8.6 | Shadow-log correlation / conf-floor rejections | ~1 h | Low | `analysis.js` |
+
+Recommended order: 8.1 → 8.2 → 8.6 (quick, independent) → 8.3 → 8.4 → 8.5.
+Each item is shippable alone; none depends on another.
+
+---
+
+### 8.1 Wire the response validator into the live path  ← data-integrity, do first
+
+**Problem.** `validateRec()`, `getValidatedAnalysisWithRepair()`, and `validateSellTags()` in
+`js/response-validator.js` are defined but **called from nowhere** (grep-verified: only
+self-references + Vitest). Consequences:
+- CLAUDE.md's 4-layer pipeline diagram (Regime → Claude → Quant → **Validator**) is aspirational —
+  the validator layer never runs.
+- The prompt's threats ("FORBIDDEN combinations (validation will reject)", "Invented tags fail
+  validation") are unenforced. Invalid `sell_primary_driver` / forbidden tag combos flow into
+  `ai_learning_events` and pollute the sell-tag verdict analytics (`_resolve_sell_outcomes`)
+  that feed back into future prompts.
+- `analysis.js` re-implements fragments inline (conf floor, neg-EV drop, ATR floor) — duplicated,
+  partial coverage.
+
+**Plan.**
+1. In `analysis.js`, immediately after `parseClaudeJSON()` succeeds and before the quant-engine
+   step, run each rec through `validateRec(r)`:
+   - If a rule with a `fix` repairs it → use the fixed rec, tag `_validatorFixed: [ruleIds]`.
+   - If a hard rule fails un-fixably → drop the rec, append a summary note
+     `[Validator dropped N rec(s): <ruleIds>]`, and `console.warn` the full rec for diagnosis.
+2. **Do not** enable the network repair loop (`getValidatedAnalysisWithRepair`) in this pass —
+   it re-calls Claude and changes latency/cost characteristics. Local fix-or-drop only.
+3. Resolve the schema conflict found earlier: `qty-positive-int` requires `qty ≥ 1` but Rule 4
+   makes Claude emit 0 by design. Change the rule to validate qty **after** the quant-engine +
+   SELL/TRIM sizing steps instead (move the validator call after sizing), or relax the rule to
+   `qty ≥ 0` pre-sizing with a post-sizing `qty ≥ 1` assertion. **Decision: run the validator
+   AFTER sizing** — it then checks what the user actually sees.
+4. `validateSellTags()` is invoked by `validateRec()` for SELL/TRIM — confirm forbidden combos
+   (target_reached+stop_triggered, time_stop+target_reached, SELL+monitor) strip/drop correctly.
+5. Tests: source assertion that `analysis.js` calls `validateRec(`; unit case for a rec with a
+   forbidden tag combo being cleaned; update CLAUDE.md pipeline note if behaviour differs.
+
+**Acceptance:** a synthetic response containing an invented sell tag and a `qty: "fifty"` string
+never reaches `state.recommendations` unrepaired; learning events log only closed-vocabulary tags.
+
+---
+
+### 8.2 Fix the Section 7 qty/netProfit contradiction  ← latent BUY-killer
+
+**Problem.** Section 7 (`prompts.js`) requires every BUY/TOP_UP to pass a cash-comparison test
+computing `netProfit = qty × entryPrice × expectedReturn − opportunityCost − brokerage`, with a
+worked example using `qty = 21`. But Rule 4 mandates `qty: 0` in output. A literal-minded model
+outputs `netProfit ≤ 0` — and `analysis.js` (cleanedRecs loop) **drops any BUY with
+`aiNet ≤ 0`**. Claude currently papers over the contradiction by imagining a plausible qty; one
+model-version change could silently filter every BUY.
+
+**Plan.**
+1. Rewrite Section 7's cash test to be **per-$1,000-notional** (no qty dependency):
+   `returnPer1k = 1000 × expectedReturn`, `oppCostPer1k = 1000 × (RBA/100) × (days/365)`,
+   require `returnPer1k − oppCostPer1k − roundTripBrokerage > 0` assuming the minimum trade size
+   from account settings. Update the worked example to match.
+2. Redefine the `netProfit` output field for BUY/TOP_UP as **per-minimum-trade-size estimate**
+   (state it explicitly: "computed at min trade size; engine recomputes at final qty").
+3. In `analysis.js`, recompute the BUY gate **after** quant sizing: replace the
+   `aiNet ≤ 0 → drop` check with a deterministic
+   `qty × (target − entryMid) − oppCost − 2×brokerage > 0` using the engine's final qty —
+   the AI's value becomes display-only for BUYs exactly as it already is for SELL/TRIM.
+4. Bump `PROMPT_VERSION` → `2026-06-v10` (+ test, CLAUDE.md, learning_loop.md refs).
+5. Tests: assert prompts.js no longer contains a qty-dependent BUY example with nonzero qty;
+   assert `analysis.js` recomputes the BUY net-EV gate post-sizing.
+
+**Acceptance:** a model that obeys Rule 4 to the letter (qty=0, netProfit=0) still produces
+surviving BUY recs; the neg-EV gate operates on engine-computed numbers.
+
+---
+
+### 8.3 Apply calibration adjustments deterministically  ← exact feedback loop
+
+**Problem.** Section 6 instructs Claude: `new_conf = clamp(orig_conf + adj, 0, 0.98)` — the
+system's most important feedback value is applied by **LLM arithmetic**, violating the "Claude
+never does arithmetic" architecture. Unverifiable; errors propagate into Kelly sizing.
+
+**Plan.**
+1. `routes/learning.py` — extend the calibration response with a machine-readable mirror of the
+   text block: `adjustments: { bands: {"60-70": -0.05, ...}, tickers: {"BHP.AX": -0.10}, regime_warn: bool }`.
+   The human-readable `block` string stays unchanged (Claude still sees context).
+2. `learning-loop.js` — `fetchCalibrationBlock()` returns `{ block, adjustments }`; cache both.
+3. `analysis.js` — new post-response step (before the confidence floor): for each rec, apply
+   `r.confidence = clamp(r.confidence + bandAdj + tickerAdj, 0.05, 0.98)`, tag
+   `_calibApplied: {band, adj}`. Runs **before** `computeTradeParams` so Kelly sees the
+   calibrated value.
+4. `prompts.js` Section 6 — change the instruction from "apply the adjustment" to "treat the
+   CALIBRATION block as context for your reasoning; numeric adjustments are applied by the
+   engine after your response — do not pre-adjust confidence". (Same PROMPT_VERSION bump as 8.2
+   if shipped together.)
+5. Guard: skip engine-side application when the calibration payload is `{available:false}`.
+   Double-application risk is the main hazard — the prompt change (step 4) and engine change
+   (step 3) must ship in the same release.
+6. Tests: unit test the adjustment parser (band edge cases: conf exactly on a band boundary);
+   regression assertion that prompts.js no longer says "new_conf = clamp(orig_conf".
+
+**Acceptance:** for a rec with conf 0.72 and band adj −0.08, the logged learning event records
+`ai_confidence = 0.72` and the displayed/sized rec uses 0.64, with `_calibApplied` audit trail.
+
+---
+
+### 8.4 Implement the documented swing filters §2.7 / §2.8 / §2.9
+
+**Problem.** Three filters documented as strategy rules in `day-trading-strategy.md` §2 are
+**not implemented anywhere** (grep-verified):
+- §2.7 ADR breadth gate — skip new swing BUYs when `advance_decline_ratio < 0.25`
+- §2.8 Volatility-of-volatility — skip/escalate when `ATR_today > 1.3 × ATR_5d_mean`
+- §2.9 Time-of-week — no new entries Mon before 11:00 or Fri after 14:00 AEST
+
+**Plan.**
+1. **ADR gate (highest value, data already available).** In `day-trading-analysis.js`
+   `_dtBuildRecs()` (and the universe-scan path): read
+   `state.macroData?.advance_decline_ratio`; when `< 0.25`, suppress all new BUY setups, surface
+   an amber banner "Breadth gate: ADR X% < 25% — new entries paused", and shadow-log suppressed
+   setups with `shadow_reason: 'breadth_blocked'` (extends the 8.6 taxonomy). Threshold lives in
+   `DT_FILTER.minAdr = 0.25` (runtime-tunable via the existing Rules tab merge).
+2. **VoV filter.** `indicators.py analyse_ticker()` — add `atr_5d_mean` (mean of the last 5
+   daily ATR-14 values; `None` if <20 bars). `strategy.js _dtPreFilter()` — reject when
+   `s.atr_14 > (fp.vovMult ?? 1.3) × s.atr_5d_mean`; add to the rejection-breakdown counts
+   (`VoV −N`). Doc says "skip or escalate" — implement **skip** (simpler, deterministic);
+   escalation can come later.
+3. **Time-of-week filter.** Helper `_dtTimeOfWeekBlocked()` in `day-trading-analysis.js`
+   using Sydney time (`Intl.DateTimeFormat` with `timeZone:'Australia/Sydney'`, NOT
+   `getDay()` on local time — the Pi may not run in AEST): Monday < 11:00 or Friday ≥ 14:00 →
+   block *new* swing entries only, banner + tunable `DT_FILTER.timeOfWeekFilter = true` toggle.
+   Existing-position management unaffected.
+4. Doc: flip §2.7/2.8/2.9 from prose to "implemented" with file refs; update the §12 scorecard
+   note that these checks are now automatic.
+5. Tests: `_dtPreFilter` VoV rejection case; ADR-gate suppression case; time-of-week boundary
+   cases (Mon 10:59 blocked / 11:00 allowed; Fri 13:59 allowed / 14:00 blocked) with mocked
+   Sydney clock.
+
+**Acceptance:** with ADR 0.20 in macroData, a scan produces zero new BUY setups and N
+breadth-blocked shadow records; the rejection breakdown shows a VoV bucket.
+
+---
+
+### 8.5 Structured tool-schema output for Claude calls
+
+**Problem.** The local Ollama path enforces JSON at the grammar level (`format_schema`), but the
+cloud Claude path relies on "Return ONLY valid JSON" plus defensive hacks (no `{}` in strings,
+400-char summary cap, `parseClaudeJSON` salvage logic, truncation recovery). The parse-failure
+class still exists exactly where the money is.
+
+**Plan.**
+1. `claude-client.js` — for `agentType: 'portfolio'` (first; others later), send a single tool
+   `emit_recommendations` whose `input_schema` is the rec JSON schema (mirror
+   `response-validator.js` field specs: enums for action/orderType/urgency/primary_driver,
+   number ranges for confidence), with `tool_choice: {type:'tool', name:'emit_recommendations'}`.
+2. Response handling: read `content[].type === 'tool_use'` input as the parsed object; keep
+   `parseClaudeJSON` as fallback for non-tool responses (proxy mode, older logs).
+3. Prompt cache check: tools are part of the cached prefix — adding the tool definition busts
+   the cache **once**, then caches as before. Keep the tool schema static (no dynamic state) for
+   the same reason as `ANALYSIS_SYSTEM_PROMPT`.
+4. Prompt cleanup (after the schema is enforced): Section 8's "no `{}` in strings" rule and the
+   JSON-shape example become redundant → trim in a later prompt-consolidation pass, not now.
+5. `POST /api/claude/proxy` passes the body through unchanged — verify `tools`/`tool_choice`
+   survive proxy mode.
+6. Tests: mock a tool_use response shape through the parse path; assert direct + proxy modes both
+   handle it; assert the validator (8.1) still runs on tool output (schema enforces *types*, not
+   business rules like R:R ≥ 2 or forbidden tag combos — both layers stay).
+
+**Acceptance:** a full analysis round-trip yields recs parsed from `tool_use.input` with zero
+regex salvage; malformed-JSON error path becomes unreachable for the portfolio agent.
+
+---
+
+### 8.6 Shadow-log correlation and confidence-floor rejections
+
+**Problem.** Shadow logging (ML bias correction) covers only `heat_blocked` and
+`regime_blocked`. Recs halved by the correlation filter, dropped by the hard confidence floor,
+or dropped by the neg-EV gate are invisible to training — the model still learns from a
+partially pruned sample.
+
+**Plan.**
+1. `analysis.js` — at the three rejection sites, mirror the existing `dtSaveSnapshot(...,
+   {record_type:'shadow', shadow_reason})` pattern:
+   - confidence-floor drop → `shadow_reason: 'conf_floor'`
+   - neg-EV BUY drop → `shadow_reason: 'neg_ev'`
+   - correlation: only log when fully suppressing; a −30%/−50% *size reduction* still executes
+     and produces a real outcome — do NOT double-log those.
+2. `routes/day_trade_training.py` — no schema change needed (`shadow_reason` is free text);
+   add the new reasons to the §14.8 doc table.
+3. Sanity cap: skip shadow logging when the rec lacks stop/target (shadow resolution needs both).
+4. Tests: source assertions for the three call sites + reason strings.
+
+**Acceptance:** a scan day with 2 conf-floor drops produces 2 `shadow` rows resolvable by
+`_resolve_shadow_outcomes()`; Kelly phase-gate counts include them.
+
+---
+
+### Out of scope (noted, deliberately deferred)
+
+- **Prompt consolidation pass** (franking duplicated in Priority 4 + Section 4; R:R in Rule 3 +
+  Section 7; ~660-line system prompt) — do after 8.2/8.3/8.5 settle, as one reviewed rewrite
+  with a single PROMPT_VERSION bump, not piecemeal.
+- **Auto-proposed outcomes from stop/target alerts** (alerts detect hits live; outcome writes
+  are manual) — needs UX design for the confirm flow; highest-value learning-loop item after 8.3.
+- **Per-account calibration scope** — blocked on data volume; revisit when one non-default
+  account has ≥30 closed events.
+- **Intraday confidence ←→ ML expected-R blending** — wait until a trained ridge model with
+  `r2_oos > 0` exists on ≥60 intraday trades; blending an unvalidated model into sizing is
+  premature.
+- **Intraday Mode A (VWAP recapture)** — already tracked in `day-trading-strategy.md` §8.2.
 
 ---
 

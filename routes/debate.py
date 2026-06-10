@@ -114,6 +114,7 @@ _SCHEMA_CALIB_QUALITY = {
             },
         },
         "overall_summary": {"type": "string"},
+        "suggested_lesson": {"type": "string"},   # optional — only when a dominant systemic pattern exists
     },
     "required": ["band_assessments", "overall_summary"],
 }
@@ -2292,8 +2293,13 @@ def _calib_quality_prompt(bands: list[dict]) -> str:
         "Then provide overall_summary: one sentence — is calibration healthy overall, "
         "or is there a specific band requiring attention?",
         "",
+        "OPTIONAL: if a 'likely_systemic' band has ≥40% of losses sharing one tag AND you can form "
+        "a concrete, actionable rule (e.g. 'Avoid chasing breakouts in riskOff regime'), "
+        "add suggested_lesson: that rule as a single sentence. Otherwise omit suggested_lesson entirely.",
+        "",
         'Reply with JSON only — no markdown, no text outside JSON:',
-        '{"band_assessments":[{"band":"...","verdict":"...","analysis":"..."},...], "overall_summary":"..."}',
+        '{"band_assessments":[{"band":"...","verdict":"...","analysis":"..."},...], "overall_summary":"..."}'
+        '  — append "suggested_lesson":"..." only when the optional condition above is met.',
     ]
     return "\n".join(lines)
 
@@ -2390,10 +2396,12 @@ def debate_calib_quality():
 
     band_assessments: list[dict] = []
     summary_text = ""
+    suggested_lesson = ""
     try:
         parsed = json.loads(raw)
         band_assessments = parsed.get("band_assessments") or []
         summary_text     = parsed.get("overall_summary", "")
+        suggested_lesson = (parsed.get("suggested_lesson") or "").strip()
     except Exception:
         current_app.logger.warning(f"[CalibQuality] parse failure: {raw[:200]}")
         # Fall through with empty assessments — stats still useful
@@ -2431,6 +2439,8 @@ def debate_calib_quality():
         "model":     model,
         "elapsed_ms": elapsed_ms,
     }
+    if suggested_lesson:
+        payload["suggested_lesson"] = suggested_lesson
 
     # ── Persist to blob_store ─────────────────────────────────────────────────
     try:

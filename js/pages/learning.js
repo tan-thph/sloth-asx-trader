@@ -2097,6 +2097,16 @@ async function renderCalibQualityCard() {
         </div>`;
     }).join('');
 
+    const suggestedLessonHtml = d.suggested_lesson
+      ? `<div style="margin-top:10px;padding:8px 10px;background:var(--bg-secondary);border-radius:6px;border-left:3px solid #f59e0b;display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
+           <div style="flex:1;min-width:0">
+             <div style="font-size:11px;font-weight:600;color:#b45309;margin-bottom:2px">Suggested lesson</div>
+             <div style="font-size:12px" id="ll-cq-lesson-text">${escapeHTML(d.suggested_lesson)}</div>
+           </div>
+           <button class="btn btn-sm" style="white-space:nowrap;flex-shrink:0" onclick="window._createCalibLesson()">+ Create lesson</button>
+         </div>`
+      : '';
+
     el.innerHTML = `
       <div class="card" style="margin-top:14px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
@@ -2111,7 +2121,30 @@ async function renderCalibQualityCard() {
         </p>
         ${rows}
         ${d.summary ? `<div style="margin-top:10px;padding:8px;background:var(--bg-secondary);border-radius:6px;font-size:12px"><strong>Summary:</strong> ${d.summary}</div>` : ''}
+        ${suggestedLessonHtml}
       </div>`;
+
+    window._createCalibLesson = async function() {
+      const text = document.getElementById('ll-cq-lesson-text')?.textContent?.trim();
+      if (!text) return;
+      try {
+        const r = await fetch(`${API}/api/learning/lessons`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lesson_text: text, source: 'calib_quality' }),
+        });
+        const data = await r.json();
+        if (data.ok) {
+          toast('Lesson created from calibration quality analysis', 'success');
+          document.querySelector('[onclick="window._createCalibLesson()"]')?.remove();
+          renderLessonsCard().catch(() => {});
+        } else {
+          toast('Failed to create lesson: ' + (data.error || 'unknown'), 'error');
+        }
+      } catch {
+        toast('Network error saving lesson', 'error');
+      }
+    };
   }
 
   // Expose force-refresh for the Refresh button and the "Run debate" button on empty state

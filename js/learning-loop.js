@@ -165,10 +165,13 @@ function detectStrategyDecay(recHistory, windowDays = 30) {
   const cutoff = Date.now() - windowDays * 86400000;
   const parseDate = r => {
     if (!r.date) return 0;
-    const parts = r.date.split('-');
-    if (parts.length === 3 && parts[2].length === 4)
-      return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`).getTime();
-    return new Date(r.date).getTime();
+    const s = String(r.date).trim();
+    // DD-MM-YYYY or DD/MM/YYYY — year in position [2], length 4
+    const dm = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (dm) return new Date(`${dm[3]}-${dm[2].padStart(2,'0')}-${dm[1].padStart(2,'0')}`).getTime();
+    // ISO / any Date-parseable format
+    const t = new Date(s).getTime();
+    return isNaN(t) ? 0 : t;
   };
 
   const recent  = closed.filter(r => parseDate(r) > cutoff);

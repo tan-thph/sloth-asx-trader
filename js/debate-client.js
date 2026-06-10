@@ -119,15 +119,22 @@ function _getCachedDebate(ticker, signals) {
   return null;
 }
 
+let _debatePruning = false;
 function _setCachedDebate(ticker, signals, result) {
   const key = _debateCacheKey(ticker, signals);
   _debateResultCache.set(key, { result, ts: Date.now() });
-  // Prune old entries (keep map from growing indefinitely)
-  if (_debateResultCache.size > 200) {
-    const oldest = [..._debateResultCache.entries()]
-      .sort((a, b) => a[1].ts - b[1].ts)
-      .slice(0, 50);
-    oldest.forEach(([k]) => _debateResultCache.delete(k));
+  // Prune old entries — flag guards against two concurrent callers both
+  // reading size > 200 and independently deleting overlapping subsets.
+  if (_debateResultCache.size > 200 && !_debatePruning) {
+    _debatePruning = true;
+    try {
+      const oldest = [..._debateResultCache.entries()]
+        .sort((a, b) => a[1].ts - b[1].ts)
+        .slice(0, 50);
+      oldest.forEach(([k]) => _debateResultCache.delete(k));
+    } finally {
+      _debatePruning = false;
+    }
   }
 }
 
