@@ -880,21 +880,21 @@ function renderRecHistory() {
     </div>` : ''}
 
     ${filtered.length === 0 ? `<div class="empty-state" style="padding:2rem"><div class="empty-icon">◆</div><p>${state.recHistory.length === 0 ? 'No recommendation history yet.' : 'No records match your filters.'}</p></div>` : `
-    <div class="table-wrap"><table>
+    <div class="table-wrap"><table class="tbl-stack">
       <thead><tr><th>Date</th><th>Ticker</th><th>Action</th><th>Confidence</th><th>Est. P&L<br><span style="font-weight:400;font-size:10px">at target</span></th><th>Status</th><th>Outcome</th><th>Actual P&L</th><th>Feedback</th></tr></thead>
       <tbody>
         ${filtered.map((r)=>{
           const realIdx = state.recHistory.indexOf(r);
           return `<tr>
-            <td class="text-xs">${r.date}</td>
-            <td><strong>${r.ticker}</strong></td>
-            <td>${actionBadge(r.action)}</td>
-            <td><div class="flex-row"><div class="conf-bar" style="width:60px"><div class="conf-fill" style="width:${(r.confidence||0)*100}%;background:${confColor(r.confidence||0)}"></div></div><span class="text-xs">${fmt((r.confidence||0)*100,0)}%</span></div></td>
-            <td class="text-xs ${r.netProfit!=null?(r.netProfit>=0?'text-success':'text-danger'):''}">${r.netProfit!=null?(r.netProfit>=0?'+ ':'− ')+'$'+fmt(Math.abs(r.netProfit)):'&mdash;'}</td>
-            <td>${statusBadge(r.executed?'executed':'skipped')}</td>
-            <td class="text-xs ${r.outcome==='win'?'text-success':r.outcome==='loss'?'text-danger':'text-muted'}">${r.outcome==='win'?'✓ Win':r.outcome==='loss'?'✗ Loss':r.outcome||'&mdash;'}</td>
-            <td class="${r.actualProfit!=null?(r.actualProfit>=0?'text-success':'text-danger'):'text-muted'}">${r.actualProfit!=null?(r.actualProfit>=0?'+ ':'− ')+'$'+fmt(Math.abs(r.actualProfit)):'&mdash;'}</td>
-            <td style="min-width:180px">
+            <td data-label="Date" class="text-xs">${r.date}</td>
+            <td data-label="Ticker"><strong>${r.ticker}</strong></td>
+            <td data-label="Action">${actionBadge(r.action)}</td>
+            <td data-label="Confidence"><div class="flex-row"><div class="conf-bar" style="width:60px"><div class="conf-fill" style="width:${(r.confidence||0)*100}%;background:${confColor(r.confidence||0)}"></div></div><span class="text-xs">${fmt((r.confidence||0)*100,0)}%</span></div></td>
+            <td data-label="Est. P&L" class="text-xs ${r.netProfit!=null?(r.netProfit>=0?'text-success':'text-danger'):''}">${r.netProfit!=null?(r.netProfit>=0?'+ ':'− ')+'$'+fmt(Math.abs(r.netProfit)):'&mdash;'}</td>
+            <td data-label="Status">${statusBadge(r.executed?'executed':'skipped')}</td>
+            <td data-label="Outcome" class="text-xs ${r.outcome==='win'?'text-success':r.outcome==='loss'?'text-danger':'text-muted'}">${r.outcome==='win'?'✓ Win':r.outcome==='loss'?'✗ Loss':r.outcome||'&mdash;'}</td>
+            <td data-label="Actual P&L" class="${r.actualProfit!=null?(r.actualProfit>=0?'text-success':'text-danger'):'text-muted'}">${r.actualProfit!=null?(r.actualProfit>=0?'+ ':'− ')+'$'+fmt(Math.abs(r.actualProfit)):'&mdash;'}</td>
+            <td data-label="Feedback" style="min-width:180px">
               <div style="display:flex;gap:6px;align-items:center">
                 <input type="text" id="hfb-${realIdx}" value="${r.feedback||''}" placeholder="Add feedback…"
                   style="flex:1;padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:11px;font-family:var(--font)">

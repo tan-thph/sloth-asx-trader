@@ -110,7 +110,7 @@ function renderPortfolio() {
         </div>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="tbl-stack">
           <thead><tr><th></th><th>Ticker</th><th>Sector</th>${state.activeAccount==='all'?'<th>Account</th>':''}<th>Lots</th><th>Total Shares</th><th>Avg Cost</th><th>Current</th><th>Value</th><th>P&L ($)</th><th>P&L (%)</th><th>Weight</th><th>Div Yield</th><th title="Franking percentage — 100% = fully franked (tax credit included)">Franking</th><th>Ex-Div Date</th><th></th></tr></thead>
           <tbody>
             ${merged.slice().sort((a, b) => (b.shares * b.currentPrice) - (a.shares * a.currentPrice)).map(h => {
@@ -146,27 +146,27 @@ function renderPortfolio() {
               const _ACCT_COLORS = {personal:'#6366f1',super:'#16a34a',trading:'#d97706'};
               const acct = h.account || 'personal';
               const acctBadge = state.activeAccount === 'all'
-                ? `<td><span class="text-xs" style="background:${_ACCT_COLORS[acct]}22;color:${_ACCT_COLORS[acct]};padding:1px 5px;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();_cycleHoldingAccount('${h.ticker}','${acct}')" title="Click to change account">${acct}</span></td>`
+                ? `<td data-label="Account"><span class="text-xs" style="background:${_ACCT_COLORS[acct]}22;color:${_ACCT_COLORS[acct]};padding:1px 5px;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();_cycleHoldingAccount('${h.ticker}','${acct}')" title="Click to change account">${acct}</span></td>`
                 : '';
               const _lotsKey = `${h.ticker}-${hAcct}`;
               return `
                 <tr style="cursor:${hasMulti?'pointer':'default'}" onclick="${hasMulti?`toggleLots('${_lotsKey}')`:''}" title="${hasMulti?'Click to expand lots':''}">
-                  <td style="width:20px;text-align:center;color:var(--text-tertiary)">${hasMulti?`<span id="lots-arrow-${_lotsKey}" style="font-size:10px">▶</span>`:'&nbsp;'}</td>
-                  <td><strong>${h.ticker}</strong></td>
-                  <td><span class="text-xs">${h.sector}</span></td>
+                  <td class="m-hide" style="width:20px;text-align:center;color:var(--text-tertiary)">${hasMulti?`<span id="lots-arrow-${_lotsKey}" style="font-size:10px">▶</span>`:'&nbsp;'}</td>
+                  <td data-label="Ticker"><strong>${h.ticker}</strong></td>
+                  <td data-label="Sector"><span class="text-xs">${h.sector}</span></td>
                   ${acctBadge}
-                  <td class="text-xs text-muted">${lots > 0 ? `${lots} lot${lots!==1?'s':''}` : '—'}</td>
-                  <td>${h.shares}</td>
-                  <td>$${fmt(h.avgPrice)}</td>
-                  <td>$${fmt(h.currentPrice)}${_staleBadge}</td>
-                  <td>$${fmt(val)}</td>
-                  <td class="${pl>=0?'text-success':'text-danger'}">${sign(pl)}$${fmt(Math.abs(pl))}</td>
-                  <td class="${plp>=0?'text-success':'text-danger'}">${sign(plp)}${fmt(Math.abs(plp))}%</td>
-                  <td class="text-xs">${fmt((val/pv)*100)}%</td>
-                  <td>${divYieldStr}</td>
-                  <td>${frankingStr}</td>
-                  <td>${exDivStr}</td>
-                  <td style="white-space:nowrap">
+                  <td data-label="Lots" class="text-xs text-muted">${lots > 0 ? `${lots} lot${lots!==1?'s':''}` : '—'}</td>
+                  <td data-label="Total Shares">${h.shares}</td>
+                  <td data-label="Avg Cost">$${fmt(h.avgPrice)}</td>
+                  <td data-label="Current">$${fmt(h.currentPrice)}${_staleBadge}</td>
+                  <td data-label="Value">$${fmt(val)}</td>
+                  <td data-label="P&L ($)" class="${pl>=0?'text-success':'text-danger'}">${sign(pl)}$${fmt(Math.abs(pl))}</td>
+                  <td data-label="P&L (%)" class="${plp>=0?'text-success':'text-danger'}">${sign(plp)}${fmt(Math.abs(plp))}%</td>
+                  <td data-label="Weight" class="text-xs">${fmt((val/pv)*100)}%</td>
+                  <td data-label="Div Yield">${divYieldStr}</td>
+                  <td data-label="Franking">${frankingStr}</td>
+                  <td data-label="Ex-Div Date">${exDivStr}</td>
+                  <td data-label="Actions" style="white-space:nowrap">
                     <button class="btn btn-sm" style="background:#ede9fe;color:#6d28d9;border-color:#c4b5fd;margin-right:4px" onclick="event.stopPropagation();showDrpModal('${h.ticker}')" title="Record a Dividend Reinvestment Plan share issue">DRP</button>
                     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removeHolding(${portfolioIdx})">✕</button>
                   </td>
@@ -509,7 +509,8 @@ function toggleLots(key) {
   const arrow = document.getElementById(`lots-arrow-${key}`);
   if (!row) return;
   const open = row.style.display !== 'none';
-  row.style.display = open ? 'none' : 'table-row';
+  // '' (not 'table-row') so the stacked-card mobile CSS can restyle the row
+  row.style.display = open ? 'none' : '';
   if (arrow) arrow.textContent = open ? '▶' : '▼';
 }
 

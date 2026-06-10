@@ -1,4 +1,34 @@
 // ============================================================
+// CANVAS SIZING — fit container at devicePixelRatio (crisp on mobile)
+// ============================================================
+function _fitCanvas(canvas, cssHeight, fallbackWidth = 600) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.offsetWidth || canvas.parentElement?.clientWidth || fallbackWidth;
+  const h = cssHeight;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+// Redraw the active page (and its charts) after rotate/resize settles.
+// Width-change only: mobile toolbars collapsing on scroll fire height-only
+// resize events, and re-rendering then would reset the scroll position.
+let _chartRedrawT;
+let _lastViewportW = window.innerWidth;
+function _onViewportChange() {
+  clearTimeout(_chartRedrawT);
+  _chartRedrawT = setTimeout(() => {
+    if (window.innerWidth === _lastViewportW) return;
+    _lastViewportW = window.innerWidth;
+    if (typeof renderPage === 'function') renderPage();
+  }, 200);
+}
+window.addEventListener('resize', _onViewportChange);
+window.addEventListener('orientationchange', _onViewportChange);
+
+// ============================================================
 // PORTFOLIO VALUE HISTORY PAGE
 // ============================================================
 let _historyPeriod = 'monthly';
@@ -224,10 +254,7 @@ async function drawHistoryChart() {
     } catch {}
   }
 
-  const ctx = canvas.getContext('2d');
-  const w = canvas.offsetWidth || 600;
-  const h = 240;
-  canvas.width = w; canvas.height = h;
+  const { ctx, w, h } = _fitCanvas(canvas, window.innerWidth < 640 ? 180 : 240);
 
   const nwArr   = data.map(d => d.netWorth);
   const pvArr   = data.map(d => d.portfolioValue);
@@ -379,10 +406,7 @@ async function fetchSignals(tickers, forceRefresh=false) {
 function drawSparkline(canvasId, data, color='#3b82f6') {
   const canvas = document.getElementById(canvasId);
   if(!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.offsetWidth || canvas.width;
-  const h = canvas.offsetHeight || canvas.height;
-  canvas.width = w; canvas.height = h;
+  const { ctx, w, h } = _fitCanvas(canvas, canvas.offsetHeight || 60);
   if(!data || data.length<2) return;
   const prices = data.map(d=>d.close);
   const min=Math.min(...prices), max=Math.max(...prices), range=max-min||1;
@@ -741,9 +765,7 @@ function drawCandleChart(canvasId, chartData, options = {}) {
 function drawPriceChart(canvasId, chartData, sma20, sma50, bbUpper, bbLower) {
   const canvas = document.getElementById(canvasId);
   if(!canvas || !chartData?.length) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.offsetWidth; const h = canvas.height = 180;
-  canvas.width = w;
+  const { ctx, w, h } = _fitCanvas(canvas, window.innerWidth < 640 ? 150 : 180);
   const prices = chartData.map(d=>d.close);
   const allVals = [...prices];
   if(sma20) allVals.push(sma20);

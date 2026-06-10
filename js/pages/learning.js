@@ -601,7 +601,7 @@ function _renderLearningContent(d, brier) {
       <div id="classify-all-progress" style="display:none;margin-bottom:8px;padding:8px 10px;background:var(--bg-secondary);border-radius:5px;font-size:12px"></div>
       ${events.length ? `
         <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:620px">
+          <table class="tbl-stack" style="width:100%;border-collapse:collapse;font-size:12px;min-width:620px">
             <thead>
               <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
                 <th style="text-align:left;padding:4px 6px">Date</th>
@@ -738,16 +738,16 @@ function _renderLearningContent(d, brier) {
                    >${icon}<span style="font-size:8px;display:block;line-height:1;text-align:center;color:var(--text-muted)">${label}</span></button>`;
 
                 return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
-                  <td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
-                  <td style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
-                  <td style="padding:3px 6px">${ev.recommendation||'—'}</td>
-                  <td style="padding:3px 6px;text-align:right">${ev.ai_confidence != null ? (ev.ai_confidence*100).toFixed(0)+'%' : '—'}</td>
-                  <td style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
-                  <td style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}${virtualChip}</td>
-                  <td style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
-                  <td style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
-                  <td style="padding:3px 6px">${claudeTagsEl}</td>
-                  <td style="padding:3px 6px;white-space:nowrap">
+                  <td data-label="Date" style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
+                  <td data-label="Ticker" style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
+                  <td data-label="Action" style="padding:3px 6px">${ev.recommendation||'—'}</td>
+                  <td data-label="Conf" style="padding:3px 6px;text-align:right">${ev.ai_confidence != null ? (ev.ai_confidence*100).toFixed(0)+'%' : '—'}</td>
+                  <td data-label="Regime" style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
+                  <td data-label="Outcome" style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}${virtualChip}</td>
+                  <td data-label="P&L%" style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
+                  <td data-label="Error tags" style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
+                  <td data-label="Claude tags" style="padding:3px 6px">${claudeTagsEl}</td>
+                  <td data-label="🔬 Skill" style="padding:3px 6px;white-space:nowrap">
                     <div style="display:inline-flex;align-items:center;gap:2px">
                       ${_slot(28, skillBadgeContent)}
                       ${_slot(26, isClosed
@@ -757,7 +757,7 @@ function _renderLearningContent(d, brier) {
                         : '')}
                     </div>
                   </td>
-                  <td style="padding:3px 6px;white-space:nowrap">
+                  <td data-label="Actions" style="padding:3px 6px;white-space:nowrap">
                     <div style="display:inline-flex;align-items:center;gap:1px">
                       ${_slot(26, ev.outcome_status === 'win'
                         ? _iconBtn(`tagwin-btn-${ev.id}`, `triggerTagWin(${ev.id})`,

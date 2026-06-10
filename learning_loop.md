@@ -1,6 +1,6 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** June 2026 (Sprint 49 — virtual speed weight fix, 30d cutoff, n_virtual UI)
+**Last Updated:** 2026-06-10 (doc sync: PROMPT_VERSION ref, phantom regime names in examples, exit_reason vocab note. Content current through Sprint 49 — virtual speed weight fix, 30d cutoff, n_virtual UI)
 **Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–46 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
@@ -40,7 +40,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `suggested_target`    | REAL       | Claude's target price |
 | `rr_ratio`            | REAL       | Reward:risk ratio |
 | `holding_period_days` | INTEGER    | Days held |
-| `exit_reason`         | TEXT       | `stop_hit` / `target_hit` / `manual` / `protective_stop` / `time_exit` |
+| `exit_reason`         | TEXT       | `stop_hit` / `target_hit` / `manual` / `protective_stop` / `time_exit`. ⚠ Vocabulary differs from the day-trade ML DB: `trade_snapshots.exit_reason` (in `day_trade_history.db`) uses `time_stop`, not `time_exit` — grep both when searching for time-based exits. |
 | `rationale_summary`   | TEXT       | First 400 chars of Claude's reasoning |
 | `actual_entry_price`  | REAL       | Actual fill price |
 | `actual_exit_price`   | REAL       | Actual exit price |
@@ -173,20 +173,20 @@ Equal-weight samples behave the same as before (4 trades, equal weights → ESS 
 **3b. Hierarchical regime fallbacks** ✅ (L1, ESS-integrated, Sprint 24)
 When the active regime has ESS < 2.5 (e.g. recently transitioned), rather than emitting nothing, the system falls through three levels:
 
-1. **Specific regime** (e.g. `bullTrending`) — ESS ≥ 2.5 → full decay-weighted win rate
+1. **Specific regime** (e.g. `riskOn`) — ESS ≥ 2.5 → full decay-weighted win rate
 2. **Macro group** (`bearish` / `bullish` / `neutral`) — if specific is thin, pool all regimes in the same macro family
 3. **All trades** — if even the macro group is thin, fall back to overall with a low-specificity warning
 
 This prevents a freshly-transitioned regime from getting no signal at all. Each fallback level emits a progressively weaker warning so Claude knows how specific the data is:
 ```
-⚠bullTrending(ESS=1.4)→bullish-group:68%W(ESS=3.2)⚠low-specificity
+⚠riskOn(ESS=1.4)→bullish-group:68%W(ESS=3.2)⚠low-specificity
 ```
 0 trades in a regime = silently omitted even at the all-trades level.
 
 **4. Date range in calibration block** ✅
 Every calibration block includes the date range and regime so Claude can contextualise the data:
 ```
-CALIBRATION(12cls,2026-02→2026-05,bullTrending,2excl): conf 70-80%:61%WR(…)
+CALIBRATION(12cls,2026-02→2026-05,riskOn,2excl): conf 70-80%:61%WR(…)
 ```
 
 **5. Regime-conditional filtering** ✅ (partial)
@@ -278,7 +278,7 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` — never the system prompt (preserves Anthropic's server-side prompt cache).
 Target size: 30–60 tokens.
 
-The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-05-v5'`) now includes an explicit calibration algorithm: `confidence += adj_value, clamped [0.50, 0.95]` (Stage 3). It also includes a debate-block usage rule: treat Local Debate as a second opinion, weight synthesis winner, don't anchor to it over fundamentals (Stage 3).
+The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-06-v8'` — the explicit algorithm landed in `2026-05-v5`) includes an explicit calibration algorithm: `confidence += adj_value, clamped [0.50, 0.95]` (Stage 3). It also includes a debate-block usage rule: treat Local Debate as a second opinion, weight synthesis winner, don't anchor to it over fundamentals (Stage 3).
 
 ---
 

@@ -29,7 +29,7 @@
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: var(--font); background: var(--bg-tertiary); color: var(--text-primary); min-height: 100vh; font-size: 14px; }
-  .app { display: flex; height: 100vh; overflow: hidden; }
+  .app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
 
   /* Sidebar */
   .sidebar { width: 220px; flex-shrink: 0; background: var(--bg-primary); border-right: 0.5px solid var(--border-light); display: flex; flex-direction: column; padding: 1.25rem 0; overflow-y: auto; }
@@ -169,7 +169,7 @@
   canvas.price-chart { width: 100%; height: 180px; }
 
   /* Chat */
-  .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 200px); min-height: 400px; }
+  .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 200px); height: calc(100dvh - 200px); min-height: 400px; }
   .chat-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 0 12px; }
   .msg { max-width: 88%; padding: 9px 13px; border-radius: 10px; font-size: 13px; line-height: 1.6; }
   .msg-user { align-self: flex-end; background: var(--text-primary); color: var(--bg-primary); border-radius: 10px 10px 2px 10px; }
@@ -315,6 +315,73 @@
     .grid-3 { grid-template-columns: 1fr !important; }
     .grid-4 { grid-template-columns: 1fr 1fr !important; }
     .metrics-grid { grid-template-columns: 1fr 1fr; }
+
+    /* 16px floor kills Safari's auto-zoom on input focus */
+    input[type="text"], input[type="number"], input[type="password"],
+    textarea, select { font-size: 16px; }
+
+    /* Apple HIG 44px touch targets */
+    .btn, .nav-item, .tab { min-height: 44px; }
+    .btn-sm, .btn-xs { min-height: 40px; }
+    td .btn, td button, .table-wrap button { min-height: 40px; min-width: 40px; }
+
+    /* Topbar: drop low-priority pills, let the action row swipe instead of overflowing */
+    #sbc-mode-btn, .topbar .market-pill { display: none; }
+    .topbar { padding: 0.625rem 0.875rem; }
+    .topbar > .flex-row:last-child {
+      flex-wrap: nowrap; overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .topbar > .flex-row:last-child::-webkit-scrollbar { display: none; }
+  }
+
+  /* Safe-area insets — no-ops outside notched standalone PWAs */
+  .topbar  { padding-top: max(0.875rem, env(safe-area-inset-top)); }
+  .sidebar { padding-bottom: max(1.25rem, env(safe-area-inset-bottom)); }
+  .content { padding-bottom: max(1.5rem, env(safe-area-inset-bottom)); }
+
+  /* Touch polish (any touch device, regardless of width) */
+  @media (hover: none) {
+    .tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    tr:hover td { background: inherit; }
+  }
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+  .table-wrap thead th { position: sticky; top: 0; background: var(--bg-primary); z-index: 1; }
+  dialog { max-height: 90vh; max-height: 90dvh; overflow-y: auto; }
+
+  /* ── Stacked table cards (≤640px) — primary tables carry .tbl-stack ──
+     Child combinators only: these tables can nest plain tables (e.g. the
+     portfolio lot-detail rows), which must keep their tabular layout. */
+  @media (max-width: 640px) {
+    table.tbl-stack > thead { display: none; }
+    table.tbl-stack, table.tbl-stack > tbody { display: block; }
+    table.tbl-stack { min-width: 0 !important; }  /* beats inline min-width (learning events table) */
+    table.tbl-stack > tbody > tr {
+      display: block; margin-bottom: 10px;
+      border: 0.5px solid var(--border-light);
+      border-radius: var(--radius-md);
+      padding: 6px 12px;
+      background: var(--bg-primary);
+    }
+    table.tbl-stack > tbody > tr > td {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 12px; padding: 6px 0; border: none; text-align: right;
+    }
+    table.tbl-stack > tbody > tr > td:empty { display: none; }
+    table.tbl-stack > tbody > tr > td::before {
+      content: attr(data-label);
+      font-weight: 600; font-size: 11px;
+      color: var(--text-secondary);
+      text-align: left; flex-shrink: 0;
+    }
+    table.tbl-stack > tbody > tr > td:not([data-label])::before { content: none; }
+    /* Full-width cells (nested lot tables) scroll inside the card */
+    table.tbl-stack > tbody > tr > td[colspan] { display: block; padding: 0; text-align: left; overflow-x: auto; }
+    /* Totals footers don't stack meaningfully — page summary cards carry them */
+    table.tbl-stack > tfoot { display: none; }
+    table.tbl-stack tr:hover td { background: inherit; }
+    .col-optional, .m-hide { display: none !important; }
   }
 
 /* Traceability panel arrow rotation */

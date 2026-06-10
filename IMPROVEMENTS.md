@@ -882,6 +882,236 @@ Fallback if OAuth is fussy on a device: swap `oauth` for `basic-auth`.
 
 ---
 
+## 7. Mobile — make the UI great on phones/tablets (implemented 2026-06-10; device QA pending)
+
+> **Status:** Phases 1–4 shipped 2026-06-10. Phase 1 CSS quick wins, Phase 2 stacked cards on the
+> 6 primary tables (portfolio holdings, rec history, 3× CGT, learning events) via `.tbl-stack` +
+> `data-label`, Phase 3 `_fitCanvas` DPR helper + width-change redraw listener in `charts.js`,
+> Phase 4 touch polish (no hover-reveal controls existed — audit confirmed). `sw.js` does no
+> caching, so no cache-version bump was needed. Phase 5 (real-device QA via the §6 ngrok URL)
+> remains manual. Notes: `toggleLots()` now sets `display:''` so stacked CSS can restyle the lots
+> row; secondary stats tables (learning conf-band/regime/version) intentionally stay tabular —
+> they fit phones and stacking hurts comparability.
+
+Goal: first-class experience on iPhone Safari + Android Chrome, portrait & landscape, and as an
+installed PWA (standalone). Pairs with §6 (ngrok) — once the tunnel is up, real devices test the
+live app over HTTPS. Supersedes the deferred "Mobile / responsive layout" item in CLAUDE.md.
+
+### Current state — what already works (do NOT rebuild)
+- Viewport + PWA meta — `asx_trading.html:5` (`width=device-width`), `:10-11` (apple standalone).
+- Slide-in drawer sidebar + overlay + hamburger — JS `js/navigation.js:9-16`; CSS
+  `@media (max-width:768px)` block `asx_trading.css:299-318` (transform drawer, overlay, grid collapse).
+- Horizontal table scroll — `.table-wrap { overflow-x:auto }` (`css:78`).
+- Compact-mode toggle — `state.settings.compactMode` → `.compact` body class.
+- Some charts already DPR-aware — `js/charts.js:466-470`.
+
+### Gaps found (audit 2026-06-09) — why it is not yet "great"
+| Gap | Evidence | Impact |
+|---|---|---|
+| Inputs trigger iOS auto-zoom on focus | inputs `font-size:13px` (`css:192`) — Safari zooms when <16px | High |
+| `height:100vh` breaks with mobile toolbar | `.app{height:100vh}` (`css:32`), `.chat-wrap` (`css:172`) | High |
+| Touch targets <44px | `.nav-item` 7px pad (`css:41`), `.btn-sm` 4px·10px (`css:117`), table icon buttons | High |
+| Wide tables only sideways-scroll | `.table-wrap` h-scroll is the only mobile treatment | High |
+| No safe-area insets | standalone PWA, no `env(safe-area-inset-*)` | Med |
+| Mixed canvas sizing, no redraw on rotate | fixed w/h `charts.js:230,745` vs DPR `:466`; no `orientationchange` handler | Med |
+| Hover-only affordances | `tr:hover` (`css:83`), action reveals — invisible on touch | Med |
+
+---
+
+### Phase 1 — CSS-only quick wins (~1–2 h, ~60% of felt improvement)
+
+All changes go inside the existing `@media (max-width:768px)` block (`css:299-318`) unless noted.
+Additive, low regression risk.
+
+**1a. Kill iOS input zoom** — anything <16px triggers Safari focus-zoom:
+```css
+@media (max-width: 768px) {
+  input[type="text"], input[type="number"], input[type="password"],
+  textarea, select { font-size: 16px; }
+}
+```
+
+**1b. `100vh` → `100dvh`** (dynamic viewport, accounts for the collapsing browser toolbar).
+Edit `css:32` and `:172`:
+```css
+.app { height: 100vh; height: 100dvh; }                 /* fallback then override */
+.chat-wrap { height: calc(100vh - 200px); height: calc(100dvh - 200px); }
+```
+
+**1c. Touch targets ≥44px** (Apple HIG) inside the mobile block:
+```css
+@media (max-width: 768px) {
+  .btn, .btn-sm, .nav-item { min-height: 44px; }
+  td .btn, td button, .table-wrap button { min-height: 40px; min-width: 40px; }
+}
+```
+
+**1d. Safe-area insets** for notched iPhones in standalone PWA (outside the media query, harmless on desktop):
+```css
+.topbar  { padding-top: max(0.875rem, env(safe-area-inset-top)); }
+.sidebar { padding-bottom: env(safe-area-inset-bottom); }
+.content { padding-bottom: max(1.5rem, env(safe-area-inset-bottom)); }
+```
+Add `viewport-fit=cover` to the viewport meta (`asx_trading.html:5`):
+`content="width=device-width, initial-scale=1.0, viewport-fit=cover"`.
+
+**1e. Topbar overflow** — hide secondary market pills under 768px (keep title + bell + hamburger):
+```css
+@media (max-width: 768px) { .topbar .market-pill:not(:first-of-type) { display: none; } }
+```
+(Verify the selector against the actual topbar markup before applying; may need a dedicated
+`.market-pill-secondary` class added in the topbar builder.)
+
+**1f. Auto-apply compact spacing on mobile** (reuse existing `.compact` rules) — optional density win:
+```css
+@media (max-width: 768px) { .content { padding: 0.75rem; } }
+```
+
+**Phase 1 acceptance:** no input zoom on focus; no content clipped under the toolbar/notch; all
+buttons tappable; topbar fits without overflow. Bump `sw.js` cache version so the installed PWA
+picks up the CSS.
+
+---
+
+### Phase 2 — Responsive data tables (largest "great" lever)
+
+Horizontal scroll is acceptable for dense/secondary tables but poor for the **primary** ones the
+user reads daily: portfolio, recommendations, CGT, learning. Convert those to a **stacked card
+layout** under ~640px.
+
+**Approach A — `data-label` stacked cards (use for the 4 primary tables).**
+1. In the page render builders, add `data-label="<column header>"` to every `<td>`. Files:
+   - `js/pages/portfolio.js` (holdings table)
+   - `js/pages/recommendations.js` (recs table)
+   - `js/pages/cgt.js` (disposals/parcels tables)
+   - `js/pages/learning.js` (stats tables)
+2. Add a shared CSS rule keyed by a `.tbl-stack` class on those tables:
+```css
+@media (max-width: 640px) {
+  table.tbl-stack thead { display: none; }
+  table.tbl-stack tr { display: block; margin-bottom: 10px; border: 0.5px solid var(--border-light);
+                       border-radius: var(--radius-md); padding: 6px 10px; }
+  table.tbl-stack td { display: flex; justify-content: space-between; gap: 12px;
+                       padding: 6px 0; border: none; text-align: right; }
+  table.tbl-stack td::before { content: attr(data-label); font-weight: 600;
+                               color: var(--text-secondary); text-align: left; }
+}
+```
+3. Add `class="tbl-stack"` to those four tables' `<table>` tags.
+
+**Approach B — column-priority hiding (cheaper, for secondary tables: scanner, backtest, performance).**
+Tag low-priority columns with `.col-optional` in both `<th>` and `<td>`, then:
+```css
+@media (max-width: 768px) { .col-optional { display: none; } }
+```
+
+**Sticky headers + momentum scroll** for any table that stays tabular:
+```css
+.table-wrap { -webkit-overflow-scrolling: touch; }
+.table-wrap thead th { position: sticky; top: 0; background: var(--bg-primary); z-index: 1; }
+```
+
+**Phase 2 acceptance:** the four primary tables render as readable label:value cards on a phone
+(no sideways scroll); secondary tables either stack or hide non-essential columns. Verify each page
+renders without error after adding `data-label` (the builders are pure HTML-string functions — a
+typo breaks the page; the `navigation.js` error boundary will surface it).
+
+**Risk:** touches multiple `pages/*.js` render builders. Do table-by-table, verify each in the
+browser. No automated visual test exists for these.
+
+---
+
+### Phase 3 — Responsive charts
+
+Some canvas draws use fixed `w/h` (`charts.js:230`, `:745`), others are DPR-aware (`:466-470`).
+Standardise on the DPR pattern and add a single resize/rotate redraw.
+
+1. **Helper** in `js/charts.js` — size any canvas to its container at device pixel ratio:
+```js
+function _fitCanvas(canvas, cssHeight) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.parentElement.clientWidth;
+  const h = cssHeight;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+```
+   Refit the fixed-size draws (`:230`, `:745`) to call `_fitCanvas` instead of hardcoding `canvas.width = w`.
+
+2. **Redraw on rotate/resize** — one debounced global listener (add to `init.js` or `charts.js`):
+```js
+let _chartRedrawT;
+function _onViewportChange() {
+  clearTimeout(_chartRedrawT);
+  _chartRedrawT = setTimeout(() => { if (typeof renderPage === 'function') renderPage(); }, 200);
+}
+window.addEventListener('resize', _onViewportChange);
+window.addEventListener('orientationchange', _onViewportChange);
+```
+   (`renderPage()` already rebuilds the active page incl. its charts — reuse it rather than tracking
+   individual chart instances.)
+
+3. **Cap chart heights on mobile** — pass a smaller `cssHeight` (e.g. 160 vs 220) when
+   `window.innerWidth < 640`.
+
+**Phase 3 acceptance:** charts fill their card width crisply (no blur) and reflow on device rotation.
+
+---
+
+### Phase 4 — Touch & interaction polish
+
+1. **No hover-only actions.** Audit `tr:hover` (`css:83`) and any "reveal on hover" row controls;
+   make them always-visible (or tap-to-expand) on touch:
+```css
+@media (hover: none) { .row-actions { opacity: 1 !important; visibility: visible !important; } }
+```
+2. **Swipe-scroll tab bars** (scanner tabs, day-trading tabs):
+```css
+.tab-bar { display: flex; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+```
+3. **Scrollable modals** — the `navigation.js:118` dialog is 95%/420px; ensure tall modals
+   (trade dialog, rebalance) scroll: `dialog { max-height: 90dvh; overflow: auto; }`.
+4. **Optional — bottom tab bar** for one-thumb reach: a fixed bottom bar with the 5 most-used pages
+   on mobile, replacing the hamburger for primary nav. Bigger lift (new component + safe-area-inset
+   bottom padding); defer unless the drawer feels slow in use.
+
+**Phase 4 acceptance:** every action reachable by touch; no element depends on hover; tab rows
+swipe; modals never trap content off-screen.
+
+---
+
+### Phase 5 — Verification
+
+Device matrix: **iPhone Safari + Android Chrome**, **portrait + landscape**, **PWA-installed
+standalone**. Easiest via the §6 ngrok HTTPS URL on real hardware.
+
+Checklist:
+- [ ] No page-level horizontal scroll (only inside `.table-wrap`).
+- [ ] No input zoom on focus (Phase 1a).
+- [ ] No content under notch/home indicator in standalone PWA (Phase 1d).
+- [ ] All buttons/nav items tappable without mis-hits (Phase 1c).
+- [ ] Four primary tables render as cards; secondary tables stack/hide columns (Phase 2).
+- [ ] Charts crisp (DPR) and reflow on rotation (Phase 3).
+- [ ] Drawer + overlay open/close; tab bars swipe; modals scroll (Phase 4).
+- [ ] After deploy: `sw.js` cache version bumped so installed PWAs get new CSS.
+
+### Sequencing & effort
+| Phase | Effort | Files | Risk |
+|---|---|---|---|
+| 1 — CSS quick wins | ~1–2 h | `asx_trading.css`, `asx_trading.html` (1 meta) | Low |
+| 2 — Responsive tables | ~M (½–1 day) | `asx_trading.css` + 4–6 `pages/*.js` builders | Med (touches render builders) |
+| 3 — Charts | ~S | `js/charts.js`, `js/init.js` | Low |
+| 4 — Touch polish | ~S | `asx_trading.css` (+ optional new bottom-nav component) | Low (Med if bottom-nav) |
+| 5 — Verification | ~S (manual) | — | — |
+
+Do Phase 1 first (cheap, high impact, CSS-only, tests unaffected). Phase 2 is the biggest lever but
+the largest change surface — table-by-table with browser verification. No automated visual test
+exists, so mobile QA is manual on real devices.
+
+---
+
 ## Appendix A — Shipped (original build sprint)
 
 The original roadmap's nine items have all landed and are retained for history:

@@ -318,7 +318,13 @@ Alerts are checked on every `refreshPrices()` call via `checkDayTradeStopTargetA
 
 Two entry modes — **recapture** (preferred) and **discount** (fallback):
 
-**Mode A — VWAP Recapture (preferred)**
+> **Implementation status:** only **Mode B is implemented** in `/api/intraday/scan` today
+> (`routes/intraday.py`). Mode A below is the documented design for the preferred entry and
+> is planned, not live — do not write tests expecting the scanner to emit recapture setups.
+> This is also why the SPI defensive overlay (§8.8) currently blocks *all* passes: with only
+> Mode B implemented, disabling Mode B leaves nothing.
+
+**Mode A — VWAP Recapture (preferred — planned)**
 - Price was below VWAP within the last 3 bars AND the most recent bar closes *above* VWAP
 - `previous_low < VWAP AND current_close > VWAP`
 - Analogous to the swing BB Reclaim — a confirmed crossback, not just a cheap price
@@ -520,9 +526,9 @@ R:R ratio:                     __________    (must be ≥ 2.0)
 
 The rule-based filters in §2 and §3 define which setups are *structurally valid*. They do not distinguish between valid setups that have historically worked well for **you** and valid setups that have not. Two traders using identical entry rules on the same ticker on the same day will accumulate different outcome distributions because execution timing, position sizing decisions, and individual judgement at exit create different samples.
 
-The learning system is a **personalised win-probability estimator**. It records your own trades — entry signals, market context, and final outcome — then trains a statistical model on that personal history. The model answers one question:
+The learning system is a **personalised expected-return estimator**. It records your own trades — entry signals, market context, and final outcome — then trains a statistical model on that personal history. The model answers one question:
 
-> *Given these 18 technical and contextual features at entry time, what fraction of my past trades with similar features ended as wins?*
+> *Given these entry-time features (15 for swing, 18 for intraday), what R-multiple did my past trades with similar features actually achieve?*
 
 This is distinct from the Claude AI analysis (qualitative conviction) and from the regime gate (structural macro filter). The learning model operates on your realised outcomes — the other two layers operate on forward-looking analysis. All three run in parallel.
 
@@ -563,26 +569,29 @@ day_trade_history.db                ← day_trade_db.py (SQLite, WAL, separate f
     ▼
 POST /api/daytrading/train
     │
-    ├── Load completed snapshots (outcome ≠ 'open')
-    ├── Build 18-column feature matrix X  (NaN → column-mean imputation)
-    ├── Binary label y: 1 = win (pnl_pct > 0.5%), 0 = loss/breakeven
-    ├── Standardise X: z = (x − μ) / σ  (column-wise)
+    ├── Load completed snapshots (outcome ≠ 'open'), sorted chronologically
+    ├── Build per-scope feature matrices X  (swing: 15 cols, intraday: 18 cols)
+    ├── Continuous label y = R-multiple: (exit − entry) / (entry − stop)
+    ├── OOS evaluation first (no leakage — impute/standardise/fit on train fold only):
+    │     n ≥ 60 → 4-fold expanding-window walk-forward
+    │     30 ≤ n < 60 → single chronological 70/30 holdout
+    │     → r2_oos, mae_oos, n_test, cv_method
+    ├── Refit final deployment model on ALL rows (impute → z-score → ridge)
     ├── Compute IC: Spearman rank correlation per feature with y
-    ├── Fit: gradient-descent logistic regression with L2 regularisation
-    ├── Evaluate: accuracy, precision, recall, F1 on full training set
-    └── Persist: model weights, bias, μ, σ → model_state table; IC → feature_importance table
+    └── Persist: weights, bias, μ, σ, r2_score/mae_score (in-sample),
+        r2_oos/mae_oos/n_test/cv_method → model_state; IC → feature_importance
     │
     ▼
 GET /api/daytrading/model           ← loads on Day Trading page open
-    │  returns feature_names, weights[], bias, means[], stds[]
-    │  cached in window._dtModel (JavaScript)
+    │  returns feature_names, weights[], bias, means[], stds[], model_type
+    │  cached in window._dtModel (JavaScript; per-scope: .swing / .intraday)
     │
     ▼
 dtPredictLocal(features, _dtModel)  ← client-side in dt-training.js
     │  no server round-trip per setup
     │
     ▼
-📊 X% win badge on each pending setup card (Setups tab)
+📊 +X.XXR expected-R badge on each pending setup card (Setups tab)
 ```
 
 The model is **not retrained automatically**. You control when to retrain via the 🧠 Model tab → **Train Model** button. Retrain after every 10–20 new completed trades.
@@ -645,7 +654,7 @@ Phase 1 uses a conservative 0.10 Kelly because win-rate and R:R estimates are no
 
 The `_kellyPhase` and `nCompletedTrades` fields are returned by `computeTradeParams()` and shown in the Day Trading Model tab.
 
-### 14.6 Label Construction
+### 14.6 Outcome Classification and Exit Reasons
 
 ```
 outcome = 'win'        if  pnl_pct > +0.5%
@@ -653,13 +662,11 @@ outcome = 'breakeven'  if  -0.5% ≤ pnl_pct ≤ +0.5%
 outcome = 'loss'       if  pnl_pct < -0.5%
 ```
 
-Binary label for model training:
-```
-y = 1  if outcome == 'win'
-y = 0  if outcome == 'loss' or 'breakeven'
-```
+The `outcome` classification drives the History tab stats and the Kelly phase gate (§14.5).
+**It is no longer the model's training target** — since the Sprint 53 ridge upgrade the model
+trains on the continuous R-multiple (§14.7); `outcome` remains as a human-readable label.
 
-The 0.5% threshold is deliberate: ASX brokerage round-trip (2× $10 on a $5,000 position = 0.4%) means any "win" below 0.5% is economically a breakeven or worse after slippage. Treating breakeven as a loss makes the model conservative — it only counts genuine positive outcomes.
+The 0.5% threshold is deliberate: ASX brokerage round-trip (2× $10 on a $5,000 position = 0.4%) means any "win" below 0.5% is economically a breakeven or worse after slippage. Treating breakeven as a loss makes the classification conservative — it only counts genuine positive outcomes.
 
 `pnl_pct` is computed at close:
 ```
@@ -679,7 +686,7 @@ For closed trades patched via `dtCloseSnapshot()`, this is computed from actual 
 
 ---
 
-### 14.6 Training Algorithm — Ridge Regression (Pure Numpy)
+### 14.7 Training Algorithm — Ridge Regression (Pure Numpy)
 
 The training algorithm requires no external ML library. It runs entirely on `numpy`, which is already a transitive dependency of `yfinance`/`pandas`.
 
@@ -723,7 +730,33 @@ X = (X_raw - means) / stds
 
 Same as before — each feature's IC with the R-multiple target is computed. Features with IC ≈ 0 carry no signal.
 
-#### Step 3 — Ridge regression
+#### Step 3 — Out-of-sample evaluation (Sprint 54)
+
+Before the deployment model is fitted, the trainer measures honest predictive skill on
+held-out rows. Rows are sorted chronologically and split by sample size:
+
+| n (completed trades) | `cv_method` | Scheme |
+|---|---|---|
+| ≥ 60 | `walk_forward` | 4-fold expanding window — each fold trains on all earlier rows, predicts the next block |
+| 30–59 | `holdout` | Train on the first 70%, predict the last 30% |
+| held-out rows < 2 | `insufficient` | OOS metrics are `None` |
+
+**Leakage guard:** inside each fold, NaN imputation means, z-score μ/σ, and the ridge
+weights are all fitted on the **train rows only**, then applied to the test rows
+(`_fit_and_predict_fold()`). Fitting any transform on the full matrix would leak test
+information into training and overstate skill.
+
+OOS metrics computed on the pooled held-out predictions:
+```
+r2_oos  = 1 − SS_res / SS_tot      (on held-out rows)
+mae_oos = mean |y_test − y_pred|   (in R-multiples)
+n_test  = number of held-out rows
+```
+
+`r2_oos` is the number to trust. The in-sample `r2_score` (Step 5) is retained for
+overfitting diagnosis: high `r2_score` with negative `r2_oos` = the model memorised noise.
+
+#### Step 4 — Ridge regression (final deployment model)
 
 ```python
 def _ridge_regression(X, y, lr=0.01, epochs=2000, l2=0.05):
@@ -748,9 +781,10 @@ def _ridge_regression(X, y, lr=0.01, epochs=2000, l2=0.05):
 | `epochs` | 2,000 | More iterations than logistic to compensate for slower convergence. |
 | `l2` (regularisation) | 0.05 | Higher than logistic — R-multiple targets have more noise. |
 
-#### Step 4 — Model persistence
+#### Step 5 — Model persistence
 
-After fitting, the following are serialised as JSON and stored in `model_state`:
+The deployment model is refit on **all** rows (the folds in Step 3 are evaluation-only),
+then the following are serialised as JSON and stored in `model_state`:
 
 ```
 feature_names     → ordered list of feature keys (15 or 18)
@@ -759,15 +793,20 @@ bias              → fitted b scalar
 feature_means     → μ from standardisation
 feature_stds      → σ from standardisation
 trade_type_scope  → 'swing' | 'intraday'
-r2_score          → R² on training set
-mae_score         → MAE in R-multiples
+model_type        → 'ridge'
+r2_score          → R² on training set (in-sample — diagnosis only)
+mae_score         → MAE in R-multiples (in-sample)
+r2_oos            → R² on held-out rows (the headline metric)
+mae_oos           → MAE on held-out rows
+n_test            → held-out row count
+cv_method         → 'walk_forward' | 'holdout' | 'insufficient'
 ```
 
 Each training run appends a new row to `model_state`. The prediction endpoints always use `ORDER BY trained_at DESC LIMIT 1` — old model runs are retained for audit but never used.
 
 ---
 
-### 14.6b Shadow Signal Logging
+### 14.8 Shadow Signal Logging
 
 **Problem:** If the ML only trains on trades you actually executed, the model learns a biased sample — it never sees valid setups that were blocked by heat limits, regime gates, or correlation filters.
 
@@ -786,51 +825,61 @@ This gives the model the full unpruned distribution of valid setups — not just
 
 ---
 
-### 14.7 Prediction — Client-Side Inference
+### 14.9 Prediction — Client-Side Inference
 
-After `GET /api/daytrading/model` loads the model into `window._dtModel`, all predictions run entirely in the browser with no server round-trip:
+After `GET /api/daytrading/model` loads the per-scope models into `window._dtModel`
+(`.swing` / `.intraday`), all predictions run entirely in the browser with no server round-trip:
 
 ```javascript
 function dtPredictLocal(features, model) {
-    var fn   = model.feature_names;  // ordered list of 18 names
+    var fn   = model.feature_names;  // ordered list of 15 or 18 names
     var w    = model.weights;
     var mu   = model.feature_means;
     var sig  = model.feature_stds;
-    var bias = model.bias;
+    var bias = model.bias || 0;
 
     // Apply the same standardisation the training used
     var logit = bias;
     for (var i = 0; i < fn.length; i++) {
-        var raw = features[fn[i]] ?? 0;    // null/undefined → 0
+        // Imputation guard: missing values use the training mean → z = 0 (neutral)
+        var raw = (features[fn[i]] != null) ? parseFloat(features[fn[i]]) : (mu[i] || 0);
         var z   = (raw - mu[i]) / sig[i];  // z-score
         logit  += z * w[i];
     }
 
-    // Clamp and apply sigmoid
+    // Ridge models return the raw value: the expected R-multiple
+    if (model.model_type === 'ridge') return logit;
+
+    // Legacy logistic models (pre-Sprint-53): sigmoid → P(win)
     logit = Math.max(-20, Math.min(20, logit));
-    return 1 / (1 + Math.exp(-logit));     // P(win) ∈ (0, 1)
+    return 1 / (1 + Math.exp(-logit));
 }
 ```
 
-The returned value is the model's estimated **P(win)** for the setup given its entry features. This is displayed as the **📊 X% win** badge on each pending Setups card.
+For the current ridge models the returned value is the **expected R-multiple** for the setup
+given its entry features. `dtExpectedRLabel(rec)` renders it as the **📊 +X.XXR** badge on each
+pending Setups card (`dtWinProbLabel` survives as a backward-compat alias).
 
 **Colour coding of the badge:**
 
-| P(win) | Badge colour | Interpretation |
+| Expected R | Badge colour | Interpretation |
 |---|---|---|
-| ≥ 60% | Green | Historically profitable feature combination |
-| 45–59% | Amber | Mixed signal; no strong historical edge |
-| < 45% | Red | Historically weak feature combination — consider passing |
+| ≥ +0.60R | Green | Historically profitable feature combination |
+| +0.15R to +0.59R | Amber | Mixed signal; no strong historical edge |
+| < +0.15R | Red | Historically weak feature combination — consider passing |
 
 The badge is informational, not a gate. A red badge means your personal history with similar setups has been poor — it does not block execution.
 
 ---
 
-### 14.8 Using the System in Practice
+### 14.10 Using the System in Practice
 
 #### Building a usable dataset
 
-Minimum 15 completed trades are required before training is enabled. Realistically, 30–50 trades are needed before the IC estimates stabilise. Below 30 trades, the model will overfit and the ICs will be noisy.
+Minimum **30 completed trades per trade type** (`MIN_TRAIN_SAMPLES = 30` — raised from 15
+when the binary classifier became a regression; continuous targets need more data) are
+required before that scope's model trains. Realistically, 50+ trades are needed before the
+IC estimates stabilise. Shadow records (§14.8) count toward this threshold.
 
 **Do not cherry-pick.** Let all completed trades flow into the DB automatically — including losses. A model trained only on winners has a 100% win rate on training data and no predictive power.
 
@@ -840,7 +889,7 @@ Retrain after every **10–20 new completed trades** or after a **regime transit
 
 #### Interpreting feature importances
 
-The bar chart sorts features by `|IC|` (absolute Spearman correlation with outcome). The sign matters:
+The bar chart sorts features by `|IC|` (absolute Spearman correlation with the R-multiple target). The sign matters:
 
 | IC sign | Meaning |
 |---|---|
@@ -856,43 +905,43 @@ The bar chart sorts features by `|IC|` (absolute Spearman correlation with outco
 
 If `|IC| < 0.03` for all features after 50+ trades, your entry rules are already near-optimal for the signals you are tracking — the model cannot find additional edge. This is a valid and useful finding.
 
-#### Separating swing and intraday models
+#### Separate swing and intraday models (automatic since Sprint 53)
 
-The current implementation trains a single model on both trade types. If you want separate models:
-
-1. Go to 📋 History tab.
-2. Delete all swing (or all intraday) records using the ✕ buttons or the Clear All button.
-3. Train the model on the remaining type.
-4. Export the weights mentally (note which features matter) and restore the full history.
-
-A future enhancement could expose a `trade_type` filter on the train endpoint. For now, if your intraday and swing volumes are both ≥15 completed trades, the mixed-model approach is adequate — the `intraday_rsi` and `vwap_position` features will naturally receive low or zero IC for swing-dominated samples, and the model self-adjusts.
+Each **Train Model** run fits two independent models — swing (15 features) and intraday
+(18 features) — on their own snapshot subsets. No manual record juggling is needed. Each
+scope requires its own 30 completed trades; a scope below threshold simply reports
+"insufficient data" while the other trains normally. `dtExpectedRLabel()` picks the model
+matching the setup's `tradeType` at prediction time.
 
 ---
 
-### 14.9 Model Reliability Boundaries
+### 14.11 Model Reliability Boundaries
 
-The model is a **low-sample pattern detector**, not a calibrated probability estimator. Treat it accordingly.
+The model is a **low-sample pattern detector**, not a calibrated return estimator. Treat it accordingly.
 
-| Condition | Reliability |
+| Condition (per trade type) | Reliability |
 |---|---|
-| n < 15 completed trades | No model available. Rule-based filters only. |
-| n = 15–29 | Model trains but ICs and weights are unreliable. Treat badge as directional, not quantitative. |
-| n = 30–49 | Moderate reliability. Top 3–4 features are likely stable; tail features are noise. |
-| n ≥ 50 | Reasonable reliability. Retrain every 10–20 new trades to stay current. |
-| n ≥ 100 | Good reliability. Accuracy should meaningfully exceed 50% if a real edge exists. |
+| n < 30 completed trades | No model for that scope. Rule-based filters only. |
+| n = 30–59 | Model trains; OOS via a single 70/30 holdout — one split, so `r2_oos` is itself noisy. Treat badge as directional. |
+| n ≥ 60 | Walk-forward OOS (4 folds) — `r2_oos` becomes meaningful. Top 3–4 features likely stable. |
+| n ≥ 100 | Good reliability. `r2_oos` consistently above 0 across retrains indicates a real edge. |
 
 **The model cannot account for regime shifts.** If you built most of your dataset in a `riskOn` regime and are now trading in `riskOff`, the feature distributions differ and the model is stale. Add `regime` as a hard filter (only trade when regime matches the majority of training data) or retrain after the regime settles.
 
-**Accuracy around 50% is normal and expected.** Day trading mean-reversion on a 5–15 day horizon has an inherently noisy outcome distribution. A model that achieves 55–60% accuracy on hold-out data is genuinely useful. An apparent accuracy of 80%+ on a small sample (< 30 trades) is almost certainly overfitting.
+**OOS R² near zero is normal and expected.** Trade outcomes on a 5–15 day horizon are
+inherently noisy; even `r2_oos` of 0.05–0.15 is genuinely useful for ranking setups. Judge
+the model by `r2_oos`/`mae_oos`, never by the in-sample `r2_score`: a high in-sample R²
+paired with a negative `r2_oos` means the model memorised noise (overfitting) — the Model
+tab surfaces both so the comparison is one glance.
 
 ---
 
-### 14.10 What the System Does Not Do
+### 14.12 What the System Does Not Do
 
 | Capability | Available? | Notes |
 |---|---|---|
 | Auto-adjust entry thresholds | No | FACTOR_WEIGHTS in `indicators.py` are static. The model augments, not replaces, the signal score. |
-| Predict magnitude of profit | No | Binary win/loss only. Expected P&L is a separate calculation. |
+| Output a calibrated win probability | No | The ridge model predicts an expected R-multiple (magnitude), not P(win). Only legacy pre-Sprint-53 logistic models returned probabilities. |
 | Call any external API | No | Pure numpy, local DB, no network calls. |
 | Learn from other traders' data | No | Model is trained exclusively on your own trade history. |
 | Optimise the entry rules in §2–§3 | No | Rule optimisation requires a different approach (e.g., the walk-forward backtest in §Performance). |

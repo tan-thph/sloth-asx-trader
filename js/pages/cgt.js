@@ -265,23 +265,23 @@ function renderCGT() {
         ? '<div class="empty-state" style="padding:1.5rem;margin-top:12px"><div class="empty-icon">◇</div><p>No disposals yet — they appear automatically when you log a SELL trade.</p></div>'
         : fDisposals.length === 0
           ? '<div class="empty-state" style="padding:1.5rem;margin-top:12px"><div class="empty-icon">◇</div><p>No disposals match your filters.</p></div>'
-          : '<div class="table-wrap" style="margin-top:12px"><table>'
+          : '<div class="table-wrap" style="margin-top:12px"><table class="tbl-stack">'
           + '<thead><tr><th>Sale Date</th><th>Ticker</th><th>Qty</th><th>Sale Price</th><th>Parcel Date</th><th>Cost/Share</th><th>Cost Base</th><th>Proceeds</th><th>Sale Fee</th><th>Gross Gain</th><th>Held</th><th>50% Disc.</th><th>Net CGT Gain</th></tr></thead>'
           + '<tbody>'
           + fDisposals.map(d => '<tr>'
-            + '<td class="text-xs">' + d.saleDate + '</td>'
-            + '<td><strong>' + d.ticker + '</strong></td>'
-            + '<td>' + d.saleQty + '</td>'
-            + '<td>$' + fmt(d.salePrice) + '</td>'
-            + '<td class="text-xs">' + (d.parcelDate || '<span class="text-muted">Unknown</span>') + '</td>'
-            + '<td>$' + fmt(d.parcelCostPerShare) + '</td>'
-            + '<td>$' + fmt(d.costBase) + '</td>'
-            + '<td>$' + fmt(d.proceeds) + '</td>'
-            + '<td class="text-xs">$' + fmt(d.saleFee) + '</td>'
-            + '<td class="' + (d.grossGain>=0?'text-success':'text-danger') + '">' + (d.grossGain>=0?'+':'') + '$' + fmt(Math.abs(d.grossGain)) + '</td>'
-            + '<td class="text-xs">' + (d.heldDays != null ? d.heldDays+'d' : '?') + '</td>'
-            + '<td>' + (d.eligible50 && d.grossGain > 0 ? '<span class="badge badge-executed">−$'+fmt(d.discount)+'</span>' : '<span class="text-xs text-muted">—</span>') + '</td>'
-            + '<td class="' + (d.netGain>=0?'text-success':'text-danger') + '" style="font-weight:600">' + (d.netGain>=0?'+':'') + '$' + fmt(Math.abs(d.netGain)) + '</td>'
+            + '<td data-label="Sale Date" class="text-xs">' + d.saleDate + '</td>'
+            + '<td data-label="Ticker"><strong>' + d.ticker + '</strong></td>'
+            + '<td data-label="Qty">' + d.saleQty + '</td>'
+            + '<td data-label="Sale Price">$' + fmt(d.salePrice) + '</td>'
+            + '<td data-label="Parcel Date" class="text-xs">' + (d.parcelDate || '<span class="text-muted">Unknown</span>') + '</td>'
+            + '<td data-label="Cost/Share">$' + fmt(d.parcelCostPerShare) + '</td>'
+            + '<td data-label="Cost Base">$' + fmt(d.costBase) + '</td>'
+            + '<td data-label="Proceeds">$' + fmt(d.proceeds) + '</td>'
+            + '<td data-label="Sale Fee" class="text-xs">$' + fmt(d.saleFee) + '</td>'
+            + '<td data-label="Gross Gain" class="' + (d.grossGain>=0?'text-success':'text-danger') + '">' + (d.grossGain>=0?'+':'') + '$' + fmt(Math.abs(d.grossGain)) + '</td>'
+            + '<td data-label="Held" class="text-xs">' + (d.heldDays != null ? d.heldDays+'d' : '?') + '</td>'
+            + '<td data-label="50% Disc.">' + (d.eligible50 && d.grossGain > 0 ? '<span class="badge badge-executed">−$'+fmt(d.discount)+'</span>' : '<span class="text-xs text-muted">—</span>') + '</td>'
+            + '<td data-label="Net CGT Gain" class="' + (d.netGain>=0?'text-success':'text-danger') + '" style="font-weight:600">' + (d.netGain>=0?'+':'') + '$' + fmt(Math.abs(d.netGain)) + '</td>'
             + '</tr>'
           ).join('')
           + '</tbody>'
@@ -364,7 +364,7 @@ function renderCGT() {
               + '<span class="text-xs text-muted">' + openParcels.length + ' lot' + (openParcels.length!==1?'s':'') + ' · ' + openParcels.reduce((s,p)=>s+p.remainingQty,0) + ' shares</span>'
               + (currentPrice ? '<span class="text-xs text-muted">Current: $' + fmt(currentPrice) + '</span>' : '')
               + '</div></div>';
-            html += '<div class="table-wrap"><table>'
+            html += '<div class="table-wrap"><table class="tbl-stack">'
               + '<thead><tr>'
               + '<th>Parcel #</th><th>Buy Date</th><th>Held</th><th>Discount?</th>'
               + '<th>Original Qty</th><th>Remaining</th><th>Cost/Share</th><th>Buy Fee</th>'
@@ -384,21 +384,21 @@ function renderCGT() {
                 estNetCgt = grossG - (eligible && grossG > 0 ? grossG * 0.5 : 0);
               }
               html += '<tr>'
-                + '<td class="text-xs text-muted">#' + p.id + (p.action === 'DRP' ? ' <span class="badge badge-drp" style="font-size:9px;padding:1px 5px">DRP</span>' : '') + '</td>'
-                + '<td class="text-xs">' + p.date + '</td>'
-                + '<td class="text-xs">' + held + 'd</td>'
-                + '<td>' + (eligible ? '<span class="badge badge-executed">50% ✓</span>' : '<span class="badge badge-pending">' + (365-held) + 'd left</span>') + '</td>'
-                + '<td>' + p.qty + '</td>'
-                + '<td><strong>' + p.remainingQty + '</strong>' + (p.remainingQty < p.qty ? '<span class="text-xs text-muted"> (' + (p.qty-p.remainingQty) + ' sold)</span>' : '') + '</td>'
-                + '<td>$' + fmt(p.costPerShare) + '</td>'
-                + '<td class="text-xs">$' + fmt(p.fees) + '</td>'
-                + '<td>$' + fmt(costBase) + '</td>'
-                + (currentPrice ? '<td class="' + (unrealPnl!=null?(unrealPnl>=0?'text-success':'text-danger'):'') + '">' + (unrealPnl!=null?(unrealPnl>=0?'+':'')+'$'+fmt(Math.abs(unrealPnl)):'—') + '</td>' : '')
-                + '<td class="' + (estNetCgt!=null?(estNetCgt>=0?'text-success':'text-danger'):'') + ' text-xs">'
+                + '<td data-label="Parcel #" class="text-xs text-muted">#' + p.id + (p.action === 'DRP' ? ' <span class="badge badge-drp" style="font-size:9px;padding:1px 5px">DRP</span>' : '') + '</td>'
+                + '<td data-label="Buy Date" class="text-xs">' + p.date + '</td>'
+                + '<td data-label="Held" class="text-xs">' + held + 'd</td>'
+                + '<td data-label="Discount?">' + (eligible ? '<span class="badge badge-executed">50% ✓</span>' : '<span class="badge badge-pending">' + (365-held) + 'd left</span>') + '</td>'
+                + '<td data-label="Original Qty">' + p.qty + '</td>'
+                + '<td data-label="Remaining"><strong>' + p.remainingQty + '</strong>' + (p.remainingQty < p.qty ? '<span class="text-xs text-muted"> (' + (p.qty-p.remainingQty) + ' sold)</span>' : '') + '</td>'
+                + '<td data-label="Cost/Share">$' + fmt(p.costPerShare) + '</td>'
+                + '<td data-label="Buy Fee" class="text-xs">$' + fmt(p.fees) + '</td>'
+                + '<td data-label="Cost Base">$' + fmt(costBase) + '</td>'
+                + (currentPrice ? '<td data-label="Unrealised P&L" class="' + (unrealPnl!=null?(unrealPnl>=0?'text-success':'text-danger'):'') + '">' + (unrealPnl!=null?(unrealPnl>=0?'+':'')+'$'+fmt(Math.abs(unrealPnl)):'—') + '</td>' : '')
+                + '<td data-label="Est. Net CGT" class="' + (estNetCgt!=null?(estNetCgt>=0?'text-success':'text-danger'):'') + ' text-xs">'
                   + (estNetCgt!=null?(estNetCgt>=0?'+':'')+'$'+fmt(Math.abs(estNetCgt)):'—')
                   + (eligible&&estNetCgt!=null&&estNetCgt>0?'<br><span style="color:var(--text-tertiary);font-size:10px">disc. applied</span>':'')
                 + '</td>'
-                + '<td><button class="btn btn-sm btn-danger" onclick="deleteParcel(' + p.id + ')">✕</button></td>'
+                + '<td data-label="Actions"><button class="btn btn-sm btn-danger" onclick="deleteParcel(' + p.id + ')">✕</button></td>'
                 + '</tr>';
             });
             html += '</tbody></table></div></div>';
@@ -485,7 +485,7 @@ function renderCGT() {
           </div>
 
           <div class="table-wrap">
-            <table>
+            <table class="tbl-stack">
               <thead><tr>
                 <th>Ticker</th><th>Parcel</th><th>Qty</th><th>Cost/Share</th><th>Current</th><th>Cost Base</th><th>Proceeds</th><th>Unr. Loss</th><th>Held</th><th>Wash-Sale?</th>
               </tr></thead>
@@ -493,16 +493,16 @@ function renderCGT() {
                 ${losers.map(l => {
                   const held = daysBetween(l.date, today);
                   return `<tr>
-                    <td><strong>${l.ticker}</strong></td>
-                    <td class="text-xs text-muted">#${l.id} · ${l.date}</td>
-                    <td>${l.remainingQty}</td>
-                    <td>$${fmt(l.costPerShare)}</td>
-                    <td>$${fmt(l.currentPrice)}</td>
-                    <td>$${fmt(l.costBase)}</td>
-                    <td>$${fmt(l.proceeds)}</td>
-                    <td class="text-danger" style="font-weight:600">−$${fmt(Math.abs(l.unrLoss))}</td>
-                    <td class="text-xs">${held}d${held >= 365 ? ' <span class="badge badge-executed">CGT disc.</span>' : ''}</td>
-                    <td>${l.washSaleRisk ? '<span class="badge badge-pending" title="Bought same ticker in last 30 days — may trigger wash-sale rules">⚠ Risk</span>' : '<span class="text-xs text-muted">—</span>'}</td>
+                    <td data-label="Ticker"><strong>${l.ticker}</strong></td>
+                    <td data-label="Parcel" class="text-xs text-muted">#${l.id} · ${l.date}</td>
+                    <td data-label="Qty">${l.remainingQty}</td>
+                    <td data-label="Cost/Share">$${fmt(l.costPerShare)}</td>
+                    <td data-label="Current">$${fmt(l.currentPrice)}</td>
+                    <td data-label="Cost Base">$${fmt(l.costBase)}</td>
+                    <td data-label="Proceeds">$${fmt(l.proceeds)}</td>
+                    <td data-label="Unr. Loss" class="text-danger" style="font-weight:600">−$${fmt(Math.abs(l.unrLoss))}</td>
+                    <td data-label="Held" class="text-xs">${held}d${held >= 365 ? ' <span class="badge badge-executed">CGT disc.</span>' : ''}</td>
+                    <td data-label="Wash-Sale?">${l.washSaleRisk ? '<span class="badge badge-pending" title="Bought same ticker in last 30 days — may trigger wash-sale rules">⚠ Risk</span>' : '<span class="text-xs text-muted">—</span>'}</td>
                   </tr>`;
                 }).join('')}
               </tbody>
