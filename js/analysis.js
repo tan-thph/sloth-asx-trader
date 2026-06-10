@@ -195,6 +195,12 @@ async function runAnalysis() {
   // technical data (bypasses the 15-min fetchSignals cache).
   if(state.serverOk && allTickers.length) { try { await fetchSignals(allTickers, true); } catch {} }
 
+  // Macro brief must be resolved BEFORE any prompt context is built. It was
+  // previously awaited only at regime-classification time — after macroCtx and
+  // the user message were already assembled — so the first analysis of the day
+  // shipped without (or with yesterday's) TODAY'S MACRO BRIEF section.
+  await macroPromise;
+
   // ── Step 2b: fetch portfolio risk metrics ───────────────────────────────────
   // Run in parallel with the rest of context building — non-blocking failure.
   let _riskMetrics = {};   // {TICKER: {var_95, cvar_95, max_drawdown, beta, sharpe, volatility_ann}}
@@ -627,8 +633,7 @@ TASK:
 6. Return JSON only — no preamble, no markdown.
 PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown'}`;
 
-  // ── Wait for macro to finish, then classify regime ──────────────────────────
-  await macroPromise;
+  // ── Classify regime (macroPromise already awaited before context build) ─────
   const _regimeResult = await fetchAndClassifyRegime();
   const _activeRegime = _regimeResult.regime;
   if (_activeRegime && _activeRegime !== 'unknown') state._lastRegime = _activeRegime;
@@ -858,6 +863,28 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         };
       });
     }
+
+    // ── Deterministic SELL/TRIM sizing ──────────────────────────────────────────
+    // Rule 4 makes Claude emit qty=0 for every action, but computeTradeParams()
+    // above only sizes BUY/TOP_UP — exits were reaching the UI with no quantity.
+    // SELL = full position. TRIM = the "Reduce (-25-50%)" range midpoint from
+    // weightGuidance (default 35%) of the held shares, clamped to [1, held].
+    recs = recs.map(r => {
+      const action = (r.action || '').toUpperCase();
+      if (action !== 'SELL' && action !== 'TRIM') return r;
+      const holding = mergedPortfolio().find(h => h.ticker === r.ticker);
+      const held = holding ? Math.floor(Number(holding.shares) || 0) : 0;
+      if (held < 1) return r;  // not held — downstream guards handle the rec
+      const aiQty = Math.round(Number(r.qty) || 0);
+      if (aiQty >= 1 && aiQty <= held) return r;  // respect a valid explicit qty
+      if (action === 'SELL') return { ...r, qty: held, _exitSized: 'full' };
+      let frac = 0.35;
+      const m = /(\d+)\s*-\s*(\d+)\s*%/.exec(r.weightGuidance || '');
+      if (m) frac = (Number(m[1]) + Number(m[2])) / 2 / 100;
+      frac = Math.min(1, Math.max(0.05, frac));
+      const qty = Math.min(held, Math.max(1, Math.round(held * frac)));
+      return { ...r, qty, _exitSized: `${Math.round(frac * 100)}%` };
+    });
 
     // ── ATR floor for SELL/TRIM stop loss ──────────────────────────────────────
     // Claude sometimes generates near-zero stop distances for SELL/TRIM (e.g. +0.2%

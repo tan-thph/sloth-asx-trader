@@ -913,12 +913,12 @@ class TestStage2AutoClassification(unittest.TestCase):
 class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
-    def test_prompt_version_bumped_to_v5(self):
-        """PROMPT_VERSION must be bumped to v8 after Sprint 47 prompt pipeline fixes."""
+    def test_prompt_version_current(self):
+        """PROMPT_VERSION must be bumped to v9 after the SELL/TRIM sizing prompt fixes."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v8'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v8 after Sprint 47 prompt fixes")
+        self.assertIn("PROMPT_VERSION = '2026-06-v9'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v9 after SELL/TRIM sizing prompt fixes")
 
     def test_calibration_algorithm_in_system_prompt(self):
         """System prompt must prescribe the calibration algorithm (confidence += adj, clamped)."""
@@ -6517,6 +6517,48 @@ class TestSprintQuant(unittest.TestCase):
         self.assertIn('spi_chg', src)
         self.assertIn('spi_defensive', src)
         self.assertIn('spi_blocked', src)
+
+
+class TestSellTrimSizingAndMacroRace(unittest.TestCase):
+    """Regression tests — SELL/TRIM qty sizing + first-of-day macro brief race."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            cls.analysis_src = f.read()
+
+    def test_sell_trim_recs_are_sized_deterministically(self):
+        """analysis.js must size SELL/TRIM exits (Rule 4 forces Claude qty=0;
+        computeTradeParams only sizes BUY/TOP_UP — exits had qty 0 in the UI)."""
+        self.assertIn("_exitSized", self.analysis_src,
+                      "SELL/TRIM sizing block missing from analysis.js")
+        # SELL = full holding; TRIM = weightGuidance midpoint fraction
+        self.assertIn("{ ...r, qty: held, _exitSized: 'full' }", self.analysis_src)
+        self.assertIn("r.weightGuidance", self.analysis_src)
+
+    def test_trim_fraction_parses_weight_guidance_range(self):
+        """TRIM fraction must come from the Reduce (-X-Y%) range in weightGuidance."""
+        self.assertIn(r"/(\d+)\s*-\s*(\d+)\s*%/", self.analysis_src)
+
+    def test_macro_promise_awaited_before_prompt_context(self):
+        """macroPromise must resolve BEFORE macroCtx is built — otherwise the first
+        analysis of the day ships without TODAY'S MACRO BRIEF in the user message."""
+        awaited_at = self.analysis_src.index("await macroPromise")
+        macro_read = self.analysis_src.index("const _m = state.macroData")
+        prompt_built = self.analysis_src.index("${macroCtx}")
+        self.assertLess(awaited_at, macro_read,
+                        "await macroPromise must precede reading state.macroData for macroCtx")
+        self.assertLess(awaited_at, prompt_built,
+                        "await macroPromise must precede user-message assembly")
+
+    def test_prompt_action_definitions_no_qty_contradiction(self):
+        """ACTION DEFINITIONS must not tell Claude to set qty (contradicts Rule 4)."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("qty = shares to sell", src,
+                         "TRIM definition contradicts Rule 4 (qty must stay 0)")
+        self.assertNotIn("qty = incremental shares only", src,
+                         "TOP_UP definition contradicts Rule 4 (qty must stay 0)")
 
 
 if __name__ == "__main__":

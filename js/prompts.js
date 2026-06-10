@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v8';
+const PROMPT_VERSION = '2026-06-v9';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -450,15 +450,18 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   ACTION DEFINITIONS:
     BUY:    New position — watchlist entry or entirely new holding.
-    TOP_UP: Add to EXISTING holding — underweight, strong multi-factor thesis. qty = incremental shares only.
+    TOP_UP: Add to EXISTING holding — underweight, strong multi-factor thesis.
+            (qty stays 0 per Rule 4 — the quant engine sizes the increment.)
     SELL:   Close full position — multi-factor deterioration confirmed.
+            (qty stays 0 per Rule 4 — the quant engine sets qty to the full holding.)
             priceRange[0] = limit sell price. target = price that confirms the exit was correct
             (further decline — typically 5–15% below priceRange[0] depending on thesis).
             stopLoss = price at which the exit thesis is INVALIDATED (stock recovers past this level,
             signalling the sell was wrong — set 3–5% ABOVE priceRange[0]; must be above priceRange[1]).
             Do NOT set priceRange, target, and stopLoss to the same value.
     TRIM:   Reduce EXISTING holding — overweight (>15%), near fair value, or factor thesis weakening.
-            qty = shares to sell (not total held).
+            (qty stays 0 per Rule 4 — the quant engine trims by the midpoint of the
+            "Reduce (-X-Y%)" range in weightGuidance, so set weightGuidance deliberately.)
             Same target/stopLoss semantics as SELL: target below sell price, stopLoss above.
 
   === JSON OUTPUT SCHEMA EXAMPLE (conform exactly) ===
