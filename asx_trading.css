@@ -368,7 +368,8 @@ tr:hover td { background: var(--bg-hover); }
 .critical-alert-banner .alert-desc  { font-size: 12px; margin-top: 2px; opacity: 0.85; }
 .critical-alert-banner .alert-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 @media (prefers-color-scheme: dark) {
-  .critical-alert-banner { background: rgba(239,68,68,0.12); color: #fca5a5; border-color: rgba(239,68,68,0.5); }
+  /* :not() guard — a manual Light theme must keep the light banner even on a dark OS */
+  :root:not([data-theme="light"]) .critical-alert-banner { background: rgba(239,68,68,0.12); color: #fca5a5; border-color: rgba(239,68,68,0.5); }
 }
 :root[data-theme="dark"] .critical-alert-banner { background: rgba(239,68,68,0.12); color: #fca5a5; border-color: rgba(239,68,68,0.5); }
 

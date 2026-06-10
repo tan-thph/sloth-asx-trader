@@ -145,10 +145,10 @@ function renderPortfolioHistory() {
           <canvas id="history-chart" style="width:100%;height:240px"></canvas>
         </div>
         <div class="flex-row" style="gap:16px;font-size:11px;color:var(--text-secondary);margin-top:4px">
-          <span>─ <span style="color:#3b82f6">Net Worth</span></span>
-          <span>─ <span style="color:#22c55e">Portfolio</span></span>
-          <span>── <span style="color:#f59e0b">Cash</span></span>
-          <span>── <span style="color:#94a3b8">ASX200</span></span>
+          <span>─ <span style="color:var(--chart-1)">Net Worth</span></span>
+          <span>─ <span style="color:var(--chart-3)">Portfolio</span></span>
+          <span>── <span style="color:var(--chart-2)">Cash</span></span>
+          <span>── <span style="color:var(--chart-6)">ASX200</span></span>
           <span style="margin-left:auto">Peak: $${fmt(maxNW)} · Trough: $${fmt(minNW)}</span>
         </div>
         <div style="margin-top:12px">
@@ -346,20 +346,20 @@ async function drawHistoryChart() {
     ctx.stroke(); ctx.setLineDash([]);
   }
 
-  // Gradient fill under net worth
+  const c1 = chartColor('--chart-1', '#3b82f6');
+  const c2 = chartColor('--chart-2', '#f59e0b');
+  const c3 = chartColor('--chart-3', '#22c55e');
+  const c6 = chartColor('--chart-6', '#94a3b8');
+
+  // Gradient fill under net worth — tokens are 6-digit hex, so hex-alpha suffixes work
   const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
-  grad.addColorStop(0, 'rgba(59,130,246,0.18)');
-  grad.addColorStop(1, 'rgba(59,130,246,0)');
+  grad.addColorStop(0, c1 + '2e');
+  grad.addColorStop(1, c1 + '00');
   ctx.beginPath();
   nwArr.forEach((v, i) => i === 0 ? ctx.moveTo(py(i), px(v)) : ctx.lineTo(py(i), px(v)));
   ctx.lineTo(py(data.length - 1), pad.t + ch);
   ctx.lineTo(py(0), pad.t + ch);
   ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
-
-  const c1 = chartColor('--chart-1', '#3b82f6');
-  const c2 = chartColor('--chart-2', '#f59e0b');
-  const c3 = chartColor('--chart-3', '#22c55e');
-  const c6 = chartColor('--chart-6', '#94a3b8');
   if (benchArr) drawLine(benchArr, c6, true);
   drawLine(nwArr, c1, false);
   drawLine(pvArr, c3, false);
