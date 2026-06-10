@@ -709,11 +709,8 @@ Single canonical copy now in `js/utils.js`. Both page files reference it via the
 ### ✓ 3.10 Stooq rate-limit semaphore — `S` · ★★ **SHIPPED Sprint 43**
 `_stooq_sem = threading.BoundedSemaphore(1)` in `core.py`; both `stooq_quote()` and `_fetch_stooq_history()` acquire it with a 1-second `finally` sleep.
 
-### 3.11 `_cache_store` unbounded growth in `core.py` — `S` · ★
-`_cache_store` accumulates entries indefinitely — expired entries are only evicted on the next
-access after TTL, not proactively. On a long-running gunicorn server scanning 200 tickers, this
-grows to thousands of stale entries. Add a max-size cap (e.g. 2,000) and an expired-entry sweep
-inside the lock before the cache-miss check. Detail in §0 audit item A.
+### ✓ 3.11 `_cache_store` unbounded growth in `core.py` — **SHIPPED**
+`_MAX_CACHE_SIZE = 2000` cap + `_evict_cache()` expired-entry sweep added to `core.py`. Sweep runs inside the lock on every cache miss. See §0 audit item A.
 
 ### 3.12 Thundering herd in `ttl_cache` under parallel scanner load — `S` · ★
 Concurrent cache misses (e.g. 8 threads hitting the same ticker TTL simultaneously) each invoke
@@ -721,15 +718,12 @@ the expensive yfinance call before any result is stored. A per-key `threading.Ev
 would park waiters until the first compute completes, eliminating redundant network calls under
 load. See §0 audit item B. Not urgent for personal use; flag for a future engineering pass.
 
-### 3.13 Backtest endpoint missing input validation — `S` · ★★
-`POST /api/backtest` does not validate `tickers` type/length, `period` against an allowlist,
-`strategy` against an allowlist, or `capital` numeric bounds. Invalid inputs cause silent misfires
-(empty yfinance response, unrecognised strategy fall-through) or unhandled `ValueError`. Add a
-minimal allowlist check as described in §0 audit item C.
+### ✓ 3.13 Backtest endpoint missing input validation — **SHIPPED**
+`_ALLOWED_PERIODS` and `_ALLOWED_STRATEGIES` allowlist guards added to `routes/backtest.py`.
+Tickers list type/length validated; capital bounds checked. See §0 audit item C.
 
-### 3.14 `js/utils.js` merged portfolio missing `shares <= 0` guard — `XS` · ★
-`avgPrice = _totalCost / shares` in `mergedPortfolio()` produces `Infinity` when a corrupt or
-doubly-applied CGT entry leaves `shares = 0`. Filter zero-share entries after the merge step.
+### ✓ 3.14 `js/utils.js` merged portfolio missing `shares <= 0` guard — **SHIPPED**
+`.filter(h => h.shares > 0)` added after the merge step in `mergedPortfolio()` (`utils.js:44-48`).
 See §0 audit item F.
 
 ---

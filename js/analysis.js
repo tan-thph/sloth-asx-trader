@@ -1,4 +1,92 @@
 // ============================================================
+// PIPELINE HELPERS — pure functions, no I/O (testable in Vitest)
+// ============================================================
+
+/**
+ * Apply correlation-based size reduction to BUY/TOP_UP recs.
+ * @param {Array}  recs            - recommendation objects with {action, ticker, qty, riskAUD}
+ * @param {Object} corrMatrix      - {TICKER: {OTHER_TICKER: correlation_coefficient}}
+ * @param {Array}  portfolioTickers - tickers of existing holdings
+ * @returns {Array} recs with qty/riskAUD adjusted and _corrNote set where applicable
+ */
+function _applyCorrSizing(recs, corrMatrix, portfolioTickers) {
+  return recs.map(function(r) {
+    if (!['BUY','TOP_UP'].includes((r.action||'').toUpperCase())) return r;
+    var tkrRow = corrMatrix[r.ticker] || {};
+    var maxCorr = 0, maxCorrTicker = null;
+    for (var i = 0; i < portfolioTickers.length; i++) {
+      var h = portfolioTickers[i];
+      if (h === r.ticker) continue;
+      var c = Math.abs(tkrRow[h] || 0);
+      if (c > maxCorr) { maxCorr = c; maxCorrTicker = h; }
+    }
+    if (maxCorr > 0.85) {
+      var mult = 0.5;
+      return Object.assign({}, r, {
+        qty: Math.max(1, Math.round(r.qty * mult)),
+        riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
+        _corrNote: 'corr ' + maxCorr.toFixed(2) + ' with ' + maxCorrTicker + ' — size halved'
+      });
+    } else if (maxCorr > 0.7) {
+      var mult2 = 0.7;
+      return Object.assign({}, r, {
+        qty: Math.max(1, Math.round(r.qty * mult2)),
+        riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult2) : r.riskAUD,
+        _corrNote: 'corr ' + maxCorr.toFixed(2) + ' with ' + maxCorrTicker + ' — size −30%'
+      });
+    }
+    return r;
+  });
+}
+
+/**
+ * Apply heat-budget gate to BUY/TOP_UP recs.
+ * Recs that fit within the remaining budget pass through unchanged.
+ * Recs that partially fit are scaled down (_budgetScaled).
+ * Recs that don't fit at all are marked _budgetBlocked (qty=0).
+ *
+ * @param {Array}  recs       - recs to process
+ * @param {number} budgetAUD  - total $ at-risk budget
+ * @param {number} consumed   - $ already consumed by pre-existing pending recs
+ * @param {string} source     - label for _budgetNote ('user' | 'regime:X')
+ * @returns {{ recs: Array, scaled: number, blocked: number }}
+ */
+function _applyHeatBudget(recs, budgetAUD, consumed, source) {
+  var scaledCount = 0, blockedCount = 0;
+  var out = recs.map(function(r) {
+    var action = (r.action || '').toUpperCase();
+    if ((action !== 'BUY' && action !== 'TOP_UP') || !(r.riskAUD > 0)) return r;
+
+    var remaining = budgetAUD - consumed;
+
+    if (r.riskAUD <= remaining) {
+      consumed += r.riskAUD;
+      return r;
+    }
+
+    if (remaining <= 0) {
+      blockedCount++;
+      return Object.assign({}, r, { qty: 0, _budgetBlocked: true,
+        _budgetNote: 'Heat budget exhausted ($' + budgetAUD.toFixed(0) + ' limit, $0 remaining) [' + source + ']' });
+    }
+
+    var riskPerShare = r.riskAUD / r.qty;
+    var scaledQty = Math.floor(remaining / riskPerShare);
+    if (scaledQty < 1) {
+      blockedCount++;
+      return Object.assign({}, r, { qty: 0, _budgetBlocked: true,
+        _budgetNote: 'Heat budget: $' + remaining.toFixed(0) + ' remaining < 1-share risk ($' + riskPerShare.toFixed(0) + ') [' + source + ']' });
+    }
+    scaledCount++;
+    var scaledRisk = +(scaledQty * riskPerShare).toFixed(2);
+    consumed += scaledRisk;
+    return Object.assign({}, r, { qty: scaledQty, riskAUD: scaledRisk, _budgetScaled: true,
+      _budgetNote: 'Heat budget: $' + remaining.toFixed(0) + ' of $' + budgetAUD.toFixed(0) + ' remaining [' + source + ']' });
+  });
+  return { recs: out, scaled: scaledCount, blocked: blockedCount };
+}
+
+// ============================================================
 // ANALYSIS ENGINE
 // ============================================================
 async function runAnalysis() {
@@ -889,28 +977,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           if (_corrResp.ok) {
             const _corrData = await _corrResp.json();
             const _corrMatrix = _corrData.correlation || {};
-            recs = recs.map(r => {
-              if (!['BUY','TOP_UP'].includes((r.action||'').toUpperCase())) return r;
-              const tkrRow = _corrMatrix[r.ticker] || {};
-              let maxCorr = 0, maxCorrTicker = null;
-              for (const h of portfolioTickers) {
-                if (h === r.ticker) continue;
-                const c = Math.abs(tkrRow[h] || 0);
-                if (c > maxCorr) { maxCorr = c; maxCorrTicker = h; }
-              }
-              if (maxCorr > 0.85) {
-                const mult = 0.5;
-                return { ...r, qty: Math.max(1, Math.round(r.qty * mult)),
-                  riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
-                  _corrNote: `corr ${maxCorr.toFixed(2)} with ${maxCorrTicker} — size halved` };
-              } else if (maxCorr > 0.7) {
-                const mult = 0.7;
-                return { ...r, qty: Math.max(1, Math.round(r.qty * mult)),
-                  riskAUD: r.riskAUD ? Math.round(r.riskAUD * mult) : r.riskAUD,
-                  _corrNote: `corr ${maxCorr.toFixed(2)} with ${maxCorrTicker} — size −30%` };
-              }
-              return r;
-            });
+            recs = _applyCorrSizing(recs, _corrMatrix, portfolioTickers);
           }
         }
       } catch { /* non-fatal — analysis continues without correlation adjustment */ }
@@ -939,39 +1006,10 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
                      r.riskAUD > 0)
         .reduce((s, r) => s + r.riskAUD, 0);
 
-      let budgetScaledCount = 0, budgetBlockedCount = 0;
-
-      recs = recs.map(r => {
-        const action = (r.action || '').toUpperCase();
-        if ((action !== 'BUY' && action !== 'TOP_UP') || !(r.riskAUD > 0)) return r;
-
-        const remaining = budgetAUD - consumed;
-
-        if (r.riskAUD <= remaining) {
-          consumed += r.riskAUD;  // rec fits — count it for subsequent recs in batch
-          return r;
-        }
-
-        if (remaining <= 0) {
-          budgetBlockedCount++;
-          return { ...r, qty: 0, _budgetBlocked: true,
-            _budgetNote: `Heat budget exhausted ($${budgetAUD.toFixed(0)} limit, $0 remaining) [${_heatLimitSource}]` };
-        }
-
-        // Rec partially fits — scale qty to remaining capacity
-        const riskPerShare = r.riskAUD / r.qty;
-        const scaledQty = Math.floor(remaining / riskPerShare);
-        if (scaledQty < 1) {
-          budgetBlockedCount++;
-          return { ...r, qty: 0, _budgetBlocked: true,
-            _budgetNote: `Heat budget: $${remaining.toFixed(0)} remaining < 1-share risk ($${riskPerShare.toFixed(0)}) [${_heatLimitSource}]` };
-        }
-        budgetScaledCount++;
-        const scaledRisk = +(scaledQty * riskPerShare).toFixed(2);
-        consumed += scaledRisk;
-        return { ...r, qty: scaledQty, riskAUD: scaledRisk, _budgetScaled: true,
-          _budgetNote: `Heat budget: $${remaining.toFixed(0)} of $${budgetAUD.toFixed(0)} remaining [${_heatLimitSource}]` };
-      });
+      const _budgetResult = _applyHeatBudget(recs, budgetAUD, consumed, _heatLimitSource);
+      recs = _budgetResult.recs;
+      const budgetScaledCount  = _budgetResult.scaled;
+      const budgetBlockedCount = _budgetResult.blocked;
 
       // Drop budget-blocked recs — shadow-log them first for ML bias correction
       const budgetBlockedRecs = recs.filter(r => r._budgetBlocked);
