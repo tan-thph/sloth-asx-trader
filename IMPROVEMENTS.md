@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-10 (Sprint 59: §G debate cache race, §H parseDate hardening, §2.7 calib-quality lessons; §K marked shipped)
+**Last Updated:** 2026-06-11 (Sprint 60: "Quiet Terminal" UI redesign — CSS token system, dark-mode, chart theming, theme toggle)
 
 ## 0. Post-Sprint-53 audit — ML evaluation gap (2026-06-09)
 
@@ -83,6 +83,16 @@ or the deployed model's weights.
 
 **Acceptance:** training run returns and displays an OOS R² that is generally lower than the
 in-sample R²; the UI no longer presents the optimistic number as the headline metric.
+
+---
+
+## 0. Shipped — Sprint 60 (2026-06-11)
+
+| Fix / Feature | Area | Detail |
+|---|---|---|
+| **"Quiet Terminal" CSS redesign (Phases A+B)** | UX (M) | Full `asx_trading.css` rewrite. New design-token system: `--bg-base/surface/inset/hover`, `--text-primary/secondary/tertiary`, `--text-muted` alias (fixed 314 undefined usages), `--border` alias (fixed 91 undefined usages), `--shadow-card/pop/hover`, `--up/down/warn` + bg variants, `--chart-1..6`, `--chart-grid`. Dual dark-mode block: `@media (prefers-color-scheme:dark) :root:not([data-theme="light"])` + byte-identical `[data-theme="dark"]` attribute block. Tabular-nums on tables + metric values. Sticky topbar with `backdrop-filter: blur(12px)`. Active sidebar indicator bar (2.5px left). Cards with hover elevation. Token-driven badges (pill + dot). Button focus ring via `--accent-ring`. Skeleton shimmer utility. Dialog `::backdrop`. Motion guard. Scrollbar refinement. Deleted 3 redundant dark override blocks. Compact mode, mobile `@media`, `.tbl-stack`, safe-area all preserved unchanged. |
+| **Chart theming (Phase C)** | UX (S) | `chartColor(token, fallback)` helper added to `js/charts.js` — reads CSS custom properties via `getComputedStyle(document.documentElement)` at draw time. All canvas hex colors in `drawHistoryChart`, `drawCandleChart`, `drawPriceChart` replaced: grids → `--chart-grid`, series → `--chart-1..6`, candle up/down → `--up`/`--down`, axes → `--text-tertiary`. Removed `isDark` matchMedia detection. |
+| **Theme toggle (Phase D)** | UX (S) | `_applyTheme(theme)` in `js/utils.js` sets/clears `document.documentElement.dataset.theme` and updates `<meta name="theme-color">` for PWA chrome. `state.settings.theme: 'auto'` default added to `js/config.js`. Startup call in `js/init.js`. `settingsSetTheme()` + Auto / Light / Dark segmented control in Settings → Display card (`js/pages/settings.js`). |
 
 ---
 
