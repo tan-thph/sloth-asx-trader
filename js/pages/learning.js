@@ -211,7 +211,7 @@ function _renderLearningContent(d, brier) {
     // Previously returned nothing (null → silent false-negative on the UI).
     if (promptRegression.status === 'evaluating') {
       return `
-        <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;
+        <div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:6px;
                     padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;align-items:flex-start">
           <span style="font-size:18px;line-height:1.2">⏳</span>
           <div style="flex:1">
@@ -226,12 +226,11 @@ function _renderLearningContent(d, brier) {
     }
 
     const sig  = promptRegression.significant;
-    const bg   = sig ? '#fef2f2' : '#fef3c7';
-    const bdr  = sig ? '#fca5a5' : '#fde68a';
+    const bdr  = sig ? 'rgba(239,68,68,.45)'  : 'rgba(245,158,11,.45)';
     const icon = sig ? '⚠️' : '🔔';
     const label = sig ? 'Significant regression detected' : 'Early warning — possible regression';
     return `
-      <div style="background:${bg};border:1px solid ${bdr};border-radius:6px;padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;align-items:flex-start">
+      <div style="background:var(--bg-surface);border:1px solid ${bdr};border-radius:6px;padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;align-items:flex-start">
         <span style="font-size:18px;line-height:1.2">${icon}</span>
         <div style="flex:1">
           <strong style="font-size:13px">${label}: ${promptRegression.current_version} vs ${promptRegression.prior_version}</strong>
