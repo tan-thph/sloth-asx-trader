@@ -104,8 +104,12 @@ async function runDayTradeAnalysis() {
 
   state.dayTrading.recommendations = newRecs;
   const _rejLine = `BB:${filterStats.bb} ADV:${filterStats.adv} SMA:${filterStats.sma} ADX:${filterStats.adx}${filterStats.noData ? ` NoData:${filterStats.noData}` : ''}`;
+  const _bb = state.dayTrading._breadthBlocked;
+  const _bbNote = _bb
+    ? `⚠ BREADTH GATE: ADR ${(100 * _bb.adr).toFixed(0)}% < ${(100 * _bb.threshold).toFixed(0)}% — ${_bb.suppressed} setup(s) suppressed (shadow-logged). `
+    : '';
   state.dayTrading.lastSummary = {
-    text: `Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} passed · Rejected — ${_rejLine}`,
+    text: `${_bbNote}Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} passed · Rejected — ${_rejLine}`,
     filterStats,
     date: todayStr(),
     time: nowSydney(),
@@ -124,6 +128,14 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
   const _minConf = ap.minConfidence ?? DT_AI_PARAMS.minConfidence;
   const _minRR   = ap.minRrRatio   ?? DT_AI_PARAMS.minRrRatio;
   const recs = [];
+
+  // §2.7 market breadth gate — when fewer than minAdr of the ASX200 sit above
+  // their 20-day SMA, mean-reversion hit rates collapse. Setups are still built
+  // (so they can be shadow-logged for the ML at full stop/target fidelity) but
+  // NONE are surfaced. Tunable via Day Trading → Rules (filterParams.minAdr; 0 disables).
+  const _adr    = state.macroData?.advance_decline_ratio;
+  const _minAdr = (state.dayTrading?.filterParams?.minAdr ?? DT_FILTER.minAdr ?? 0.25);
+  const _breadthBlocked = _adr != null && _minAdr > 0 && _adr < _minAdr;
 
   for (let i = 0; i < candidates.length; i++) {
     const t = candidates[i];
@@ -203,6 +215,24 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
       holdDays:      8,                // estimated hold period in trading days
     });
   }
+
+  // §2.7 breadth gate: suppress everything, shadow-log what would have fired
+  if (_breadthBlocked) {
+    if (typeof dtSaveSnapshot === 'function') {
+      recs.forEach(r => {
+        if (!r.stopLoss || !r.target) return;  // shadow resolution needs both
+        dtSaveSnapshot(r, 'swing', state.liveSignals[r.ticker] || {}, state.macroData || {},
+          Array.isArray(r.priceRange) ? r.priceRange[0] : 0, 0,
+          { record_type: 'shadow', shadow_reason: 'breadth_blocked' });
+      });
+    }
+    state.dayTrading._breadthBlocked = {
+      adr: _adr, threshold: _minAdr, suppressed: recs.length,
+      at: new Date().toISOString(),
+    };
+    return [];
+  }
+  state.dayTrading._breadthBlocked = null;
 
   // Sort: most signals first, then lowest BB %B (closest to lower band)
   return recs.sort((a, b) => {
@@ -426,8 +456,12 @@ async function runUniverseScan() {
   state.dayTrading.recommendations = [...kept, ...newRecs];
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
+  const _ubb = state.dayTrading._breadthBlocked;
+  const _ubbNote = _ubb
+    ? `⚠ BREADTH GATE: ADR ${(100 * _ubb.adr).toFixed(0)}% < ${(100 * _ubb.threshold).toFixed(0)}% — ${_ubb.suppressed} setup(s) suppressed (shadow-logged). `
+    : '';
   state.dayTrading.lastSummary = {
-    text: `${meta.label}: ${candidates.length}/${universeTickers.length} passed · ${newRecs.length} setup(s) · Rejected — ${_rejLine} (${elapsed}s)`,
+    text: `${_ubbNote}${meta.label}: ${candidates.length}/${universeTickers.length} passed · ${newRecs.length} setup(s) · Rejected — ${_rejLine} (${elapsed}s)`,
     filterStats,
     date: todayStr(),
     time: nowSydney(),

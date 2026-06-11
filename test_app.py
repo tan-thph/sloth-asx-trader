@@ -914,20 +914,22 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_current(self):
-        """PROMPT_VERSION must be bumped to v9 after the SELL/TRIM sizing prompt fixes."""
+        """PROMPT_VERSION must be bumped to v10 after the §8.2/§8.3 prompt rewrites."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v9'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v9 after SELL/TRIM sizing prompt fixes")
+        self.assertIn("PROMPT_VERSION = '2026-06-v10'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v10 after §8.2/§8.3 prompt rewrites")
 
-    def test_calibration_algorithm_in_system_prompt(self):
-        """System prompt must prescribe the calibration algorithm (confidence += adj, clamped)."""
+    def test_calibration_is_context_only_in_system_prompt(self):
+        """§8.3 (supersedes Stage 3): the system prompt must present CALIBRATION as
+        context and explicitly forbid Claude from applying the numeric adjustments —
+        the engine applies them deterministically post-response (analysis.js)."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("clamp(orig_conf + adj", src,
-                      "System prompt must describe confidence += adj clamped algorithm")
+        self.assertIn("Do NOT apply the numeric adjustments yourself", src,
+                      "Section 6 must forbid LLM-side calibration arithmetic")
         self.assertIn("per-ticker", src,
-                      "System prompt must mention per-ticker calibration adjustment")
+                      "System prompt must still mention per-ticker calibration context")
 
     def test_debate_block_usage_rule_in_prompt(self):
         """System prompt must include the debate-block usage rule."""
@@ -6313,11 +6315,12 @@ class TestSprintMl53(unittest.TestCase):
             # Must have at least swing or intraday key
             self.assertTrue('swing' in data or 'intraday' in data)
 
-    def test_features_swing_has_15_items(self):
-        """FEATURES_SWING has exactly 15 items (no intraday-specific)."""
+    def test_features_swing_has_16_items(self):
+        """FEATURES_SWING has exactly 16 items (15 original + regime_risk, Sprint 61);
+        no intraday-specific features."""
         from routes.day_trade_training import FEATURES_SWING, FEATURES_INTRADAY
-        self.assertEqual(len(FEATURES_SWING), 15)
-        self.assertEqual(len(FEATURES_INTRADAY), 18)
+        self.assertEqual(len(FEATURES_SWING), 16)
+        self.assertEqual(len(FEATURES_INTRADAY), 19)
         # Intraday adds exactly the 3 intraday-specific features
         extras = set(FEATURES_INTRADAY) - set(FEATURES_SWING)
         self.assertEqual(extras, {'intraday_rsi', 'vwap_position', 'volume_accel'})
@@ -6559,6 +6562,126 @@ class TestSellTrimSizingAndMacroRace(unittest.TestCase):
                          "TRIM definition contradicts Rule 4 (qty must stay 0)")
         self.assertNotIn("qty = incremental shares only", src,
                          "TOP_UP definition contradicts Rule 4 (qty must stay 0)")
+
+    def test_validator_wired_into_live_path(self):
+        """§8.1: validateRec must run in analysis.js post-processing (was dead code).
+        Must run AFTER the sizing steps so qty>=1 validates final values."""
+        self.assertIn("validateRec(r)", self.analysis_src,
+                      "validateRec must be called per-rec in analysis.js")
+        self.assertIn("_validatorFixed", self.analysis_src,
+                      "repaired recs must carry the _validatorFixed audit tag")
+        sizing_at    = self.analysis_src.index("_exitSized")
+        validator_at = self.analysis_src.index("validateRec(r)")
+        self.assertLess(sizing_at, validator_at,
+                        "validator must run after SELL/TRIM sizing (qty >= 1 check)")
+
+    def test_ensemble_confidence_restored(self):
+        """§8.1: ensembleConfidence must be computed in analysis.js — it was only
+        ever computed inside the unwired validateResponse(), so learning events
+        logged ensemble_confidence = null."""
+        self.assertIn("ensembleConfidence", self.analysis_src)
+        self.assertIn("indScore / 100", self.analysis_src,
+                      "ensemble blend (0.5*conf + 0.5*score/100) missing from analysis.js")
+
+    def test_buy_net_ev_gate_is_engine_computed(self):
+        """§8.2: the BUY neg-EV gate must use engine-computed netProfit at final qty,
+        not the AI's value (Rule 4 forces qty=0, so the AI cannot compute a real one)."""
+        self.assertIn("_netProfitEngine", self.analysis_src)
+        self.assertIn("engineNet", self.analysis_src)
+        # The old AI-value gate must be gone
+        self.assertNotIn("const aiNet     = Number(r.netProfit)", self.analysis_src)
+
+    def test_section7_cash_test_is_qty_free(self):
+        """§8.2: Section 7 must not require arithmetic on qty (which Rule 4 zeroes)."""
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("Expected dollar return = qty", src,
+                         "Section 7 cash test still depends on qty")
+        self.assertIn("MINIMUM TRADE SIZE", src,
+                      "Section 7 must compute the cash test on the min-trade-size notional")
+
+    def test_calibration_applied_deterministically(self):
+        """§8.3: numeric calibration nudges are applied engine-side, not by Claude."""
+        # Backend exposes the machine-readable mirror
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            py = f.read()
+        self.assertIn('"adjustments": adjustments', py,
+                      "calibration response must include the adjustments payload")
+        # Client applies it before Kelly sizing and preserves the original confidence
+        self.assertIn("_calibApplied", self.analysis_src)
+        calib_at = self.analysis_src.index("_calibAdjustments")
+        quant_at = self.analysis_src.index("Quant Engine post-processing")
+        self.assertLess(calib_at, quant_at,
+                        "calibration must be applied before quant sizing (Kelly reads confidence)")
+        # Prompt no longer instructs Claude to do the arithmetic
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            prompts = f.read()
+        self.assertNotIn("new_conf = clamp(orig_conf", prompts,
+                         "Section 6 still tells Claude to apply calibration arithmetic")
+
+    def test_learning_log_uses_original_confidence(self):
+        """§8.3: ai_confidence must log Claude's original value, not the engine-adjusted
+        one — otherwise calibration compounds on its own output."""
+        self.assertIn("_calibApplied && r._calibApplied.orig", self.analysis_src)
+
+
+class TestSprint61PipelineIntegrity(unittest.TestCase):
+    """§8 plan implementation: ADR breadth gate, regime ML feature, outcome-proposal
+    notifications, expanded shadow-logging taxonomy."""
+
+    @classmethod
+    def setUpClass(cls):
+        def _read(*p):
+            with open(os.path.join(ROOT, *p), encoding="utf-8") as f:
+                return f.read()
+        cls.dta         = _read("js", "day-trading-analysis.js")
+        cls.strategy    = _read("js", "strategy.js")
+        cls.alerts      = _read("js", "alerts.js")
+        cls.notifs      = _read("js", "notifications.js")
+        cls.dt_train_js = _read("js", "dt-training.js")
+        cls.analysis    = _read("js", "analysis.js")
+
+    def test_adr_breadth_gate_implemented(self):
+        """§2.7: new swing BUYs suppressed when ADR < minAdr (default 0.25)."""
+        self.assertIn("minAdr", self.strategy)
+        self.assertIn("0.25", self.strategy)
+        self.assertIn("_breadthBlocked", self.dta)
+        self.assertIn("advance_decline_ratio", self.dta)
+
+    def test_breadth_blocked_setups_are_shadow_logged(self):
+        """Suppressed setups must feed the ML as shadow records (full stop/target)."""
+        self.assertIn("shadow_reason: 'breadth_blocked'", self.dta)
+
+    def test_regime_risk_feature_lists(self):
+        """Sprint 61: regime_risk ordinal feature in both training matrices."""
+        import routes.day_trade_training as dtt
+        self.assertIn("regime_risk", dtt.FEATURES_SWING)
+        self.assertEqual(len(dtt.FEATURES_SWING), 16)
+        self.assertEqual(len(dtt.FEATURES_INTRADAY), 19)
+        self.assertEqual(dtt._REGIME_RISK["riskOn"], 0)
+        self.assertEqual(dtt._REGIME_RISK["panic"], 5)
+
+    def test_regime_risk_maps_in_sync(self):
+        """The JS prediction-side map must match the Python training-side map."""
+        self.assertIn("regime_risk", self.dt_train_js)
+        for pair in ("riskOn: 0", "trend: 1", "sideways: 2",
+                     "highVol: 3", "riskOff: 4", "panic: 5"):
+            self.assertIn(pair, self.dt_train_js,
+                          f"JS _RR map missing/mismatched: {pair}")
+
+    def test_outcome_proposal_notifications(self):
+        """Stop/target hits on executed recs must propose outcome recording via the
+        bell (persistent, deep-linked) — portfolio recs AND day-trade swing recs."""
+        # 1 definition + 4 call sites (portfolio stop/target, swing stop/target)
+        self.assertGreaterEqual(self.alerts.count("_proposeOutcomeRecording("), 5)
+        self.assertIn("_NOTIF_NAV", self.notifs)
+        self.assertIn("outcome: 'recommendations'", self.notifs)
+        self.assertIn("outcome_dt: 'day-trading'", self.notifs)
+
+    def test_shadow_reason_taxonomy_expanded(self):
+        """§8.6: conf-floor and neg-EV drops are shadow-logged (ML bias correction)."""
+        self.assertIn("shadow_reason: 'conf_floor'", self.analysis)
+        self.assertIn("shadow_reason: 'neg_ev'", self.analysis)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,13 @@ function dtBuildFeatures(signals, macro) {
     price_vs_sma50:  (sma50 && price)  ? ((price / sma50  - 1) * 100) : null,
     asx200_5d_ret:   m.asx200_5d_ret != null ? m.asx200_5d_ret : null,
     adl_ratio:       m.advance_decline_ratio != null ? m.advance_decline_ratio : null,
+    // Ordinal regime risk (Sprint 61) — keep in sync with _REGIME_RISK in
+    // routes/day_trade_training.py. null when regime unknown (model imputes mean).
+    regime_risk:     (function () {
+      var _RR = { riskOn: 0, trend: 1, sideways: 2, highVol: 3, riskOff: 4, panic: 5 };
+      var reg = (typeof state !== 'undefined' && state.currentRegime && state.currentRegime.regime) || null;
+      return (reg != null && _RR[reg] != null) ? _RR[reg] : null;
+    })(),
     intraday_rsi:    s.intraday_rsi       != null ? s.intraday_rsi       : null,
     vwap_position:   s.vwap_pct           != null ? s.vwap_pct           : null,
     volume_accel:    s.volume_acceleration != null ? s.volume_acceleration : null,

@@ -107,6 +107,7 @@ function checkRecStopTargetAlerts() {
         `Live price $${price.toFixed(2)} ≤ stop $${r.stopLoss.toFixed(2)}. Consider exiting.`,
         `sloth-stop-${r.ticker}`
       );
+      _proposeOutcomeRecording(r, 'stop', price);
       r._stopAlertedAt = new Date().toISOString();
       anyFired = true;
     } else if (r.target && price >= r.target) {
@@ -116,6 +117,7 @@ function checkRecStopTargetAlerts() {
         `Live price $${price.toFixed(2)} ≥ target $${r.target.toFixed(2)}. Consider taking profits.`,
         `sloth-target-${r.ticker}`
       );
+      _proposeOutcomeRecording(r, 'target', price);
       r._targetAlertedAt = new Date().toISOString();
       anyFired = true;
     } else {
@@ -125,6 +127,27 @@ function checkRecStopTargetAlerts() {
     }
   });
   if (anyFired && typeof scheduleSave === 'function') scheduleSave();
+}
+
+// ── Outcome-recording proposal ────────────────────────────────────────────────
+// When a stop/target fires on an EXECUTED rec, the learning loop only captures
+// the outcome if the user records the close — which is easy to forget. This
+// drops a persistent, clickable notification in the bell (category 'outcome' /
+// 'outcome_dt' deep-links to the relevant page via _NOTIF_NAV) proposing the
+// recording. One-shot: piggybacks on the caller's _stopAlertedAt/_targetAlertedAt
+// guards, so it re-arms on the same 2% price-retreat rule as the alert itself.
+function _proposeOutcomeRecording(rec, kind, price, isDayTrade = false) {
+  if (typeof pushNotification !== 'function') return;
+  const verb  = kind === 'stop' ? 'Stop' : 'Target';
+  const advice = kind === 'stop'
+    ? 'If you exited, record the close so the learning loop logs the outcome (stop_hit).'
+    : 'If you took profits, record the close so the learning loop logs the win.';
+  pushNotification(
+    kind === 'stop' ? 'warning' : 'success',
+    `📋 Record outcome: ${rec.ticker}`,
+    `${verb} $${(kind === 'stop' ? rec.stopLoss : rec.target).toFixed(2)} hit at $${price.toFixed(2)}. ${advice} Tap to open.`,
+    isDayTrade ? 'outcome_dt' : 'outcome'
+  );
 }
 
 // ── Stop-proximity pre-warning ────────────────────────────────────────────────
@@ -321,6 +344,7 @@ function checkDayTradeStopTargetAlerts() {
           `sloth-dt-stop-${r.ticker}`
         );
         toast(`🛑 Swing ${r.ticker} stop hit @ $${price.toFixed(3)}`, 'error');
+        _proposeOutcomeRecording(r, 'stop', price, true);
         r._stopAlertedAt = new Date().toISOString();
         anyFired = true;
       }
@@ -332,6 +356,7 @@ function checkDayTradeStopTargetAlerts() {
           `sloth-dt-target-${r.ticker}`
         );
         toast(`✅ Swing ${r.ticker} target hit @ $${price.toFixed(3)}`, 'success');
+        _proposeOutcomeRecording(r, 'target', price, true);
         r._targetAlertedAt = new Date().toISOString();
         anyFired = true;
       }

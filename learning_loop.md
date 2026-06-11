@@ -278,7 +278,7 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` — never the system prompt (preserves Anthropic's server-side prompt cache).
 Target size: 30–60 tokens.
 
-The system prompt (`js/prompts.js`, `PROMPT_VERSION='2026-06-v9'` — the explicit algorithm landed in `2026-05-v5`) includes an explicit calibration algorithm: `confidence += adj_value, clamped [0.50, 0.95]` (Stage 3). It also includes a debate-block usage rule: treat Local Debate as a second opinion, weight synthesis winner, don't anchor to it over fundamentals (Stage 3).
+Since `PROMPT_VERSION='2026-06-v10'` (Sprint 61, §8.3) the numeric adjustments are applied **engine-side**: the calibration response includes a machine-readable `adjustments: {bands, tickers}` payload, stashed by `fetchCalibrationBlock()` on `window._calibAdjustments` and applied deterministically in `analysis.js` before Kelly sizing (clamped [0.05, 0.98], audit-tagged `_calibApplied`). The text block remains in the user message as context only, and the system prompt explicitly forbids Claude from pre-adjusting confidence. Learning events log the **original** confidence so calibration never compounds on its own output. (The earlier LLM-applied algorithm `confidence += adj` ran from `2026-05-v5` to `2026-06-v9`.) The prompt also includes a debate-block usage rule: treat Local Debate as a second opinion, weight synthesis winner, don't anchor to it over fundamentals (Stage 3).
 
 ---
 

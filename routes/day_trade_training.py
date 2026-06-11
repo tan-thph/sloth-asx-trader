@@ -35,13 +35,21 @@ FEATURES_SWING = [
     "adx", "volume_zscore", "mfi_14", "stoch_k",
     "williams_r", "cci_20", "setup_score",
     "price_vs_sma20", "price_vs_sma50",
-    "asx200_5d_ret", "adl_ratio",
-]  # 15 features
+    "asx200_5d_ret", "adl_ratio", "regime_risk",
+]  # 16 features
 
 # Intraday features (swing + 3 intraday-specific)
 FEATURES_INTRADAY = FEATURES_SWING + [
     "intraday_rsi", "vwap_position", "volume_accel",
-]  # 18 features
+]  # 19 features
+
+# Regime as an ordinal risk feature (Sprint 61) — DERIVED at training time from the
+# snapshot's stored `regime` TEXT column: no schema change, applies retroactively to
+# every historical snapshot. Unknown/absent regime → None → mean-imputed like any
+# other missing feature. Keep this map in sync with dtBuildFeatures() in dt-training.js.
+_REGIME_RISK = {
+    "riskOn": 0, "trend": 1, "sideways": 2, "highVol": 3, "riskOff": 4, "panic": 5,
+}
 
 # FEATURES kept for backward compatibility (same as FEATURES_INTRADAY)
 
@@ -461,6 +469,12 @@ def _train_model_impl(conn):
                 "n_available": len(rows),
             }
             continue
+
+        # Materialise rows as dicts and derive regime_risk from the stored regime
+        # string — sqlite Rows would KeyError on the synthetic feature name.
+        rows = [dict(r) for r in rows]
+        for r in rows:
+            r["regime_risk"] = _REGIME_RISK.get(r.get("regime"))
 
         # ── Build feature matrix ─────────────────────────────────────────────
         X_raw = np.array(

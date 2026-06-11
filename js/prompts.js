@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v9';
+const PROMPT_VERSION = '2026-06-v10';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -333,11 +333,12 @@ const ANALYSIS_SYSTEM_PROMPT =
       (wrong macro call? earnings miss? stop not triggered?). Only re-recommend if you can
       explicitly cite what changed since the failure. State this in the reasoning field.
     - For any ticker with outcome = win: note what drove it and whether that driver still holds.
-    - Apply any CALIBRATION adjustments from the user message before setting confidence scores.
-      Algorithm: read the CALIBRATION block (if present). For each rec, find the matching
-      confidence band (e.g. "conf 70-80%: adj+0.08"). Apply: new_conf = clamp(orig_conf + adj, 0, 0.98).
-      If a per-ticker line appears (e.g. "BHP.AX:45%(Δ−18pp)⚠weak"), apply an extra −0.10 to that
-      ticker's confidence regardless of band. Ignore CALIBRATION if fewer than 5 closed trades.
+    - Treat the CALIBRATION block (if present) as CONTEXT for your reasoning — e.g. a band
+      showing a low historical win rate, or a "⚠weak" per-ticker line, should make you more
+      sceptical of marginal setups in that band/ticker and is worth citing in factorsUsed[].
+      Do NOT apply the numeric adjustments yourself — the engine applies band and per-ticker
+      adjustments deterministically to your confidence after your response. Output your honest,
+      unadjusted confidence.
     - If "SELL_TAG:" lines appear in the CALIBRATION block, apply them to every SELL/TRIM rec
       whose primary_driver matches the tagged driver:
         ⚠SELL_TAG: driver is underperforming. Require at least one additional confirming signal
@@ -357,21 +358,27 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   SECTION 7 — PRE-FLIGHT CHECKS
 
-  CASH COMPARISON TEST (required for every BUY/TOP_UP rec):
-    Expected dollar return = qty × entryPrice × expectedReturn (base scenario)
-    Opportunity cost = qty × entryPrice × (RBA_rate/100) × (expectedTimeToTarget/365)
+  CASH COMPARISON TEST (required for every BUY/TOP_UP rec — qty-FREE):
+    Rule 4 sets qty = 0, so compute this test on a notional N = the MINIMUM TRADE SIZE
+    from account settings (in dollars). Do NOT use qty in any formula.
+    Expected dollar return = N × expectedReturn (base scenario)
+    Opportunity cost = N × (RBA_rate/100) × (expectedTimeToTarget/365)
     Round-trip brokerage = 2 × brokerage (one buy + one sell)
     netProfit = expected dollar return − opportunity cost − round-trip brokerage
-    Rec is only valid if netProfit > 0.
+    Rec is only valid if netProfit > 0. The engine re-runs this gate at the final
+    engine-computed qty after your response; your value is a min-size estimate for display.
 
-    Example (BUY 21 ALL @ $50.75, base ret=7%, RBA=4.35%, 60 days, brokerage=$10):
-      Return = 21 × 50.75 × 0.07 = $74.60
-      Opp cost = 21 × 50.75 × (0.0435) × (60/365) = $7.20
+    Example (BUY ALL, N = $1,000 min trade size, base ret=7%, RBA=4.35%, 60 days, brokerage=$10):
+      Return = 1000 × 0.07 = $70.00
+      Opp cost = 1000 × 0.0435 × (60/365) = $7.15
       Brokerage = 2 × $10 = $20
-      netProfit = 74.60 − 7.20 − 20 = $47.40  ← show exactly this in the netProfit field
+      netProfit = 70.00 − 7.15 − 20 = $42.85  ← show exactly this in the netProfit field
 
-    For SELL/TRIM: netProfit = (limitPrice − holding.avgPrice) × qty − brokerage (one-way only)
-    Example (TRIM 37 CSL @ $99.76, avgPrice=$96.11):
+    For SELL/TRIM: netProfit = (limitPrice − holding.avgPrice) × sharesToExit − brokerage (one-way only)
+    where sharesToExit comes from the Holdings block: the full holding.shares for SELL, or your
+    intended Reduce % of holding.shares for TRIM (the qty FIELD still stays 0 per Rule 4 — the
+    engine sizes and recomputes this value authoritatively post-response).
+    Example (TRIM 25% of 148 CSL ≈ 37 shares @ $99.76, avgPrice=$96.11, brokerage=$10):
       netProfit = (99.76 − 96.11) × 37 − 10 = 135.05 − 10 = $125.05
     Do NOT deduct opportunity cost from SELL/TRIM — you are exiting, not deploying capital.
     The client overrides this value post-response with authoritative cost-basis data;
@@ -435,7 +442,8 @@ const ANALYSIS_SYSTEM_PROMPT =
                                one-sentence steelman of how this trade loses money in 90 days;
                                if no credible bear case, downgrade confidence by 0.10),
     "weightGuidance":        "Strong Accumulate (+3-5%)" | "Accumulate (+1-2%)" | "Hold" | "Reduce (-25-50%)" | "Exit",
-    "expectedProfit":        number (gross dollar profit if target hit: qty x (target - entryMid)),
+    "expectedProfit":        number (gross dollar profit if target hit, at min-trade-size notional:
+                               (minTradeSize / entryMid) x (target - entryMid); engine recomputes at final qty),
     "netProfit":             number — must be a plain number, never a string or formula expression.
                               (BUY/TOP_UP: show cash comparison arithmetic per Section 7;
                                SELL/TRIM: (priceRange[0] - holding.avgPrice) x qty - brokerage),

@@ -1117,24 +1117,28 @@ exists, so mobile QA is manual on real devices.
 
 ---
 
-## 8. Pipeline integrity & strategy enforcement — deep-dive audit (planned, 2026-06-10)
+## 8. Pipeline integrity & strategy enforcement — deep-dive audit (Sprint 61: mostly SHIPPED)
 
 Source: code-level audit of the learning loop (`routes/learning.py`), the prompts
 (`js/prompts.js`), and the day-trading strategy (`js/strategy.js`, `js/day-trading-analysis.js`,
 `js/intraday-strategy.js`, `routes/day_trade_training.py`). The architecture is sound; these six
 items close the gaps between what the docs/prompts *claim* and what the code *enforces*.
 
-| # | Item | Effort | Risk | Files |
-|---|---|---|---|---|
-| 8.1 | Wire the response validator into the live path | ~1 h | Low | `analysis.js`, `response-validator.js` |
-| 8.2 | Fix the Section 7 qty/netProfit contradiction | ~1 h | Low | `prompts.js`, `analysis.js` |
-| 8.3 | Apply calibration adjustments deterministically | ~2 h | Med | `analysis.js`, `learning-loop.js`, `prompts.js` |
-| 8.4 | Implement the §2.7/2.8/2.9 swing filters | ~½ day | Low | `strategy.js`, `day-trading-analysis.js`, `indicators.py` |
-| 8.5 | Structured tool-schema output for Claude calls | ~½ day | Med | `claude-client.js`, `prompts.js`, `analysis.js` |
-| 8.6 | Shadow-log correlation / conf-floor rejections | ~1 h | Low | `analysis.js` |
+| # | Item | Status |
+|---|---|---|
+| 8.1 | Wire the response validator into the live path | ✅ **Shipped Sprint 61** — `validateRec()` local fix-or-drop after the sizing steps (no network repair loop); `_validatorFixed` audit tag; ensembleConfidence restored (was null in every learning event since the validator went dark); quant-rejected BUYs and unheld SELL/TRIM now dropped instead of surfacing with qty=0 |
+| 8.2 | Fix the Section 7 qty/netProfit contradiction | ✅ **Shipped Sprint 61** — Section 7 cash test rewritten qty-free (min-trade-size notional); BUY net-EV gate recomputed engine-side at final qty (`_netProfitEngine`); `PROMPT_VERSION = 2026-06-v10` |
+| 8.3 | Apply calibration adjustments deterministically | ✅ **Shipped Sprint 61** — calibration response carries `adjustments:{bands,tickers}`; `fetchCalibrationBlock()` stashes it on `window._calibAdjustments`; `analysis.js` applies it before Kelly sizing (clamped [0.05,0.98], `_calibApplied` audit tag); learning events log the ORIGINAL confidence so calibration never compounds; Section 6 now context-only |
+| 8.4 | Implement the §2.7/2.8/2.9 swing filters | ◐ **§2.7 ADR breadth gate shipped Sprint 61** — `_dtBuildRecs()` suppresses all new setups when ADR < `filterParams.minAdr` (default 0.25, 0 disables), shadow-logs them (`breadth_blocked`), amber summary note. **§2.8 VoV and §2.9 time-of-week still open** — plan below remains valid |
+| 8.5 | Structured tool-schema output for Claude calls | Open — plan below |
+| 8.6 | Shadow-log correlation / conf-floor rejections | ✅ **Shipped Sprint 61** — `conf_floor` (BUY/TOP_UP only) and `neg_ev` reasons in `analysis.js`, `breadth_blocked` in `day-trading-analysis.js`. Full-suppression sites only — correlation size *reductions* still execute and produce real outcomes, so they are deliberately NOT shadow-logged |
 
-Recommended order: 8.1 → 8.2 → 8.6 (quick, independent) → 8.3 → 8.4 → 8.5.
-Each item is shippable alone; none depends on another.
+**Also shipped Sprint 61 (from the deep-dive feature recommendations):**
+- **Outcome-proposal notifications** — stop/target hits on executed recs (portfolio + day-trade swing) push a persistent 📋 notification proposing the close be recorded; clicking deep-links via `_NOTIF_NAV` (`outcome` → Recommendations, `outcome_dt` → Day Trading). One-shot, riding the existing alert re-arm rules.
+- **`regime_risk` ML feature** — ordinal 0–5 (riskOn=0 → panic=5) added to both training matrices (now 16 swing / 19 intraday). Derived at training time from the snapshot's stored `regime` string — no schema change, retroactive over all historical snapshots. JS prediction map in `dtBuildFeatures()` kept in sync (test-enforced).
+- **prompts.md re-verified** — post-processing list now matches `analysis.js` exactly (15 steps); false validator/repair-loop claims corrected.
+
+Remaining open: 8.4 VoV + time-of-week, 8.5 tool-schema output, execution-alpha tracker (deep-dive feature item 6), weekly Telegram learning digest, retrain nudge, DT_FILTER walk-forward threshold tuner.
 
 ---
 

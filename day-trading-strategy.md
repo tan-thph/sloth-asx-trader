@@ -60,8 +60,9 @@ Prevents trading stocks where wide spreads and low float degrade technical execu
 - **Swing recs auto-expire after 3 days.** A `STALE Nd` badge is shown on setup cards older than 3 days (faded card, tooltip). Stale pending recs are auto-dismissed at the start of each new scan.
 - **Rationale:** A BB reclaim setup from Monday is technically invalid by Friday — price has moved, BB bands have shifted, and the signal was contingent on that day's close.
 
-### 2.7 Market Breadth Gate
+### 2.7 Market Breadth Gate ✅ implemented Sprint 61
 - **ADR (Advance/Decline Ratio):** Skip all new BUY setups when `advance_decline_ratio < 0.25` (fewer than 25% of ASX200 above their 20-day SMA).
+- **Enforcement:** `_dtBuildRecs()` in `day-trading-analysis.js` — setups are still built but ALL are suppressed and shadow-logged (`shadow_reason: 'breadth_blocked'`); the scan summary shows an amber `⚠ BREADTH GATE` note. Tunable via Day Trading → Rules (`filterParams.minAdr`; 0 disables).
 - The current ADR is shown on the Macro page and is computed after each scanner run. The regime engine also uses it to classify breadth-driven regimes.
 - **Rationale:** When 75%+ of the market is in downtrend, individual mean-reversion setups have materially lower hit rates. Waiting for broad participation to recover (ADR > 0.35) before re-entering new positions preserves capital during distribution phases.
 
@@ -528,7 +529,7 @@ The rule-based filters in §2 and §3 define which setups are *structurally vali
 
 The learning system is a **personalised expected-return estimator**. It records your own trades — entry signals, market context, and final outcome — then trains a statistical model on that personal history. The model answers one question:
 
-> *Given these entry-time features (15 for swing, 18 for intraday), what R-multiple did my past trades with similar features actually achieve?*
+> *Given these entry-time features (16 for swing, 19 for intraday), what R-multiple did my past trades with similar features actually achieve?*
 
 This is distinct from the Claude AI analysis (qualitative conviction) and from the regime gate (structural macro filter). The learning model operates on your realised outcomes — the other two layers operate on forward-looking analysis. All three run in parallel.
 
@@ -570,7 +571,8 @@ day_trade_history.db                ← day_trade_db.py (SQLite, WAL, separate f
 POST /api/daytrading/train
     │
     ├── Load completed snapshots (outcome ≠ 'open'), sorted chronologically
-    ├── Build per-scope feature matrices X  (swing: 15 cols, intraday: 18 cols)
+    ├── Build per-scope feature matrices X  (swing: 16 cols, intraday: 19 cols)
+    ├── Derive regime_risk (0–5 ordinal) from each snapshot's stored regime string
     ├── Continuous label y = R-multiple: (exit − entry) / (entry − stop)
     ├── OOS evaluation first (no leakage — impute/standardise/fit on train fold only):
     │     n ≥ 60 → 4-fold expanding-window walk-forward
@@ -616,13 +618,13 @@ Schema (key tables):
 
 ---
 
-### 14.4 Feature Sets — Decoupled Swing (15) and Intraday (18)
+### 14.4 Feature Sets — Decoupled Swing (16) and Intraday (19)
 
 Every snapshot records features at trade entry time. Features are sourced from `state.liveSignals[ticker]` (populated by `GET /api/analyse/<ticker>`) and `state.macroData` (from `GET /api/macro`).
 
 Two separate training matrices are used — one per trade type. This eliminates the need for arbitrary imputation of missing intraday features on swing records.
 
-#### Swing Trade Features (15)
+#### Swing Trade Features (16)
 
 | Feature | Description |
 |---------|-------------|
@@ -630,9 +632,10 @@ Two separate training matrices are used — one per trade type. This eliminates 
 | `volume_zscore`, `mfi_14`, `stoch_k`, `williams_r`, `cci_20` | Volume / oscillators |
 | `setup_score`, `price_vs_sma20`, `price_vs_sma50` | Trend position |
 | `asx200_5d_ret`, `adl_ratio` | Market context |
+| `regime_risk` | Ordinal regime risk 0–5 (riskOn=0 → panic=5) — derived at train time from the snapshot's stored `regime` string, so it applies retroactively to all historical snapshots *(Sprint 61)* |
 
-#### Intraday Trade Features (18)
-All 15 swing features plus:
+#### Intraday Trade Features (19)
+All 16 swing features plus:
 - `intraday_rsi` — RSI on 5-minute bars
 - `vwap_position` — % from VWAP
 - `volume_accel` — recent volume vs 20-bar mean
@@ -787,7 +790,7 @@ The deployment model is refit on **all** rows (the folds in Step 3 are evaluatio
 then the following are serialised as JSON and stored in `model_state`:
 
 ```
-feature_names     → ordered list of feature keys (15 or 18)
+feature_names     → ordered list of feature keys (16 or 19)
 weights           → fitted w vector
 bias              → fitted b scalar
 feature_means     → μ from standardisation
@@ -816,6 +819,9 @@ Each training run appends a new row to `model_state`. The prediction endpoints a
 |-----------------|-------|
 | `heat_blocked` | Rec would push portfolio heat over regime ceiling |
 | `regime_blocked` | Panic regime blocked all new longs |
+| `breadth_blocked` | §2.7 ADR breadth gate suppressed all new setups *(Sprint 61)* |
+| `conf_floor` | BUY/TOP_UP dropped by the hard confidence floor *(Sprint 61)* |
+| `neg_ev` | BUY/TOP_UP dropped by the engine-computed net-EV gate *(Sprint 61)* |
 
 Shadow records are resolved lazily at training time via `_resolve_shadow_outcomes()`, which simulates the trade forward using yfinance price history (same target/stop/time-stop logic as live trade management). The resulting `r_multiple` is stored and the shadow record participates in training alongside executed records.
 
@@ -832,7 +838,7 @@ After `GET /api/daytrading/model` loads the per-scope models into `window._dtMod
 
 ```javascript
 function dtPredictLocal(features, model) {
-    var fn   = model.feature_names;  // ordered list of 15 or 18 names
+    var fn   = model.feature_names;  // ordered list of 16 or 19 names
     var w    = model.weights;
     var mu   = model.feature_means;
     var sig  = model.feature_stds;
@@ -926,7 +932,7 @@ The model is a **low-sample pattern detector**, not a calibrated return estimato
 | n ≥ 60 | Walk-forward OOS (4 folds) — `r2_oos` becomes meaningful. Top 3–4 features likely stable. |
 | n ≥ 100 | Good reliability. `r2_oos` consistently above 0 across retrains indicates a real edge. |
 
-**The model cannot account for regime shifts.** If you built most of your dataset in a `riskOn` regime and are now trading in `riskOff`, the feature distributions differ and the model is stale. Add `regime` as a hard filter (only trade when regime matches the majority of training data) or retrain after the regime settles.
+**Regime is now a feature (Sprint 61)** — `regime_risk` lets ridge learn regime interaction directly. Still: If you built most of your dataset in a `riskOn` regime and are now trading in `riskOff`, the feature distributions differ and the model is stale. Add `regime` as a hard filter (only trade when regime matches the majority of training data) or retrain after the regime settles.
 
 **OOS R² near zero is normal and expected.** Trade outcomes on a 5–15 day horizon are
 inherently noisy; even `r2_oos` of 0.05–0.15 is genuinely useful for ranking setups. Judge

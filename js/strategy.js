@@ -14,6 +14,8 @@ const DT_FILTER = {
   sma50Floor:   0.970,  // fallback floor when SMA200 unavailable (stocks < 200 days old)
                         // 3% from SMA50 compensates for SMA50 being much closer to price
   maxAdx:        35,    // ADX ceiling — skip stocks already in a strong rip
+  minAdr:        0.25,  // §2.7 market breadth gate — suppress ALL new swing BUYs when
+                        // advance_decline_ratio < this (set 0 to disable)
 };
 
 // ── AI-phase parameters ────────────────────────────────────────────────────────

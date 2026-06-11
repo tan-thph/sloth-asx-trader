@@ -625,7 +625,7 @@ RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRa
 ${recCtx}${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${rulesCtx}${indicatorCtx}
 
 TASK:
-1. Apply any CALIBRATION adjustments above to confidence scores before output.
+1. Read the CALIBRATION block above as context for your reasoning. Do NOT pre-adjust confidence scores — numeric band/per-ticker adjustments are applied by the engine after your response.
 2. Assess macro regime — Rule 12: if sentiment = "bearish" AND bullish < 35, block all BUY/TOP_UP.
 3. For every holding and watchlist ticker, run the Section 3 multi-factor framework. Exclude any ticker with < 3 independent non-technical factors from recs[].
 4. For each candidate rec: compute priceRange, target (next S/R), stopLoss (stopAtrMultiple×ATR from ACTIVE RULE OVERRIDES), set qty=0 (quant engine sizes), optionally scenarios (if included, p must sum to 1.0), invalidationCondition (must include a measurable value), bearCase (if conf ≥ 0.70), factorsUsed (≥ 3 specific data points).
@@ -827,6 +827,36 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       }
     }
 
+    // ── Deterministic calibration application (§8.3) ───────────────────────────
+    // The CALIBRATION block in the user message is context only — the numeric
+    // band/per-ticker nudges are applied HERE (exactly, engine-side) instead of
+    // trusting Claude's arithmetic. Runs before the quant engine so Kelly sizing
+    // sees the calibrated confidence. Original confidence is preserved in
+    // _calibApplied.orig and logged as ai_confidence so calibration stats never
+    // compound on already-adjusted values.
+    {
+      const _adj = window._calibAdjustments;
+      if (_adj && (_adj.bands || _adj.tickers)) {
+        recs = recs.map(r => {
+          const orig = Number(r.confidence) || 0;
+          const bandKey = orig >= 0.80 && orig < 0.90 ? '80-90'
+                        : orig >= 0.70 && orig < 0.80 ? '70-80'
+                        : orig >= 0.60 && orig < 0.70 ? '60-70' : null;
+          let adj = 0;
+          if (bandKey && _adj.bands && typeof _adj.bands[bandKey] === 'number') {
+            adj += _adj.bands[bandKey];
+          }
+          const tickAdj = _adj.tickers
+            ? (_adj.tickers[r.ticker] ?? _adj.tickers[r.ticker + '.AX']) : null;
+          if (typeof tickAdj === 'number') adj += tickAdj;
+          if (!adj) return r;
+          const conf = Math.min(0.98, Math.max(0.05, orig + adj));
+          return { ...r, confidence: +conf.toFixed(2),
+                   _calibApplied: { band: bandKey, adj: +adj.toFixed(2), orig } };
+        });
+      }
+    }
+
     // ── Quant Engine post-processing: override AI sizing with deterministic math (3.1) ──
     // computeTradeParams() replaces AI-computed qty/stopLoss/rrRatio/riskAUD/rewardAUD
     // for BUY/TOP_UP recs. The AI's confidence (winProb proxy) drives Kelly sizing.
@@ -910,6 +940,45 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       });
     }
 
+    // ── Validator (§8.1) — schema + business rules, local fix-or-drop ──────────
+    // Runs AFTER the sizing + ATR-floor steps so the qty ≥ 1 and stop-direction
+    // checks validate what the user will actually see (Rule 4 makes Claude emit
+    // qty=0; the engine sizes BUY/TOP_UP and SELL/TRIM above). No network repair
+    // loop — unfixable recs are dropped with a summary note. This also drops
+    // quant-rejected BUYs (Kelly ≤ 0 → qty stayed 0) and SELL/TRIM on unheld
+    // tickers (sizing skipped → qty stayed 0), both of which previously slipped
+    // through with qty=0.
+    if (typeof validateRec === 'function') {
+      const validatorDropped = [];
+      recs = recs.flatMap(r => {
+        const { valid, errors, fixed } = validateRec(r);
+        if (valid) return [r];
+        if (fixed) {
+          console.warn(`[validator] repaired ${r.action} ${r.ticker}:`, errors);
+          return [{ ...fixed, _validatorFixed: errors }];
+        }
+        console.warn(`[validator] dropped ${r.action} ${r.ticker}:`, errors, r);
+        validatorDropped.push(`${r.action} ${r.ticker}`);
+        return [];
+      });
+      if (validatorDropped.length > 0) {
+        const note = ` [Validator dropped ${validatorDropped.length} rec(s): ${validatorDropped.join(', ')}]`;
+        summary = (summary ? summary + ' ' : '') + note.trim();
+      }
+    }
+
+    // ── Ensemble confidence — blend AI confidence with indicator composite ─────
+    // Previously computed only inside the unwired validateResponse(), so every
+    // learning event logged ensemble_confidence = null. Restored here.
+    recs = recs.map(r => {
+      const sig = state.liveSignals?.[r.ticker] ?? state.liveSignals?.[r.ticker + '.AX'];
+      const indScore = sig?.score;
+      const hasValidScore = indScore != null && !Number.isNaN(indScore);
+      return { ...r, ensembleConfidence: hasValidScore
+        ? Math.round((0.5 * (r.confidence || 0) + 0.5 * (indScore / 100)) * 100) / 100
+        : r.confidence };
+    });
+
     // ── Apply regime size modifiers ─────────────────────────────────────────────
     if (typeof applyRegimeModifiers === 'function' && _activeRegime && _activeRegime !== 'unknown') {
       recs = recs.map(r => {
@@ -960,15 +1029,33 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       }
 
       if (isAdding) {
-        // Hard guard: never show a buy/top-up the AI rated as a guaranteed loss.
+        // §8.2: deterministic net-EV gate at the ENGINE-computed qty. The AI's
+        // netProfit is a min-trade-size estimate (Rule 4 forces qty=0, so it can
+        // no longer compute a real one) — recompute here from final sizing:
+        // gross reward − opportunity cost vs RBA − round-trip brokerage.
+        const entryLo   = Array.isArray(r.priceRange) ? Number(r.priceRange[0]) : NaN;
         const entryHigh = Array.isArray(r.priceRange) ? Number(r.priceRange[1]) : Number(r.target);
+        const entryMid  = isFinite(entryLo) && isFinite(entryHigh) ? (entryLo + entryHigh) / 2 : entryHigh;
         const target    = Number(r.target);
-        const aiNet     = Number(r.netProfit);
         const targetBelowEntry = isFinite(entryHigh) && isFinite(target) && target <= entryHigh;
-        if (!isFinite(aiNet) || aiNet <= 0 || targetBelowEntry) {
+        const grossReward = qty * (target - entryMid);
+        const oppCost = qty * entryMid * ((state.rbaRate || 4.35) / 100)
+                        * ((Number(r.expectedTimeToTarget) || 30) / 365);
+        const engineNet = grossReward - oppCost - 2 * fees;
+        if (targetBelowEntry || !isFinite(engineNet) || engineNet <= 0) {
           droppedNegEV++;
+          // §8.6: shadow-log so the ML sees the unpruned setup distribution
+          if (typeof dtSaveSnapshot === 'function' && r.stopLoss && r.target) {
+            const _sigs = (state.liveSignals && state.liveSignals[r.ticker]) || {};
+            dtSaveSnapshot(r, 'swing', _sigs, state.macroData || {},
+              _sigs.current_price || entryMid || 0, 0,
+              { record_type: 'shadow', shadow_reason: 'neg_ev' });
+          }
           continue;
         }
+        r.expectedProfit = +grossReward.toFixed(2);
+        r.netProfit = +engineNet.toFixed(2);
+        r._netProfitEngine = true;
       }
 
       cleanedRecs.push(r);
@@ -983,7 +1070,19 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     const MIN_CONFIDENCE = state.analysisConfig.rules?.minConfidence ?? 0.62;
     let lowConfDropped = 0;
     recs = recs.filter(r => {
-      if ((r.confidence || 0) < MIN_CONFIDENCE) { lowConfDropped++; return false; }
+      if ((r.confidence || 0) < MIN_CONFIDENCE) {
+        lowConfDropped++;
+        // §8.6: shadow-log BUY-side drops so the ML sees the unpruned distribution
+        const _act = (r.action || '').toUpperCase();
+        if (typeof dtSaveSnapshot === 'function' && r.stopLoss && r.target
+            && (_act === 'BUY' || _act === 'TOP_UP')) {
+          const _sigs = (state.liveSignals && state.liveSignals[r.ticker]) || {};
+          dtSaveSnapshot(r, 'swing', _sigs, state.macroData || {},
+            _sigs.current_price || (Array.isArray(r.priceRange) ? r.priceRange[0] : 0), 0,
+            { record_type: 'shadow', shadow_reason: 'conf_floor' });
+        }
+        return false;
+      }
       return true;
     });
     if (lowConfDropped > 0) {
@@ -1327,7 +1426,10 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         prompt_version:      pv,
         prompt_hash:         _promptHash,
         agent_type:          'portfolio-scanner',
-        ai_confidence:       r.confidence ?? null,
+        // §8.3: log Claude's ORIGINAL confidence — calibration stats measure the
+        // model, so feeding back engine-adjusted values would compound the nudges.
+        ai_confidence:       (r._calibApplied && r._calibApplied.orig != null)
+                               ? r._calibApplied.orig : (r.confidence ?? null),
         ensemble_confidence: r.ensembleConfidence ?? null,
         recommendation:      r.action,
         rationale_summary:   r.reasoning ? r.reasoning.slice(0, 400) : null,

@@ -1,6 +1,6 @@
 # Sloth ASX Trader — Prompt Architecture Reference
 
-**Last Updated:** June 2026 (Sprint 47)
+**Last Updated:** 2026-06-11 (Sprint 61 — validator wired into live path; post-processing list re-verified against analysis.js; v9 history row)
 **Model:** `claude-sonnet-4-6` · all calls via `callClaude()` in `js/claude-client.js`
 
 This document is the authoritative reference for every Claude API call in the application:
@@ -220,18 +220,23 @@ SYNTHESIS: {winner} | {key_pivot}
 
 ### Post-processing pipeline (client-side, after response)
 
+Order matches the section markers in `analysis.js` (verified Sprint 61):
+
 1. **JSON parse** — `parseClaudeJSON()` with brace-depth recovery on truncation
 2. **Quant engine** — `computeTradeParams()` replaces AI-computed `qty / stopLoss / rrRatio / riskAUD / rewardAUD` for BUY/TOP_UP with deterministic Kelly + volatility-scalar + multi-constraint sizing
-3. **ATR floor** — SELL/TRIM stop loss floored at `entry + stopMult×ATR` where `stopMult = regimeMod.stopAtrMult ?? 2.5` (regime-conditional: 2.5 riskOn/trend/sideways · 3.0 highVol · 3.5 riskOff · 4.0 panic). Rec flagged `_stopRepaired: true` and `_stopRepairedMult: N` when repair fires. *(Sprint 41: was hardcoded 2.5×, now reads `getRegimeModifiers(state.currentRegime.regime).stopAtrMult ?? 2.5`)*
-4. **Regime modifiers** — `applyRegimeModifiers()` applies size multipliers; `panic` blocks all recs
-5. **P&L recompute** — SELL/TRIM `netProfit` recalculated from actual `holding.avgPrice`
-6. **Confidence floor** — recs below `minConfidence` (default 0.62) are dropped
-7. **Correlation adjustment** — correlation matrix from `/api/risk`; BUY qty −30% if `|corr|>0.70` with existing holding, −50% if `>0.85`
-8. **Same-day conflict guard** — drops SELL if BUY already logged today for same ticker (and vice versa)
-9. **Daily dedup** — suppresses duplicate TRIM/TOP_UP for same ticker on same day
-10. **Daily cap** — trims to `maxTradesPerDay` by descending confidence
-11. **Validator** — `validateRec()` + `validateSellTags()` + auto-repair loop (≤2 retries via `getValidatedAnalysisWithRepair`)
-12. **Learning loop** — `logRecsToLearningLoop()` fires asynchronously
+3. **SELL/TRIM sizing** — Rule 4 forces Claude to emit `qty: 0`; SELL = full held position, TRIM = midpoint of the `weightGuidance` "Reduce (-X-Y%)" range (default 35%), clamped to `[1, shares held]`. Tagged `_exitSized`. *(Sprint 58)*
+4. **ATR floor** — SELL/TRIM stop loss floored at `entry + stopMult×ATR` where `stopMult = regimeMod.stopAtrMult ?? 2.5` (regime-conditional: 2.5 riskOn/trend/sideways · 3.0 highVol · 3.5 riskOff · 4.0 panic). Rec flagged `_stopRepaired: true` + `_stopRepairedMult: N` when repair fires.
+5. **Validator** — `validateRec()` (schema + business rules + `validateSellTags()`), **local fix-or-drop only — there is NO network repair loop in the live path**. Runs after sizing so the `qty ≥ 1` and stop-direction checks validate final values. Repaired recs carry `_validatorFixed: [errors]`; unfixable recs are dropped with a summary note. Also drops quant-rejected BUYs (Kelly ≤ 0) and SELL/TRIM on unheld tickers. `getValidatedAnalysisWithRepair()` exists in `response-validator.js` but is **not called** from `runAnalysis()`. *(Wired Sprint 61 — was dead code before)*
+6. **Ensemble confidence** — `0.5 × AI conf + 0.5 × (indicator score/100)` stamped on each rec; feeds `ensemble_confidence` in learning events. *(Restored Sprint 61 — was only computed in the unwired `validateResponse()`)*
+7. **Regime modifiers** — `applyRegimeModifiers()` applies size multipliers; `panic` blocks all recs (blocked recs shadow-logged)
+8. **P&L recompute** — SELL/TRIM `netProfit` recalculated from actual `holding.avgPrice`; BUYs with non-positive AI netProfit dropped
+9. **Confidence floor** — recs below `minConfidence` (default 0.62) are dropped
+10. **Correlation adjustment** — correlation matrix from `/api/risk`; BUY qty −30% if `|corr|>0.70` with existing holding, −50% if `>0.85`
+11. **Heat budget gate** — total $-at-risk capped at `min(maxRiskBudgetPct, regime ceiling)`; over-budget recs scaled or `_budgetBlocked`
+12. **Same-day conflict guard** — drops SELL if BUY already logged today for same ticker (and vice versa)
+13. **Daily dedup** — suppresses duplicate TRIM/TOP_UP for same ticker on same day
+14. **Daily cap** — trims to `maxTradesPerDay` by descending confidence
+15. **Learning loop** — `logRecsToLearningLoop()` fires asynchronously
 
 > **Note on `portfolioJson` and live prices (hotfix a888eec):** Before building the user message, `analysis.js` constructs `portfolioJson` using `livePrice = state.liveSignals[ticker]?.current_price ?? h.currentPrice` for **all** price-derived fields: `currentPrice`, `value`, `unrealisedPnl`, `unrealisedPnlPct`, and `weight`. This ensures SELL/TRIM recs anchor `priceRange` to the fresh signal price (force-fetched at Step 2 of `runAnalysis()`), not the potentially stale `state.portfolio[].currentPrice` cached from the last portfolio save.
 
@@ -274,8 +279,12 @@ Two call sites with different system prompts and inputs.
 ```
 You are a macro analyst for Australian equity markets. Return ONLY valid JSON, no markdown.
 Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,
+         "analysis":"3 paragraph macro analysis covering overnight US/global moves,
+                     key commodities, and ASX outlook",
          "keyDrivers":"2-3 sentence summary of key market drivers today"}
 ```
+(The `analysis` paragraphs render on the Macro page; only `keyDrivers` + sentiment/bullish
+are injected into the portfolio prompt.)
 
 **User message:**
 ```
@@ -618,7 +627,7 @@ The backend (`routes/debate.py`) prepends `_LOCAL_ANALYSIS_SYSTEM` (a stripped-d
 | Context truncated to 4000 chars | Ollama small models (Qwen 4B–9B) have limited context windows; the most critical context (date, regime, holdings, top signals) is always first |
 | No calibration injection | Calibration nudges assume Claude-level instruction following; small models may ignore or invert them |
 | `🔒 Local` badge on rec cards | `_source === 'local'` triggers amber badge in `recommendations.js` so the user sees which recs came from Ollama |
-| Validator + quant engine still run | Ollama output goes through `getValidatedAnalysisWithRepair()` and `computeTradeParams()` identically to the Claude path |
+| Validator + quant engine still run | Ollama output flows through the same `analysis.js` post-processing as the Claude path: `validateRec()` local fix-or-drop (Sprint 61) + `computeTradeParams()`. No network repair loop in either path |
 | `ai_call_log` written by backend *(Sprint 42)* | `routes/debate.py` writes to `ai_call_log` with `agent_type='portfolio:local'` after each Ollama response. `callClaude()` client-side logging block is still bypassed (fast-path returns before it). Browsable via `GET /api/log/ai_calls?agent_type=portfolio:local` |
 
 ### System prompt (`_LOCAL_ANALYSIS_SYSTEM`)
@@ -701,7 +710,7 @@ These exist in `state.liveSignals[t]` but are not currently included in any prom
 
 ## Prompt Versioning
 
-`PROMPT_VERSION = '2026-06-v8'` in `js/prompts.js`.
+`PROMPT_VERSION = '2026-06-v10'` in `js/prompts.js`.
 
 Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. The version is:
 - Stored on every `ai_learning_events` row at log time
@@ -711,6 +720,8 @@ Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. Th
 **Version history:**
 | Version | Key changes |
 |---|---|
+| `2026-06-v10` | Sprint 61 (§8.2 + §8.3): Section 7 cash test rewritten qty-free (min-trade-size notional — Rule 4 zeroes qty, so qty-based formulas were incoherent); SELL/TRIM netProfit derives sharesToExit from the Holdings block; Section 6 calibration is now CONTEXT-ONLY — the engine applies band/per-ticker adjustments deterministically post-response (`window._calibAdjustments` → analysis.js, before Kelly sizing); learning events log the original (pre-adjustment) confidence |
+| `2026-06-v9` | Sprint 58: ACTION DEFINITIONS aligned with Rule 4 (TOP_UP/SELL/TRIM all state qty stays 0); TRIM definition documents that the quant engine trims by the weightGuidance Reduce-range midpoint — weightGuidance is now load-bearing for TRIM sizing |
 | `2026-06-v8` | Sprint 47: Rule 3 stop ATR changed from hardcoded 1.5× to regime-aware stopAtrMultiple from ACTIVE RULE OVERRIDES; Rule 4 instructs Claude to set qty=0 (quant engine sizes); scenarios field made optional; ACTIVE_REGIME moved to top of user message (line 3); rulesCtx moved before indicatorCtx |
 | `2026-06-v7` | Sprint 42: `unrealised_loss_large` enforcement line (≥$500 AUD check against Holdings `unrealisedPnl`); SELL/TRIM exit stop/target semantics (stop = invalidation level above sell price; target = confirmation level below sell price; explicit ban on all-three-same-value) |
 | `2026-06-v6` | Rule 17 renumbered (was duplicate Rule 16); SELL_TAG calibration injection rules (Section 6); sell tag urgency/monitor enforcement. Sprint 42 user-message additions: `Range60d: hi=${n} lo=${n}` in Returns line; optional `Account: {PERSONAL\|SUPER\|TRADING}` in date header |

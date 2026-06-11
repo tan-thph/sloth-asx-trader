@@ -330,6 +330,7 @@ function computeRRRealization(recHistory) {
  * @param {string[]} sectors - Sectors present in the current analysis
  */
 async function fetchCalibrationBlock(regime, sectors, tickers) {
+  window._calibAdjustments = null;   // §8.3: reset so a failed fetch never reuses stale nudges
   if (typeof state === 'undefined' || !state.serverOk) return '';
   try {
     const params = new URLSearchParams();
@@ -344,6 +345,10 @@ async function fetchCalibrationBlock(regime, sectors, tickers) {
     const resp = await fetch(`${API}/api/learning/calibration?${params}`);
     if (!resp.ok) return '';
     const data = await resp.json();
+    // §8.3: machine-readable nudges, applied deterministically by analysis.js
+    // post-response (the text block is context only — Claude no longer does
+    // the arithmetic). Stored on window so the same fetch serves both uses.
+    if (data.available && data.adjustments) window._calibAdjustments = data.adjustments;
     return (data.available && data.block) ? '\n\n' + data.block : '';
   } catch (_) { return ''; }
 }

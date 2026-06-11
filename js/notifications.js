@@ -24,7 +24,19 @@ var _NOTIF_ICONS = {
 };
 var _CATEGORY_ICONS = {
   trade: '💼', price: '📈', scan: '🔍', system: '🔔', error: '💥',
+  outcome: '📋', outcome_dt: '📋',
 };
+
+// Categories that deep-link to a page when the notification is clicked.
+// Used by the outcome-proposal notifications (stop/target hit → record the close).
+var _NOTIF_NAV = { outcome: 'recommendations', outcome_dt: 'day-trading' };
+
+function _notifNavigate(category) {
+  var page = _NOTIF_NAV[category];
+  if (!page || typeof showPage !== 'function') return;
+  if (typeof toggleNotifPanel === 'function' && _notifPanelOpen) toggleNotifPanel();
+  showPage(page);
+}
 
 // ── Badge count cached in localStorage for instant display on startup ─────────
 var _NOTIF_BADGE_KEY = 'sloth_notif_badge';
@@ -185,7 +197,10 @@ function _renderNotifList() {
       : n.type === 'success' ? '#22c55e'
       : n.type === 'warning' ? '#f59e0b'
       : '#3b82f6';
-    return '<div class="notif-item" style="border-left:3px solid ' + borderColor + '">' +
+    var navAttr = _NOTIF_NAV[n.category]
+      ? ' onclick="_notifNavigate(\'' + n.category + '\')" title="Open ' + _NOTIF_NAV[n.category] + ' page"'
+      : '';
+    return '<div class="notif-item" style="border-left:3px solid ' + borderColor + '"' + navAttr + '>' +
       '<div class="notif-icon">' + icon + '</div>' +
       '<div class="notif-content">' +
         '<div class="notif-title">' + escapeHTML(String(n.title || '')) + '</div>' +

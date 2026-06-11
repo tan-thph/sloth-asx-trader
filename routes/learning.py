@@ -1243,6 +1243,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
 
         n = len(rows)
         parts = []
+        # §8.3: machine-readable mirror of the text nudges. The engine applies these
+        # deterministically post-response (analysis.js) — the text block is context
+        # only. Survives token-budget truncation of `parts` (computed independently).
+        adjustments = {"bands": {}, "tickers": {}}
 
         # Fix #18: merge virtual outcomes (0.75× weight) into rows for all downstream calcs.
         # Virtual rows don't count toward `n` (the real-data gate) — only toward weighted stats.
@@ -1284,6 +1288,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             delta = wr - mid
             if abs(delta) > 0.05:
                 adj_val = round(max(-0.15, min(0.10, delta * 0.8)), 2)
+                adjustments["bands"][label] = adj_val
                 parts.append(f"conf {label}%:{wr*100:.0f}%WR(Δ{delta*100:+.0f}pp,adj{adj_val:+.2f},ESS={ess:.1f})")
 
         # 2. Current regime — hierarchical fallback when ESS < 2.5
@@ -1463,6 +1468,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 delta = tk_wr - overall_wr
                 if abs(delta) > 0.15:
                     direction = "✓strong" if delta > 0 else "⚠weak"
+                    if delta < 0:
+                        # Penalty-only, matching the prompt's documented per-ticker rule
+                        # ("apply an extra −0.10 to that ticker's confidence").
+                        adjustments["tickers"][tk] = -0.10
                     ticker_parts.append(
                         f"{tk}:{tk_wr*100:.0f}%(Δ{delta*100:+.0f}pp,ESS={_ess(tk_rows):.1f}){direction}"
                     )
@@ -1564,7 +1573,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             f"CALIBRATION({n}cls{virt_note},{date_from}→{date_to}{regime_tag}{excl_note}{hl_note}): "
             + block_body + "."
         )
-        return {"available": True, "block": block, "sample": n}
+        return {"available": True, "block": block, "sample": n, "adjustments": adjustments}
     except Exception as e:
         return {"error": str(e)}
 
