@@ -794,6 +794,10 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "bb_bandwidth":   safe_float(bb_bandwidth.iloc[-1]),
         "atr_14":         safe_float(atr.iloc[-1]),
         "atr_pct":        safe_float((atr.iloc[-1] / cp) * 100) if cp else None,
+        # §2.8 VoV filter input: mean of the 5 ATR values ENDING YESTERDAY (excludes
+        # today's bar) so a sudden ATR expansion is measured against the recent
+        # baseline rather than diluted by itself. None when <6 ATR values.
+        "atr_5d_mean":    safe_float(atr.iloc[-6:-1].mean()) if len(atr) >= 6 else None,
         "keltner_upper":  safe_float(keltner_upper.iloc[-1]),
         "keltner_lower":  safe_float(keltner_lower.iloc[-1]),
         "donchian_upper": safe_float(donchian_upper.iloc[-1]),

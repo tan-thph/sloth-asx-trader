@@ -44,6 +44,15 @@ callClaude(agentType, userMessage, options)    ← js/claude-client.js
 | `assistant` | ❌ no | Multi-turn; context varies every call |
 | `briefing` | ❌ no | Short, one-shot, daily freshness needed |
 
+**Structured output (Sprint 62, §8.5):** the `portfolio` agent forces tool use on a static
+`emit_recommendations` tool (`_PORTFOLIO_TOOL` in `claude-client.js`) — the API constrains the
+output to the JSON schema at generation time, eliminating the malformed-JSON parse-failure class.
+The `tool_use` block's input is stringified back into `responseText` so `parseClaudeJSON()` and
+all downstream post-processing are unchanged. The schema enforces TYPES and closed enums
+(action, orderType, urgency); business rules remain the validator's job. The tool definition is
+static (part of the cached prompt prefix — interpolating state would bust the cache every call).
+Escape hatch: `options.noTool`. Proxy mode forwards `tools`/`tool_choice` verbatim.
+
 The `portfolio` system prompt is the only one worth optimising for cache stability — it's the most expensive (~8,700 tokens, confirmed via `cache_creation_input_tokens` in call logs) and called multiple times per trading day. All dynamic state lives in the user message; the system prompt contains zero interpolations.
 
 ### Auto-trigger removal (hotfix a888eec)

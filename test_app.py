@@ -6684,5 +6684,79 @@ class TestSprint61PipelineIntegrity(unittest.TestCase):
         self.assertIn("shadow_reason: 'neg_ev'", self.analysis)
 
 
+class TestSprint62RemainingFilters(unittest.TestCase):
+    """§2.8 VoV filter, §2.9 time-of-week filter, §8.5 tool-schema output."""
+
+    @classmethod
+    def setUpClass(cls):
+        def _read(*p):
+            with open(os.path.join(ROOT, *p), encoding="utf-8") as f:
+                return f.read()
+        cls.indicators = _read("indicators.py")
+        cls.strategy   = _read("js", "strategy.js")
+        cls.dta        = _read("js", "day-trading-analysis.js")
+        cls.client     = _read("js", "claude-client.js")
+
+    # ── §2.8 VoV ──────────────────────────────────────────────────────────
+    def test_atr_5d_mean_emitted_by_indicators(self):
+        """atr_5d_mean = mean of the 5 ATR values ending YESTERDAY (excludes today)."""
+        self.assertIn('"atr_5d_mean"', self.indicators)
+        self.assertIn("atr.iloc[-6:-1].mean()", self.indicators,
+                      "atr_5d_mean must exclude today's bar from the baseline")
+
+    def test_vov_gate_in_both_prefilters(self):
+        """The VoV check must exist in strategy.js AND the stats variant — the two
+        pre-filters are documented as kept in sync."""
+        for src, name in ((self.strategy, "strategy.js"), (self.dta, "day-trading-analysis.js")):
+            self.assertIn("vovMult", src, f"VoV gate missing from {name}")
+            self.assertIn("atr_5d_mean", src, f"VoV gate missing from {name}")
+        self.assertIn("vovMult:       1.3", self.strategy)
+        self.assertIn("stats.vov++", self.dta)
+
+    # ── §2.9 time-of-week ─────────────────────────────────────────────────
+    def test_time_of_week_uses_sydney_clock(self):
+        """Must use Australia/Sydney via Intl — the Pi may not run in AEST.
+        Boundary behaviour (Mon 10:59 blocked / 11:00 allowed; Fri 13:59 allowed /
+        14:00 blocked; toggle off) is verified functionally in Node during dev."""
+        self.assertIn("_dtTimeOfWeekBlocked", self.dta)
+        self.assertIn("Australia/Sydney", self.dta)
+        self.assertIn("hh < 11", self.dta)
+        self.assertIn("hh >= 14", self.dta)
+        self.assertIn("timeOfWeekFilter", self.strategy)
+
+    def test_time_of_week_not_shadow_logged(self):
+        """TOW suppressions are deliberately NOT shadow-logged — the same setup
+        re-scanned after the window would double-count in the ML."""
+        self.assertIn("_towBlocked", self.dta)
+        # the TOW block must not contain a dtSaveSnapshot call (unlike breadth)
+        tow_block = self.dta.split("§2.9 time-of-week gate")[1].split("state.dayTrading._towBlocked = null")[0]
+        self.assertNotIn("dtSaveSnapshot", tow_block)
+
+    # ── §8.5 tool-schema output ───────────────────────────────────────────
+    def test_portfolio_tool_schema_forced(self):
+        """Portfolio agent must use forced tool_choice on emit_recommendations."""
+        self.assertIn("_PORTFOLIO_TOOL", self.client)
+        self.assertIn("emit_recommendations", self.client)
+        self.assertIn("tool_choice", self.client)
+        self.assertIn("agentType === 'portfolio' && !options.noTool", self.client)
+
+    def test_tool_use_block_serialised_for_parser(self):
+        """tool_use input must be stringified so parseClaudeJSON works unchanged."""
+        self.assertIn("b.type === 'tool_use'", self.client)
+        self.assertIn("JSON.stringify(_toolBlock.input)", self.client)
+
+    def test_tool_schema_enforces_enums(self):
+        """Schema must constrain action and urgency to closed vocabularies."""
+        self.assertIn("enum: ['BUY', 'SELL', 'TRIM', 'TOP_UP']", self.client)
+        self.assertIn("enum: ['immediate', 'routine', 'monitor']", self.client)
+
+    def test_tool_schema_is_static(self):
+        """The tool definition is part of the cached prompt prefix — it must not
+        interpolate runtime state or the cache would bust on every call."""
+        tool_src = self.client.split("const _PORTFOLIO_TOOL")[1].split("};")[0]
+        self.assertNotIn("${", tool_src)
+        self.assertNotIn("state.", tool_src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

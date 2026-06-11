@@ -14,7 +14,7 @@
 // can display a breakdown of why tickers were rejected.
 function _dtPreFilterWithStats(tickers) {
   const fp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}) };
-  const stats = { bb: 0, adv: 0, sma: 0, adx: 0, noData: 0 };
+  const stats = { bb: 0, adv: 0, sma: 0, adx: 0, vov: 0, noData: 0 };
   const passing = [];
 
   for (const t of tickers) {
@@ -25,6 +25,9 @@ function _dtPreFilterWithStats(tickers) {
     const ref = s.sma_200 ?? s.sma_50;
     if (ref && s.current_price < ref * fp.sma200Floor)                                                      { stats.sma++; continue; }
     if ((s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus)               { stats.adx++; continue; }
+    // §2.8 VoV — keep in sync with _dtPreFilter() in strategy.js
+    if ((fp.vovMult ?? 0) > 0 && s.atr_14 != null && s.atr_5d_mean != null
+        && s.atr_5d_mean > 0 && s.atr_14 > fp.vovMult * s.atr_5d_mean)                                     { stats.vov++; continue; }
     passing.push(t);
   }
   return { passing, stats };
@@ -103,13 +106,17 @@ async function runDayTradeAnalysis() {
   const newRecs = _dtBuildRecs(candidates, _ap, _dtPortCtx, _dtRegime);
 
   state.dayTrading.recommendations = newRecs;
-  const _rejLine = `BB:${filterStats.bb} ADV:${filterStats.adv} SMA:${filterStats.sma} ADX:${filterStats.adx}${filterStats.noData ? ` NoData:${filterStats.noData}` : ''}`;
+  const _rejLine = `BB:${filterStats.bb} ADV:${filterStats.adv} SMA:${filterStats.sma} ADX:${filterStats.adx}${filterStats.vov ? ` VoV:${filterStats.vov}` : ''}${filterStats.noData ? ` NoData:${filterStats.noData}` : ''}`;
   const _bb = state.dayTrading._breadthBlocked;
   const _bbNote = _bb
     ? `⚠ BREADTH GATE: ADR ${(100 * _bb.adr).toFixed(0)}% < ${(100 * _bb.threshold).toFixed(0)}% — ${_bb.suppressed} setup(s) suppressed (shadow-logged). `
     : '';
+  const _tw = state.dayTrading._towBlocked;
+  const _twNote = _tw
+    ? `⏰ TIME-OF-WEEK: ${_tw.rule} — ${_tw.suppressed} setup(s) deferred (re-scan after the window). `
+    : '';
   state.dayTrading.lastSummary = {
-    text: `${_bbNote}Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} passed · Rejected — ${_rejLine}`,
+    text: `${_bbNote}${_twNote}Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} passed · Rejected — ${_rejLine}`,
     filterStats,
     date: todayStr(),
     time: nowSydney(),
@@ -119,6 +126,31 @@ async function runDayTradeAnalysis() {
   scheduleSave();
   toast(`Day trade scan: ${newRecs.length} setup(s) found`, newRecs.length > 0 ? 'success' : 'info');
   renderPage();
+}
+
+// ── _dtTimeOfWeekBlocked ──────────────────────────────────────────────────────
+// §2.9 time-of-week filter: no NEW swing entries Monday before 11:00 (weekend
+// gaps unresolved) or Friday from 14:00 (weekend gap risk before the stop can
+// be adjusted). Sydney wall-clock via Intl — NOT the local clock; the host may
+// not run in AEST. Existing positions are managed normally. Returns a
+// { rule } object when blocked, else null. `now` injectable for tests.
+function _dtTimeOfWeekBlocked(now) {
+  const fp = { ...DT_FILTER, ...(state.dayTrading?.filterParams || {}) };
+  if (!fp.timeOfWeekFilter) return null;
+  let wd, hh;
+  try {
+    const parts = new Intl.DateTimeFormat('en-AU', {
+      timeZone: 'Australia/Sydney', weekday: 'short',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(now || new Date());
+    const get = t => (parts.find(p => p.type === t) || {}).value || '';
+    wd = get('weekday');
+    hh = parseInt(get('hour'), 10);
+  } catch (_) { return null; }   // Intl unavailable — fail open
+  if (Number.isNaN(hh)) return null;
+  if (wd.startsWith('Mon') && hh < 11)  return { rule: 'Monday before 11:00 AEST' };
+  if (wd.startsWith('Fri') && hh >= 14) return { rule: 'Friday from 14:00 AEST' };
+  return null;
 }
 
 // ── _dtBuildRecs ──────────────────────────────────────────────────────────────
@@ -233,6 +265,18 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
     return [];
   }
   state.dayTrading._breadthBlocked = null;
+
+  // §2.9 time-of-week gate: suppress new entries during asymmetric gap-risk
+  // windows. NOT shadow-logged — these windows are hours long and the same
+  // setup re-scanned after the window would double-count in the ML.
+  const _tow = _dtTimeOfWeekBlocked();
+  if (_tow && recs.length > 0) {
+    state.dayTrading._towBlocked = {
+      rule: _tow.rule, suppressed: recs.length, at: new Date().toISOString(),
+    };
+    return [];
+  }
+  state.dayTrading._towBlocked = null;
 
   // Sort: most signals first, then lowest BB %B (closest to lower band)
   return recs.sort((a, b) => {
@@ -416,7 +460,7 @@ async function runUniverseScan() {
   _dtDismissStaleRecs(3);
   const { passing: candidates, stats: filterStats } = _dtPreFilterWithStats(universeTickers);
   const elapsedFetch = ((Date.now() - t0) / 1000).toFixed(0);
-  const _rejLine = `BB:${filterStats.bb} ADV:${filterStats.adv} SMA:${filterStats.sma} ADX:${filterStats.adx}${filterStats.noData ? ` NoData:${filterStats.noData}` : ''}`;
+  const _rejLine = `BB:${filterStats.bb} ADV:${filterStats.adv} SMA:${filterStats.sma} ADX:${filterStats.adx}${filterStats.vov ? ` VoV:${filterStats.vov}` : ''}${filterStats.noData ? ` NoData:${filterStats.noData}` : ''}`;
 
   if (candidates.length === 0) {
     state.dayTrading.analysisRunning = false;
@@ -460,8 +504,12 @@ async function runUniverseScan() {
   const _ubbNote = _ubb
     ? `⚠ BREADTH GATE: ADR ${(100 * _ubb.adr).toFixed(0)}% < ${(100 * _ubb.threshold).toFixed(0)}% — ${_ubb.suppressed} setup(s) suppressed (shadow-logged). `
     : '';
+  const _utw = state.dayTrading._towBlocked;
+  const _utwNote = _utw
+    ? `⏰ TIME-OF-WEEK: ${_utw.rule} — ${_utw.suppressed} setup(s) deferred (re-scan after the window). `
+    : '';
   state.dayTrading.lastSummary = {
-    text: `${_ubbNote}${meta.label}: ${candidates.length}/${universeTickers.length} passed · ${newRecs.length} setup(s) · Rejected — ${_rejLine} (${elapsed}s)`,
+    text: `${_ubbNote}${_utwNote}${meta.label}: ${candidates.length}/${universeTickers.length} passed · ${newRecs.length} setup(s) · Rejected — ${_rejLine} (${elapsed}s)`,
     filterStats,
     date: todayStr(),
     time: nowSydney(),

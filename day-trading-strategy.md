@@ -66,12 +66,14 @@ Prevents trading stocks where wide spreads and low float degrade technical execu
 - The current ADR is shown on the Macro page and is computed after each scanner run. The regime engine also uses it to classify breadth-driven regimes.
 - **Rationale:** When 75%+ of the market is in downtrend, individual mean-reversion setups have materially lower hit rates. Waiting for broad participation to recover (ADR > 0.35) before re-entering new positions preserves capital during distribution phases.
 
-### 2.8 Volatility-of-Volatility (VoV) Filter
-- **Skip or escalate** when `ATR_today > 1.3 × ATR_5d_mean` — ATR is expanding rapidly.
+### 2.8 Volatility-of-Volatility (VoV) Filter ✅ implemented Sprint 62
+- **Skip** when `ATR_today > 1.3 × ATR_5d_mean` — ATR is expanding rapidly (skip chosen over escalate: simpler, deterministic).
+- **Enforcement:** `indicators.py` emits `atr_5d_mean` (mean of the 5 ATR values ending *yesterday*, so today's expansion is measured against the recent baseline rather than diluted by itself); both pre-filters (`_dtPreFilter` in `strategy.js`, `_dtPreFilterWithStats` in `day-trading-analysis.js`) reject on `atr_14 > vovMult × atr_5d_mean`; rejection breakdown shows a `VoV:N` bucket. Tunable via `filterParams.vovMult` (default 1.3; 0 disables).
 - If VoV triggers, either skip the setup entirely or treat the current regime as one level more defensive (e.g., apply `riskOff` stop multiplier even in a `sideways` regime classification).
 - **Rationale:** When ATR itself is accelerating, the noise floor estimate used to set the stop is already stale. Stop distances computed from last session's ATR understates current risk. The regime engine detects macro-level transitions but intra-regime ATR expansion goes undetected without this check.
 
-### 2.9 Time-of-Week Filter (Swing)
+### 2.9 Time-of-Week Filter (Swing) ✅ implemented Sprint 62
+- **Enforcement:** `_dtTimeOfWeekBlocked()` in `day-trading-analysis.js`, evaluated on the Sydney wall-clock via `Intl.DateTimeFormat` (NOT the host clock — the server may not run in AEST). When blocked, `_dtBuildRecs()` suppresses all new setups with a `⏰ TIME-OF-WEEK` summary note. Deliberately NOT shadow-logged — the window is hours long and a post-window re-scan of the same setup would double-count in the ML. Toggle: `filterParams.timeOfWeekFilter` (default true).
 - **Avoid initiating new swing positions:**
   - **Monday before 11:00 AEST** — weekend news gaps are unresolved; opening auction prints are unreliable until the market stabilises.
   - **Friday after 14:00 AEST** — position squaring into the close increases gap risk over the weekend before the stop can be adjusted.

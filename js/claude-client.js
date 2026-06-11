@@ -30,6 +30,78 @@ const _AGENT_NO_CACHE = {
   briefing:  true,
 };
 
+// ── §8.5: structured tool output for the portfolio agent ─────────────────────
+// Forcing tool_choice onto a JSON-schema'd tool makes the API constrain the
+// output shape — eliminating the malformed-JSON parse-failure class that the
+// "Return ONLY valid JSON" prompt instruction could never guarantee. The local
+// Ollama path already had this (format_schema); this brings the cloud path level.
+//
+// MUST STAY STATIC (no state interpolation): tools are part of the cached
+// prompt prefix — a changing schema would bust the prompt cache on every call.
+// Schema enforces TYPES; business rules (R:R ≥ 2, forbidden tag combos, stop
+// direction) remain the validator's job in analysis.js — both layers stay.
+// `required` is deliberately minimal so a missing optional field degrades to a
+// validator fix/drop instead of an API refusal.
+const _PORTFOLIO_TOOL = {
+  name: 'emit_recommendations',
+  description: 'Emit the final portfolio analysis result. Call exactly once with the '
+    + 'complete set of recommendations, summary, and data gaps.',
+  input_schema: {
+    type: 'object',
+    required: ['recs', 'summary', 'dataGaps'],
+    properties: {
+      recs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['ticker', 'action', 'priceRange', 'target', 'stopLoss',
+                     'qty', 'confidence', 'reasoning'],
+          properties: {
+            ticker:                { type: 'string', pattern: '^[A-Z0-9]{2,5}(\\.AX)?$' },
+            action:                { type: 'string', enum: ['BUY', 'SELL', 'TRIM', 'TOP_UP'] },
+            sector:                { type: 'string' },
+            isWatchlist:           { type: 'boolean' },
+            priceRange:            { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+            target:                { type: 'number' },
+            stopLoss:              { type: 'number' },
+            qty:                   { type: 'number' },
+            tranches:              { type: 'number' },
+            orderType:             { type: 'string', enum: ['LIMIT', 'MARKET', 'VWAP'] },
+            limitPrice:            { type: 'number' },
+            confidence:            { type: 'number', minimum: 0, maximum: 1 },
+            scenarios:             { type: 'object' },
+            expectedTimeToTarget:  { type: 'number' },
+            factorsUsed:           { type: 'array', items: { type: 'string' } },
+            reasoning:             { type: 'string' },
+            risks:                 { type: 'string' },
+            catalysts:             { type: 'string' },
+            signals:               { type: 'array', items: { type: 'string' } },
+            invalidationCondition: { type: 'string' },
+            bearCase:              { type: 'string' },
+            weightGuidance:        { type: 'string' },
+            expectedProfit:        { type: 'number' },
+            netProfit:             { type: 'number' },
+            taxBenefitEstimate:    { type: ['number', 'null'] },
+            grossedUpYield:        { type: ['number', 'null'] },
+            primary_driver:        { type: 'string' },
+            secondary_factors:     { type: 'array', items: { type: 'string' } },
+            urgency:               { type: 'string', enum: ['immediate', 'routine', 'monitor'] },
+            alternativeTicker:     { type: ['string', 'null'] },
+          },
+        },
+      },
+      summary:  { type: 'string' },
+      dataGaps: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { ticker: { type: 'string' }, missingField: { type: 'string' } },
+        },
+      },
+    },
+  },
+};
+
 // Returns the system prompt string for a given agent type.
 // Prompt functions (getDayTradeSystemPrompt etc.) are called lazily
 // so they can reference state at call time.
@@ -106,6 +178,15 @@ async function callClaude(agentType, userMessage, options = {}) {
   const body = { model: CLAUDE_MODEL, max_tokens: maxTokens, messages };
   if (system) body.system = system;
 
+  // §8.5: portfolio agent gets grammar-level JSON enforcement via forced tool use.
+  // options.noTool opts out (escape hatch for diagnostics). The proxy endpoint
+  // forwards the body verbatim, so tools work identically in both modes.
+  const useTool = agentType === 'portfolio' && !options.noTool;
+  if (useTool) {
+    body.tools = [_PORTFOLIO_TOOL];
+    body.tool_choice = { type: 'tool', name: 'emit_recommendations' };
+  }
+
   // ── Headers ─────────────────────────────────────────────────────────────────
   const headers = useProxy ? {
     'Content-Type': 'application/json',
@@ -174,7 +255,15 @@ async function callClaude(agentType, userMessage, options = {}) {
     }
 
     const usage = data.usage || {};
-    const responseText = data.content?.[0]?.text ?? '';
+    // §8.5: with forced tool use the result arrives as a tool_use block —
+    // serialise its input so downstream parseClaudeJSON() consumes it exactly
+    // like text output (zero changes in analysis.js). Falls back to the first
+    // text block for non-tool agents or truncated responses.
+    const _toolBlock = Array.isArray(data.content)
+      ? data.content.find(b => b && b.type === 'tool_use') : null;
+    const responseText = _toolBlock
+      ? JSON.stringify(_toolBlock.input)
+      : (data.content?.[0]?.text ?? '');
 
     console.log(
       `[callClaude] ✓ ${agentType} | sent OK → response received | ` +

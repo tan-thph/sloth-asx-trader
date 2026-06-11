@@ -16,6 +16,9 @@ const DT_FILTER = {
   maxAdx:        35,    // ADX ceiling — skip stocks already in a strong rip
   minAdr:        0.25,  // §2.7 market breadth gate — suppress ALL new swing BUYs when
                         // advance_decline_ratio < this (set 0 to disable)
+  vovMult:       1.3,   // §2.8 VoV filter — skip when atr_14 > vovMult × atr_5d_mean
+                        // (ATR expanding rapidly = stop distances already stale; 0 disables)
+  timeOfWeekFilter: true, // §2.9 — block new entries Mon <11:00 / Fri ≥14:00 AEST (false disables)
 };
 
 // ── AI-phase parameters ────────────────────────────────────────────────────────
@@ -51,6 +54,11 @@ function _dtPreFilter(tickers) {
 
     // Regime filter — skip stocks already in a strong uptrend (DI+ > DI- confirms direction).
     if ((s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus) return false;
+
+    // §2.8 VoV filter — ATR expanding rapidly vs its recent baseline means the
+    // noise-floor estimate behind the stop distance is already stale. Skip.
+    if ((fp.vovMult ?? 0) > 0 && s.atr_14 != null && s.atr_5d_mean != null
+        && s.atr_5d_mean > 0 && s.atr_14 > fp.vovMult * s.atr_5d_mean) return false;
 
     return true;
   });
