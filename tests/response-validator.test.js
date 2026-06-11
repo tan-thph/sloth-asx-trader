@@ -300,3 +300,57 @@ describe('_buildRepairMessage', () => {
     expect(out).toContain('stopLoss too high');
   });
 });
+
+// ── validateSellTags — driver-mention auto-repair (Sprint 64) ─────────────────
+// The prompt's contract is "word or concept"; the literal check can't detect
+// concepts, so a missing driver token is repaired by appending it — never a
+// hard failure (the old hard-fail destroyed 3 of 5 good recs on 2026-06-11).
+
+describe('validateSellTags — driver mention auto-repair', () => {
+  it('repairs reasoning that phrases the concept without the literal token', () => {
+    const { valid, errors, fixed } = validateRec(makeRec({
+      action:           'TRIM',
+      target:           42.00,
+      stopLoss:         45.50,
+      rrRatio:          1.5,
+      primary_driver:   'risk_management',
+      secondary_factors: ['sector_concentration'],
+      urgency:          'routine',
+      reasoning:        'Banking sector at 32% cap. Trim to reduce concentration.',
+    }));
+    expect(valid).toBe(true);
+    expect(errors).toHaveLength(0);
+    expect(fixed.reasoning).toContain('[driver: risk_management]');
+    expect(fixed._driverMentionAppended).toBe(true);
+  });
+
+  it('does not touch reasoning that already names the driver', () => {
+    const { valid, fixed } = validateRec(makeRec({
+      action:           'TRIM',
+      target:           42.00,
+      stopLoss:         45.50,
+      rrRatio:          1.5,
+      primary_driver:   'risk_management',
+      secondary_factors: ['position_oversized'],
+      urgency:          'routine',
+      reasoning:        'Mandatory risk_management trim — 16.7% weight breaches the cap.',
+    }));
+    expect(valid).toBe(true);
+    expect(fixed.reasoning).not.toContain('[driver:');
+  });
+
+  it('still hard-fails genuinely invalid tags (forbidden combo)', () => {
+    const { valid, fixed } = validateRec(makeRec({
+      action:           'SELL',
+      target:           42.00,
+      stopLoss:         45.50,
+      rrRatio:          1.5,
+      primary_driver:   'target_reached',
+      secondary_factors: ['stop_triggered'],
+      urgency:          'immediate',
+      reasoning:        'target reached',
+    }));
+    expect(valid).toBe(false);
+    expect(fixed).toBeNull();
+  });
+});

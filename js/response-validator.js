@@ -126,16 +126,24 @@ function validateSellTags(rec) {
   }
 
   // ── rationale must reference the primary_driver ────────────────────────────
+  // The prompt's contract is "word or CONCEPT" — a literal substring check
+  // cannot detect concepts ("reduce concentration" ⊆ risk_management), so a
+  // miss is AUTO-REPAIRED by appending the driver token, never hard-failed.
+  // (The old hard-fail silently destroyed 3 of 5 good recs in the
+  // 2026-06-11 11:44 run: EVN/WBC/CBA all phrased the concept, not the token.)
+  let repaired = null;
   if (rec.primary_driver && rec.reasoning) {
     const rat    = rec.reasoning.toLowerCase();
     const needle = rec.primary_driver.replace(/_/g, ' ');
     const needleRaw = rec.primary_driver;
     if (!rat.includes(needle) && !rat.includes(needleRaw)) {
-      errors.push(`reasoning must explicitly mention the primary_driver ("${rec.primary_driver}") — currently it does not`);
+      repaired = { ...rec,
+        reasoning: `${rec.reasoning} [driver: ${rec.primary_driver}]`,
+        _driverMentionAppended: true };
     }
   }
 
-  return { ok: errors.length === 0, errors, repaired: null };
+  return { ok: errors.length === 0, errors, repaired };
 }
 
 // Fields required for actionable recs (BUY/SELL/TRIM/TOP_UP).

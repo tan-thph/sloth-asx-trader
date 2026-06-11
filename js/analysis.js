@@ -374,6 +374,11 @@ async function runAnalysis() {
   }
 
   // ── Helper: days held since earliest open BUY/TOP_UP for this ticker ──────
+  // Journal dates are DD-MM-YYYY. `new Date('09-06-2026')` reads MM-DD → a
+  // FUTURE date → negative daysHeld (the ANZ −87 / EVN −117 anomaly in the
+  // 2026-06-11 logs, which corrupted Claude's CGT-window reasoning). Parse via
+  // parseDate() (DD-MM aware) and compare as timestamps, not strings — a
+  // lexicographic compare on day-first dates picks the wrong "earliest" too.
   function _daysHeld(ticker) {
     const buys = (state.tradeJournal || []).filter(t =>
       t.ticker === ticker &&
@@ -381,8 +386,16 @@ async function runAnalysis() {
       !t.closeDate && t.date
     );
     if (!buys.length) return null;
-    const earliest = buys.reduce((a, b) => (a.date < b.date ? a : b));
-    return Math.floor((Date.now() - new Date(earliest.date).getTime()) / 86400000);
+    let earliestMs = null;
+    for (const b of buys) {
+      const d = (typeof parseDate === 'function') ? parseDate(b.date) : new Date(b.date);
+      const ms = d instanceof Date ? d.getTime() : NaN;
+      if (Number.isNaN(ms)) continue;
+      if (earliestMs == null || ms < earliestMs) earliestMs = ms;
+    }
+    if (earliestMs == null) return null;
+    const days = Math.floor((Date.now() - earliestMs) / 86400000);
+    return days >= 0 ? days : null;   // future-dated entry = data error → null, not negative
   }
 
   // Merged portfolio for analysis (deduplicated, weighted avg)
@@ -949,20 +962,38 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // tickers (sizing skipped → qty stayed 0), both of which previously slipped
     // through with qty=0.
     if (typeof validateRec === 'function') {
+      const validatorFlagged = [];
       const validatorDropped = [];
       recs = recs.flatMap(r => {
         const { valid, errors, fixed } = validateRec(r);
-        if (valid) return [r];
+        if (valid) return [fixed || r];   // fixed carries error-free repairs (e.g. [driver: X] suffix)
         if (fixed) {
           console.warn(`[validator] repaired ${r.action} ${r.ticker}:`, errors);
           return [{ ...fixed, _validatorFixed: errors }];
         }
-        console.warn(`[validator] dropped ${r.action} ${r.ticker}:`, errors, r);
-        validatorDropped.push(`${r.action} ${r.ticker}`);
-        return [];
+        // Flag-don't-drop (user decision 2026-06-11): unfixable recs stay
+        // visible with a highlighted warning panel listing every failed rule —
+        // the user makes the final Skip/Execute call. Only structurally
+        // unusable recs (no valid ticker/action — unrenderable, unexecutable)
+        // are still dropped.
+        const action = (r.action || '').toUpperCase();
+        const usable = /^[A-Z0-9]{2,5}(\.AX)?$/.test(r.ticker || '')
+          && ['BUY', 'SELL', 'TRIM', 'TOP_UP', 'HOLD'].includes(action);
+        if (!usable) {
+          console.warn(`[validator] dropped structurally unusable rec:`, errors, r);
+          validatorDropped.push(r.ticker || '?');
+          return [];
+        }
+        console.warn(`[validator] flagged ${r.action} ${r.ticker} for review:`, errors);
+        validatorFlagged.push(`${r.action} ${r.ticker}`);
+        return [{ ...r, _ruleWarnings: errors }];
       });
+      if (validatorFlagged.length > 0) {
+        const note = ` [⚠ ${validatorFlagged.length} rec(s) failed validation — shown highlighted for your review: ${validatorFlagged.join(', ')}]`;
+        summary = (summary ? summary + ' ' : '') + note.trim();
+      }
       if (validatorDropped.length > 0) {
-        const note = ` [Validator dropped ${validatorDropped.length} rec(s): ${validatorDropped.join(', ')}]`;
+        const note = ` [Validator dropped ${validatorDropped.length} structurally unusable rec(s): ${validatorDropped.join(', ')}]`;
         summary = (summary ? summary + ' ' : '') + note.trim();
       }
     }
@@ -1051,28 +1082,33 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
               _sigs.current_price || entryMid || 0, 0,
               { record_type: 'shadow', shadow_reason: 'neg_ev' });
           }
-          continue;
+          // Flag-don't-drop: keep visible with the failure reason for user review
+          r._ruleWarnings = [...(r._ruleWarnings || []),
+            targetBelowEntry
+              ? `Target $${isFinite(target) ? target : '?'} ≤ entry high — trade cannot profit as specified`
+              : `Engine net-EV ≤ 0 at sized qty (gross $${isFinite(grossReward) ? grossReward.toFixed(0) : '?'} − opportunity cost − $${(2 * fees).toFixed(0)} round-trip brokerage = $${isFinite(engineNet) ? engineNet.toFixed(0) : '?'})`];
+        } else {
+          r.expectedProfit = +grossReward.toFixed(2);
+          r.netProfit = +engineNet.toFixed(2);
+          r._netProfitEngine = true;
         }
-        r.expectedProfit = +grossReward.toFixed(2);
-        r.netProfit = +engineNet.toFixed(2);
-        r._netProfitEngine = true;
       }
 
       cleanedRecs.push(r);
     }
     if (droppedNegEV > 0) {
-      const note = ` [Filtered ${droppedNegEV} buy rec(s) with non-positive est. P&L]`;
+      const note = ` [⚠ ${droppedNegEV} buy rec(s) flagged with non-positive est. P&L — review before executing]`;
       summary = (summary ? summary + ' ' : '') + note.trim();
     }
     recs = cleanedRecs;
 
-    // ── HARD CONFIDENCE FLOOR: drop any rec below threshold that slipped through ──
+    // ── CONFIDENCE FLOOR: flag (not drop) any rec below threshold ──────────────
     const MIN_CONFIDENCE = state.analysisConfig.rules?.minConfidence ?? 0.62;
-    let lowConfDropped = 0;
-    recs = recs.filter(r => {
+    let lowConfFlagged = 0;
+    recs = recs.map(r => {
       if ((r.confidence || 0) < MIN_CONFIDENCE) {
-        lowConfDropped++;
-        // §8.6: shadow-log BUY-side drops so the ML sees the unpruned distribution
+        lowConfFlagged++;
+        // §8.6: shadow-log BUY-side fails so the ML sees the unpruned distribution
         const _act = (r.action || '').toUpperCase();
         if (typeof dtSaveSnapshot === 'function' && r.stopLoss && r.target
             && (_act === 'BUY' || _act === 'TOP_UP')) {
@@ -1081,12 +1117,13 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
             _sigs.current_price || (Array.isArray(r.priceRange) ? r.priceRange[0] : 0), 0,
             { record_type: 'shadow', shadow_reason: 'conf_floor' });
         }
-        return false;
+        return { ...r, _ruleWarnings: [...(r._ruleWarnings || []),
+          `Confidence ${(100 * (r.confidence || 0)).toFixed(0)}% is below the ${(MIN_CONFIDENCE * 100).toFixed(0)}% floor`] };
       }
-      return true;
+      return r;
     });
-    if (lowConfDropped > 0) {
-      const note = ` [Dropped ${lowConfDropped} rec(s) below ${(MIN_CONFIDENCE*100).toFixed(0)}% confidence floor]`;
+    if (lowConfFlagged > 0) {
+      const note = ` [⚠ ${lowConfFlagged} rec(s) below ${(MIN_CONFIDENCE*100).toFixed(0)}% confidence floor — flagged for review]`;
       summary = (summary ? summary + ' ' : '') + note.trim();
     }
 
@@ -1284,17 +1321,23 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     );
 
     // ── MAX TRADES PER DAY CAP ──
+    // Flagged recs (failed validation/EV/confidence — shown for review) don't
+    // compete for cap slots and aren't cut by the cap: they're advisory until
+    // the user decides, not planned trades.
     const todayKey2 = todayStr();
     const todayExecutedCount = state.recHistory.filter(r => r.date === todayKey2 && r.executed).length;
     const maxNew = Math.max(0, (state.settings.maxTradesPerDay || 5) - todayExecutedCount);
     let capDropped = 0;
     let cappedDedupedRecs = dedupedRecs;
-    if (dedupedRecs.length > maxNew) {
-      cappedDedupedRecs = dedupedRecs
+    const _cleanRecs   = dedupedRecs.filter(r => !(r._ruleWarnings && r._ruleWarnings.length));
+    const _flaggedRecs = dedupedRecs.filter(r =>  (r._ruleWarnings && r._ruleWarnings.length));
+    if (_cleanRecs.length > maxNew) {
+      const cappedClean = _cleanRecs
         .slice()
         .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
         .slice(0, maxNew);
-      capDropped = dedupedRecs.length - cappedDedupedRecs.length;
+      capDropped = _cleanRecs.length - cappedClean.length;
+      cappedDedupedRecs = [...cappedClean, ..._flaggedRecs];
     }
     if (capDropped > 0) {
       const note = ` [Capped: dropped ${capDropped} lower-confidence rec(s) — max ${state.settings.maxTradesPerDay} trades/day, ${todayExecutedCount} already executed today]`;

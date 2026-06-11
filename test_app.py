@@ -6847,5 +6847,66 @@ class TestSprint63ExecutionAlphaAndRetrainNudge(unittest.TestCase):
         self.assertIn("retrain: '🧠'", self.notifs_js)
 
 
+class TestSprint64FlagDontDrop(unittest.TestCase):
+    """2026-06-11 incident fixes: driver-mention auto-repair, negative daysHeld,
+    and flag-don't-drop — failed recs stay visible with reasons + Skip/Execute."""
+
+    @classmethod
+    def setUpClass(cls):
+        def _read(*p):
+            with open(os.path.join(ROOT, *p), encoding="utf-8") as f:
+                return f.read()
+        cls.validator_js = _read("js", "response-validator.js")
+        cls.analysis_js  = _read("js", "analysis.js")
+        cls.recs_js      = _read("js", "pages", "recommendations.js")
+
+    def test_driver_mention_is_auto_repaired_not_failed(self):
+        """The 'reasoning must mention primary_driver' check must repair (append
+        the token) instead of hard-failing — the prompt contract is 'word or
+        CONCEPT' and the literal check cannot detect concepts."""
+        self.assertIn("_driverMentionAppended", self.validator_js)
+        self.assertNotIn("reasoning must explicitly mention the primary_driver",
+                         self.validator_js,
+                         "the hard-fail error message must be gone")
+
+    def test_days_held_uses_dd_mm_parse(self):
+        """new Date('09-06-2026') reads MM-DD → future date → negative daysHeld
+        (the ANZ −87 anomaly). Must parse via parseDate and clamp negatives to null."""
+        block = self.analysis_js.split("function _daysHeld")[1].split("\n  }")[0]
+        self.assertIn("parseDate", block)
+        self.assertIn("days >= 0 ? days : null", block)
+        self.assertNotIn("new Date(earliest.date)", self.analysis_js)
+
+    def test_validator_flags_instead_of_dropping(self):
+        """Unfixable recs are kept with _ruleWarnings (user decides Skip/Execute);
+        only structurally unusable recs (bad ticker/action) are dropped."""
+        self.assertIn("_ruleWarnings: errors", self.analysis_js)
+        self.assertIn("structurally unusable", self.analysis_js)
+        # repaired-but-error-free recs must keep their repairs
+        self.assertIn("return [fixed || r];", self.analysis_js)
+
+    def test_neg_ev_and_conf_floor_flag_not_drop(self):
+        """The engine net-EV gate and confidence floor flag recs instead of
+        removing them; shadow logging is retained for the ML."""
+        self.assertIn("Engine net-EV ≤ 0 at sized qty", self.analysis_js)
+        self.assertIn("below the ${(MIN_CONFIDENCE * 100).toFixed(0)}% floor", self.analysis_js)
+        # the conf-floor must no longer filter
+        self.assertNotIn("if ((r.confidence || 0) < MIN_CONFIDENCE) { lowConfDropped++; return false; }",
+                         self.analysis_js)
+
+    def test_flagged_recs_exempt_from_daily_cap(self):
+        """Flagged (advisory) recs must not compete for or be cut by maxTradesPerDay."""
+        self.assertIn("_cleanRecs", self.analysis_js)
+        self.assertIn("_flaggedRecs", self.analysis_js)
+        self.assertIn("...cappedClean, ..._flaggedRecs", self.analysis_js)
+
+    def test_rec_card_renders_failure_panel(self):
+        """Flagged recs render a highlighted panel listing every failed rule,
+        next to the existing Skip / Mark Executed buttons."""
+        self.assertIn("_ruleWarnings", self.recs_js)
+        self.assertIn("would have been dropped", self.recs_js)
+        self.assertIn("border-left:3px solid #dc2626", self.recs_js)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
