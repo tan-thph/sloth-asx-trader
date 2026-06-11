@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v10';
+const PROMPT_VERSION = '2026-06-v11';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -295,6 +295,13 @@ const ANALYSIS_SYSTEM_PROMPT =
     INSTITUTIONAL: Analyst ratings direction, short interest trend, fund ownership shifts.
     CORRELATION: Flag if a new position duplicates factor exposure already in the portfolio
       (e.g. adding another iron ore name when BHP already provides that exposure).
+      When a ticker's indicator block includes a CorrToHoldings line (20d Pearson ρ vs current
+      holdings, shown for |ρ| ≥ 0.60): treat ρ ≥ 0.70 as CONCENTRATION, not diversification —
+      a BUY there requires the thesis to be explicitly orthogonal (a different driver than the
+      correlated holding's) and you must cite the correlation in factorsUsed[]
+      (e.g. "Corr: ρ=0.87 with NAB — thesis driver is X, orthogonal to NAB's Y").
+      Do NOT adjust confidence or qty numerically for correlation — the engine reduces size
+      deterministically (−30% at |ρ|>0.70, −50% at |ρ|>0.85) after your response.
 
   SECTION 4 — INCOME & TAX RULES
 

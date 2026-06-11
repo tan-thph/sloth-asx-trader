@@ -137,13 +137,56 @@ async function _callLocalAnalysis(userMessage) {
   return { text: d.text, usage: { local: true, model: d.model, elapsed_ms: d.elapsed_ms } };
 }
 
+// §9.5: local SELL/TRIM on a LARGE position escalates to Claude. Small local
+// models produce exit tags inconsistently — cheap insurance until their tag
+// quality is proven. Returns {ticker, weight} of the largest offending exit,
+// or null when the local result is fine to use.
+const _LOCAL_ESCALATE_WEIGHT_PCT = 10;
+function _localExitOnLargePosition(text) {
+  try {
+    const parsed = JSON.parse(text);
+    const recs = Array.isArray(parsed) ? parsed : (parsed?.recs || []);
+    const pv = typeof portfolioValue === 'function' ? portfolioValue() : 0;
+    if (!pv) return null;
+    let worst = null;
+    for (const r of recs) {
+      const action = (r.action || '').toUpperCase();
+      if (action !== 'SELL' && action !== 'TRIM') continue;
+      const h = (typeof mergedPortfolio === 'function' ? mergedPortfolio() : [])
+        .find(x => x.ticker === r.ticker);
+      if (!h) continue;
+      const weight = (h.shares * h.currentPrice) / pv * 100;
+      if (weight > _LOCAL_ESCALATE_WEIGHT_PCT && (!worst || weight > worst.weight)) {
+        worst = { ticker: r.ticker, weight: +weight.toFixed(1) };
+      }
+    }
+    return worst;
+  } catch (_) { return null; }   // unparseable — let the normal pipeline handle it
+}
+
 async function callClaude(agentType, userMessage, options = {}) {
   // Local LLM fast-path: portfolio analysis only, opt-in via Settings.
   // SELL/TRIM tagging and calibration injection are Claude-only features;
   // the local path produces BUY/TOP_UP/HOLD recs through the same validator/quant stack.
   if (agentType === 'portfolio' && state.settings?.useLocalLLM) {
     console.log('[callClaude] routing portfolio → local Ollama (useLocalLLM=true)');
-    return _callLocalAnalysis(userMessage);
+    const local = await _callLocalAnalysis(userMessage);
+    const big = _localExitOnLargePosition(local.text);
+    const canEscalate = (typeof getApiKey === 'function' && getApiKey())
+      || state.settings?.useBackendProxy;
+    if (!big) return local;
+    if (!canEscalate) {
+      // Local-only install (no Claude key): keep the local result but warn loudly
+      if (typeof toast === 'function') {
+        toast(`⚠ Local model proposes exit on ${big.ticker} (${big.weight}% of portfolio) — no Claude key to escalate; review carefully`, 'error');
+      }
+      return local;
+    }
+    // §9.5 escalation: discard the local result and fall through to Claude
+    console.warn(`[callClaude] local SELL/TRIM touches ${big.ticker} (${big.weight}% of portfolio) — escalating to Claude`);
+    if (typeof toast === 'function') {
+      toast(`Local model proposed exit on ${big.ticker} (${big.weight}% of portfolio) — escalated to Claude for the full taxonomy`, 'info');
+    }
   }
 
   // Two modes:

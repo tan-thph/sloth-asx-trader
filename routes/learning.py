@@ -1909,6 +1909,7 @@ def lessons_list():
                 lessons.append(d)
                 continue
             # Breadth-scoped: only inject when current market conditions match
+            month = datetime.now().month   # §9.5: calendar scopes are server-derived
             if scope == "adl_below_0.3" and adl is not None and adl < 0.3:
                 lessons.append(d)
             elif scope == "adl_above_0.7" and adl is not None and adl > 0.7:
@@ -1916,6 +1917,10 @@ def lessons_list():
             elif scope == "high_vol" and asx_vol is not None and asx_vol > 25:
                 lessons.append(d)
             elif scope == "low_vol" and asx_vol is not None and asx_vol < 12:
+                lessons.append(d)
+            elif scope == "earnings_season" and month in (2, 8):     # Feb/Aug reporting
+                lessons.append(d)
+            elif scope == "cgt_window" and month in (5, 6):          # May–Jun EOFY
                 lessons.append(d)
         return jsonify({"ok": True, "lessons": lessons})
     except Exception as e:
@@ -1928,13 +1933,15 @@ def lessons_create():
 
     Body: { lesson_text, ticker?, sector?, regime?, setup_type?,
              learning_event_id?, source?, breadth_scope? }
-    breadth_scope: adl_below_0.3 | adl_above_0.7 | high_vol | low_vol | null
+    breadth_scope: adl_below_0.3 | adl_above_0.7 | high_vol | low_vol
+                 | earnings_season | cgt_window | null   (§9.5: calendar scopes)
     """
     data = request.get_json() or {}
     lesson_text   = (data.get("lesson_text") or "").strip()
     breadth_scope = data.get("breadth_scope") or None
     if breadth_scope and breadth_scope not in (
-            "adl_below_0.3", "adl_above_0.7", "high_vol", "low_vol"):
+            "adl_below_0.3", "adl_above_0.7", "high_vol", "low_vol",
+            "earnings_season", "cgt_window"):
         return jsonify({"ok": False, "error": f"Invalid breadth_scope: {breadth_scope}"}), 400
     if not lesson_text:
         return jsonify({"ok": False, "error": "lesson_text required"}), 400

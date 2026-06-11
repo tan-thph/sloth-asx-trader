@@ -1365,9 +1365,9 @@ good and adopted below. Stale/wrong items are listed at the end so they aren't r
 |---|---|---|---|
 | 9.1 | Dynamic regime stop widening for open positions | ✅ **Shipped Sprint 66** — `checkRegimeStopWidening()` in alerts.js, runs before stop-hit checks; widen-only, `_stopTrailed` precedence, one-shot per regime, alert+bell on every widen, ↔ Widened badge in History | High |
 | 9.2 | Slippage penalty for virtual outcomes (+ execution-alpha sim) | ✅ **Shipped Sprint 66** — `core.adv_slippage` (hoisted from backtester) × regime mult; wins must clear target by the margin, mech fills degraded; `virtual_slippage_applied` audit column + chip tooltip | High |
-| 9.3 | Per-ticker portfolio correlation in the prompt (context-only) | ✓ Adopt, modified | Med |
-| 9.4 | "Why this rec?" traceability modal | ✓ Adopt | Med |
-| 9.5 | Small batch: breadth-scope triggers, local-LLM size guard | ✓ Adopt | Low |
+| 9.3 | Per-ticker portfolio correlation in the prompt (context-only) | ✅ **Shipped Sprint 67** — CorrToHoldings line (incl. watchlist candidates via the extended Step 2b risk fetch); context-only prompt rule (v11); max |ρ| logged to learning events' market_context | Med |
+| 9.4 | "Why this rec?" traceability modal | ✅ **Shipped Sprint 67** — ℹ️ button on rec cards; Generation / Confidence trail / Sizing & risk gates / Validator / Thesis sections from the rec's audit fields | Med |
+| 9.5 | Small batch: breadth-scope triggers, local-LLM size guard | ✅ **Shipped Sprint 67** — `earnings_season` + `cgt_window` calendar scopes (server-derived); local SELL/TRIM on >10%-weight holding escalates to Claude (keyless installs warn instead) | Low |
 
 ---
 

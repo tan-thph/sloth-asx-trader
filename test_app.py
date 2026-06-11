@@ -914,11 +914,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_current(self):
-        """PROMPT_VERSION must be bumped to v10 after the §8.2/§8.3 prompt rewrites."""
+        """PROMPT_VERSION must be bumped to v11 after the §9.3 CorrToHoldings rules."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v10'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v10 after §8.2/§8.3 prompt rewrites")
+        self.assertIn("PROMPT_VERSION = '2026-06-v11'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v11 after §9.3 CorrToHoldings rules")
 
     def test_calibration_is_context_only_in_system_prompt(self):
         """§8.3 (supersedes Stage 3): the system prompt must present CALIBRATION as
@@ -7048,6 +7048,86 @@ class TestSprint66RegimeStopWideningAndSlippage(unittest.TestCase):
         self.assertIn("from core import adv_slippage", self.backtest_py)
         self.assertNotIn("if adv_aud >= 10_000_000", self.backtest_py)
         self.assertIn('("virtual_slippage_applied", "REAL")', self.db_py)
+
+
+class TestSprint67CorrContextTraceabilityAndBatch(unittest.TestCase):
+    """§9.3 CorrToHoldings prompt context, §9.4 traceability modal,
+    §9.5 calendar lesson scopes + local-LLM size escalation."""
+
+    @classmethod
+    def setUpClass(cls):
+        def _read(*p):
+            with open(os.path.join(ROOT, *p), encoding="utf-8") as f:
+                return f.read()
+        cls.analysis_js = _read("js", "analysis.js")
+        cls.prompts_js  = _read("js", "prompts.js")
+        cls.recs_js     = _read("js", "pages", "recommendations.js")
+        cls.learning_js = _read("js", "pages", "learning.js")
+        cls.learning_py = _read("routes", "learning.py")
+        cls.client_js   = _read("js", "claude-client.js")
+
+    # ── §9.3 CorrToHoldings ───────────────────────────────────────────────
+    def test_corr_matrix_captured_pre_prompt(self):
+        """Step 2b must capture the correlation matrix (incl. watchlist tickers)
+        BEFORE the prompt is built — previously only metrics were read."""
+        self.assertIn("_corrMatrixPre = rd.correlation || {}", self.analysis_js)
+        self.assertIn("[...new Set(allTickers)].join(',')", self.analysis_js,
+                      "risk fetch must include watchlist tickers for BUY-candidate corr")
+        # capture must precede the indicator-block builder's use
+        self.assertLess(self.analysis_js.index("_corrMatrixPre = rd.correlation"),
+                        self.analysis_js.index("CorrToHoldings:"))
+
+    def test_corr_line_in_indicator_block(self):
+        self.assertIn("CorrToHoldings:", self.analysis_js)
+        self.assertIn("Math.abs(rowC[h]) >= 0.60", self.analysis_js)
+
+    def test_corr_prompt_rule_is_context_only(self):
+        """The prompt must forbid numeric confidence/qty adjustment for correlation
+        (engine-side sizing is the v10 architecture) while requiring orthogonality."""
+        self.assertIn("CorrToHoldings", self.prompts_js)
+        self.assertIn("Do NOT adjust confidence or qty numerically for correlation", self.prompts_js)
+        self.assertIn("orthogonal", self.prompts_js)
+
+    def test_max_corr_logged_to_learning_events(self):
+        self.assertIn("max_corr_to_holdings", self.analysis_js)
+        self.assertIn("window._lastCorrMatrix", self.analysis_js)
+
+    # ── §9.4 traceability modal ───────────────────────────────────────────
+    def test_traceability_modal_wired(self):
+        self.assertIn("function showRecTraceability", self.recs_js)
+        self.assertIn("showRecTraceability('${r.id}')", self.recs_js)
+        for field in ("_calibApplied", "_constraintBinding", "_validatorFixed",
+                      "_ruleWarnings", "_stopWidened", "_exitSized"):
+            self.assertIn(field, self.recs_js, f"modal must surface {field}")
+
+    # ── §9.5 calendar lesson scopes ───────────────────────────────────────
+    def test_calendar_lesson_scopes(self):
+        self.assertIn('"earnings_season"', self.learning_py)
+        self.assertIn('"cgt_window"', self.learning_py)
+        self.assertIn("month in (2, 8)", self.learning_py)
+        self.assertIn("month in (5, 6)", self.learning_py)
+        self.assertIn('value="earnings_season"', self.learning_js)
+        self.assertIn('value="cgt_window"', self.learning_js)
+
+    def test_calendar_scope_accepted_by_create(self):
+        """POST validation must accept the new scope values."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        client = asx_server.app.test_client()
+        r = client.post("/api/learning/lessons",
+                        json={"lesson_text": "test cgt lesson", "breadth_scope": "cgt_window"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(json.loads(r.data)["ok"])
+
+    # ── §9.5 local-LLM size escalation ────────────────────────────────────
+    def test_local_llm_escalation(self):
+        """Local SELL/TRIM on a >10%-weight holding escalates to Claude; a
+        keyless local-only install keeps the result with a loud warning
+        instead of throwing."""
+        self.assertIn("_localExitOnLargePosition", self.client_js)
+        self.assertIn("_LOCAL_ESCALATE_WEIGHT_PCT = 10", self.client_js)
+        self.assertIn("escalating to Claude", self.client_js)
+        self.assertIn("no Claude key to escalate", self.client_js)
 
 
 if __name__ == "__main__":

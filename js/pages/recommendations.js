@@ -452,6 +452,7 @@ function renderPendingRecs(recs) {
           <button class="btn btn-sm btn-success" onclick="confirmExecute('${r.id}')">✓ Mark Executed</button>
           <button class="btn btn-sm btn-danger" onclick="markSkipped('${r.id}')">✕ Skip</button>
           <button class="btn btn-sm" onclick="trailStop('${r.id}')" title="Trail stop to current price × ATR">📍 Trail</button>
+          <button class="btn btn-sm" onclick="showRecTraceability('${r.id}')" title="Why did I get this rec? — full decision trail">ℹ️</button>
         </div>
       </div>
 
@@ -1027,6 +1028,80 @@ function _showPreTradeChecklist(recId, onConfirm) {
 
   // Store callback so the close handlers can call it
   dialog._onConfirm = onConfirm;
+  dialog.showModal();
+}
+
+// ── §9.4: "Why did I get this rec?" traceability modal ────────────────────────
+// Pure UI assembly — every input already lives on the rec object as an audit
+// field written by the pipeline (calibration, quant engine, validator, gates).
+function showRecTraceability(recId) {
+  const r = (state.recommendations || []).find(x => x.id === recId)
+         || (state.recHistory || []).find(x => x.id === recId);
+  if (!r) { toast('Rec not found', 'error'); return; }
+
+  const row = (label, value) => value == null || value === '' ? '' :
+    `<div style="display:flex;gap:10px;padding:3px 0;font-size:12px">
+       <span style="flex:0 0 150px;color:var(--text-muted)">${label}</span>
+       <span style="flex:1;min-width:0;word-break:break-word">${value}</span>
+     </div>`;
+  const section = (title, rowsHtml) => !rowsHtml ? '' :
+    `<div style="margin-bottom:12px">
+       <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-tertiary);margin-bottom:4px;border-bottom:0.5px solid var(--border-light);padding-bottom:3px">${title}</div>
+       ${rowsHtml}</div>`;
+  const list = arr => Array.isArray(arr) && arr.length
+    ? `<ul style="margin:0 0 0 14px;padding:0">${arr.map(x => `<li>${escapeHTML(String(x))}</li>`).join('')}</ul>` : null;
+  const pct = v => v != null ? `${(v * 100).toFixed(0)}%` : null;
+
+  const origConf = r._calibApplied?.orig ?? r.confidence;
+  const genRows =
+    row('Generated', `${r.generatedAt || r.date || ''}${r.regime ? ` · regime: <strong>${r.regime}</strong>` : ''}`) +
+    row('Source', r._source === 'local' ? '🔒 Local Ollama model' : 'Claude (tool-schema output)') +
+    row('Action', `${r.action} ${r.ticker}${r.isWatchlist ? ' ★watchlist' : ''}`);
+  const confRows =
+    row('Claude confidence', pct(origConf)) +
+    (r._calibApplied
+      ? row('Calibration applied', `${r._calibApplied.adj > 0 ? '+' : ''}${(r._calibApplied.adj * 100).toFixed(0)}pp (band ${r._calibApplied.band || '—'}) → ${pct(r.confidence)}`)
+      : '') +
+    row('Ensemble (½AI + ½indicator)', pct(r.ensembleConfidence));
+  const sizingRows =
+    row('Quant engine', r._quantEngine ? `qty=${r.qty}${r._constraintBinding ? ` · binding constraint: ${r._constraintBinding}` : ''}` : (r._exitSized ? null : 'AI values kept (engine skipped)')) +
+    row('Exit sizing', r._exitSized ? (r._exitSized === 'full' ? 'SELL — full holding' : `TRIM — ${r._exitSized} of holding (weightGuidance midpoint)`) : null) +
+    row('Risk / reward', r.riskAUD != null ? `$${fmt(r.riskAUD)} / $${fmt(r.rewardAUD)} (R:R ${r.rrRatio ?? '—'})` : null) +
+    row('Pre-earnings widen', r._preEarningsAdj ? 'stop ×1.3 — earnings ≤14d' : null) +
+    row('Correlation', r._corrNote || null) +
+    row('Heat budget', r._budgetScaled ? (r._budgetNote || 'scaled to fit risk budget') : null) +
+    row('VaR adjustment', r._varAdjusted ? `qty ×${r._varMult} (VaR1d ${r._varMult === 0.5 ? '< −5.0%' : '< −3.5%'})` : null) +
+    row('Stop repaired', r._stopRepaired ? `ATR floor applied (${r._stopRepairedMult}×ATR)` : null) +
+    row('Stop widened', r._stopWidened ? `$${(r._stopWidenedFrom ?? 0).toFixed(2)} → $${(r.stopLoss ?? 0).toFixed(2)} (${r._stopWidenedRegime} regime)` : null) +
+    row('Stop trailed', r._stopTrailed ? `at ${(r._stopTrailedAt || '').slice(0, 16)}` : null);
+  const validatorRows =
+    row('Auto-repairs', list(r._validatorFixed)) +
+    row('Rule warnings', list(r._ruleWarnings)) +
+    row('Driver mention', r._driverMentionAppended ? 'appended to reasoning by validator' : null);
+  const thesisRows =
+    row('Factors used', list(r.factorsUsed)) +
+    row('Reasoning', r.reasoning ? escapeHTML(r.reasoning) : null) +
+    row('Invalidation', r.invalidationCondition ? escapeHTML(r.invalidationCondition) : null) +
+    row('Bear case', r.bearCase ? escapeHTML(r.bearCase) : null) +
+    (r.primary_driver ? row('Exit tags', `${r.primary_driver}${Array.isArray(r.secondary_factors) && r.secondary_factors.length ? ' · ' + r.secondary_factors.join(', ') : ''}${r.urgency ? ' · ' + r.urgency : ''}`) : '');
+
+  const dialog = document.createElement('dialog');
+  dialog.id = 'rec-trace-dialog';
+  dialog.style.cssText = 'padding:0;border:none;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.35);background:var(--bg-primary);color:var(--text-primary);max-width:560px;width:92vw';
+  dialog.innerHTML = `
+    <div style="padding:18px 20px">
+      <div class="flex-between" style="margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700">ℹ️ Why this rec — ${r.action} ${r.ticker}</div>
+        <button class="btn btn-sm" onclick="document.getElementById('rec-trace-dialog').close()">✕</button>
+      </div>
+      ${section('Generation', genRows)}
+      ${section('Confidence trail', confRows)}
+      ${section('Sizing & risk gates', sizingRows)}
+      ${section('Validator', validatorRows)}
+      ${section('Thesis', thesisRows)}
+    </div>`;
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.appendChild(dialog);
   dialog.showModal();
 }
 

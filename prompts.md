@@ -1,6 +1,6 @@
 # Sloth ASX Trader — Prompt Architecture Reference
 
-**Last Updated:** 2026-06-11 (Sprint 61 — validator wired into live path; post-processing list re-verified against analysis.js; v9 history row)
+**Last Updated:** 2026-06-11 (Sprint 67 — v11 CorrToHoldings context rule; §9.5 local-LLM size escalation; v10/v11 history rows)
 **Model:** `claude-sonnet-4-6` · all calls via `callClaude()` in `js/claude-client.js`
 
 This document is the authoritative reference for every Claude API call in the application:
@@ -173,6 +173,7 @@ LIVE TECHNICAL DATA (yfinance, real-time):
                 OpMgn={n}%, D/E={n}, RevGrowth={n}%, FCFYield={n}%, Short={n}%float
   52W: High=${n}, Low=${n}, FromHigh={n}%, AnalystUpside:{±n}%, Analyst={rec} (target ${n})
   BuySignals: {list} | SellSignals: {list}
+  CorrToHoldings: NAB:0.87 ANZ:0.81        ← §9.3, top |ρ| ≥ 0.60 vs current holdings (when available)
   WeeklyCls(10wk,old→new): ${n} ${n}↑ ${n}↓ ... | VolTrend5w:{±n}%
 
 ACTIVE RULE OVERRIDES: {all configurable thresholds from state.analysisConfig.rules}
@@ -633,6 +634,7 @@ The backend (`routes/debate.py`) prepends `_LOCAL_ANALYSIS_SYSTEM` (a stripped-d
 | Constraint | Reason |
 |---|---|
 | BUY / TOP_UP / HOLD only — no SELL / TRIM | SELL/TRIM require `sell_primary_driver`, `sell_secondary_factors`, `sell_urgency` structured tagging which small models produce inconsistently |
+| §9.5 size escalation (Sprint 67) | A local SELL/TRIM touching a holding > 10% of portfolio value discards the local result and re-routes the run to Claude (`_localExitOnLargePosition` in `claude-client.js`); a keyless local-only install keeps the local result with a loud warning toast instead |
 | Context truncated to 4000 chars | Ollama small models (Qwen 4B–9B) have limited context windows; the most critical context (date, regime, holdings, top signals) is always first |
 | No calibration injection | Calibration nudges assume Claude-level instruction following; small models may ignore or invert them |
 | `🔒 Local` badge on rec cards | `_source === 'local'` triggers amber badge in `recommendations.js` so the user sees which recs came from Ollama |
@@ -719,7 +721,7 @@ These exist in `state.liveSignals[t]` but are not currently included in any prom
 
 ## Prompt Versioning
 
-`PROMPT_VERSION = '2026-06-v10'` in `js/prompts.js`.
+`PROMPT_VERSION = '2026-06-v11'` in `js/prompts.js`.
 
 Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. The version is:
 - Stored on every `ai_learning_events` row at log time
@@ -729,6 +731,7 @@ Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. Th
 **Version history:**
 | Version | Key changes |
 |---|---|
+| `2026-06-v11` | Sprint 67 (§9.3): CorrToHoldings line in each ticker's indicator block (top |ρ| ≥ 0.60 vs holdings, incl. watchlist candidates); Section 3 CORRELATION rule — ρ ≥ 0.70 = concentration, thesis must be explicitly orthogonal and cited in factorsUsed[]; explicit ban on numeric confidence/qty adjustment for correlation (engine sizes deterministically) |
 | `2026-06-v10` | Sprint 61 (§8.2 + §8.3): Section 7 cash test rewritten qty-free (min-trade-size notional — Rule 4 zeroes qty, so qty-based formulas were incoherent); SELL/TRIM netProfit derives sharesToExit from the Holdings block; Section 6 calibration is now CONTEXT-ONLY — the engine applies band/per-ticker adjustments deterministically post-response (`window._calibAdjustments` → analysis.js, before Kelly sizing); learning events log the original (pre-adjustment) confidence |
 | `2026-06-v9` | Sprint 58: ACTION DEFINITIONS aligned with Rule 4 (TOP_UP/SELL/TRIM all state qty stays 0); TRIM definition documents that the quant engine trims by the weightGuidance Reduce-range midpoint — weightGuidance is now load-bearing for TRIM sizing |
 | `2026-06-v8` | Sprint 47: Rule 3 stop ATR changed from hardcoded 1.5× to regime-aware stopAtrMultiple from ACTIVE RULE OVERRIDES; Rule 4 instructs Claude to set qty=0 (quant engine sizes); scenarios field made optional; ACTIVE_REGIME moved to top of user message (line 3); rulesCtx moved before indicatorCtx |

@@ -203,15 +203,20 @@ async function runAnalysis() {
 
   // ── Step 2b: fetch portfolio risk metrics ───────────────────────────────────
   // Run in parallel with the rest of context building — non-blocking failure.
+  // §9.3: includes watchlist tickers so the correlation matrix covers BUY
+  // candidates vs existing holdings (CorrToHoldings prompt context).
   let _riskMetrics = {};   // {TICKER: {var_95, cvar_95, max_drawdown, beta, sharpe, volatility_ann}}
   let _riskComposite = null; // portfolio-level weighted values
+  let _corrMatrixPre = {}; // §9.3: correlation matrix captured pre-prompt (bare tickers)
   if (state.serverOk && portfolioTickers.length) {
     try {
       const rf = state.rbaRate || 4.35;
-      const riskResp = await fetch(`${API}/api/risk?tickers=${portfolioTickers.join(',')}&rf=${rf}`);
+      const riskResp = await fetch(`${API}/api/risk?tickers=${[...new Set(allTickers)].join(',')}&rf=${rf}`);
       if (riskResp.ok) {
         const rd = await riskResp.json();
         _riskMetrics = rd.metrics || {};
+        _corrMatrixPre = rd.correlation || {};
+        window._lastCorrMatrix = _corrMatrixPre;   // logRecsToLearningLoop reads this
         // Compute portfolio-weighted composites for the prompt
         const pv = portfolioValue();
         let wVol=0, wBeta=0, wVaR=0, wDD=0, wSharpe=0, covered=0;
@@ -350,6 +355,21 @@ async function runAnalysis() {
         return `, NearPivot:${nearest.name}(${pct > 0 ? '+' : ''}${pct}%)`;
       })();
 
+      // §9.3: top correlations to existing holdings — CONTEXT for thesis
+      // orthogonality (cite in factorsUsed). The numeric response stays
+      // engine-side (qty −30%/−50% at |ρ|>0.70/0.85) per the v10 architecture.
+      const corrLine = (() => {
+        const rowC = _corrMatrixPre[t];
+        if (!rowC) return '';
+        const pairs = portfolioTickers
+          .filter(h => h !== t && typeof rowC[h] === 'number' && Math.abs(rowC[h]) >= 0.60)
+          .map(h => ({ h, c: rowC[h] }))
+          .sort((a, b) => Math.abs(b.c) - Math.abs(a.c))
+          .slice(0, 3);
+        if (!pairs.length) return '';
+        return `\n  CorrToHoldings: ${pairs.map(p => `${p.h}:${p.c.toFixed(2)}`).join(' ')}`;
+      })();
+
       const volSpikeFlag = (s.volume_z_score ?? 0) > 3 ? ' ⚡VOLSPIKE' : '';
       if (!_isCandidate(s, t)) {
         // Tier 2: compressed 1-line summary for stable holds
@@ -369,7 +389,7 @@ async function runAnalysis() {
   Returns: 1D=${s.return_1d?.toFixed(2)}%, 5D=${s.return_5d?.toFixed(2)}%, 20D=${s.return_20d?.toFixed(2)}%, 60D=${s.return_60d?.toFixed(2)}%${s.return_90d!=null?` 90D:${s.return_90d.toFixed(2)}%`:''}${rsAlpha!=null?` vs.ASX200:${rsAlpha>0?'+':''}${rsAlpha}pp`:''}${sectorAlpha!=null?` vs.Sector:${sectorAlpha>0?'+':''}${sectorAlpha}pp`:''}${s.high_60d!=null?` | Range60d: hi=$${s.high_60d.toFixed(3)} lo=$${s.low_60d?.toFixed(3)||'?'}`  :''}
   Fundamentals: PE=${f.pe_ratio?.toFixed(1)||'n/a'}, FwdPE=${f.forward_pe?.toFixed(1)||'n/a'}, PB=${f.pb_ratio?.toFixed(2)||'n/a'}, DivYield=${f.dividend_yield?(f.dividend_yield*100).toFixed(2)+'%':'n/a'}, Beta=${f.beta?.toFixed(2)||'n/a'}, ROE=${f.roe?(f.roe*100).toFixed(1)+'%':'n/a'}, OpMgn=${f.operating_margin!=null?(f.operating_margin*100).toFixed(1)+'%':'n/a'}, D/E=${f.debt_to_equity?.toFixed(1)||'n/a'}, RevGrowth=${f.revenue_growth!=null?(f.revenue_growth*100).toFixed(1)+'%':'n/a'}, FCFYield=${(f.free_cashflow&&f.market_cap)?((f.free_cashflow/f.market_cap)*100).toFixed(1)+'%':'n/a'}${f.short_pct_float!=null?`, Short=${(f.short_pct_float*100).toFixed(1)}%float`:''}
   52W: High=$${f['52w_high']?.toFixed(3)||'n/a'}, Low=$${f['52w_low']?.toFixed(3)||'n/a'}, FromHigh=${f.pct_from_52w_high?.toFixed(1)||'n/a'}%${analystUpside!=null?`, AnalystUpside=${analystUpside>0?'+':''}${analystUpside}%`:''}, Analyst=${f.analyst_recommendation||'n/a'} (target $${f.analyst_target?.toFixed(2)||'n/a'})
-  BuySignals: ${(s.buy_signals||[]).join(', ')||'none'} | SellSignals: ${(s.sell_signals||[]).join(', ')||'none'}`;
+  BuySignals: ${(s.buy_signals||[]).join(', ')||'none'} | SellSignals: ${(s.sell_signals||[]).join(', ')||'none'}${corrLine}`;
     }).join('\n');
   }
 
@@ -1430,6 +1450,10 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
 
   // Capture market context once per analysis run
   const _mktCtx = { rba_rate: typeof state.rbaRate === 'number' ? state.rbaRate : null };
+  // §9.3: max |ρ| vs holdings at generation time — lets later analysis answer
+  // "do high-correlation entries underperform?" from the learning DB.
+  const _corrM = window._lastCorrMatrix || {};
+  const _holdingTickers = mergedPortfolio().map(h => h.ticker);
 
   for (const r of recs) {
     if (r._learningId) continue;  // already logged — idempotency guard
@@ -1481,7 +1505,16 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         rr_ratio:            rrRatio != null ? +rrRatio.toFixed(2) : null,
         sector:              r.sector || holding?.sector || null,
         was_executed:             false,
-        market_context:           _mktCtx,
+        market_context:           (() => {
+          const rowC = _corrM[r.ticker] || {};
+          let maxC = null;
+          for (const h of _holdingTickers) {
+            if (h === r.ticker) continue;
+            const c = rowC[h];
+            if (typeof c === 'number' && (maxC == null || Math.abs(c) > Math.abs(maxC))) maxC = c;
+          }
+          return { ..._mktCtx, max_corr_to_holdings: maxC != null ? +maxC.toFixed(2) : null };
+        })(),
         debate_summary:           _debateSummary,
         entry_signals_json,
         debate_synthesis_winner,

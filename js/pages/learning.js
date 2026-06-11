@@ -2250,6 +2250,8 @@ async function renderLessonsCard() {
             <option value="adl_above_0.7">ADL above 0.7 (broad market strong)</option>
             <option value="high_vol">High volatility (A-VIX &gt; 25%)</option>
             <option value="low_vol">Low volatility (A-VIX &lt; 12%)</option>
+            <option value="earnings_season">Earnings season (Feb / Aug)</option>
+            <option value="cgt_window">CGT / EOFY window (May – Jun)</option>
           </select>
         </div>
         <div style="display:flex;gap:6px">
