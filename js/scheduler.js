@@ -239,6 +239,39 @@ async function autoRefreshPrices(reason) {
   console.log(`Auto-refreshing prices (${reason})...`);
   await refreshPrices({silent: true});
   checkAutoBriefSchedule();
+  checkMacroBriefSchedule();
+}
+
+// ── AI morning macro — auto-run once per trading day ─────────────────────────
+// Default ON (state.settings.autoMacroBrief !== false; toggle in Settings →
+// Display). When switched OFF, the brief still runs automatically on the first
+// manual Run Analysis of the day (analysis.js Step 1) or via the Macro page
+// button — this scheduler only removes the need to remember.
+// Idempotence: state.macroDate is persisted, so a page reload never re-runs.
+// Failures retry on later ticks, capped at 3 attempts/day to avoid toast spam.
+function checkMacroBriefSchedule() {
+  if (state.settings?.autoMacroBrief === false) return;
+  if (!state.serverOk) return;
+  if (state.settings?.useLocalLLM) return;                 // macro is a Claude-only agent
+  // Need a usable key path: direct key OR backend proxy. (runMacroAnalysis
+  // itself navigates to Settings when keyless — never trigger that from a timer.)
+  const hasKey = (typeof getApiKey === 'function' && getApiKey()) || state.settings?.useBackendProxy;
+  if (!hasKey) return;
+  const today = todayStr();
+  if (state.macroDate === today && state.macroData?.analysis) return;   // already ran today
+  const day = new Date().getDay();
+  if (day === 0 || day === 6) return;                       // weekend — keep Friday's brief
+  if (window._macroAutoRunning) return;
+  let attempts = {};
+  try { attempts = JSON.parse(localStorage.getItem('macroAutoAttempts') || '{}'); } catch (_) {}
+  if (attempts.date === today && attempts.n >= 3) return;
+  localStorage.setItem('macroAutoAttempts',
+    JSON.stringify({ date: today, n: (attempts.date === today ? attempts.n : 0) + 1 }));
+  window._macroAutoRunning = true;
+  console.log('[scheduler] auto-running daily AI macro brief');
+  Promise.resolve(typeof runMacroAnalysis === 'function' ? runMacroAnalysis() : null)
+    .catch(() => {})
+    .finally(() => { window._macroAutoRunning = false; });
 }
 
 function checkAutoBriefSchedule() {

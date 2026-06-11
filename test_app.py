@@ -6908,5 +6908,63 @@ class TestSprint64FlagDontDrop(unittest.TestCase):
         self.assertIn("border-left:3px solid #dc2626", self.recs_js)
 
 
+class TestSprint65MacroBriefPersistence(unittest.TestCase):
+    """2026-06-11 disappearing-macro fix: live refreshes must MERGE into
+    state.macroData (preserving the AI brief) instead of replacing it; the
+    brief auto-runs once per trading day; displayed with its date until the
+    next run replaces it."""
+
+    @classmethod
+    def setUpClass(cls):
+        def _read(*p):
+            with open(os.path.join(ROOT, *p), encoding="utf-8") as f:
+                return f.read()
+        cls.utils_js     = _read("js", "utils.js")
+        cls.macro_js     = _read("js", "pages", "macro.js")
+        cls.analysis_js  = _read("js", "analysis.js")
+        cls.scheduler_js = _read("js", "scheduler.js")
+        cls.config_js    = _read("js", "config.js")
+        cls.settings_js  = _read("js", "pages", "settings.js")
+        cls.init_js      = _read("js", "init.js")
+
+    def test_merge_helper_exists_and_preserves_ai_fields(self):
+        self.assertIn("function mergeLiveMacro", self.utils_js)
+        for f in ("'sentiment'", "'sentimentConf'", "'bullish'", "'analysis'", "'keyDrivers'"):
+            self.assertIn(f, self.utils_js, f"AI field {f} missing from preserve list")
+
+    def test_no_wholesale_macro_replacement_remains(self):
+        """The four wipe sites must all route through mergeLiveMacro()."""
+        for src, name in ((self.macro_js, "pages/macro.js"), (self.analysis_js, "analysis.js")):
+            self.assertNotIn("state.macroData = {...d, _source:'live'}", src, name)
+            self.assertNotIn("state.macroData = {...data, _source:'live'}", src, name)
+            self.assertNotIn("state.macroData = { ...data, _source: 'live' }", src, name)
+        self.assertGreaterEqual(self.macro_js.count("mergeLiveMacro("), 3)
+        self.assertIn("mergeLiveMacro(d)", self.analysis_js)
+
+    def test_daily_auto_run_with_toggle(self):
+        """checkMacroBriefSchedule: once/day via persisted macroDate, weekday-only,
+        ≤3 attempts/day, gated on autoMacroBrief (default true) and key/proxy."""
+        self.assertIn("function checkMacroBriefSchedule", self.scheduler_js)
+        self.assertIn("autoMacroBrief === false", self.scheduler_js)
+        self.assertIn("macroAutoAttempts", self.scheduler_js)
+        self.assertIn("useBackendProxy", self.scheduler_js)
+        self.assertIn("autoMacroBrief: true", self.config_js)
+        self.assertIn("autoMacroBrief", self.settings_js)
+        self.assertIn("checkMacroBriefSchedule();", self.init_js)
+        # the price-refresh tick also checks it
+        self.assertIn("checkMacroBriefSchedule();", self.scheduler_js.split("function checkMacroBriefSchedule")[0])
+
+    def test_macro_run_does_not_hijack_proxy_mode(self):
+        """runMacroAnalysis must not navigate to Settings when proxy mode supplies
+        the key server-side (auto-run from a timer must never change pages)."""
+        self.assertIn("if(!key && !state.settings?.useBackendProxy)", self.macro_js)
+
+    def test_brief_shows_its_date_until_replaced(self):
+        """The AI Macro Analysis card carries a date badge: green 'Today' or amber
+        'From <date>' when displaying a previous day's brief."""
+        self.assertIn("From ${state.macroDate}", self.macro_js)
+        self.assertIn("Today · ${state.macroDate}", self.macro_js)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

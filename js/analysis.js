@@ -157,7 +157,7 @@ async function runAnalysis() {
         const r = await fetch(`${API}/api/macro`);
         if(r.ok) {
           const d = await r.json();
-          state.macroData = {...d, _source:'live'};
+          mergeLiveMacro(d);   // merge — never wipe the persisted AI brief fields
           const lines = [];
           if(d.sp500)    lines.push(`S&P500: ${fmt(d.sp500.value)} (${fmtp(d.sp500.change_pct)})`);
           if(d.asx200)   lines.push(`ASX200: ${fmt(d.asx200.value)} (${fmtp(d.asx200.change_pct)})`);

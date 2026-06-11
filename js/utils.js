@@ -104,6 +104,28 @@ function getPortfolioHolding(ticker) {
   return state.portfolio.find(h => h.ticker === ticker.toUpperCase());
 }
 
+// ── mergeLiveMacro ────────────────────────────────────────────────────────────
+// Merge fresh live market numbers into state.macroData WITHOUT wiping the AI
+// brief fields — those are only replaced by a successful new AI run.
+// Bug fixed 2026-06-11: four call sites did `state.macroData = {...live}`
+// wholesale, so any live-data refresh (incl. the silent one on every Macro page
+// visit after 5 min) destroyed the day's AI brief, and the next save persisted
+// the gutted object. The brief must survive until the next AI run replaces it.
+function mergeLiveMacro(liveData) {
+  const AI_FIELDS = ['sentiment', 'sentimentConf', 'bullish', 'analysis', 'keyDrivers'];
+  const prev = state.macroData || {};
+  const live = liveData || {};
+  const merged = { ...prev, ...live };
+  // The live /api/macro payload never carries AI fields, but guard anyway
+  for (const f of AI_FIELDS) {
+    if (live[f] == null && prev[f] != null) merged[f] = prev[f];
+  }
+  // _source gates the Sentiment row on the Macro page — keep 'ai' while a brief exists
+  merged._source = (merged.analysis || merged.keyDrivers) ? 'ai' : 'live';
+  state.macroData = merged;
+  return merged;
+}
+
 function toast(msg, type='info') {
   const c=document.getElementById('toast-container');
   const el=document.createElement('div');

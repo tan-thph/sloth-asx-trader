@@ -79,6 +79,7 @@ async function initApp() {
   if (state.settings.compactMode) document.body.classList.add('compact');
   _applyTheme(state.settings.theme || 'auto');
   checkAutoBriefSchedule();
+  checkMacroBriefSchedule();
 }
 
 // Init

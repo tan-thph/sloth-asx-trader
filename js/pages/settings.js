@@ -334,6 +334,16 @@ python3 asx_server.py</pre>
           style="padding:4px 8px;border-radius:6px;border:1px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:13px"
           onchange="updateSetting('autoBriefTime', this.value); scheduleSave()">
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border-light)">
+        <div>
+          <div style="font-size:13px;font-weight:600">Auto-run AI morning macro</div>
+          <div class="text-xs text-muted">Runs the AI macro brief once per trading day (weekdays, when a key/proxy is available). When off, it still runs on your first manual Run Analysis of the day.</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" ${state.settings.autoMacroBrief !== false ? 'checked' : ''}
+            onchange="updateSetting('autoMacroBrief', this.checked); scheduleSave()">
+        </label>
+      </div>
     </div>
 
     <div class="card">

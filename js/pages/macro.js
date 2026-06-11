@@ -235,7 +235,12 @@ function renderMacro() {
     </div>
     ${m.analysis?`
     <div class="card mb-2">
-      <div class="card-title">AI Macro Analysis</div>
+      <div class="flex-between" style="margin-bottom:0.875rem">
+        <div class="card-title" style="margin-bottom:0">AI Macro Analysis</div>
+        ${state.macroDate ? (state.macroDate === todayStr()
+          ? `<span class="badge" style="background:var(--up-bg,#dcfce7);color:var(--up,#16a34a);border:none">Today · ${state.macroDate}</span>`
+          : `<span class="badge" style="background:var(--warn-bg,#fef3c7);color:var(--warn,#d97706);border:none" title="Shown until the next run replaces it — run AI Macro Brief for today's update">From ${state.macroDate}</span>`) : ''}
+      </div>
       <p class="text-sm" style="line-height:1.75;white-space:pre-wrap">${m.analysis}</p>
       ${m.keyDrivers?`<div class="mt-2"><div class="card-title">Key Drivers</div><p class="text-sm" style="line-height:1.75">${m.keyDrivers}</p></div>`:''}
     </div>`:''}
@@ -324,7 +329,7 @@ async function fetchRealMacro() {
     const r = await fetch(`${API}/api/macro`);
     if(!r.ok) throw new Error('Server error');
     const data = await r.json();
-    state.macroData = {...data, _source:'live'};
+    mergeLiveMacro(data);   // preserves the day's AI brief fields
     state.macroLastFetch = Date.now();
     toast('Live macro data loaded','success');
   } catch(e) {
@@ -337,7 +342,8 @@ async function fetchRealMacro() {
 
 async function runMacroAnalysis(force=false) {
   const key=getApiKey();
-  if(!key){toast('Add API key in Settings','error');showPage('settings');return;}
+  // Proxy mode has no browser-side key — callClaude() routes via the backend
+  if(!key && !state.settings?.useBackendProxy){toast('Add API key in Settings','error');showPage('settings');return;}
 
   // Once-per-day guard — skip if already ran today (unless forced)
   const today = todayStr();
@@ -354,7 +360,7 @@ async function runMacroAnalysis(force=false) {
       const r=await fetch(`${API}/api/macro`);
       if(r.ok) {
         const d=await r.json();
-        state.macroData={...d, _source:'live'};
+        mergeLiveMacro(d);   // preserves the AI brief if the Claude call below fails
         const lines=[];
         if(d.sp500) lines.push(`S&P500: ${fmt(d.sp500.value)} (${fmtp(d.sp500.change_pct)})`);
         if(d.asx200) lines.push(`ASX200: ${fmt(d.asx200.value)} (${fmtp(d.asx200.change_pct)})`);
@@ -418,7 +424,7 @@ async function renderMacroPage(gen) {
       const r = await fetch(`${API}/api/macro`);
       if (!r.ok) throw new Error('Server error');
       const data = await r.json();
-      state.macroData = { ...data, _source: 'live' };
+      mergeLiveMacro(data);   // THE disappearing-brief bug: this silent refresh used to wipe the AI fields
       state.macroLastFetch = Date.now();
     } catch (_) { /* stale data stays visible */ } finally {
       _macroRefreshing = false;
