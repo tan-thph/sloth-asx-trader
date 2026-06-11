@@ -58,7 +58,26 @@
       "Bash(grep -v \"\\\\.js:[0-9]*:.*//\\\\|\\\\.js:[0-9]*:.*\\\\`\\\\|\\\\.js:[0-9]*:.*fmt\")",
       "Bash(grep -v \"^commit\\\\|^Author\\\\|^Date\\\\|^feat\\\\|^Gap\\\\|^-\\\\|^$\")",
       "Bash(xargs -I{} sh -c 'echo \"{}\" | head -c 200')",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(timeout 25 python asx_server.py)",
+      "Bash(curl -s localhost:5000/health)",
+      "Bash(curl -s localhost:5000/api/db/git-status)",
+      "Read(//tmp/**)",
+      "Bash(pkill -f asx_server.py)",
+      "Bash(git pull *)",
+      "Bash(curl -s http://localhost:5000/api/daytrading/history)",
+      "Bash(curl *)",
+      "Bash(ngrok version *)",
+      "Bash(pkill -f \"ngrok http\")",
+      "Bash(ngrok http *)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(git -C /home/tanth/projects/sloth-asx-trader status)",
+      "Bash(git -C /home/tanth/projects/sloth-asx-trader log --oneline -5)",
+      "Bash(git *)",
+      "Bash(grep -n \"'#[0-9a-fA-F]\\\\{3,6\\\\}'\" js/charts.js)",
+      "Bash(sed -n 70,90p js/init.js)",
+      "Bash(sed -n 480,495p js/pages/settings.js)",
+      "Bash(grep -n \"returnPer1k\\\\|per-\\\\$1\\\\|min trade size\" js/prompts.js)"
     ]
   }
 }
