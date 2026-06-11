@@ -68,7 +68,7 @@ This prevents unintended Ollama calls during market hours and avoids priority-qu
 ## 1. Portfolio Analysis — `'portfolio'`
 
 **File:** `js/analysis.js → runAnalysis()`
-**Trigger:** "Run Analysis" button · max 8,000 output tokens
+**Trigger:** "Run Analysis" button · max 10,000 output tokens *(8,000 → 10,000 Sprint 68: the 15:35 run hit the cap exactly; tool input counts against max_tokens)*
 **System prompt:** `ANALYSIS_SYSTEM_PROMPT` (static, cached) + optional regime/date modules from `buildSystemArray()` (uncached second block)
 
 ### System prompt structure (8 sections)
@@ -233,7 +233,7 @@ SYNTHESIS: {winner} | {key_pivot}
 Order matches the section markers in `analysis.js` (verified Sprint 61):
 
 1. **JSON parse** — `parseClaudeJSON()` with brace-depth recovery on truncation
-2. **Quant engine** — `computeTradeParams()` replaces AI-computed `qty / stopLoss / rrRatio / riskAUD / rewardAUD` for BUY/TOP_UP with deterministic Kelly + volatility-scalar + multi-constraint sizing
+2. **Quant engine** — `computeTradeParams()` replaces AI-computed `qty / stopLoss / rrRatio / riskAUD / rewardAUD` for BUY/TOP_UP with deterministic Kelly + volatility-scalar + multi-constraint sizing. When the engine DECLINES (`ok:false` — e.g. R:R below 2 at the regime-widened stop), the rec gets min-trade-size fallback qty (capped by cash) + a single `_ruleWarnings` entry stating the engine's reason, so the card stays executable on user judgment *(Sprint 68 — fixes the WDS qty=0 triple-warning incident)*
 3. **SELL/TRIM sizing** — Rule 4 forces Claude to emit `qty: 0`; SELL = full held position, TRIM = midpoint of the `weightGuidance` "Reduce (-X-Y%)" range (default 35%), clamped to `[1, shares held]`. Tagged `_exitSized`. *(Sprint 58)*
 4. **ATR floor** — SELL/TRIM stop loss floored at `entry + stopMult×ATR` where `stopMult = regimeMod.stopAtrMult ?? 2.5` (regime-conditional: 2.5 riskOn/trend/sideways · 3.0 highVol · 3.5 riskOff · 4.0 panic). Rec flagged `_stopRepaired: true` + `_stopRepairedMult: N` when repair fires.
 5. **Validator** — `validateRec()` (schema + business rules + `validateSellTags()`), **local fix-or-flag — there is NO network repair loop in the live path**. Runs after sizing so the `qty ≥ 1` and stop-direction checks validate final values. Repaired recs carry `_validatorFixed: [errors]` (incl. the Sprint 64 driver-mention auto-repair: missing literal driver token in reasoning → `[driver: X]` appended, `_driverMentionAppended`). **Unfixable recs are KEPT and flagged** (`_ruleWarnings: [errors]`) — rendered with a red review panel + Skip/Execute buttons so the user decides (2026-06-11 decision). Only structurally unusable recs (invalid ticker/action) are dropped. `getValidatedAnalysisWithRepair()` exists in `response-validator.js` but is **not called** from `runAnalysis()`. *(Wired Sprint 61; flag-don't-drop Sprint 64)*

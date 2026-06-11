@@ -911,7 +911,32 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           priceRange: r.priceRange,
           target: r.target,
         });
-        if (!qt.ok) return r;  // keep AI values if quant rejects
+        if (!qt.ok) {
+          // Quant engine declined to size. Rule 4 means the AI qty is 0, so a
+          // bare `return r` used to ship an unexecutable card with three
+          // cascading qty warnings and no stated cause (the WDS 15:35 case).
+          // Flag-don't-drop: surface the engine's ACTUAL reason once, and apply
+          // fallback min-trade-size sizing (capped by cash) so the user can
+          // still execute on their own judgment with a sane prefilled qty.
+          const entryLoQ  = Array.isArray(r.priceRange) ? Number(r.priceRange[0]) : NaN;
+          const entryHiQ  = Array.isArray(r.priceRange) ? Number(r.priceRange[1]) : Number(r.target);
+          const entryMidQ = isFinite(entryLoQ) && isFinite(entryHiQ) ? (entryLoQ + entryHiQ) / 2 : entryHiQ;
+          const minTrade  = Number(state.settings.minTradeSize) || 1000;
+          const warnings  = [...(r._ruleWarnings || [])];
+          if (!entryMidQ || !isFinite(entryMidQ) || entryMidQ <= 0) {
+            warnings.push(`Quant engine declined to size: ${qt.reason || 'unknown'} — and no valid entry price for fallback sizing`);
+            return { ...r, _ruleWarnings: warnings };
+          }
+          const affordable = Math.floor((state.cash || 0) / entryMidQ);
+          const wanted     = Math.max(1, Math.round(minTrade / entryMidQ));
+          const fbQty      = Math.min(wanted, affordable);
+          if (fbQty < 1) {
+            warnings.push(`Quant engine declined to size: ${qt.reason || 'unknown'} — and cash $${fmt(state.cash || 0)} cannot cover 1 share at $${entryMidQ.toFixed(2)}`);
+            return { ...r, _ruleWarnings: warnings };
+          }
+          warnings.push(`Quant engine declined to size: ${qt.reason || 'unknown'}. Fallback min-trade sizing applied (${fbQty} sh ≈ $${fmt(fbQty * entryMidQ)}) — review before executing`);
+          return { ...r, qty: fbQty, _fallbackSized: true, _ruleWarnings: warnings };
+        }
         return {
           ...r,
           qty: qt.qty,

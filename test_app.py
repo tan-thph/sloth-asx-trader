@@ -7119,6 +7119,24 @@ class TestSprint67CorrContextTraceabilityAndBatch(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(json.loads(r.data)["ok"])
 
+    # ── Sprint 68: quant-reject fallback sizing ───────────────────────────
+    def test_quant_reject_gets_fallback_sizing(self):
+        """When computeTradeParams declines a BUY/TOP_UP, the rec must surface
+        the engine's actual reason ONCE and receive min-trade-size fallback qty
+        (capped by cash) so the card is executable — not ship qty=0 with three
+        cascading warnings and no stated cause (the WDS 15:35 incident)."""
+        self.assertIn("Quant engine declined to size", self.analysis_js)
+        self.assertIn("_fallbackSized: true", self.analysis_js)
+        self.assertIn("Math.floor((state.cash || 0) / entryMidQ)", self.analysis_js)
+        self.assertIn("cannot cover 1 share", self.analysis_js)
+        # the silent keep-AI-values path must be gone
+        self.assertNotIn("if (!qt.ok) return r;", self.analysis_js)
+
+    def test_portfolio_token_cap_raised(self):
+        """out=8000 hit the cap exactly on the 15:35 run — tool input counts
+        against max_tokens, so the cap must exceed observed peak usage."""
+        self.assertIn("portfolio: 10000", self.client_js)
+
     # ── §9.5 local-LLM size escalation ────────────────────────────────────
     def test_local_llm_escalation(self):
         """Local SELL/TRIM on a >10%-weight holding escalates to Claude; a

@@ -1064,7 +1064,11 @@ function showRecTraceability(recId) {
       : '') +
     row('Ensemble (½AI + ½indicator)', pct(r.ensembleConfidence));
   const sizingRows =
-    row('Quant engine', r._quantEngine ? `qty=${r.qty}${r._constraintBinding ? ` · binding constraint: ${r._constraintBinding}` : ''}` : (r._exitSized ? null : 'AI values kept (engine skipped)')) +
+    row('Quant engine', r._quantEngine
+      ? `qty=${r.qty}${r._constraintBinding ? ` · binding constraint: ${r._constraintBinding}` : ''}`
+      : (r._fallbackSized
+        ? `declined — fallback min-trade sizing applied (qty=${r.qty}; see warnings)`
+        : (r._exitSized ? null : 'AI values kept (engine skipped)'))) +
     row('Exit sizing', r._exitSized ? (r._exitSized === 'full' ? 'SELL — full holding' : `TRIM — ${r._exitSized} of holding (weightGuidance midpoint)`) : null) +
     row('Risk / reward', r.riskAUD != null ? `$${fmt(r.riskAUD)} / $${fmt(r.rewardAUD)} (R:R ${r.rrRatio ?? '—'})` : null) +
     row('Pre-earnings widen', r._preEarningsAdj ? 'stop ×1.3 — earnings ≤14d' : null) +

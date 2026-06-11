@@ -14,7 +14,10 @@
 const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
 const _AGENT_MAX_TOKENS = {
-  portfolio: 8000,
+  // 8000 → 10000 (Sprint 68): the 2026-06-11 15:35 run reported out=8000 — the
+  // cap exactly — with 7 recs. Tool-schema input counts against max_tokens; a
+  // larger portfolio would truncate the tool input and fail the whole parse.
+  portfolio: 10000,
   analyst:   3000,
   pm:        3000,
   dayTrade:  4000,
