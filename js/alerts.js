@@ -150,6 +150,58 @@ function _proposeOutcomeRecording(rec, kind, price, isDayTrade = false) {
   );
 }
 
+// ── §9.1: Dynamic regime stop widening for open positions ─────────────────────
+// The hard stop is set at entry with the entry-regime's stopAtrMult. If the
+// regime degrades mid-hold (e.g. sideways → highVol), that stop is now inside
+// the new noise floor — the exact condition §4.1 widens stops for at entry.
+// This recomputes the regime-appropriate stop for open executed BUY/TOP_UP
+// recs and WIDENS ONLY (never tightens). A manually trailed stop (📍 Trail,
+// r._stopTrailed) always wins — trailing is a deliberate profit lock-in.
+// One-shot per regime per rec (re-arms when the regime changes again).
+// NOTE: widening increases $-at-risk beyond the originally sized amount, so
+// every widen fires a visible alert + bell notification — never silent.
+function checkRegimeStopWidening() {
+  const regime = state.currentRegime?.regime;
+  if (!regime || regime === 'unknown' || typeof getRegimeModifiers !== 'function') return;
+  const mult = (getRegimeModifiers(regime) || {}).stopAtrMult;
+  if (!mult) return;
+
+  const openRecs = (state.recHistory || []).filter(r =>
+    r.executed && r.stopLoss && (r.outcome === 'open' || !r.outcome)
+    && (!r.action || r.action === 'BUY' || r.action === 'TOP_UP'));
+
+  let anyWidened = false;
+  for (const r of openRecs) {
+    if (r._stopTrailed) continue;                  // manual trail takes precedence
+    if (r._stopWidenedRegime === regime) continue; // already widened for this regime
+    const sig = state.liveSignals?.[r.ticker] ?? state.liveSignals?.[r.ticker + '.AX'];
+    const atr = sig?.atr_14;
+    if (!atr || atr <= 0) continue;
+    const entryMid = Array.isArray(r.priceRange)
+      ? (Number(r.priceRange[0]) + Number(r.priceRange[1])) / 2
+      : null;
+    if (!entryMid || !isFinite(entryMid)) continue;
+
+    const widenedStop = +(entryMid - mult * atr).toFixed(3);
+    if (!isFinite(widenedStop) || widenedStop <= 0) continue;
+    if (widenedStop >= r.stopLoss) continue;       // would tighten or no-op — never
+
+    r._stopWidenedFrom   = r.stopLoss;
+    r._stopWidened       = true;
+    r._stopWidenedAt     = new Date().toISOString();
+    r._stopWidenedRegime = regime;
+    r.stopLoss = widenedStop;
+    anyWidened = true;
+    fireAlert(
+      `↔ Stop widened: ${r.ticker}`,
+      `Regime ${regime} (${mult}×ATR): hard stop moved $${r._stopWidenedFrom.toFixed(2)} → $${widenedStop.toFixed(2)}. ` +
+      `Risk per share increased — review the position if you'd rather exit than widen.`,
+      `sloth-stopwiden-${r.ticker}`
+    );
+  }
+  if (anyWidened && typeof scheduleSave === 'function') scheduleSave();
+}
+
 // ── Stop-proximity pre-warning ────────────────────────────────────────────────
 // Fires BEFORE a stop is breached — gives time to act.
 // Threshold: state.settings.stopProximityPct (default 3 %, 0 = disabled).

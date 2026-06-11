@@ -37,6 +37,9 @@ async function refreshPrices(opts = {}) {
   state.lastPriceRefresh = Date.now();
   if(!silent) toast(`Updated ${updated} prices from yfinance`,'success');
   checkPriceAlerts();
+  // §9.1: widen stops BEFORE checking hits — a stop the current regime says is
+  // too tight must not fire a stop-hit alert at the stale level.
+  if (typeof checkRegimeStopWidening === 'function') checkRegimeStopWidening();
   if (typeof checkRecStopTargetAlerts === 'function') checkRecStopTargetAlerts();
   if (typeof checkStopProximityAlerts === 'function') checkStopProximityAlerts();
   if (typeof checkIntradayCloseouts    === 'function') checkIntradayCloseouts();

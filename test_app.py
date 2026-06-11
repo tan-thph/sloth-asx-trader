@@ -6966,5 +6966,89 @@ class TestSprint65MacroBriefPersistence(unittest.TestCase):
         self.assertIn("Today · ${state.macroDate}", self.macro_js)
 
 
+class TestSprint66RegimeStopWideningAndSlippage(unittest.TestCase):
+    """§9.1 dynamic regime stop widening + §9.2 virtual-fill slippage."""
+
+    @classmethod
+    def setUpClass(cls):
+        def _read(*p):
+            with open(os.path.join(ROOT, *p), encoding="utf-8") as f:
+                return f.read()
+        cls.alerts_js   = _read("js", "alerts.js")
+        cls.prices_js   = _read("js", "prices.js")
+        cls.recs_js     = _read("js", "pages", "recommendations.js")
+        cls.learning_py = _read("routes", "learning.py")
+        cls.backtest_py = _read("routes", "backtest.py")
+        cls.db_py       = _read("db.py")
+
+    # ── §9.1 regime stop widening ─────────────────────────────────────────
+    def test_stop_widening_invariants(self):
+        """Widen-only, manual-trail precedence, one-shot per regime — the full
+        behaviour matrix is verified functionally in Node during dev; this pins
+        the load-bearing source lines."""
+        self.assertIn("function checkRegimeStopWidening", self.alerts_js)
+        self.assertIn("if (widenedStop >= r.stopLoss) continue;", self.alerts_js,
+                      "widen-only invariant missing")
+        self.assertIn("if (r._stopTrailed) continue;", self.alerts_js,
+                      "manual trail must take precedence")
+        self.assertIn("_stopWidenedRegime === regime", self.alerts_js,
+                      "one-shot-per-regime guard missing")
+        self.assertIn("_stopWidenedFrom", self.alerts_js)
+
+    def test_widening_runs_before_stop_hit_checks(self):
+        """A stale-tight stop must be widened before the hit-checker fires on it."""
+        widen_at = self.prices_js.index("checkRegimeStopWidening")
+        hits_at  = self.prices_js.index("checkRecStopTargetAlerts")
+        self.assertLess(widen_at, hits_at)
+
+    def test_widened_badge_in_history_table(self):
+        self.assertIn("↔ Widened", self.recs_js)
+        self.assertIn("_stopWidenedFrom", self.recs_js)
+
+    # ── §9.2 slippage ─────────────────────────────────────────────────────
+    def test_adv_slippage_tiers(self):
+        from core import adv_slippage
+        self.assertEqual(adv_slippage(20_000_000), 0.0005)
+        self.assertEqual(adv_slippage(5_000_000), 0.001)
+        self.assertEqual(adv_slippage(1_000_000), 0.002)
+        self.assertEqual(adv_slippage(100_000), 0.0035)
+        self.assertEqual(adv_slippage(None), 0.0035)      # missing → thin-name tier
+        self.assertEqual(adv_slippage("garbage"), 0.0035)
+
+    def test_event_slippage_regime_multiplier(self):
+        from routes.learning import _event_slippage
+        row = {"entry_signals_json": json.dumps({"adv_20": 5_000_000}), "regime": "panic"}
+        self.assertAlmostEqual(_event_slippage(row), 0.001 * 2.0)
+        row["regime"] = "sideways"
+        self.assertAlmostEqual(_event_slippage(row), 0.001)
+        # corrupt snapshot → conservative thin-name tier
+        self.assertAlmostEqual(
+            _event_slippage({"entry_signals_json": "not json", "regime": None}), 0.0035)
+
+    def test_virtual_outcomes_use_asymmetric_slippage(self):
+        """Wins must clear the target by the slippage margin; losses trigger at
+        the raw stop (pessimistic by construction)."""
+        block = self.learning_py.split("def _resolve_virtual_outcomes")[1].split("def _resolve_sell_outcomes")[0] \
+            if "def _resolve_sell_outcomes" in self.learning_py else \
+            self.learning_py.split("def _resolve_virtual_outcomes")[1]
+        self.assertIn('target * (1 + slip)', block)   # BUY win needs clearance
+        self.assertIn('target * (1 - slip)', block)   # exit-frame win needs clearance
+        self.assertIn("virtual_slippage_applied", block)
+
+    def test_execution_alpha_degrades_mechanical_fills(self):
+        """Actual fills embed real slippage — the mechanical baseline must too,
+        or alpha is overstated."""
+        block = self.learning_py.split("def _resolve_execution_alpha")[1].split("def _compute_execution_alpha")[0]
+        self.assertIn('stop * (1 - slip), "stop"', block)
+        self.assertIn('target * (1 + slip)', block)
+        self.assertIn('float(bar["Close"]) * (1 - slip), "time"', block)
+
+    def test_slippage_single_source_of_truth(self):
+        """backtest.py must use core.adv_slippage, not a duplicated tier table."""
+        self.assertIn("from core import adv_slippage", self.backtest_py)
+        self.assertNotIn("if adv_aud >= 10_000_000", self.backtest_py)
+        self.assertIn('("virtual_slippage_applied", "REAL")', self.db_py)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

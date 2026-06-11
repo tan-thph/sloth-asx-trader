@@ -678,7 +678,7 @@ function _renderLearningContent(d, brier) {
                 const _virtEffectiveWt = ev.virtual_speed_weight
                   ? (0.75 * ev.virtual_speed_weight).toFixed(2) : '0.75';
                 const virtualChip = (!ev.was_executed && ev.virtual_outcome && ev.virtual_outcome !== 'virtual_open')
-                  ? `<span title="Virtual outcome (skipped rec): OHLC scan found ${ev.virtual_outcome === 'virtual_win' ? 'target hit' : 'stop hit'} — included at ${_virtEffectiveWt}× weight in calibration (speed factor: ${ev.virtual_speed_weight ?? '1.0'})"
+                  ? `<span title="Virtual outcome (skipped rec): OHLC scan found ${ev.virtual_outcome === 'virtual_win' ? 'target hit' : 'stop hit'} — included at ${_virtEffectiveWt}× weight in calibration (speed factor: ${ev.virtual_speed_weight ?? '1.0'}${ev.virtual_slippage_applied != null ? `; slippage ${(ev.virtual_slippage_applied * 100).toFixed(2)}% applied` : ''})"
                        style="font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600;margin-left:3px;cursor:default;
                               background:${ev.virtual_outcome === 'virtual_win' ? '#f0fdf4' : '#fef2f2'};
                               color:${ev.virtual_outcome === 'virtual_win' ? '#15803d' : '#dc2626'};

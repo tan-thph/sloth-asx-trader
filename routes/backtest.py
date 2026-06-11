@@ -12,6 +12,7 @@ import datetime as _dt
 import yfinance as yf
 from flask import Blueprint, jsonify, request
 
+from core import adv_slippage
 from indicators import (
     asx, safe_float,
     compute_rsi, compute_macd, compute_bollinger, compute_adx, compute_atr,
@@ -79,12 +80,9 @@ def backtest():
     except (ValueError, TypeError):
         return jsonify({"error": "slippage_pct must be a number"}), 400
 
-    def _adv_slippage(adv_aud):
-        """ADV-tiered slippage rate. adv_aud = mean(close × volume) over 20d."""
-        if adv_aud >= 10_000_000:   return 0.0005  # 0.05%
-        if adv_aud >= 2_000_000:    return 0.001   # 0.10%
-        if adv_aud >= 500_000:      return 0.002   # 0.20%
-        return 0.0035                               # 0.35%
+    # ADV-tiered slippage hoisted to core.adv_slippage (§9.2) — shared with the
+    # learning loop's virtual-outcome and execution-alpha resolvers.
+    _adv_slippage = adv_slippage
 
     # Map period string to days lookback
     period_days = {"3mo": 90, "6mo": 180, "1y": 252, "2y": 504}

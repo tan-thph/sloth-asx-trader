@@ -204,6 +204,29 @@ _STOOQ_MAP: dict[str, str] = {
 }
 
 
+def adv_slippage(adv_aud: float | None) -> float:
+    """ADV-tiered one-way slippage rate. adv_aud = mean(close × volume) over 20d.
+
+    Single source of truth shared by the backtester (liquidity slippage mode),
+    `_resolve_virtual_outcomes()` and `_resolve_execution_alpha()` in
+    routes/learning.py (§9.2 — virtual fills must not assume perfect execution).
+    Unknown/missing ADV falls into the thin-name tier (conservative).
+    """
+    if adv_aud is None:
+        return 0.0035
+    try:
+        adv_aud = float(adv_aud)
+    except (TypeError, ValueError):
+        return 0.0035
+    if adv_aud >= 10_000_000:
+        return 0.0005   # 0.05%
+    if adv_aud >= 2_000_000:
+        return 0.001    # 0.10%
+    if adv_aud >= 500_000:
+        return 0.002    # 0.20%
+    return 0.0035       # 0.35%
+
+
 def _to_stooq_sym(yf_symbol: str) -> str | None:
     """Convert a yfinance symbol to its Stooq equivalent, or None if unsupported."""
     if yf_symbol in _STOOQ_MAP:

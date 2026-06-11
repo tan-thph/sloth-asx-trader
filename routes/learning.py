@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
+from core import adv_slippage
 from db import get_db
 
 # Columns that /api/learning/outcome is allowed to update (§0.E SQL whitelist)
@@ -507,7 +508,7 @@ def learning_stats():
                        error_type, error_type_source, debate_summary, skill_score,
                        postmortem_debate, success_tags, checklist_bypasses,
                        sell_primary_driver, sell_secondary_factors, sell_urgency,
-                       virtual_outcome, virtual_speed_weight
+                       virtual_outcome, virtual_speed_weight, virtual_slippage_applied
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
 
@@ -926,6 +927,27 @@ def _resolve_sell_outcomes(conn) -> int:
     return resolved
 
 
+# §9.2: virtual fills must not assume perfect execution — thin ASX names would
+# teach the calibration optimism from fills that wouldn't have happened.
+# One-way slippage = ADV tier (core.adv_slippage) × regime multiplier.
+_SLIP_REGIME_MULT = {"highVol": 1.5, "riskOff": 1.25, "panic": 2.0}
+
+
+def _event_slippage(row) -> float:
+    """One-way slippage rate for a learning event, from its stored signal snapshot."""
+    adv = None
+    try:
+        sig = json.loads(row["entry_signals_json"] or "{}")
+        adv = sig.get("adv_20")
+    except Exception:
+        pass
+    try:
+        regime = row["regime"] or ""
+    except (KeyError, IndexError):
+        regime = ""
+    return adv_slippage(adv) * _SLIP_REGIME_MULT.get(regime, 1.0)
+
+
 def _resolve_virtual_outcomes(conn) -> int:
     """Lazy-evaluate skipped/unexecuted trades for virtual calibration signal.
 
@@ -961,7 +983,8 @@ def _resolve_virtual_outcomes(conn) -> int:
     cutoff = (datetime.now() - timedelta(days=30)).isoformat()  # ≥30d old per spec
     try:
         rows = conn.execute("""
-            SELECT id, ticker, recommendation, suggested_stop, suggested_target, timestamp
+            SELECT id, ticker, recommendation, suggested_stop, suggested_target, timestamp,
+                   regime, entry_signals_json
             FROM ai_learning_events
             WHERE was_executed = 0
               AND suggested_stop IS NOT NULL AND suggested_target IS NOT NULL
@@ -1004,6 +1027,12 @@ def _resolve_virtual_outcomes(conn) -> int:
         except Exception:
             continue
 
+        # §9.2 asymmetric slippage: a virtual WIN must clear the target by the
+        # slippage margin (the fill wouldn't happen at a barely-touched level);
+        # losses trigger at the raw stop (slippage makes losses worse, never
+        # less likely). Pessimistic by construction.
+        slip = _event_slippage(row)
+
         outcome = "virtual_open"
         # Track the bar index (1-indexed) at which target or stop was first hit.
         # This is used as `hold_days` for speed_weight — rewards fast resolutions.
@@ -1011,12 +1040,12 @@ def _resolve_virtual_outcomes(conn) -> int:
         for i, (_, bar) in enumerate(hist.iterrows(), 1):
             if is_exit:
                 # SELL/TRIM: falling price = thesis confirmed (target below entry)
-                if bar["Low"]  <= target: outcome = "virtual_win";  bars_to_resolution = i; break
-                if bar["High"] >= stop:   outcome = "virtual_loss"; bars_to_resolution = i; break
+                if bar["Low"]  <= target * (1 - slip): outcome = "virtual_win";  bars_to_resolution = i; break
+                if bar["High"] >= stop:                outcome = "virtual_loss"; bars_to_resolution = i; break
             else:
                 # BUY: rising price = thesis confirmed (target above entry)
-                if bar["High"] >= target: outcome = "virtual_win";  bars_to_resolution = i; break
-                if bar["Low"]  <= stop:   outcome = "virtual_loss"; bars_to_resolution = i; break
+                if bar["High"] >= target * (1 + slip): outcome = "virtual_win";  bars_to_resolution = i; break
+                if bar["Low"]  <= stop:                outcome = "virtual_loss"; bars_to_resolution = i; break
 
         # virtual_open: neither level was hit — use full bar count as hold_days
         # (the position drifted for the entire available history without resolution)
@@ -1028,8 +1057,9 @@ def _resolve_virtual_outcomes(conn) -> int:
         #   resolved in 30 bars → ~0.23 (slow drift, weaker signal)
         speed_weight = round(min(1.0, 7.0 / bars_to_resolution), 3)
         conn.execute(
-            "UPDATE ai_learning_events SET virtual_outcome=?, virtual_speed_weight=? WHERE id=?",
-            (outcome, speed_weight, row["id"]))
+            "UPDATE ai_learning_events SET virtual_outcome=?, virtual_speed_weight=?, "
+            "virtual_slippage_applied=? WHERE id=?",
+            (outcome, speed_weight, round(slip, 5), row["id"]))
         resolved += 1
 
     return resolved
@@ -1692,7 +1722,8 @@ def _resolve_execution_alpha(conn, cap: int = 5) -> int:
     """
     try:
         rows = conn.execute("""
-            SELECT id, ticker, actual_entry_price, suggested_stop, suggested_target, timestamp
+            SELECT id, ticker, actual_entry_price, suggested_stop, suggested_target, timestamp,
+                   regime, entry_signals_json
             FROM ai_learning_events
             WHERE was_executed = 1
               AND recommendation IN ('BUY', 'TOP_UP')
@@ -1733,16 +1764,23 @@ def _resolve_execution_alpha(conn, cap: int = 5) -> int:
         if hist.empty:
             continue
 
+        # §9.2: same slippage convention as virtual outcomes — stop fills are
+        # WORSE than the level (gap/queue), target fills require the bar to
+        # clear the level by the margin, time-stop sells degrade by the margin.
+        # Actual fills (realized_pnl_pct) already embed real-world slippage,
+        # so the mechanical baseline must too, or alpha is overstated.
+        slip = _event_slippage(row)
+
         exit_px, exit_kind = None, None
         for i, (_, bar) in enumerate(hist.iterrows(), 1):
             if bar["Low"] <= stop:
-                exit_px, exit_kind = stop, "stop"
+                exit_px, exit_kind = stop * (1 - slip), "stop"
                 break
-            if bar["High"] >= target:
+            if bar["High"] >= target * (1 + slip):
                 exit_px, exit_kind = target, "target"
                 break
             if i >= HORIZON:
-                exit_px, exit_kind = float(bar["Close"]), "time"
+                exit_px, exit_kind = float(bar["Close"]) * (1 - slip), "time"
                 break
         if exit_px is None:
             continue  # < HORIZON bars elapsed, no level hit — resolve later

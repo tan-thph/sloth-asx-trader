@@ -275,6 +275,9 @@ _LE_MIGRATIONS = [
     # whether manual exit decisions add value over the rules.
     ("exec_mech_pnl_pct", "REAL"),  # simulated mechanical exit P&L %
     ("exec_mech_exit",    "TEXT"),  # 'stop' | 'target' | 'time'
+    # §9.2 (Sprint 66): one-way slippage rate applied when resolving the virtual
+    # outcome — ADV tier (core.adv_slippage) × regime multiplier. Audit field.
+    ("virtual_slippage_applied", "REAL"),
 ]
 
 

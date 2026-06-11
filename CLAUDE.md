@@ -147,7 +147,7 @@ state.portfolio:          [{ ticker, shares, avgPrice, currentPrice, sector }]
 state.tradeJournal:       [{ id, date, ticker, action, qty, entryPrice, exitPrice, fees, pnl, status, recId, recExecuted, closeDate }]
   -- action values: BUY | SELL | TOP_UP | TRIM | HOLD | DRP
   -- DRP entries have fees:0, pnl:0, status:'open', recId:null, recExecuted:false, and parcelId set
-state.recHistory:         [{ id, date, ticker, action, confidence, ensembleConfidence, priceRange, target, stopLoss, qty, executed, outcome, actualProfit, regime, _learningId, _thesis?, _stopAlertedAt?, _targetAlertedAt?, _stopTrailed?: bool, _stopTrailedAt?: ISO string }]
+state.recHistory:         [{ id, date, ticker, action, confidence, ensembleConfidence, priceRange, target, stopLoss, qty, executed, outcome, actualProfit, regime, _learningId, _thesis?, _stopAlertedAt?, _targetAlertedAt?, _stopTrailed?: bool, _stopTrailedAt?: ISO string, _stopWidened?: bool, _stopWidenedFrom?: number, _stopWidenedRegime?: string }]  — _stopWidened* set by checkRegimeStopWidening() (alerts.js, Sprint 66): regime-degradation hard-stop widening, widen-only, trail wins
 state.recommendations:    pending recs (same shape as recHistory entries with status='pending')
 state.liveSignals:        { TICKER: { current_price, rsi_14, bb_*, atr_14, adv_20 (AUD), volume_avg_20 (shares), score, ... } }
 state.currentRegime:      { regime, confidence, signals: [...], _blendedSizeMult?: number, _prevSizeMult?: number }

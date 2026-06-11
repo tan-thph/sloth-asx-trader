@@ -904,7 +904,7 @@ function renderRecHistory() {
             <td data-label="Action">${actionBadge(r.action)}</td>
             <td data-label="Confidence"><div class="flex-row"><div class="conf-bar" style="width:60px"><div class="conf-fill" style="width:${(r.confidence||0)*100}%;background:${confColor(r.confidence||0)}"></div></div><span class="text-xs">${fmt((r.confidence||0)*100,0)}%</span></div></td>
             <td data-label="Est. P&L" class="text-xs ${r.netProfit!=null?(r.netProfit>=0?'text-success':'text-danger'):''}">${r.netProfit!=null?(r.netProfit>=0?'+ ':'− ')+'$'+fmt(Math.abs(r.netProfit)):'&mdash;'}</td>
-            <td data-label="Status">${statusBadge(r.executed?'executed':'skipped')}</td>
+            <td data-label="Status">${statusBadge(r.executed?'executed':'skipped')}${r._stopWidened?`<span class="badge" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;margin-left:4px" title="Stop widened to the ${r._stopWidenedRegime||''} regime multiple on ${(r._stopWidenedAt||'').slice(0,10)}: $${(r._stopWidenedFrom??0).toFixed(2)} → $${(r.stopLoss??0).toFixed(2)} (risk per share increased)">↔ Widened</span>`:''}</td>
             <td data-label="Outcome" class="text-xs ${r.outcome==='win'?'text-success':r.outcome==='loss'?'text-danger':'text-muted'}">${r.outcome==='win'?'✓ Win':r.outcome==='loss'?'✗ Loss':r.outcome||'&mdash;'}</td>
             <td data-label="Actual P&L" class="${r.actualProfit!=null?(r.actualProfit>=0?'text-success':'text-danger'):'text-muted'}">${r.actualProfit!=null?(r.actualProfit>=0?'+ ':'− ')+'$'+fmt(Math.abs(r.actualProfit)):'&mdash;'}</td>
             <td data-label="Feedback" style="min-width:180px">

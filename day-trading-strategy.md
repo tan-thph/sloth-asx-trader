@@ -259,6 +259,7 @@ Exit the entire position if **any** of these trigger:
 - If the **regime flips to `riskOff` or `panic`** while holding an open swing position, immediately advance to Step 2 (Chandelier trailing stop) on the full position — do not wait for a mechanical trigger.
 - **Rationale:** The mean-reversion thesis was entered in a neutral or bullish regime. A regime flip invalidates the macro context that underpinned the trade. Holding the full position through a regime transition is a thesis mismatch, not a discipline failure to hold.
 - The regime-change alert fires automatically (`fireAlert()`) when a flip to `panic` or `riskOff` is detected — use this as the trigger to review all open swing positions.
+- **Automatic hard-stop widening (Sprint 66):** on every price refresh, `checkRegimeStopWidening()` recomputes the §4.1 regime stop for open executed BUY/TOP_UP positions and **widens** the hard stop when the current regime's `stopAtrMult` puts it below the stored stop (never tightens; a 📍-trailed stop always wins; one-shot per regime). Every widen fires an alert — risk per share has increased; exit per this Step 4 if you'd rather not carry the wider stop.
 
 ### Time-Based Exit (Dynamic)
 

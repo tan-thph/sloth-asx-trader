@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-11 (Sprint 60: "Quiet Terminal" UI redesign — CSS token system, dark-mode, chart theming, theme toggle)
+**Last Updated:** 2026-06-11 (§9 external-review triage added; Sprints 61–65 shipped: §8 pipeline integrity, execution alpha, retrain nudge, flag-don't-drop, macro-brief persistence)
 
 ## 0. Post-Sprint-53 audit — ML evaluation gap (2026-06-09)
 
@@ -1351,6 +1351,131 @@ partially pruned sample.
   `r2_oos > 0` exists on ≥60 intraday trades; blending an unvalidated model into sizing is
   premature.
 - **Intraday Mode A (VWAP recapture)** — already tracked in `day-trading-strategy.md` §8.2.
+
+---
+
+## 9. External review triage (`critics.md`, assessed 2026-06-11)
+
+An external review (critics.md) was assessed against the actual codebase. Verdict: roughly a
+third of its items are **already shipped** (the review predates Sprints 43–65), one is
+**architecturally misguided**, one rests on **wrong schema premises** — and four are genuinely
+good and adopted below. Stale/wrong items are listed at the end so they aren't re-litigated.
+
+| # | Item | Verdict | Priority |
+|---|---|---|---|
+| 9.1 | Dynamic regime stop widening for open positions | ✅ **Shipped Sprint 66** — `checkRegimeStopWidening()` in alerts.js, runs before stop-hit checks; widen-only, `_stopTrailed` precedence, one-shot per regime, alert+bell on every widen, ↔ Widened badge in History | High |
+| 9.2 | Slippage penalty for virtual outcomes (+ execution-alpha sim) | ✅ **Shipped Sprint 66** — `core.adv_slippage` (hoisted from backtester) × regime mult; wins must clear target by the margin, mech fills degraded; `virtual_slippage_applied` audit column + chip tooltip | High |
+| 9.3 | Per-ticker portfolio correlation in the prompt (context-only) | ✓ Adopt, modified | Med |
+| 9.4 | "Why this rec?" traceability modal | ✓ Adopt | Med |
+| 9.5 | Small batch: breadth-scope triggers, local-LLM size guard | ✓ Adopt | Low |
+
+---
+
+### 9.1 Dynamic regime stop widening for open positions  *(critics Phase 1.1)*
+
+**Gap (real):** the hard stop is set once at entry using the entry-regime `stopAtrMult`; if the
+regime degrades mid-hold (sideways → highVol/riskOff), the stop is now too tight for the new
+noise floor — exactly the §4.1 rationale, unapplied to open positions. The Chandelier trail
+(📍 Trail button) is manual and tightens only.
+
+**Plan:**
+1. New `checkRegimeStopWidening()` in `js/alerts.js` (or `prices.js`), called from
+   `refreshPrices()` alongside the stop/target checkers:
+   - For each EXECUTED open BUY/TOP_UP rec with a stop: compute
+     `widenedStop = entryMid − getRegimeModifiers(currentRegime).stopAtrMult × ATR` (live
+     `atr_14` from `state.liveSignals`).
+   - **Widen only, never tighten** (`widenedStop < r.stopLoss`), and never widen a stop the
+     user manually trailed (`r._stopTrailed` wins — trailing is a deliberate lock-in).
+   - Apply with audit fields `_stopWidened: true`, `_stopWidenedAt`, `_stopWidenedFrom`,
+     `_stopWidenedRegime`; one-shot per regime flip (re-arm when regime changes again).
+2. Badge on the rec card (`↔ Stop widened (highVol)` amber) mirroring the `_stopTrailed` badge.
+3. Notification via the bell (category `price`) so the change is never silent — widening the
+   stop increases $-at-risk beyond the originally sized amount; the user must see it.
+4. Tests: widen-only invariant, `_stopTrailed` precedence, one-shot re-arm.
+
+**Design note:** this deliberately does NOT resize the position (risk grew). The alternative —
+exit instead of widen — is already covered by §6 Step 4 (regime-flip → advance to trailing
+stop). Widening keeps the §4.1 philosophy consistent across the position's life.
+
+### 9.2 Slippage penalty for virtual outcomes  *(critics Phase 1.2)*
+
+**Gap (real):** `_resolve_virtual_outcomes()` and `_resolve_execution_alpha()` assume perfect
+fills at the touched level. Thin ASX names overstate virtual wins → calibration learns
+optimism from fills that wouldn't have happened at that price.
+
+**Plan:**
+1. Reuse the backtester's existing ADV-tiered model: hoist `_adv_slippage(adv_aud)` from
+   `routes/backtest.py` into a shared helper (`core.py` or a small `slippage.py`).
+2. In both resolvers: read `adv_20` from the event's `entry_signals_json` snapshot (already
+   stored per event); require the bar to clear the level *plus* slippage before counting the
+   fill — for a long: win needs `High ≥ target × (1 + slip)`, loss triggers at
+   `Low ≤ stop × (1 − slip)`… asymmetric in the unfavourable direction for both.
+   Missing `adv_20` → conservative thin-name tier.
+3. Regime multiplier (highVol/panic ×1.5) using the event's stored `regime`.
+4. Store `virtual_slippage_applied REAL` (new `_LE_MIGRATIONS` column) for audit; surface in
+   the `~W`/`~L` chip tooltip.
+5. Tests: a barely-touched target that fails the slippage-adjusted threshold counts as
+   `virtual_open`, not `virtual_win`.
+
+### 9.3 Per-ticker portfolio correlation in the prompt — context-only  *(critics Phase 1.3, modified)*
+
+**Adopted with one critical modification.** The critic suggests instructing Claude to "reduce
+confidence 8–15pp when ρ > 0.70" — that re-introduces LLM-side arithmetic, which §8.3 just
+removed deliberately. The numeric response to correlation already exists engine-side (qty
+−30%/−50% at |ρ|>0.70/0.85). What's genuinely missing is Claude *seeing* the correlation when
+forming the thesis.
+
+**Plan:**
+1. `analysis.js` Step 2b already fetches `/api/risk` (whose payload includes the correlation
+   matrix) before the prompt is built — currently only `metrics` is read. Capture
+   `correlation` too (zero extra calls).
+2. Append to each ticker's indicator block:
+   `CorrToHoldings: NAB:0.87 ANZ:0.81` (top 2–3 |ρ| ≥ 0.60 vs current holdings, bare tickers).
+3. Prompt (Section 3 ADDITIONAL FACTORS → CORRELATION): "When CorrToHoldings shows ρ ≥ 0.70,
+   treat the new position as concentration, not diversification — require the thesis to be
+   explicitly orthogonal (different driver) and cite it in factorsUsed[]. Do NOT adjust
+   confidence numerically — the engine reduces size deterministically." `PROMPT_VERSION` bump.
+4. Log max |ρ| at rec time into learning events (`market_context` JSON) for later analysis.
+
+### 9.4 "Why did I get this rec?" traceability modal  *(critics Phase 2.4)*
+
+All inputs already live on the rec object — this is pure UI assembly. New ℹ️ button on the rec
+card opening a modal with: regime + confidence at creation (`regime`, `_calibApplied.orig` →
+adjusted), calibration nudge (`_calibApplied`), quant sizing trail (`_quantEngine`,
+`_constraintBinding`, `_preEarningsAdj`, `_corrNote`, `_budgetNote`, `_varAdjusted`), validator
+repairs/warnings (`_validatorFixed`, `_ruleWarnings`, `_stopRepaired`, `_exitSized`), debate
+synthesis (`debate_synthesis_winner` via `_learningId`), local-model flag (`_source`), and the
+factorsUsed list. Read-only, no new state. ~half day.
+
+### 9.5 Small batch (low priority)
+
+- **Extra `breadth_scope` lesson triggers** — add `high_vov` (ATR expansion active),
+  `earnings_season` (Feb/Aug), `cgt_window` (May–Jun) to the lessons filter vocabulary.
+  The plumbing exists (Sprint 44); this is vocabulary + filter conditions.
+- **Local-LLM size guard** — when `useLocalLLM` is on and a SELL/TRIM touches a holding worth
+  more than a threshold (e.g. >10% of portfolio), force the Claude path for that run (badge:
+  "escalated to Claude — position size"). Cheap insurance until local tag quality is proven.
+- **Monitor local-vs-Claude tag agreement** — blocked on data: needs enough paired decisions;
+  revisit once local SELL/TRIM volume exists.
+
+---
+
+### Rejected / already-shipped items from critics.md (do not re-open)
+
+| Critics item | Status |
+|---|---|
+| 1.4 Hoist `_detectExitReason` to utils.js | **Already shipped Sprint 43** — canonical copy in `utils.js`, Vitest-enforced (CLAUDE.md gotcha 14) |
+| 2.1 Calibration text bucketing "for cache hit rate" | **Misguided** — the calibration block is injected into the *user message* precisely so the cached *system prompt* never changes. User-message content is uncached by design (it carries live prices/holdings that change every call); standardising calibration text cannot improve the cache hit rate. The machine-readable/text split it asks for shipped in v10 (§8.3) |
+| 2.2 Lessons auto-suggest from calib-quality | **Already shipped Sprint 59** (suggested-lesson banner + Create button) |
+| 2.3 "Thesis-broken TRIMs with minimal movement" | **Substantially covered** — `_resolve_sell_outcomes()` already price-verifies SELL/TRIM drivers post-hoc and emits `⚠SELL_TAG` nudges; thesis-drift covers early exits |
+| 3.3 DB generated columns from JSON | **Wrong premises** — `prompt_version`, `error_type`, `sell_primary_driver`, `virtual_outcome` are already real, indexed columns on `ai_learning_events` (see Appendix B), not JSON extracts; `regime_risk` is derived at train time from the real `regime` column. No query-performance problem exists at this row count |
+| 3.4 Intraday "indicative" labelling | **Already in the UI** (`day-trading.js`: "yfinance 5m data has ~5–15 min latency — prices are indicative"); Mode A already tracked as planned; real-time feed out of scope for personal use |
+| §3 FACTOR_WEIGHTS validation | **Already shipped** — `warnings.warn` at import when sum ≠ 100 |
+| §3 Stooq rate limiter | **Already shipped Sprint 43** — `_stooq_sem` BoundedSemaphore + 1 s pacing |
+| §4 ADV-tiered slippage in backtester | **Already shipped** — `slippage_mode: 'liquidity'` via `_adv_slippage()` |
+| 3.1 Look-ahead / survivorship (as-traded mode, point-in-time universe) | **Deferred, not rejected** — legitimate for rigorous backtesting but heavy (manual adjustment handling, universe snapshots); partial mitigations exist (`_sanity_check` drops unadjusted-split bars, splits-check endpoint, universe exclusion list). Revisit if backtest results start driving real capital decisions |
+| 3.2 Corporate actions auto-adjust of parcels | **Deferred** — detection exists (splits-check + capital-return warnings); silently mutating CGT parcels is a data-integrity risk. If adopted, build as assisted apply (warning card → preview → confirm), never automatic |
+| §4 learning-loop walk-forward / red-team scenarios | **Good ideas, large** — noted as future testing-framework work |
 
 ---
 
