@@ -121,6 +121,8 @@ async function renderLearningPage(gen) {
   renderSellOutcomesCard().catch(() => {});
   // Async: load thesis drift analytics card (Sprint 45)
   renderThesisDriftCard().catch(() => {});
+  // Async: load execution alpha card (Sprint 63)
+  renderExecutionAlphaCard().catch(() => {});
   // Async: load tag accuracy card (Gap 6)
   renderTagAccuracyCard().catch(() => {});
 }
@@ -896,13 +898,16 @@ function _renderLearningContent(d, brier) {
   // ── Thesis Drift card (async — filled by renderThesisDriftCard()) ──
   const thesisDriftPlaceholder = `<div id="ll-thesis-drift-card"></div>`;
 
+  // ── Execution Alpha card (async — filled by renderExecutionAlphaCard()) ──
+  const execAlphaPlaceholder = `<div id="ll-exec-alpha-card"></div>`;
+
   // ── Calibration Quality card (async — filled by renderCalibQualityCard()) ──
   const calibQualityPlaceholder = `<div id="ll-calib-quality-card"></div>`;
 
   return summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard + recentCard + failedCard + debateInsightsCard +
-    digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
+    digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder + execAlphaPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
 }
 
 // ── Postmortem digest — AI summary of recent failure patterns ─────────────────
@@ -2352,6 +2357,75 @@ async function renderThesisDriftCard() {
           Compares avg P&amp;L of manual early exits vs positions held to target. A large gap suggests the anti-churn rules should be stronger.
         </p>
         ${summaryHtml}
+      </div>`;
+  } catch {
+    el.innerHTML = '';
+  }
+}
+
+// ── Execution Alpha card (Sprint 63) ─────────────────────────────────────────
+// Actual exits vs the simulated mechanical exit (stop / target / 15-bar
+// time-stop) on the same entries. Positive alpha = manual decisions add value.
+// Each page visit lazily resolves up to 5 more pending events server-side.
+async function renderExecutionAlphaCard() {
+  const el = document.getElementById('ll-exec-alpha-card');
+  if (!el || !state.serverOk) return;
+
+  try {
+    const r = await fetch(`${API}/api/learning/execution-alpha`);
+    if (!r.ok) { el.innerHTML = ''; return; }
+    const d = await r.json();
+    if (!d.ok) { el.innerHTML = ''; return; }
+
+    const fmtPct   = v => v != null ? `${v >= 0 ? '+' : ''}${v.toFixed(1)}%` : '—';
+    const fmtColor = v => v == null ? 'var(--text-muted)' : v >= 0 ? '#16a34a' : '#dc2626';
+    const n = d.n || 0;
+
+    let body;
+    if (n < 5) {
+      body = `<div class="text-xs text-muted" style="padding:6px 0">
+        Not enough resolved trades yet (have ${n}, need ≥5${d.pending
+          ? ` — ${d.pending} pending; up to 5 resolve on each visit to this page` : ''}).
+      </div>`;
+    } else {
+      const alpha = d.alpha_pp ?? 0;
+      const positive = alpha >= 0;
+      const verdictColor = positive ? '#16a34a' : '#d97706';
+      const verdictText = positive
+        ? `Your exits add ${alpha.toFixed(1)}pp over the mechanical rules (${d.n_beat}/${n} trades beat the rules)`
+        : `Mechanical rules outperform your exits by ${Math.abs(alpha).toFixed(1)}pp — consider trusting stops/targets more (${d.n_lag}/${n} trades lagged)`;
+      const ex = d.mech_exits || {};
+      const exitDist = ['stop', 'target', 'time']
+        .filter(k => ex[k]).map(k => `${k}:${ex[k]}`).join(' · ');
+      body = `
+        <div style="display:flex;gap:12px;margin-bottom:10px">
+          <div style="flex:1;padding:10px;background:var(--bg-secondary);border-radius:6px;text-align:center">
+            <div style="font-size:20px;font-weight:700;color:${fmtColor(d.avg_actual_pct)}">${fmtPct(d.avg_actual_pct)}</div>
+            <div class="text-xs text-muted">Your actual exits</div>
+          </div>
+          <div style="flex:1;padding:10px;background:var(--bg-secondary);border-radius:6px;text-align:center">
+            <div style="font-size:20px;font-weight:700;color:${fmtColor(d.avg_mech_pct)}">${fmtPct(d.avg_mech_pct)}</div>
+            <div class="text-xs text-muted">Mechanical exits</div>
+          </div>
+          <div style="flex:1;padding:10px;background:var(--bg-secondary);border-radius:6px;text-align:center">
+            <div style="font-size:20px;font-weight:700;color:${fmtColor(alpha)}">${alpha >= 0 ? '+' : ''}${alpha.toFixed(1)}pp</div>
+            <div class="text-xs text-muted">Execution alpha (n=${n})</div>
+          </div>
+        </div>
+        <div style="padding:7px 10px;border-radius:6px;background:${positive ? '#f0fdf4' : '#fffbeb'};border:1px solid ${positive ? '#bbf7d0' : '#fde68a'};font-size:12px;font-weight:600;color:${verdictColor}">
+          ${positive ? '✓' : '⚠'} ${verdictText}
+        </div>
+        ${exitDist ? `<div class="text-xs text-muted" style="margin-top:6px">Mechanical exit mix: ${exitDist}${d.pending ? ` · ${d.pending} pending` : ''}</div>` : ''}`;
+    }
+
+    el.innerHTML = `
+      <div class="card" style="margin-top:14px">
+        <div class="card-title" style="margin-bottom:10px">Execution Alpha</div>
+        <p class="text-xs text-muted" style="margin-bottom:10px">
+          Re-runs each executed BUY/TOP_UP entry through the mechanical rules (stop hit / target hit /
+          15-bar time-stop, stop-first within a bar) and compares with what you actually realised.
+        </p>
+        ${body}
       </div>`;
   } catch {
     el.innerHTML = '';

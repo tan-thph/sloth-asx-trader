@@ -6758,5 +6758,94 @@ class TestSprint62RemainingFilters(unittest.TestCase):
         self.assertNotIn("state.", tool_src)
 
 
+class TestSprint63ExecutionAlphaAndRetrainNudge(unittest.TestCase):
+    """Execution-alpha tracker (mechanical vs actual exits) + ML retrain nudge."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+        def _read(*p):
+            with open(os.path.join(ROOT, *p), encoding="utf-8") as f:
+                return f.read()
+        cls.learning_py  = _read("routes", "learning.py")
+        cls.db_py        = _read("db.py")
+        cls.learning_js  = _read("js", "pages", "learning.js")
+        cls.dt_train_js  = _read("js", "dt-training.js")
+        cls.notifs_js    = _read("js", "notifications.js")
+
+    # ── Execution alpha ───────────────────────────────────────────────────
+    def test_exec_alpha_migration_columns(self):
+        self.assertIn('("exec_mech_pnl_pct", "REAL")', self.db_py)
+        self.assertIn('("exec_mech_exit",    "TEXT")', self.db_py)
+
+    def test_exec_alpha_endpoint_empty_db(self):
+        """Empty DB → ok=True, n=0 (no crash, no yfinance call needed)."""
+        r = self.client.get("/api/learning/execution-alpha")
+        self.assertEqual(r.status_code, 200)
+        data = json.loads(r.data)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["n"], 0)
+        self.assertEqual(data["pending"], 0)
+
+    def test_exec_alpha_simulation_conventions(self):
+        """Stop must be checked FIRST within a bar (conservative); horizon = 15 bars
+        (the §6 time-based exit ceiling)."""
+        block = self.learning_py.split("def _resolve_execution_alpha")[1].split("def _compute_execution_alpha")[0]
+        self.assertIn("HORIZON = 15", block)
+        stop_at   = block.index('bar["Low"] <= stop')
+        target_at = block.index('bar["High"] >= target')
+        self.assertLess(stop_at, target_at, "stop must be checked before target within a bar")
+
+    def test_exec_alpha_aggregation(self):
+        """_compute_execution_alpha: alpha = avg(actual) − avg(mech); beat/lag counts."""
+        from routes.learning import _compute_execution_alpha
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE ai_learning_events (
+                realized_pnl_pct REAL, exec_mech_pnl_pct REAL, exec_mech_exit TEXT,
+                was_executed INTEGER, recommendation TEXT, outcome_status TEXT,
+                actual_entry_price REAL, suggested_stop REAL, suggested_target REAL
+            )""")
+        rows = [
+            (6.0,  2.0, 'target', 1, 'BUY', 'win',  10, 9, 12),
+            (-2.0, 1.0, 'time',   1, 'BUY', 'loss', 10, 9, 12),
+            (2.0,  0.0, 'stop',   1, 'BUY', 'win',  10, 9, 12),
+            # eligible but unresolved → counted as pending
+            (3.0,  None, None,    1, 'BUY', 'win',  10, 9, 12),
+        ]
+        conn.executemany("INSERT INTO ai_learning_events VALUES (?,?,?,?,?,?,?,?,?)", rows)
+        d = _compute_execution_alpha(conn)
+        self.assertEqual(d["n"], 3)
+        self.assertEqual(d["pending"], 1)
+        self.assertAlmostEqual(d["avg_actual_pct"], 2.0)
+        self.assertAlmostEqual(d["avg_mech_pct"], 1.0)
+        self.assertAlmostEqual(d["alpha_pp"], 1.0)
+        self.assertEqual(d["n_beat"], 2)
+        self.assertEqual(d["n_lag"], 1)
+        self.assertEqual(d["mech_exits"], {"target": 1, "time": 1, "stop": 1})
+
+    def test_exec_alpha_card_wired(self):
+        self.assertIn("renderExecutionAlphaCard", self.learning_js)
+        self.assertIn("ll-exec-alpha-card", self.learning_js)
+        self.assertIn("execAlphaPlaceholder", self.learning_js)
+
+    # ── Retrain nudge ─────────────────────────────────────────────────────
+    def test_retrain_nudge_wired(self):
+        """Nudge at ≥15 new completed trades; one-shot per trained_at; called on startup."""
+        self.assertIn("_dtCheckRetrainNudge", self.dt_train_js)
+        self.assertIn("newSince < 15", self.dt_train_js)
+        self.assertIn("dt_retrain_nudged_for", self.dt_train_js)
+        self.assertIn("_dtCheckRetrainNudge();", self.dt_train_js)
+
+    def test_retrain_notification_deep_links(self):
+        self.assertIn("retrain: 'day-trading'", self.notifs_js)
+        self.assertIn("retrain: '🧠'", self.notifs_js)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

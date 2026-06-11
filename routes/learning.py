@@ -1670,6 +1670,145 @@ def thesis_drift():
     return jsonify({**result, "ok": True})
 
 
+# ── Execution alpha (Sprint 63) ───────────────────────────────────────────────
+# Generalises thesis drift: for every EXECUTED closed BUY/TOP_UP trade, simulate
+# what the mechanical rules (stop / target / 15-bar time-stop) would have
+# produced on the same entry, then compare with the actual realized P&L.
+# alpha = avg(actual) − avg(mechanical). Positive = manual exits add value.
+
+def _resolve_execution_alpha(conn, cap: int = 5) -> int:
+    """Lazily simulate the mechanical exit for unresolved executed trades.
+
+    Bar walk from the entry date (same machinery as _resolve_virtual_outcomes):
+      - stop checked FIRST within each bar — the conservative backtest
+        convention when both levels fall inside one bar's range
+      - target hit → exit at target
+      - neither within 15 bars → exit at the 15th bar's close ('time') —
+        mirrors the §6 time-based exit ceiling (riskOn max hold 15 days)
+      - fewer than 15 bars elapsed and no hit → too early, leave unresolved
+
+    Writes exec_mech_pnl_pct + exec_mech_exit. Capped per call to bound
+    yfinance round-trips (the endpoint resolves a few more on each visit).
+    """
+    try:
+        rows = conn.execute("""
+            SELECT id, ticker, actual_entry_price, suggested_stop, suggested_target, timestamp
+            FROM ai_learning_events
+            WHERE was_executed = 1
+              AND recommendation IN ('BUY', 'TOP_UP')
+              AND outcome_status IN ('win', 'loss', 'breakeven')
+              AND realized_pnl_pct IS NOT NULL
+              AND actual_entry_price IS NOT NULL
+              AND suggested_stop IS NOT NULL AND suggested_target IS NOT NULL
+              AND exec_mech_pnl_pct IS NULL
+            ORDER BY timestamp DESC LIMIT ?
+        """, (cap,)).fetchall()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+
+    HORIZON = 15  # trading bars — strategy max hold (§6 time-based exit)
+    resolved = 0
+    for row in rows:
+        try:
+            entry  = float(row["actual_entry_price"])
+            stop   = float(row["suggested_stop"])
+            target = float(row["suggested_target"])
+        except (TypeError, ValueError):
+            continue
+        if entry <= 0:
+            continue
+        ticker = row["ticker"] or ""
+        yf_sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+        try:
+            hist = yf.Ticker(yf_sym).history(start=row["timestamp"][:10], interval="1d")
+        except Exception:
+            continue
+        if hist.empty:
+            continue
+
+        exit_px, exit_kind = None, None
+        for i, (_, bar) in enumerate(hist.iterrows(), 1):
+            if bar["Low"] <= stop:
+                exit_px, exit_kind = stop, "stop"
+                break
+            if bar["High"] >= target:
+                exit_px, exit_kind = target, "target"
+                break
+            if i >= HORIZON:
+                exit_px, exit_kind = float(bar["Close"]), "time"
+                break
+        if exit_px is None:
+            continue  # < HORIZON bars elapsed, no level hit — resolve later
+
+        mech_pct = round((exit_px - entry) / entry * 100, 2)
+        conn.execute(
+            "UPDATE ai_learning_events SET exec_mech_pnl_pct=?, exec_mech_exit=? WHERE id=?",
+            (mech_pct, exit_kind, row["id"]))
+        resolved += 1
+    return resolved
+
+
+def _compute_execution_alpha(conn) -> dict:
+    """Aggregate actual-vs-mechanical P&L over resolved executed trades."""
+    rows = conn.execute("""
+        SELECT realized_pnl_pct, exec_mech_pnl_pct, exec_mech_exit
+        FROM ai_learning_events
+        WHERE was_executed = 1
+          AND exec_mech_pnl_pct IS NOT NULL
+          AND realized_pnl_pct IS NOT NULL
+    """).fetchall()
+    pending = conn.execute("""
+        SELECT COUNT(*) FROM ai_learning_events
+        WHERE was_executed = 1
+          AND recommendation IN ('BUY', 'TOP_UP')
+          AND outcome_status IN ('win', 'loss', 'breakeven')
+          AND realized_pnl_pct IS NOT NULL
+          AND actual_entry_price IS NOT NULL
+          AND suggested_stop IS NOT NULL AND suggested_target IS NOT NULL
+          AND exec_mech_pnl_pct IS NULL
+    """).fetchone()[0]
+
+    n = len(rows)
+    if n == 0:
+        return {"n": 0, "pending": pending}
+
+    actual = [r["realized_pnl_pct"] for r in rows]
+    mech   = [r["exec_mech_pnl_pct"] for r in rows]
+    exits: dict = {}
+    for r in rows:
+        exits[r["exec_mech_exit"]] = exits.get(r["exec_mech_exit"], 0) + 1
+    avg_a = sum(actual) / n
+    avg_m = sum(mech) / n
+    return {
+        "n":              n,
+        "pending":        pending,
+        "avg_actual_pct": round(avg_a, 2),
+        "avg_mech_pct":   round(avg_m, 2),
+        "alpha_pp":       round(avg_a - avg_m, 2),
+        "n_beat":         sum(1 for a, m in zip(actual, mech) if a > m),
+        "n_lag":          sum(1 for a, m in zip(actual, mech) if a < m),
+        "mech_exits":     exits,
+    }
+
+
+@bp.route("/api/learning/execution-alpha")
+def execution_alpha():
+    """Execution alpha: actual realized P&L vs the simulated mechanical exit for
+    executed BUY/TOP_UP trades. Positive alpha = manual exit decisions beat the
+    rules. Resolves up to 5 unresolved events per call (lazy, bounded)."""
+    with get_db() as conn:
+        _resolve_execution_alpha(conn)
+        result = _compute_execution_alpha(conn)
+    return jsonify({**result, "ok": True})
+
+
 # ── Trading Lessons endpoints ─────────────────────────────────────────────────
 
 @bp.route("/api/learning/lessons", methods=["GET"])

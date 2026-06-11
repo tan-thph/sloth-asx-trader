@@ -24,12 +24,13 @@ var _NOTIF_ICONS = {
 };
 var _CATEGORY_ICONS = {
   trade: '💼', price: '📈', scan: '🔍', system: '🔔', error: '💥',
-  outcome: '📋', outcome_dt: '📋',
+  outcome: '📋', outcome_dt: '📋', retrain: '🧠',
 };
 
 // Categories that deep-link to a page when the notification is clicked.
-// Used by the outcome-proposal notifications (stop/target hit → record the close).
-var _NOTIF_NAV = { outcome: 'recommendations', outcome_dt: 'day-trading' };
+// Used by the outcome-proposal notifications (stop/target hit → record the close)
+// and the ML retrain nudge.
+var _NOTIF_NAV = { outcome: 'recommendations', outcome_dt: 'day-trading', retrain: 'day-trading' };
 
 function _notifNavigate(category) {
   var page = _NOTIF_NAV[category];

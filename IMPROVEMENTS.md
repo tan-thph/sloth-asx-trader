@@ -1138,7 +1138,7 @@ items close the gaps between what the docs/prompts *claim* and what the code *en
 - **`regime_risk` ML feature** — ordinal 0–5 (riskOn=0 → panic=5) added to both training matrices (now 16 swing / 19 intraday). Derived at training time from the snapshot's stored `regime` string — no schema change, retroactive over all historical snapshots. JS prediction map in `dtBuildFeatures()` kept in sync (test-enforced).
 - **prompts.md re-verified** — post-processing list now matches `analysis.js` exactly (15 steps); false validator/repair-loop claims corrected.
 
-Remaining open: execution-alpha tracker (deep-dive feature item 6), weekly Telegram learning digest, retrain nudge, DT_FILTER walk-forward threshold tuner. (§8.1–8.6 all shipped as of Sprint 62.)
+Remaining open: weekly Telegram learning digest (user deferred), DT_FILTER walk-forward threshold tuner. (§8.1–8.6 all shipped as of Sprint 62; execution-alpha tracker + ML retrain nudge shipped Sprint 63.)
 
 ---
 

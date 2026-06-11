@@ -609,10 +609,40 @@ function dtExpectedRLabel(rec) {
 // Backward-compat alias — day-trading.js calls dtWinProbLabel(r)
 function dtWinProbLabel(rec) { return dtExpectedRLabel(rec); }
 
+/* ── Retrain nudge (Sprint 63) ───────────────────────────────────────────── */
+/**
+ * §14.10 says "retrain after every 10–20 new completed trades" but nothing
+ * tracked it. Once ≥15 completed trades have accumulated past the last
+ * training run's n_samples, push a one-shot bell notification (category
+ * 'retrain' deep-links to the Day Trading page). One nudge per trained_at —
+ * retraining changes trained_at, which re-arms the nudge automatically.
+ * Note: `completed` spans both trade types while n_samples is the latest
+ * model's scope — slightly noisy for mixed swing/intraday use, fine for a nudge.
+ */
+function _dtCheckRetrainNudge() {
+  try {
+    if (!_dtStats || !_dtStats.ok) return;
+    var model = _dtStats.model;
+    if (!model || !model.trained_at) return;   // no model yet — Model tab handles onboarding
+    var newSince = (_dtStats.completed || 0) - (model.n_samples || 0);
+    if (newSince < 15) return;
+    var KEY = 'dt_retrain_nudged_for';
+    if (localStorage.getItem(KEY) === String(model.trained_at)) return;  // already nudged for this model
+    localStorage.setItem(KEY, String(model.trained_at));
+    if (typeof pushNotification === 'function') {
+      pushNotification('info', '🧠 ML model is stale',
+        newSince + ' completed trades since the last training run ('
+        + String(model.trained_at).slice(0, 10) + '). Retrain via Day Trading → 🧠 Model tab '
+        + 'to fold them in (regime_risk applies retroactively). Tap to open.',
+        'retrain');
+    }
+  } catch (_) { /* never break startup */ }
+}
+
 /* ── Initialise on startup (non-blocking) ────────────────────────────────── */
 // Silently load model + stats so predictions are ready when the DT page opens.
 // _dtModel is initialised to undefined so renderDtModelTab can distinguish
 // "not loaded yet" from "loaded but null (no model)".
 Promise.all([dtLoadModelWithImportances(), dtLoadStats()]).then(function() {
-  // Nothing to render here — tabs pull from the cache when opened
+  _dtCheckRetrainNudge();
 }).catch(function() {});

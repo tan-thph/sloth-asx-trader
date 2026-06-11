@@ -269,6 +269,12 @@ _LE_MIGRATIONS = [
     # Sprint 44: speed weight = min(1.0, 7 / bars_to_resolution)
     # Fast hits (≤7 bars) → 1.0; slow drift (30 bars) → ~0.23. High weight = high conviction.
     ("virtual_speed_weight", "REAL"),  # 1.0 = fast hit (≤7 bars); ~0.23 = slow drift (30 bars)
+    # Sprint 63: execution-alpha tracker — the MECHANICAL exit (stop/target/15-bar
+    # time-stop) simulated for executed closed BUY/TOP_UP trades, lazily resolved by
+    # _resolve_execution_alpha(). Compared against realized_pnl_pct to measure
+    # whether manual exit decisions add value over the rules.
+    ("exec_mech_pnl_pct", "REAL"),  # simulated mechanical exit P&L %
+    ("exec_mech_exit",    "TEXT"),  # 'stop' | 'target' | 'time'
 ]
 
 

@@ -67,6 +67,8 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `sell_verify_date`         | TEXT       | Date when the 25d+ sell outcome verification ran (Sprint 37) |
 | `sell_verify_verdict`      | TEXT       | `validated` / `invalidated` / `inconclusive` (Sprint 37) |
 | `sell_verify_sold_chg`     | REAL       | % price change of sold ticker from sell date → verify date (Sprint 37) |
+| `exec_mech_pnl_pct`        | REAL       | Execution-alpha tracker: simulated MECHANICAL exit P&L % (stop/target/15-bar time-stop, stop-first within a bar) for executed closed BUY/TOP_UP trades; lazily resolved by `_resolve_execution_alpha()` (≤5/call) (Sprint 63) |
+| `exec_mech_exit`           | TEXT       | `stop` / `target` / `time` — which mechanical rule fired in the simulation (Sprint 63) |
 | `sell_verify_alt_chg`      | REAL       | % price change of `alternative_ticker` from sell date → verify date (Sprint 37) |
 
 > **Note on `loss_quality`:** This is a *computed property*, not a stored column. It is derived at calibration time from existing fields:
@@ -297,6 +299,7 @@ Since `PROMPT_VERSION='2026-06-v10'` (Sprint 61, §8.3) the numeric adjustments 
 | `GET /api/learning/lessons`             | Read   | Scoped lessons matching `?ticker=X&sector=Y&regime=Z&adl=<float>&asx_vol=<float>` (cap 4); filtered by `breadth_scope` column; injected into Claude user messages *(Sprint 39, breadth-scope Sprint 44)* |
 | `POST /api/learning/lessons`            | Write  | Create a lesson `{lesson_text, ticker?, sector?, regime?, source, breadth_scope?}` *(Sprint 39)* |
 | `GET /api/learning/thesis-drift`        | Read   | `{n_manual, n_target, avg_manual_pct, avg_target_pct, nudge}` — requires n≥5 per bucket; backed by `_compute_thesis_drift(conn)` *(Sprint 45)* |
+| `GET /api/learning/execution-alpha`     | Read   | `{n, pending, avg_actual_pct, avg_mech_pct, alpha_pp, n_beat, n_lag, mech_exits}` — actual realized P&L vs simulated mechanical exit for executed BUY/TOP_UP; resolves ≤5 pending events per call. Display-only (no calibration nudge — `⚠EARLY_EXIT_DRAG` already covers exit-timing feedback) *(Sprint 63)* |
 | `DELETE /api/learning/lesson/<id>`      | Write  | Hard-delete one lesson *(Sprint 39)* |
 | `GET /api/learning/untagged`            | Read   | Loss/breakeven events with no `error_type` — batch-classify queue *(Sprint 38)* |
 | `GET /api/learning/tag-reviews`         | Read   | Up to 5 random unreviewed auto-tagged events for weekly spot-check *(Sprint 41)* |
@@ -330,6 +333,7 @@ Since `PROMPT_VERSION='2026-06-v10'` (Sprint 61, §8.3) the numeric adjustments 
 - **Success Patterns card** *(Sprint 27):* two-column layout — left: tag chips with count + win rate bars (color-coded per tag type); right: calibration nudge explanation when a dominant tag was injected into the last calibration block. Tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`
 - Failure Patterns (exit reason distribution + error tag counts, shock excluded)
 - **Sell Decision Tracker card** *(Sprint 37):* executed SELL/TRIM events with `sell_primary_driver` set; 🟢 validated / 🔴 invalidated / — inconclusive badges per event; "↺ Check Now" button triggers `?force=1` re-resolve
+- **Execution Alpha card** *(Sprint 63):* actual exits vs simulated mechanical exits (stop/target/15-bar time-stop) — three tiles (actual avg, mechanical avg, alpha pp) + verdict banner; each page visit lazily resolves up to 5 pending events
 - **Lessons card** *(Sprint 39):* list of scoped trading lessons with ticker/sector/regime scope badges; "Add Lesson" form; delete button per lesson
 - **Auto-Tag Accuracy card** *(Sprint 41):* agree-rate badge (🟢 ≥75% / 🟡 60–75% / 🔴 <60%); "Review Batch (5)" button loads up to 5 unreviewed auto-tagged events with agree/disagree/retag UI; when <60%, emits `⚠AUTO_TAGS_UNRELIABLE` in calibration block and suppresses `top_err` nudge
 - Recent Events table (30 most recent) — features:
