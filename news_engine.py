@@ -152,6 +152,29 @@ def _sanitize_summary(text: str, max_len: int = 500) -> str:
     return text
 
 
+def _is_degenerate_summary(text: str) -> bool:
+    """True if a summary is dominated by a model repetition loop.
+
+    Some quantised models (notably gemma4:26b q4_K_M) collapse into
+    degenerate loops on low-quality articles even with nucleus sampling,
+    while Llama/Qwen handle the same input fine. Detect that collapse so the
+    caller can discard the result and fall back to a clean headline summary
+    instead of storing garbage with 0.0 scores.
+
+    Two signals:
+      1. Sanitising removes >40% of the text — a loop started early.
+      2. Low lexical diversity — unique/total word ratio < 0.4.
+    """
+    if not text or len(text) < 40:
+        return False
+    if len(_sanitize_summary(text)) < len(text) * 0.6:
+        return True
+    words = re.findall(r"\w+", text.lower())
+    if len(words) >= 12 and (len(set(words)) / len(words)) < 0.4:
+        return True
+    return False
+
+
 def _strip_urls(text: str) -> str:
     """Remove hyperlinks from article content before sending to LLM.
 
@@ -1381,6 +1404,26 @@ class NewsPipeline:
                     )
                     art_elapsed = time.monotonic() - art_t0
                     art_times.append(art_elapsed)
+
+                    # Reject degenerate output (model repetition loop). Store a
+                    # clean headline-based entry instead of looping garbage with
+                    # 0.0 scores — keeps the feed readable when a quantised model
+                    # (e.g. gemma4:26b q4_K_M) collapses on low-quality articles.
+                    if result and _is_degenerate_summary(str(result.get("summary") or "")):
+                        log.warning(
+                            "Degenerate LLM output for '%s' — headline fallback",
+                            short_title,
+                        )
+                        result = {
+                            "summary":           (row["title"] or "")[:200],
+                            "category":          "other",
+                            "sentiment":         "neutral",
+                            "sentiment_score":   0.0,
+                            "impact_score":      0.0,
+                            "primary_tickers":   [],
+                            "mentioned_tickers": [],
+                            "tags":              [],
+                        }
 
                     # Probe GPU after first article so model is fully loaded into VRAM
                     if idx == 0:
