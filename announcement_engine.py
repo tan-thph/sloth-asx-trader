@@ -1416,6 +1416,28 @@ def _robust_json_parse(raw: str) -> Optional[Dict]:
     return None
 
 
+def _strip_repetition(text: str) -> str:
+    """Truncate repetition loops in a summary string (e.g. 'BJV/BJV/BJV/...').
+
+    Mirrors news_engine._sanitize_summary: cuts at the earliest of a short
+    repeated unit (2–15 chars, 3+ times) or a long one (16–120 chars, 2+ times).
+    Verbose/quantised models (gemma4:26b) trail into these loops as they run out
+    of tokens; this keeps the looped tail out of the stored summary.
+    """
+    if not text or len(text) < 20:
+        return text
+    cuts: list[int] = []
+    m = re.search(r"(.{2,15}?)\1{2,}", text)
+    if m:
+        cuts.append(m.start() + len(m.group(1)))
+    m = re.search(r"(.{16,120}?)\1{1,}", text)
+    if m:
+        cuts.append(m.start() + len(m.group(1)))
+    if cuts:
+        return text[: min(cuts)].rstrip(" _/-,.|")
+    return text
+
+
 def _parse_llm_json(raw: str) -> Optional[Dict]:
     """Strip think blocks + fences, extract first JSON object, validate fields."""
     if not raw:
@@ -1430,15 +1452,26 @@ def _parse_llm_json(raw: str) -> Optional[Dict]:
     # Use greedy match to find the OUTERMOST {...} (captures the full JSON object,
     # not a nested one that the non-greedy form might stop at prematurely)
     m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not m:
-        logger.debug("_parse_llm_json: no JSON object found | cleaned=%s", cleaned[:200])
-        return None
+    if m:
+        candidate = m.group()
+    else:
+        # Truncated output — the model hit num_predict mid-JSON and emitted no
+        # closing brace (common with verbose models like gemma4:26b on the PS
+        # prompt). Extract from the first '{' to end and let _robust_json_parse
+        # repair the unclosed structure (it closes dangling quotes + braces).
+        # Without this, an answer that already contained type/sentiment/impact
+        # is discarded as a parse failure and falls back to keyword matching.
+        brace = cleaned.find("{")
+        if brace == -1:
+            logger.debug("_parse_llm_json: no JSON object found | cleaned=%s", cleaned[:200])
+            return None
+        candidate = cleaned[brace:]
 
-    data = _robust_json_parse(m.group())
+    data = _robust_json_parse(candidate)
     if data is None:
         # Greedy failed — try non-greedy (picks up smallest/first {...} in free text)
         m2 = re.search(r"\{.*?\}", cleaned, re.DOTALL)
-        if m2 and m2.group() != m.group():
+        if m2 and m2.group() != candidate:
             data = _robust_json_parse(m2.group())
     if data is None:
         logger.debug("_parse_llm_json: repair failed | raw=%s", raw[:300])
@@ -1456,7 +1489,7 @@ def _parse_llm_json(raw: str) -> Optional[Dict]:
         data["impact"] = 5.0
     summary = data.get("summary", "")
     if isinstance(summary, str):
-        data["summary"] = summary[:200]
+        data["summary"] = _strip_repetition(summary)[:200]
     tags = data.get("tags", [])
     if not isinstance(tags, list):
         data["tags"] = []
@@ -1650,10 +1683,11 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
     if thinking:
         prompt = "/no_think\n" + prompt
 
-    # 600 tokens for non-CPU: gemma4:26b + keyFigures + 200-char summary easily
-    # exceeds the old 400-token cap, truncating mid-string and failing the parse.
-    # 300 for CPU (small models on SBC/Jetson don't need as many).
-    num_predict = 300 if cpu_mode else 600
+    # Verbose models (gemma4:26b) + keyFigures + summary can run long; 600 tokens
+    # still truncated WDS mid-summary (no closing brace). 800 gives headroom to
+    # close the JSON. _parse_llm_json also repairs truncation as a backstop.
+    # 300 for CPU (small models on SBC/Jetson are more concise and slower).
+    num_predict = 300 if cpu_mode else 800
     num_ctx     = 1024 if cpu_mode else 2048
 
     options: Dict = {
