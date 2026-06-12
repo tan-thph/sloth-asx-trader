@@ -1031,6 +1031,7 @@ function executeIntradayTrade(recId) {
     // Record BUY leg in trade journal — creates a paired entry that closeIntradayPosition
     // patches on exit, so the journal shows both legs of the round-trip trade.
     if (!state.tradeJournal) state.tradeJournal = [];
+    const _itSig = (state.liveSignals && state.liveSignals[rec.ticker]) || {};
     const intradayBuyEntry = {
       id:          Date.now(),
       date:        todayStr(),
@@ -1045,6 +1046,15 @@ function executeIntradayTrade(recId) {
       sector,
       account:     'trading',
       notes:       'Intraday BUY',
+      entrySignals: {
+        rsi_14:    _itSig.rsi_14    ?? null,
+        bb_pct_b:  _itSig.bb_pct_b  ?? null,
+        adx_14:    _itSig.adx ?? _itSig.adx_14 ?? null,
+        atr_pct:   _itSig.atr_pct   ?? null,
+        return_5d: _itSig.return_5d ?? null,
+        return_20d:_itSig.return_20d ?? null,
+        price:     entryPrice,
+      },
     };
     state.tradeJournal.unshift(intradayBuyEntry);
     newPos._journalId = intradayBuyEntry.id;   // link so close can patch the entry

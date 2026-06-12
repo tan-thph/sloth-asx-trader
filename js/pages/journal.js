@@ -51,8 +51,10 @@ function renderJournal() {
   }
 
   // ── Sort ───────────────────────────────────────────────────────────────────
-  if (jf.sortBy === 'date_desc')  filtered.sort((a,b) => (b.date||'').localeCompare(a.date||''));
-  if (jf.sortBy === 'date_asc')   filtered.sort((a,b) => (a.date||'').localeCompare(b.date||''));
+  // Dates are stored as DD-MM-YYYY; convert to YYYY-MM-DD for correct chronological order.
+  const _jDateKey = d => { if (!d) return ''; const p = d.split('-'); return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : d; };
+  if (jf.sortBy === 'date_desc')  filtered.sort((a,b) => _jDateKey(b.date).localeCompare(_jDateKey(a.date)));
+  if (jf.sortBy === 'date_asc')   filtered.sort((a,b) => _jDateKey(a.date).localeCompare(_jDateKey(b.date)));
   if (jf.sortBy === 'pnl_desc')   filtered.sort((a,b) => (b.pnl||0) - (a.pnl||0));
   if (jf.sortBy === 'pnl_asc')    filtered.sort((a,b) => (a.pnl||0) - (b.pnl||0));
 
