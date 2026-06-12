@@ -284,6 +284,11 @@ _LE_MIGRATIONS = [
     # exit-verdict thesis-accuracy matrix. entry_signals_json (the technical snapshot)
     # and trade_thesis (free-text thesis) already exist and are reused as-is.
     ("primary_entry_driver", "TEXT"),
+    # Sprint 68 (Thesis Tracking Phase 2/3): exit verdict — did the original entry
+    # driver play out? validated | invalidated | irrelevant. Computed client-side by
+    # computeThesisDrift() at SELL/TRIM time, patched onto the parent BUY/TOP_UP event
+    # at position close. Joined with primary_entry_driver for the thesis-accuracy matrix.
+    ("thesis_verdict", "TEXT"),
 ]
 
 

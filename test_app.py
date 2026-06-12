@@ -339,6 +339,109 @@ class TestLearningLoopRoutes(unittest.TestCase):
         self.assertEqual(g["primary_entry_driver"], "mean_reversion")
         self.assertIsNone(v["primary_entry_driver"], "unclassifiable snapshot stays NULL")
 
+    # ── Thesis Tracking Phase 2/3 (Sprint 68) ───────────────────────────────────
+
+    def test_entry_context_endpoint(self):
+        """GET /api/learning/entry-context returns entry context for a logged BUY."""
+        payload = {
+            "ticker": "RIO", "recommendation": "BUY",
+            "prompt_version": "2026-06-v12", "ai_confidence": 0.78,
+            "primary_entry_driver": "momentum_breakout",
+            "entry_signals_json": json.dumps({"rsi_14": 65, "bb_pct_b": 0.88,
+                                              "return_5d": 5.1, "return_20d": 9.2}),
+            "trade_thesis": "Volume breakout above 52-week high",
+        }
+        r = self.client.post("/api/learning/log",
+                             data=json.dumps(payload),
+                             content_type="application/json")
+        self.assertTrue(json.loads(r.data)["ok"])
+
+        resp = self.client.get("/api/learning/entry-context?tickers=RIO")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+        self.assertIn("RIO", body["contexts"])
+        ctx = body["contexts"]["RIO"]
+        self.assertEqual(ctx["primary_entry_driver"], "momentum_breakout")
+        self.assertIsInstance(ctx["entry_signals"], dict)
+        self.assertAlmostEqual(ctx["entry_signals"]["rsi_14"], 65)
+        self.assertEqual(ctx["trade_thesis"], "Volume breakout above 52-week high")
+        self.assertIn("entry_date", ctx)
+
+    def test_entry_context_missing_ticker_omitted(self):
+        """Tickers with no BUY/TOP_UP history must be omitted from contexts."""
+        resp = self.client.get("/api/learning/entry-context?tickers=ZZZZ99")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+        self.assertNotIn("ZZZZ99", body["contexts"])
+
+    def test_thesis_verdict_patchable(self):
+        """POST /api/learning/outcome must accept and persist thesis_verdict."""
+        payload = {
+            "ticker": "NAB", "recommendation": "BUY",
+            "prompt_version": "2026-06-v12", "ai_confidence": 0.72,
+            "primary_entry_driver": "trend_pullback",
+        }
+        r = self.client.post("/api/learning/log",
+                             data=json.dumps(payload),
+                             content_type="application/json")
+        ev_id = json.loads(r.data)["id"]
+
+        patch_resp = self.client.post(
+            "/api/learning/outcome",
+            data=json.dumps({"id": ev_id, "thesis_verdict": "validated"}),
+            content_type="application/json",
+        )
+        self.assertTrue(json.loads(patch_resp.data).get("ok"))
+
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT thesis_verdict FROM ai_learning_events WHERE id=?",
+                (ev_id,)
+            ).fetchone()
+        self.assertEqual(row["thesis_verdict"], "validated")
+
+    def test_thesis_matrix_endpoint(self):
+        """GET /api/learning/thesis-matrix returns the expected shape."""
+        # Insert 2 closed BUY events with driver + verdict + pnl directly into DB.
+        with _test_get_db() as conn:
+            for rec in [
+                ("MQG", "mean_reversion", "validated",   "win",  8.5),
+                ("ANZ", "mean_reversion", "invalidated", "loss", -4.2),
+            ]:
+                ticker, driver, verdict, status, pnl = rec
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                        (ticker, recommendation, primary_entry_driver, thesis_verdict,
+                         outcome_status, realized_pnl_pct, was_executed, timestamp)
+                    VALUES (?, 'BUY', ?, ?, ?, ?, 1, datetime('now','localtime'))
+                """, (ticker, driver, verdict, status, pnl))
+
+        resp = self.client.get("/api/learning/thesis-matrix")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+        self.assertIn("matrix", body)
+        self.assertIn("drivers", body)
+        self.assertIn("verdicts", body)
+        self.assertGreaterEqual(body["n_total"], 2)
+        # mean_reversion validated cell must have at least 1 entry
+        mr_val = body["matrix"].get("mean_reversion", {}).get("validated", {})
+        self.assertGreaterEqual(mr_val.get("n", 0), 1)
+
+    def test_compute_thesis_matrix_helper(self):
+        """_compute_thesis_matrix returns expected keys when called directly."""
+        from routes.learning import _compute_thesis_matrix
+        with _test_get_db() as conn:
+            result = _compute_thesis_matrix(conn)
+        for key in ("n_total", "drivers", "verdicts", "matrix", "insight"):
+            self.assertIn(key, result, f"Missing key: {key}")
+        self.assertIsInstance(result["drivers"], list)
+        self.assertIsInstance(result["verdicts"], list)
+        self.assertIsInstance(result["matrix"], dict)
+        self.assertIsInstance(result["insight"], str)
+
 
 class TestQuoteRoute(unittest.TestCase):
     """Smoke-test /api/quote — just checks response shape, not live price."""

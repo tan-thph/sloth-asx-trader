@@ -29,6 +29,7 @@ _ALLOWED_OUTCOME_COLS = (
     "skill_score", "debate_summary", "prompt_hash",
     "tags", "trade_thesis", "rr_ratio",
     "success_tags", "checklist_bypasses",
+    "thesis_verdict",
 )
 
 # ── Calibration TTL cache (L4) ────────────────────────────────────────────────
@@ -300,8 +301,8 @@ def learning_log():
                      entry_signals_json, debate_synthesis_winner,
                      tags, trade_thesis,
                      sell_primary_driver, sell_secondary_factors, sell_urgency,
-                     alternative_ticker, primary_entry_driver)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     alternative_ticker, primary_entry_driver, thesis_verdict)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -339,6 +340,7 @@ def learning_log():
                 data.get("sell_urgency"),
                 data.get("alternative_ticker"),
                 data.get("primary_entry_driver"),
+                data.get("thesis_verdict"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -392,6 +394,163 @@ def backfill_entry_drivers():
                 updated += 1
         return jsonify({"ok": True, "updated": updated, "skipped": skipped,
                         "candidates": len(rows)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/entry-context", methods=["GET"])
+def entry_context():
+    """Return the most recent BUY/TOP_UP entry context for each requested ticker.
+
+    GET /api/learning/entry-context?tickers=BHP.AX,CBA.AX
+
+    For each ticker returns: entry_date, primary_entry_driver, entry_signals (parsed
+    dict), trade_thesis. Prefers executed events (was_executed=1) over unexecuted,
+    then most recent id. Tickers with no BUY/TOP_UP history are omitted from the
+    response. Capped at 50 tickers.
+    """
+    raw = (request.args.get("tickers") or "").strip()
+    tickers = [t.strip().upper() for t in raw.split(",") if t.strip()][:50]
+    contexts = {}
+    if not tickers:
+        return jsonify({"ok": True, "contexts": contexts})
+    try:
+        with get_db() as conn:
+            for tk in tickers:
+                row = conn.execute("""
+                    SELECT timestamp, primary_entry_driver, entry_signals_json, trade_thesis
+                      FROM ai_learning_events
+                     WHERE ticker = ? AND recommendation IN ('BUY','TOP_UP')
+                     ORDER BY was_executed DESC, id DESC
+                     LIMIT 1
+                """, (tk,)).fetchone()
+                if not row:
+                    continue
+                try:
+                    sig = json.loads(row["entry_signals_json"] or "{}")
+                    if not isinstance(sig, dict):
+                        sig = {}
+                except (ValueError, TypeError):
+                    sig = {}
+                contexts[tk] = {
+                    "entry_date": row["timestamp"],
+                    "primary_entry_driver": row["primary_entry_driver"],
+                    "entry_signals": sig,
+                    "trade_thesis": row["trade_thesis"],
+                }
+        return jsonify({"ok": True, "contexts": contexts})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+_VERDICT_LIST = ("validated", "invalidated", "irrelevant")
+
+
+def _compute_thesis_matrix(conn) -> dict:
+    """Build the entry-driver × thesis-verdict accuracy matrix.
+
+    Selects closed BUY/TOP_UP events that have BOTH primary_entry_driver AND
+    thesis_verdict set, and a non-null realized_pnl_pct. A 'win' is
+    realized_pnl_pct > 0.
+
+    Returns a dict ready to be merged into the GET /api/learning/thesis-matrix
+    response: n_total, drivers, verdicts, matrix, insight.
+    """
+    rows = conn.execute("""
+        SELECT primary_entry_driver, thesis_verdict, realized_pnl_pct
+          FROM ai_learning_events
+         WHERE recommendation IN ('BUY','TOP_UP')
+           AND outcome_status IN ('win','loss','breakeven')
+           AND primary_entry_driver IS NOT NULL
+           AND thesis_verdict IS NOT NULL
+           AND realized_pnl_pct IS NOT NULL
+    """).fetchall()
+
+    # Build nested counts/sums keyed driver → verdict
+    _data: dict = {}
+    for r in rows:
+        drv = r["primary_entry_driver"]
+        vrd = r["thesis_verdict"]
+        pnl = float(r["realized_pnl_pct"])
+        if drv not in ENTRY_DRIVERS or vrd not in _VERDICT_LIST:
+            continue
+        bucket = _data.setdefault(drv, {}).setdefault(vrd, {"n": 0, "pnl_sum": 0.0, "wins": 0})
+        bucket["n"] += 1
+        bucket["pnl_sum"] += pnl
+        if pnl > 0:
+            bucket["wins"] += 1
+
+    n_total = sum(
+        b["n"]
+        for drv_data in _data.values()
+        for b in drv_data.values()
+    )
+
+    # Format the matrix: driver → verdict → {n, avg_pnl_pct, win_rate}
+    matrix: dict = {}
+    for drv in sorted(ENTRY_DRIVERS):
+        drv_data = _data.get(drv, {})
+        matrix[drv] = {}
+        for vrd in _VERDICT_LIST:
+            b = drv_data.get(vrd, {"n": 0, "pnl_sum": 0.0, "wins": 0})
+            n = b["n"]
+            matrix[drv][vrd] = {
+                "n": n,
+                "avg_pnl_pct": round(b["pnl_sum"] / n, 1) if n else 0.0,
+                "win_rate": round(b["wins"] / n * 100, 1) if n else 0.0,
+            }
+
+    # Build insight: driver with best (validated WR − invalidated WR) gap where
+    # both buckets have n≥5.
+    best_driver = None
+    best_gap = 0.0
+    best_val_wr = 0.0
+    best_inval_wr = 0.0
+    best_n_val = 0
+    best_n_inval = 0
+    for drv, cells in matrix.items():
+        val_cell   = cells.get("validated",   {"n": 0, "win_rate": 0.0})
+        inval_cell = cells.get("invalidated", {"n": 0, "win_rate": 0.0})
+        if val_cell["n"] >= 5 and inval_cell["n"] >= 5:
+            gap = val_cell["win_rate"] - inval_cell["win_rate"]
+            if gap > best_gap:
+                best_gap      = gap
+                best_driver   = drv
+                best_val_wr   = val_cell["win_rate"]
+                best_inval_wr = inval_cell["win_rate"]
+                best_n_val    = val_cell["n"]
+                best_n_inval  = inval_cell["n"]
+
+    insight = ""
+    if best_driver:
+        insight = (
+            f"{best_driver}: {best_val_wr:.0f}% win when thesis validated vs "
+            f"{best_inval_wr:.0f}% when invalidated (n={best_n_val}/{best_n_inval})."
+        )
+
+    return {
+        "n_total": n_total,
+        "drivers": sorted(ENTRY_DRIVERS),
+        "verdicts": list(_VERDICT_LIST),
+        "matrix": matrix,
+        "insight": insight,
+    }
+
+
+@bp.route("/api/learning/thesis-matrix", methods=["GET"])
+def thesis_matrix():
+    """Entry-driver × thesis-verdict accuracy matrix.
+
+    GET /api/learning/thesis-matrix
+
+    Returns n_total, drivers, verdicts, matrix (driver→verdict→{n,avg_pnl_pct,
+    win_rate}), and a human-readable insight string for the driver with the largest
+    validated vs invalidated win-rate gap (both buckets n≥5; else empty string).
+    """
+    try:
+        with get_db() as conn:
+            result = _compute_thesis_matrix(conn)
+        return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1670,6 +1829,28 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         # Sprint 45: thesis drift nudge — lowest priority (appended last, first to drop).
         if _thesis_drift.get("nudge"):
             parts.append(_thesis_drift["nudge"])
+
+        # Sprint 68: thesis-accuracy matrix nudge — very lowest priority (last item,
+        # first to drop under token budget). Only fires when a driver has both
+        # validated n≥5 and invalidated n≥5 with a win-rate gap ≥25pp.
+        try:
+            _tm = _compute_thesis_matrix(conn)
+            _tm_insight = _tm.get("insight", "")
+            if _tm_insight:
+                # Extract the driver and win-rates from the insight for a compact token.
+                # Full insight emitted only if space; otherwise compact THESIS: token.
+                for _drv, _cells in _tm.get("matrix", {}).items():
+                    _val_cell   = _cells.get("validated",   {"n": 0, "win_rate": 0.0})
+                    _inval_cell = _cells.get("invalidated", {"n": 0, "win_rate": 0.0})
+                    if _val_cell["n"] >= 5 and _inval_cell["n"] >= 5:
+                        _gap = _val_cell["win_rate"] - _inval_cell["win_rate"]
+                        if _gap >= 25.0:
+                            parts.append(
+                                f"THESIS:{_drv} val={_val_cell['win_rate']:.0f}% inval={_inval_cell['win_rate']:.0f}%"
+                            )
+                            break  # only one driver nudge per calibration block
+        except Exception:
+            pass  # never let thesis-matrix errors break calibration
 
         if not parts:
             return {"available": False, "block": None}
