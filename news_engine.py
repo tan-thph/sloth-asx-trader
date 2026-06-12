@@ -853,13 +853,18 @@ final = min(10.0, sum of applicable steps)>,\
             tickers=ticker_str,
             context=context_block,
         )
-        prompt = base_prompt
+        # For thinking models (qwen3/qwq/deepseek-r1 etc.), prepend /no_think to
+        # disable chain-of-thought. Without it, the reasoning pass consumes most of
+        # num_predict before the model can emit the JSON answer — producing either a
+        # truncated / empty response (all 0.0 scores) or prompt-fragment leakage when
+        # thinking tokens are mixed into the raw output string.
+        prompt = ("/no_think\n" + base_prompt) if thinking else base_prompt
 
         # format:"json" (GBNF grammar) forces the model to output pure JSON.
-        # For thinking models on this Ollama version, JSON is routed to the
-        # chunk["thinking"] field instead of chunk["response"] — the streaming
-        # loop reads both, so this works correctly and uses only ~36–50 tokens
-        # instead of the 2048-token thinking pass that think:False triggered.
+        # With /no_think the JSON always lands in chunk["response"].  We also keep
+        # a separate thinking_parts buffer as a fallback for older Ollama builds
+        # that route format:"json" output to chunk["thinking"] — in that case
+        # raw_parts will be empty and we fall back to thinking_parts post-stream.
         num_predict = 250 if cpu_mode else 400
         num_ctx     = 1024 if cpu_mode else 2048
 
@@ -883,16 +888,16 @@ final = min(10.0, sum of applicable steps)>,\
             "format":  "json",
             "options": options,
         }
-        raw_parts: list[str] = []
+        raw_parts: list[str] = []       # chunk["response"] tokens (the JSON answer)
+        thinking_parts: list[str] = []  # chunk["thinking"] tokens (fallback only)
         token_count = 0
         t_start = time.monotonic()
 
         try:
-            # connect timeout 30s; read timeout scales with model type:
-            # thinking models on GPU get 10 min — they run the reasoning pass
-            # internally before streaming JSON, so the "silent" phase can be long.
-            # 300 s floor for all GPU modes — Jetson cold model load alone ~60 s.
-            read_timeout = 300 if cpu_mode else (600 if thinking else 300)
+            # connect timeout 30s; read timeout: CPU=300s, GPU=300s.
+            # Thinking models used to need 600s for the silent reasoning pass, but
+            # /no_think disables that phase so 300s is sufficient for all modes.
+            read_timeout = 300
             with requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
@@ -915,11 +920,18 @@ final = min(10.0, sum of applicable steps)>,\
                     except json.JSONDecodeError:
                         continue
 
-                    # Ollama routes JSON to "thinking" for thinking models even with
-                    # format:"json" — read both fields so we work across versions.
-                    token = chunk.get("response", "") or chunk.get("thinking", "")
-                    if token:
-                        raw_parts.append(token)
+                    # Keep response and thinking tokens strictly separate.
+                    # Mixing them causes prompt-fragment leakage: qwen3's reasoning
+                    # pass paraphrases the prompt (including the category enum and
+                    # JSON template) and those fragments corrupt the final JSON when
+                    # the two streams are concatenated before parsing.
+                    r_tok = chunk.get("response", "")
+                    t_tok = chunk.get("thinking", "")
+                    if r_tok:
+                        raw_parts.append(r_tok)
+                    if t_tok:
+                        thinking_parts.append(t_tok)
+                    if r_tok or t_tok:
                         token_count += 1
                         if status_ref is not None:
                             elapsed = max(time.monotonic() - t_start, 0.01)
@@ -947,6 +959,11 @@ final = min(10.0, sum of applicable steps)>,\
             return None
 
         raw = "".join(raw_parts).strip()
+        # Fallback: older Ollama builds route format:"json" output to the
+        # thinking field instead of response — use it only when response is empty.
+        if not raw and thinking_parts:
+            log.debug("LLM response empty; using thinking field as fallback (old Ollama?)")
+            raw = "".join(thinking_parts).strip()
         if not raw:
             return None
 
