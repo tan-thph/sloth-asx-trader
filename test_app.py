@@ -368,6 +368,43 @@ class TestLearningLoopRoutes(unittest.TestCase):
         self.assertEqual(ctx["trade_thesis"], "Volume breakout above 52-week high")
         self.assertIn("entry_date", ctx)
 
+    def test_trade_detail_endpoint(self):
+        """GET /api/learning/trade-detail returns rich per-event detail by id."""
+        payload = {
+            "ticker": "STO", "recommendation": "BUY",
+            "prompt_version": "2026-06-v13", "ai_confidence": 0.70,
+            "primary_entry_driver": "trend_pullback",
+            "thesis_verdict": "validated",
+            "entry_signals_json": json.dumps({"rsi_14": 48, "adx_14": 28,
+                                              "return_5d": -1.2}),
+            "trade_thesis": "Buying the dip in an uptrend",
+            "outcome_status": "win", "realized_pnl_pct": 4.5,
+        }
+        r = self.client.post("/api/learning/log",
+                             data=json.dumps(payload),
+                             content_type="application/json")
+        ev_id = json.loads(r.data)["id"]
+
+        resp = self.client.get(f"/api/learning/trade-detail?ids={ev_id}")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+        d = body["details"][str(ev_id)]
+        self.assertEqual(d["primary_entry_driver"], "trend_pullback")
+        self.assertEqual(d["thesis_verdict"], "validated")
+        self.assertEqual(d["trade_thesis"], "Buying the dip in an uptrend")
+        self.assertIsInstance(d["entry_signals"], dict)
+        self.assertAlmostEqual(d["entry_signals"]["rsi_14"], 48)
+        self.assertNotIn("entry_signals_json", d)  # raw column not leaked
+
+    def test_trade_detail_empty_ids(self):
+        """trade-detail with no ids returns an empty details map, not an error."""
+        resp = self.client.get("/api/learning/trade-detail")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["details"], {})
+
     def test_entry_context_missing_ticker_omitted(self):
         """Tickers with no BUY/TOP_UP history must be omitted from contexts."""
         resp = self.client.get("/api/learning/entry-context?tickers=ZZZZ99")
@@ -1121,6 +1158,19 @@ class TestStage3PromptInstructions(unittest.TestCase):
                       "analysis.js must include primary_entry_driver in the log payload")
         self.assertIn("_ENTRY_DRIVERS", src,
                       "analysis.js must normalise the driver against the allowed enum")
+
+    def test_journal_trade_detail_wiring(self):
+        """Sprint 69: journal.js must expose the trade-detail drawer + capture manual technicals."""
+        with open(os.path.join(ROOT, "js/pages/journal.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("toggleJournalDetail", src,
+                      "journal.js must define the trade-detail toggle")
+        self.assertIn("_fetchSignalSnapshot", src,
+                      "journal.js must snapshot technicals for manual trades")
+        self.assertIn("/api/learning/trade-detail", src,
+                      "journal.js must fetch per-trade detail from the backend")
+        self.assertIn("entrySignals", src,
+                      "manual trade entries must carry an entrySignals snapshot")
 
     def test_calibration_is_context_only_in_system_prompt(self):
         """§8.3 (supersedes Stage 3): the system prompt must present CALIBRATION as

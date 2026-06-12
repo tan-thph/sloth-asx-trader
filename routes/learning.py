@@ -443,6 +443,56 @@ def entry_context():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/learning/trade-detail", methods=["GET"])
+def trade_detail():
+    """Return rich per-trade detail for a set of learning-event ids.
+
+    GET /api/learning/trade-detail?ids=12,15,18
+
+    Used by the Trade Journal's expandable detail drawer to show the entry
+    technical snapshot, thesis, entry/exit driver, thesis verdict, and outcome
+    for AI-linked trades. Cap 50 ids. `entry_signals` is the parsed snapshot.
+    """
+    raw = (request.args.get("ids") or "").strip()
+    ids = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    ids = ids[:50]
+    details = {}
+    if not ids:
+        return jsonify({"ok": True, "details": details})
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        with get_db() as conn:
+            rows = conn.execute(f"""
+                SELECT id, ticker, timestamp, recommendation, ai_confidence,
+                       regime, prompt_version, suggested_stop, suggested_target,
+                       rr_ratio, outcome_status, realized_pnl_pct, realized_pnl_aud,
+                       holding_period_days, exit_reason, rationale_summary,
+                       entry_signals_json, trade_thesis, primary_entry_driver,
+                       thesis_verdict, sell_primary_driver, sell_secondary_factors,
+                       success_tags, error_type
+                  FROM ai_learning_events
+                 WHERE id IN ({placeholders})
+            """, ids).fetchall()
+            for row in rows:
+                try:
+                    sig = json.loads(row["entry_signals_json"] or "{}")
+                    if not isinstance(sig, dict):
+                        sig = {}
+                except (ValueError, TypeError):
+                    sig = {}
+                d = dict(row)
+                d.pop("entry_signals_json", None)
+                d["entry_signals"] = sig
+                details[str(row["id"])] = d
+        return jsonify({"ok": True, "details": details})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 _VERDICT_LIST = ("validated", "invalidated", "irrelevant")
 
 

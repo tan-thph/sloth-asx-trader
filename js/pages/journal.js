@@ -245,7 +245,13 @@ function renderJournal() {
                 <td>${parcelBadge}</td>
                 <td><span class="badge ${t.recId&&t.recExecuted?'badge-executed':'badge-skipped'}" title="${matchedRec?._thesis ? 'Thesis: '+matchedRec._thesis : ''}">${t.recId?(t.recExecuted?'Rec: Yes':'Rec: No'):'Manual'}</span>${matchedRec?._thesis?'<span style="font-size:10px;margin-left:3px" title="'+escapeHTML(matchedRec._thesis)+'">📋</span>':''}</td>
                 <td>${_journalRegimeBadge(matchedRec?.regime)}</td>
-                <td><button class="btn btn-sm btn-danger" onclick="removeJournalTrade(${realIdx})" title="Remove trade">✕</button></td>
+                <td style="white-space:nowrap">
+                  <button class="btn btn-sm" id="jtoggle-${realIdx}" onclick="toggleJournalDetail(${realIdx})" title="Show technicals & thesis">▸</button>
+                  <button class="btn btn-sm btn-danger" onclick="removeJournalTrade(${realIdx})" title="Remove trade">✕</button>
+                </td>
+              </tr>
+              <tr id="jdetail-${realIdx}" style="display:none">
+                <td colspan="14" style="background:var(--bg-inset);padding:10px 14px"></td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -253,6 +259,110 @@ function renderJournal() {
       </div>`}
     </div>
   `;
+}
+
+// ── Trade detail drawer (technicals + thesis per transaction) ────────────────
+// Cache backend trade-detail by learning-event id. Values: object | 'pending' | 'none' | 'error'.
+let _journalDetailCache = {};
+
+async function toggleJournalDetail(realIdx) {
+  const row = document.getElementById('jdetail-' + realIdx);
+  const btn = document.getElementById('jtoggle-' + realIdx);
+  if (!row) return;
+  const isOpen = row.style.display !== 'none';
+  if (isOpen) {
+    row.style.display = 'none';
+    if (btn) btn.textContent = '▸';
+    return;
+  }
+  row.style.display = '';
+  if (btn) btn.textContent = '▾';
+  const cell = row.querySelector('td');
+  const t = state.tradeJournal[realIdx];
+  if (!t) { cell.innerHTML = '<span class="text-xs text-muted">Trade not found.</span>'; return; }
+  const matchedRec = t.recId ? state.recHistory.find(r => r.id === t.recId) : null;
+  const lid = matchedRec?._learningId || null;
+  // AI-linked trade: ensure rich backend detail is fetched (entry technicals live server-side).
+  if (lid && (_journalDetailCache[lid] === undefined)) {
+    cell.innerHTML = '<span class="text-xs text-muted">Loading trade detail…</span>';
+    _journalDetailCache[lid] = 'pending';
+    try {
+      const r = await fetch(`${API}/api/learning/trade-detail?ids=${lid}`);
+      const d = await r.json();
+      _journalDetailCache[lid] = (d.ok && d.details && d.details[lid]) ? d.details[lid] : 'none';
+    } catch { _journalDetailCache[lid] = 'error'; }
+  }
+  cell.innerHTML = _buildJournalDetailHTML(t, matchedRec, lid);
+}
+
+function _journalSig(label, val, fmtFn) {
+  if (val == null || Number.isNaN(Number(val))) return '';
+  return `<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0">
+    <span class="text-muted">${label}</span><strong>${fmtFn ? fmtFn(val) : val}</strong></div>`;
+}
+
+function _buildJournalDetailHTML(t, matchedRec, lid) {
+  const det = lid ? _journalDetailCache[lid] : null;
+  const detObj = (det && typeof det === 'object') ? det : null;
+
+  // Resolve fields from richest available source: backend detail → client rec → manual entry.
+  const thesis      = detObj?.trade_thesis || matchedRec?._thesis || t.thesis || null;
+  const entryDriver = detObj?.primary_entry_driver || matchedRec?.primary_entry_driver || null;
+  const exitDriver  = detObj?.sell_primary_driver || null;
+  const verdict     = detObj?.thesis_verdict || matchedRec?.thesis_verdict || null;
+  const sig         = detObj?.entry_signals || t.entrySignals || null;
+  const source      = lid ? 'AI recommendation' : 'Manual entry';
+
+  // Entry technicals block
+  let sigHtml;
+  if (sig && Object.values(sig).some(v => v != null)) {
+    sigHtml = `<div style="min-width:200px">
+      <div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Technicals at entry</div>
+      <div style="font-size:12px">
+        ${_journalSig('RSI(14)', sig.rsi_14, v => Number(v).toFixed(1))}
+        ${_journalSig('BB %b', sig.bb_pct_b, v => Number(v).toFixed(2))}
+        ${_journalSig('ADX(14)', sig.adx_14, v => Number(v).toFixed(1))}
+        ${_journalSig('ATR %', sig.atr_pct, v => Number(v).toFixed(2) + '%')}
+        ${_journalSig('Return 5d', sig.return_5d, v => (v>=0?'+':'') + Number(v).toFixed(1) + '%')}
+        ${_journalSig('Return 20d', sig.return_20d, v => (v>=0?'+':'') + Number(v).toFixed(1) + '%')}
+      </div></div>`;
+  } else {
+    sigHtml = `<div style="min-width:200px"><div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Technicals at entry</div>
+      <div class="text-xs text-muted" style="font-style:italic">Not captured at trade time.</div></div>`;
+  }
+
+  // Thesis + drivers block
+  const VC = { validated:['var(--up)','✅ Validated'], invalidated:['var(--down)','❌ Invalidated'], irrelevant:['var(--text-tertiary)','➖ Irrelevant'] };
+  const vc = verdict ? (VC[verdict] || ['var(--text-tertiary)', verdict]) : null;
+  const driverChip = (label, val, color) => val
+    ? `<span style="display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;background:${color||'var(--bg-surface)'};border:1px solid var(--border);margin-right:5px">${label}: ${escapeHTML(String(val).replace(/_/g,' '))}</span>`
+    : '';
+  const thesisHtml = `<div style="flex:1;min-width:240px">
+    <div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Thesis & drivers <span style="text-transform:none">· ${source}</span></div>
+    <div style="margin-bottom:6px">
+      ${driverChip('Entry', entryDriver)}
+      ${driverChip('Exit', exitDriver)}
+      ${vc ? `<span style="font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid ${vc[0]};color:${vc[0]}">${vc[1]}</span>` : ''}
+    </div>
+    <div style="font-size:12px;line-height:1.45">${thesis ? escapeHTML(thesis) : '<span class="text-muted" style="font-style:italic">No thesis recorded.</span>'}</div>
+    ${detObj?.rationale_summary && detObj.rationale_summary !== thesis ? `<div style="font-size:11px;color:var(--text-tertiary);margin-top:5px">${escapeHTML(detObj.rationale_summary)}</div>` : ''}
+  </div>`;
+
+  // Outcome line (prefer backend, fall back to journal)
+  const oc = detObj?.outcome_status || (t.status === 'closed' ? (t.pnl >= 0 ? 'win' : 'loss') : 'open');
+  const pnlPct = detObj?.realized_pnl_pct;
+  const ocColor = oc === 'win' ? 'var(--up)' : (oc === 'loss' ? 'var(--down)' : 'var(--text-tertiary)');
+  const outcomeHtml = `<div style="min-width:150px">
+    <div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Outcome</div>
+    <div style="font-size:13px;font-weight:600;color:${ocColor}">${oc}${pnlPct != null ? ` · ${(pnlPct>=0?'+':'')}${Number(pnlPct).toFixed(1)}%` : ''}</div>
+    ${detObj?.exit_reason ? `<div style="font-size:11px;color:var(--text-tertiary)">exit: ${escapeHTML(detObj.exit_reason)}</div>` : ''}
+    ${detObj?.regime ? `<div style="font-size:11px;color:var(--text-tertiary)">regime: ${escapeHTML(detObj.regime)}</div>` : ''}
+    ${detObj?.ai_confidence != null ? `<div style="font-size:11px;color:var(--text-tertiary)">conf: ${Math.round(detObj.ai_confidence*100)}%</div>` : ''}
+  </div>`;
+
+  const loading = (det === 'pending') ? '<div class="text-xs text-muted">Loading trade detail…</div>' : '';
+  return `${loading}<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start">
+    ${thesisHtml}${sigHtml}${outcomeHtml}</div>`;
 }
 
 function setJournalFilterKey(key, value) {
@@ -280,15 +390,43 @@ function setJournalFilter(type, value) {
 function setJournalStatusFilter(status) { setJournalFilterKey('status', status); }
 function setJournalActionFilter(action) { setJournalFilterKey('action', action); }
 
-function addManualTrade() {
+// Capture a technical snapshot for a ticker in the same shape as entry_signals_json
+// (rsi_14, bb_pct_b, adx_14, atr_pct, return_5d, return_20d) so manual trades carry
+// the same data as AI recs. Prefers in-memory live signals; falls back to a fresh
+// /api/analyse fetch. Returns null if signals are unavailable (offline / new ticker).
+async function _fetchSignalSnapshot(ticker) {
+  let s = state.liveSignals?.[ticker];
+  if (!s) {
+    try {
+      const r = await fetch(`${API}/api/analyse/${encodeURIComponent(ticker)}`);
+      if (r.ok) s = await r.json();
+    } catch { /* offline — leave null */ }
+  }
+  if (!s) return null;
+  return {
+    rsi_14:    s.rsi_14    ?? null,
+    bb_pct_b:  s.bb_pct_b  ?? null,
+    adx_14:    s.adx ?? s.adx_14 ?? null,
+    atr_pct:   s.atr_pct   ?? null,
+    return_5d: s.return_5d ?? null,
+    return_20d:s.return_20d ?? null,
+    price:     s.current_price ?? null,
+  };
+}
+
+async function addManualTrade() {
   const ticker = prompt('Ticker:'); if(!ticker) return;
   const action = (prompt('Action (BUY/SELL):') || 'BUY').toUpperCase();
   const qty = Number(prompt('Quantity:')); if(!qty) return;
   const price = Number(prompt('Price ($):')); if(!price) return;
   const dateInput = prompt('Date (DD-MM-YYYY, blank = today):');
   const tradeDate = (dateInput && dateInput.match(/^\d{2}-\d{2}-\d{4}$/)) ? dateInput : todayStr();
+  const thesisInput = (prompt('Thesis / why (optional — recorded for review):') || '').trim();
   const fees = state.settings.brokerage;
   const symbol = ticker.toUpperCase();
+  // Snapshot current technicals so this manual trade can be reviewed later like an AI rec.
+  const entrySignals = await _fetchSignalSnapshot(symbol);
+  const thesis = thesisInput || null;
   let tradeEntry;
 
   if(action === 'SELL') {
@@ -302,13 +440,15 @@ function addManualTrade() {
         qty, entryPrice: holding.avgPrice, exitPrice: price, fees,
         status: 'closed', pnl: grossPnl,
         disposalIds: disposals.map((_,i) => prevLen + i),
-        recId: null, recExecuted: false, timestamp: nowSydney()
+        recId: null, recExecuted: false, timestamp: nowSydney(),
+        entrySignals, thesis
       };
     } else {
       tradeEntry = {
         id: state.tradeJournal.length + 1, date: tradeDate, ticker: symbol, action,
         qty, entryPrice: price, exitPrice: null, fees,
-        status: 'open', pnl: null, recId: null, recExecuted: false, timestamp: nowSydney()
+        status: 'open', pnl: null, recId: null, recExecuted: false, timestamp: nowSydney(),
+        entrySignals, thesis
       };
       toast('Sell logged — no matching portfolio position found. Portfolio unchanged.', 'warn');
     }
@@ -322,7 +462,8 @@ function addManualTrade() {
       qty, entryPrice: price, exitPrice: null, fees,
       status: 'open', pnl: null,
       parcelId: newParcel ? newParcel.id : null,
-      recId: null, recExecuted: false, timestamp: nowSydney()
+      recId: null, recExecuted: false, timestamp: nowSydney(),
+      entrySignals, thesis
     };
   }
 
