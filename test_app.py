@@ -1097,11 +1097,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_current(self):
-        """PROMPT_VERSION must be bumped to v12 after Sprint 67 entry-driver tagging."""
+        """PROMPT_VERSION must be bumped to v13 after Sprint 68 thesis-validation-at-exit."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v12'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v12 after Sprint 67 entry-driver tagging")
+        self.assertIn("PROMPT_VERSION = '2026-06-v13'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v13 after Sprint 68 thesis-validation-at-exit")
 
     def test_entry_driver_in_prompt(self):
         """Sprint 67: ANALYSIS_SYSTEM_PROMPT must require primary_entry_driver on BUYs."""

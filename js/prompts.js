@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v12';
+const PROMPT_VERSION = '2026-06-v13';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
