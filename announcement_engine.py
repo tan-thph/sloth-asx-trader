@@ -1460,6 +1460,14 @@ def _parse_llm_json(raw: str) -> Optional[Dict]:
     tags = data.get("tags", [])
     if not isinstance(tags, list):
         data["tags"] = []
+    else:
+        # Cap to 5 tags, each max 30 chars — prevents repetition-loop strings
+        # like "GBR/GBR/GB4/GB5/GB8/GB8/..." from slipping through even when
+        # repeat_penalty doesn't fully stop the loop before num_predict runs out.
+        data["tags"] = [
+            str(t)[:30] for t in tags[:5]
+            if isinstance(t, str) and t.strip()
+        ]
     return data
 
 
