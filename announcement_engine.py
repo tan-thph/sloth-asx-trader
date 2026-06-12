@@ -1636,16 +1636,26 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
     thinking = _is_ann_thinking_model(model)
 
     # format:"json" (GBNF grammar) forces pure JSON output for all models.
-    # For thinking models on this Ollama version, JSON is routed to the
-    # "thinking" response field instead of "response" — Fallback A reads it.
-    # This uses ~50 tokens instead of a full 2048-token thinking pass.
-    num_predict = 250 if cpu_mode else 400
+    # For thinking models (qwen3/qwq etc.), prepend /no_think to suppress the
+    # reasoning pass — otherwise it consumes most of num_predict before the
+    # model can emit the JSON, causing truncation or empty responses.
+    if thinking:
+        prompt = "/no_think\n" + prompt
+
+    # 600 tokens for non-CPU: gemma4:26b + keyFigures + 200-char summary easily
+    # exceeds the old 400-token cap, truncating mid-string and failing the parse.
+    # 300 for CPU (small models on SBC/Jetson don't need as many).
+    num_predict = 300 if cpu_mode else 600
     num_ctx     = 1024 if cpu_mode else 2048
 
     options: Dict = {
-        "temperature": 0.1,
-        "num_predict": num_predict,
-        "num_ctx":     num_ctx,
+        "temperature":    0.1,
+        "num_predict":    num_predict,
+        "num_ctx":        num_ctx,
+        # Penalise repeated tokens — prevents "analysis_analysis_analysis..."
+        # loops that corrupt the JSON and cause parse failures.
+        "repeat_penalty": 1.2,
+        "repeat_last_n":  64,
     }
     if cpu_mode:
         options["num_gpu"] = 0  # force CPU-only; omit entirely otherwise so Ollama auto-selects
@@ -1690,7 +1700,13 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
             # Safety net: if result is still None, retry once more (rare).
             if result is None and raw:
                 logger.warning("_classify_ollama [%s]: JSON parse failed, retrying", model)
-                retry_opts: Dict = {"temperature": 0.1, "num_predict": num_predict, "num_ctx": num_ctx}
+                retry_opts: Dict = {
+                    "temperature":    0.1,
+                    "num_predict":    num_predict,
+                    "num_ctx":        num_ctx,
+                    "repeat_penalty": 1.2,
+                    "repeat_last_n":  64,
+                }
                 if cpu_mode:
                     retry_opts["num_gpu"] = 0
                 retry_payload = {
