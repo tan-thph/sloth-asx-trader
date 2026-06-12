@@ -123,13 +123,32 @@ def _sanitize_summary(text: str, max_len: int = 500) -> str:
     if not text or len(text) < 20:
         return text
     text = text[:max_len]
-    # Match any run of 4–40 chars repeated ≥3 times in a row.
-    # re.search finds the leftmost (earliest) such repetition.
-    m = re.search(r'(.{4,40})\1{2,}', text)
-    if m:
-        # Keep everything up to (and including) the first occurrence.
-        cutoff = m.start() + len(m.group(1))
-        return text[:cutoff].rstrip(' _/-,.’‘')
+    cuts: list[int] = []
+    # Tier 1 — SHORT period (2–15 chars) repeated 3+ times in a row.
+    #   Catches "de_de_de", "_on_on_on", "-the-the-the". Requires 3 repeats so
+    #   a legitimately doubled word/phrase isn't truncated.
+    m_short = re.search(r'(.{2,15}?)\1{2,}', text)
+    if m_short:
+        cuts.append(m_short.start() + len(m_short.group(1)))
+    # Tier 2 — LONG period (16–160 chars) repeated 2+ times in a row.
+    #   Catches prompt-schema leakage loops like
+    #   "Westpac (WBC)ary/regulatory/macro/...|bullish|" ×2. A 16+ char block
+    #   repeated even twice is always degenerate, so 2 repeats is enough here.
+    m_long = re.search(r'(.{16,160}?)\1{1,}', text)
+    if m_long:
+        cuts.append(m_long.start() + len(m_long.group(1)))
+    # Tier 3 — leaked prompt-schema signature (the pipe/slash-delimited enums
+    #   from CLASSIFY_PROMPT). Cut at the first occurrence — real summaries
+    #   never contain these exact tokens.
+    m_leak = re.search(
+        r'(regulatory/macro|/sector/dividend|\|bullish\||\|bearish\||\|neutral\|)',
+        text,
+    )
+    if m_leak:
+        cuts.append(m_leak.start())
+    if cuts:
+        # Cut at the earliest detected loop / leak.
+        return text[: min(cuts)].rstrip(' _/-,.’‘|')
     return text
 
 
@@ -869,14 +888,21 @@ final = min(10.0, sum of applicable steps)>,\
         num_ctx     = 1024 if cpu_mode else 2048
 
         options: dict = {
-            "temperature":    0.1,
+            # Near-greedy decoding (temp 0.1) is the PRIMARY cause of the
+            # repetition loops in summaries (de_de_de, -the-the-the, etc.).
+            # Greedy/low-temp sampling is the classic "neural text degeneration"
+            # trap; nucleus + top-k sampling lets the model escape loops while
+            # staying deterministic enough for a classification task.
+            "temperature":    0.4,
+            "top_p":          0.9,
+            "top_k":          40,
+            "min_p":          0.05,
             "num_predict":    num_predict,
             "num_ctx":        num_ctx,
-            # Penalise repeated tokens — primary defence against the
-            # /models/models/ and _err_err_err_ repetition-loop bug.
-            # 1.2 is aggressive enough to break loops without degrading fluency.
-            "repeat_penalty": 1.2,
-            "repeat_last_n":  64,   # window of tokens checked for repetition
+            # Token-level repetition penalty — secondary defence. Raised from
+            # 1.2→1.3 and the window from 64→128 tokens to catch longer loops.
+            "repeat_penalty": 1.3,
+            "repeat_last_n":  128,
         }
         if cpu_mode:
             options["num_gpu"] = 0  # force CPU-only; omit entirely otherwise so Ollama auto-selects

@@ -1657,13 +1657,19 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
     num_ctx     = 1024 if cpu_mode else 2048
 
     options: Dict = {
-        "temperature":    0.1,
+        # Near-greedy decoding (temp 0.1) is the root cause of the
+        # "analysis_analysis_analysis..." repetition loops. Raise temperature
+        # and add nucleus/top-k sampling so the model escapes degenerate loops
+        # while staying deterministic enough for classification.
+        "temperature":    0.4,
+        "top_p":          0.9,
+        "top_k":          40,
+        "min_p":          0.05,
         "num_predict":    num_predict,
         "num_ctx":        num_ctx,
-        # Penalise repeated tokens — prevents "analysis_analysis_analysis..."
-        # loops that corrupt the JSON and cause parse failures.
-        "repeat_penalty": 1.2,
-        "repeat_last_n":  64,
+        # Token-level repetition penalty — secondary defence.
+        "repeat_penalty": 1.3,
+        "repeat_last_n":  128,
     }
     if cpu_mode:
         options["num_gpu"] = 0  # force CPU-only; omit entirely otherwise so Ollama auto-selects
@@ -1709,11 +1715,14 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
             if result is None and raw:
                 logger.warning("_classify_ollama [%s]: JSON parse failed, retrying", model)
                 retry_opts: Dict = {
-                    "temperature":    0.1,
+                    "temperature":    0.4,
+                    "top_p":          0.9,
+                    "top_k":          40,
+                    "min_p":          0.05,
                     "num_predict":    num_predict,
                     "num_ctx":        num_ctx,
-                    "repeat_penalty": 1.2,
-                    "repeat_last_n":  64,
+                    "repeat_penalty": 1.3,
+                    "repeat_last_n":  128,
                 }
                 if cpu_mode:
                     retry_opts["num_gpu"] = 0
