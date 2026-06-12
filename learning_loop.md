@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** 2026-06-10 (doc sync: PROMPT_VERSION ref, phantom regime names in examples, exit_reason vocab note. Content current through Sprint 49 — virtual speed weight fix, 30d cutoff, n_virtual UI)
-**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–46 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block)
+**Last Updated:** 2026-06-12 (Sprint 67–68: Thesis Tracking — structured entry-driver tagging, entry→exit thesis comparison, Thesis Accuracy Matrix. PROMPT_VERSION → 2026-06-v13.)
+**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–68 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block) · Thesis Tracking Live (Sprint 67–68)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -70,6 +70,8 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `exec_mech_pnl_pct`        | REAL       | Execution-alpha tracker: simulated MECHANICAL exit P&L % (stop/target/15-bar time-stop, stop-first within a bar) for executed closed BUY/TOP_UP trades; lazily resolved by `_resolve_execution_alpha()` (≤5/call) (Sprint 63) |
 | `exec_mech_exit`           | TEXT       | `stop` / `target` / `time` — which mechanical rule fired in the simulation (Sprint 63) |
 | `sell_verify_alt_chg`      | REAL       | % price change of `alternative_ticker` from sell date → verify date (Sprint 37) |
+| `primary_entry_driver`     | TEXT       | Structured entry driver declared by Claude at BUY/TOP_UP generation: one of `mean_reversion` / `momentum_breakout` / `trend_pullback` / `fundamental_value` / `macro_tailwind`. Aligns with `indicators.FACTOR_WEIGHTS`. Backfillable for historical rows via `classify_entry_driver()` (Sprint 67) |
+| `thesis_verdict`           | TEXT       | Exit verdict — did the original entry driver play out? `validated` / `invalidated` / `irrelevant`. Computed client-side by `computeThesisDrift()` at SELL/TRIM time (entry-vs-current technicals), patched onto the **parent BUY/TOP_UP** event at position close. Joined with `primary_entry_driver` for the Thesis Accuracy Matrix. Distinct from `sell_verify_verdict` (which asks "was selling the right call") (Sprint 68) |
 
 > **Note on `loss_quality`:** This is a *computed property*, not a stored column. It is derived at calibration time from existing fields:
 > - `exit_reason = 'protective_stop'` → **good** loss (deliberate capital defence, excluded from confidence calibration)
@@ -93,11 +95,12 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 1. **Recommendation Generated** (`analysis.js` → `logRecsToLearningLoop()`)
    - `POST /api/learning/log` — creates partial record, returns `id`
    - Stores `rec._learningId`, persists `debate_summary`, `prompt_hash`, `entry_signals_json` (signal snapshot), `debate_synthesis_winner`
+   - BUY/TOP_UP: persists `primary_entry_driver` (Sprint 67). SELL/TRIM: persists `thesis_verdict` from `computeThesisDrift()` (Sprint 68)
 
 2. **Trade Executed** (`recommendations.js` → `markExecuted()`)
    - `POST /api/learning/outcome` — updates entry price, outcome fields
    - `exit_reason` auto-detected via `_detectExitReason(exitPrice, stopLoss, target)` — sets `stop_hit`/`target_hit` (±0.5% tolerance) or falls back to `manual` (Stage 1); function now lives in `js/utils.js` (hoisted Sprint 43)
-   - Auto-reconciles parent BUY/TOP_UP learning events when a SELL/TRIM fully closes the position (Stage 1)
+   - Auto-reconciles parent BUY/TOP_UP learning events when a SELL/TRIM fully closes the position (Stage 1) — also patches `thesis_verdict` onto each parent from the SELL rec's `_thesisCheck.verdict` (Sprint 68)
    - **No longer auto-triggers postmortem/skill-score** — these must be initiated via the 🤖/🔬 buttons on the Learning page (hotfix a888eec)
 
 3. **Trade Closed** (`performance.js` → `syncClosedTradesToLearningLoop()`)
@@ -282,7 +285,52 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` — never the system prompt (preserves Anthropic's server-side prompt cache).
 Target size: 30–60 tokens.
 
+**Thesis-matrix calibration nudge** *(Sprint 68):* appended last (lowest priority, first to drop by the token budget). When a driver shows clear separation — validated win-rate vs invalidated win-rate gap ≥ 25pp with both buckets n≥5 — `_calib_compute()` emits a compact `THESIS:<driver> val=X% inval=Y%` token from `_compute_thesis_matrix(conn)` (reuses the open conn). Tells Claude which entry archetypes pay off only when their thesis holds, so it can tighten exits when reversion/momentum stalls.
+
 Since `PROMPT_VERSION='2026-06-v10'` (Sprint 61, §8.3) the numeric adjustments are applied **engine-side**: the calibration response includes a machine-readable `adjustments: {bands, tickers}` payload, stashed by `fetchCalibrationBlock()` on `window._calibAdjustments` and applied deterministically in `analysis.js` before Kelly sizing (clamped [0.05, 0.98], audit-tagged `_calibApplied`). The text block remains in the user message as context only, and the system prompt explicitly forbids Claude from pre-adjusting confidence. Learning events log the **original** confidence so calibration never compounds on its own output. (The earlier LLM-applied algorithm `confidence += adj` ran from `2026-05-v5` to `2026-06-v9`.) The prompt also includes a debate-block usage rule: treat Local Debate as a second opinion, weight synthesis winner, don't anchor to it over fundamentals (Stage 3).
+
+---
+
+## Thesis Tracking (Entry Driver → Exit Verdict) *(Sprint 67–68)*
+
+Closes the loop between **why a position was entered** and **whether that reason survived to exit**. Reuses the existing `entry_signals_json` (technical snapshot) and `trade_thesis` (free text); adds just two columns: `primary_entry_driver` and `thesis_verdict`.
+
+### Flow
+
+```
+BUY/TOP_UP generation                SELL/TRIM generation                    Position close
+─────────────────────                ────────────────────                    ──────────────
+Claude tags primary_entry_driver  →  fetchEntryContexts() pulls the      →   markExecuted() patches
+(prompts.js §1C; 5-driver enum)      original driver + entry_signals;        thesis_verdict onto the
+logged via logRecsToLearningLoop()   injected as HOLDING_CONTEXT so          parent BUY/TOP_UP event
+into primary_entry_driver            Claude's sell reasoning is              (→ matrix data source)
+                                     thesis-aware (prompts.js §2B).
+                                     computeThesisDrift() computes the
+                                     verdict DETERMINISTICALLY (engine,
+                                     not Claude) → r._thesisCheck
+```
+
+### Entry side (Phase 1, Sprint 67)
+- **Taxonomy** (aligned to `indicators.FACTOR_WEIGHTS`): `mean_reversion`, `momentum_breakout`, `trend_pullback`, `fundamental_value`, `macro_tailwind`. Defined as `ENTRY_DRIVERS` in `routes/learning.py`.
+- Claude declares `primary_entry_driver` on every BUY/TOP_UP (prompt §1C). `analysis.js` normalises it against `_ENTRY_DRIVERS` (stray value → null) before logging.
+- `classify_entry_driver(sig)` — deterministic technical classifier (RSI/BB → mean_reversion, ADX+dip → trend_pullback, thrust → momentum_breakout; `fundamental_value`/`macro_tailwind` not technically inferable → `unknown`). Powers `POST /api/learning/backfill-entry-drivers` (fills historical rows, no Claude spend) and serves as a cross-check.
+
+### Exit side (Phase 2, Sprint 68)
+- `fetchEntryContexts(tickers)` (learning-loop.js) → `GET /api/learning/entry-context` returns the most recent BUY/TOP_UP per ticker (prefers executed). `analysis.js` fetches once per scan, injects a `HOLDING_CONTEXT` block after Holdings so Claude can narrate whether the original driver still holds.
+- `computeThesisDrift(entryDriver, entrySignals, liveSnapshot)` (learning-loop.js) — **deterministic** verdict per driver (engine does the arithmetic; Claude only narrates, per the four-layer architecture rule):
+  - `mean_reversion`: validated if reverted toward the mean (BB %b or RSI rose back), invalidated if it fell further.
+  - `momentum_breakout`: validated if the thrust sustained (return_5d>0, %b held), invalidated if momentum died.
+  - `trend_pullback`: validated if the trend resumed (return_5d>0, ADX held), invalidated if it broke.
+  - `fundamental_value` / `macro_tailwind`: always `irrelevant` (not technically verifiable client-side).
+- The live snapshot is built with the **same mapping** as `entry_signals_json` (note `adx_14 ← liveSignals.adx`) so both sides share one shape.
+- Verdict stored: on the SELL/TRIM event at log time, and patched onto the **parent BUY/TOP_UP** event at full close (the matrix's join source). `thesis_verdict` is in `_ALLOWED_OUTCOME_COLS`.
+
+### Matrix (Phase 3, Sprint 68)
+- `_compute_thesis_matrix(conn)` → `GET /api/learning/thesis-matrix`: cross-tab of entry driver × `thesis_verdict` over closed BUY/TOP_UP events carrying both fields. Each cell `{n, avg_pnl_pct, win_rate}`. `insight` names the driver with the largest validated-vs-invalidated win-rate gap (both n≥5).
+- Rendered as the **Thesis Accuracy Matrix** card on the Learning page; the **Thesis Check** box on SELL/TRIM rec cards shows Bought-because / Now / Verdict from `rec._thesisCheck`.
+- The strongest matrix row also feeds the calibration block as a `THESIS:<driver>` nudge (see Calibration Injection above).
+
+> **Backfill caveat:** entry drivers are backfillable from `entry_signals_json`; `thesis_verdict` is **not** (it needs exit-time signals, which only exist going forward). The matrix fills as positions close after Sprint 68 ships.
 
 ---
 
@@ -301,6 +349,9 @@ Since `PROMPT_VERSION='2026-06-v10'` (Sprint 61, §8.3) the numeric adjustments 
 | `GET /api/learning/lessons`             | Read   | Scoped lessons matching `?ticker=X&sector=Y&regime=Z&adl=<float>&asx_vol=<float>` (cap 4); filtered by `breadth_scope` column; injected into Claude user messages *(Sprint 39, breadth-scope Sprint 44)* |
 | `POST /api/learning/lessons`            | Write  | Create a lesson `{lesson_text, ticker?, sector?, regime?, source, breadth_scope?}` *(Sprint 39)* |
 | `GET /api/learning/thesis-drift`        | Read   | `{n_manual, n_target, avg_manual_pct, avg_target_pct, nudge}` — requires n≥5 per bucket; backed by `_compute_thesis_drift(conn)` *(Sprint 45)* |
+| `POST /api/learning/backfill-entry-drivers` | Write | Fills `primary_entry_driver` for historical BUY/TOP_UP rows from `entry_signals_json` via `classify_entry_driver()` (no Claude spend); `unknown` rows stay NULL. Returns `{ok, updated, skipped, candidates}` *(Sprint 67)* |
+| `GET /api/learning/entry-context`       | Read   | `?tickers=A,B` → `{ok, contexts:{TICKER:{entry_date, primary_entry_driver, entry_signals:{...}, trade_thesis}}}`; most recent BUY/TOP_UP per ticker (prefers executed); cap 50 *(Sprint 68)* |
+| `GET /api/learning/thesis-matrix`       | Read   | Entry-driver × `thesis_verdict` cross-tab `{ok, n_total, drivers, verdicts, matrix:{driver:{verdict:{n, avg_pnl_pct, win_rate}}}, insight}`; backed by `_compute_thesis_matrix(conn)` *(Sprint 68)* |
 | `GET /api/learning/execution-alpha`     | Read   | `{n, pending, avg_actual_pct, avg_mech_pct, alpha_pp, n_beat, n_lag, mech_exits}` — actual realized P&L vs simulated mechanical exit for executed BUY/TOP_UP; resolves ≤5 pending events per call. Display-only (no calibration nudge — `⚠EARLY_EXIT_DRAG` already covers exit-timing feedback) *(Sprint 63)* |
 | `DELETE /api/learning/lesson/<id>`      | Write  | Hard-delete one lesson *(Sprint 39)* |
 | `GET /api/learning/untagged`            | Read   | Loss/breakeven events with no `error_type` — batch-classify queue *(Sprint 38)* |
@@ -336,6 +387,7 @@ Since `PROMPT_VERSION='2026-06-v10'` (Sprint 61, §8.3) the numeric adjustments 
 - Failure Patterns (exit reason distribution + error tag counts, shock excluded)
 - **Sell Decision Tracker card** *(Sprint 37):* executed SELL/TRIM events with `sell_primary_driver` set; 🟢 validated / 🔴 invalidated / — inconclusive badges per event; "↺ Check Now" button triggers `?force=1` re-resolve
 - **Execution Alpha card** *(Sprint 63):* actual exits vs simulated mechanical exits (stop/target/15-bar time-stop) — three tiles (actual avg, mechanical avg, alpha pp) + verdict banner; each page visit lazily resolves up to 5 pending events
+- **Thesis Accuracy Matrix card** *(Sprint 68):* `renderThesisMatrixCard()` fetches `GET /api/learning/thesis-matrix` and renders entry-driver × verdict (`validated`/`invalidated`/`irrelevant`) cells showing avg P&L%, win rate, and n, plus the `insight` line. Mobile `.tbl-stack` layout; empty-state message until trades close. A SELL/TRIM rec card also shows a **Thesis Check** box (Bought-because / Now / colour-coded verdict) from `rec._thesisCheck`
 - **Lessons card** *(Sprint 39):* list of scoped trading lessons with ticker/sector/regime scope badges; "Add Lesson" form; delete button per lesson
 - **Auto-Tag Accuracy card** *(Sprint 41):* agree-rate badge (🟢 ≥75% / 🟡 60–75% / 🔴 <60%); "Review Batch (5)" button loads up to 5 unreviewed auto-tagged events with agree/disagree/retag UI; when <60%, emits `⚠AUTO_TAGS_UNRELIABLE` in calibration block and suppresses `top_err` nudge
 - Recent Events table (30 most recent) — features:
@@ -774,6 +826,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 6. ✅ **`high_60d` / `low_60d` for Fibonacci** — `indicators.py` `analyse_ticker()` now emits `high_60d = high.tail(60).max()` and `low_60d = low.tail(60).min()`. Signal #4 in `prompts.js` updated to use `fib_50`/`fib_618` computed from these values, with `return_60d` as fallback. *(Sprint 41)*
 7. ✅ **Thesis drift detection** — `_compute_thesis_drift(conn)` + `GET /api/learning/thesis-drift` + `renderThesisDriftCard()` on Learning page. *(Sprint 45)*
 8. ✅ **Regime-flip calibration penalty** — `fetchAndClassifyRegime()` writes flip timestamp to localStorage; `_calib_compute()` halves HL for first <10 trades; emits `⚠REGIME_FLIP` token. *(Sprint 44)*
+9. ✅ **Thesis Tracking** — structured `primary_entry_driver` on BUY/TOP_UP (Sprint 67); entry→exit comparison via `computeThesisDrift()` + `HOLDING_CONTEXT` injection; `thesis_verdict` column; Thesis Accuracy Matrix (`_compute_thesis_matrix`) + `THESIS:<driver>` calibration nudge; deterministic backfill. *(Sprint 67–68; PROMPT_VERSION → 2026-06-v13)*
 
 ---
 
