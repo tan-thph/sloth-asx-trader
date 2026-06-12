@@ -352,3 +352,132 @@ async function fetchCalibrationBlock(regime, sectors, tickers) {
     return (data.available && data.block) ? '\n\n' + data.block : '';
   } catch (_) { return ''; }
 }
+
+// ── Thesis Tracking Phase 2+3 ────────────────────────────────────────────────
+
+/**
+ * Deterministically compute whether the entry thesis held up at exit.
+ * Both entrySignals and liveSnapshot use the entry_signals_json shape:
+ *   { rsi_14, bb_pct_b, adx_14, atr_pct, return_5d, return_20d }
+ *
+ * @param {string} entryDriver   - primary_entry_driver value from learning event
+ * @param {object} entrySignals  - signal snapshot at entry time (may be {})
+ * @param {object} liveSnapshot  - current signals in the same shape
+ * @returns {{ verdict: string, reason: string, deltas: object } | null}
+ */
+function computeThesisDrift(entryDriver, entrySignals, liveSnapshot) {
+  if (!entryDriver || !entrySignals || !liveSnapshot) return null;
+
+  // Defensive number coercion — treat missing/NaN as null
+  const _n = (obj, key) => {
+    const v = Number(obj[key]);
+    return (obj[key] == null || !isFinite(v)) ? null : v;
+  };
+
+  const eRsi  = _n(entrySignals, 'rsi_14');
+  const eBB   = _n(entrySignals, 'bb_pct_b');
+  const eAdx  = _n(entrySignals, 'adx_14');
+  const eRet5 = _n(entrySignals, 'return_5d');
+
+  const nRsi  = _n(liveSnapshot, 'rsi_14');
+  const nBB   = _n(liveSnapshot, 'bb_pct_b');
+  const nAdx  = _n(liveSnapshot, 'adx_14');
+  const nRet5 = _n(liveSnapshot, 'return_5d');
+
+  let verdict = 'irrelevant';
+  let reason  = '';
+  let deltas  = {};
+
+  if (entryDriver === 'mean_reversion') {
+    deltas = {};
+    if (eRsi != null && nRsi != null) deltas.rsi_14    = { entry: eRsi, now: nRsi };
+    if (eBB  != null && nBB  != null) deltas.bb_pct_b  = { entry: eBB,  now: nBB  };
+
+    const reverted = (eBB != null && nBB != null && eBB < 0.25 && nBB > 0.45)
+                  || (eRsi != null && nRsi != null && eRsi < 35 && nRsi > 45);
+    const worsened = (eBB != null && nBB != null && nBB < eBB - 0.05)
+                  || (eRsi != null && nRsi != null && nRsi < eRsi - 3);
+
+    if (reverted) {
+      verdict = 'validated';
+    } else if (worsened) {
+      verdict = 'invalidated';
+    } else {
+      verdict = 'irrelevant';
+    }
+    const rsiStr = (eRsi != null && nRsi != null) ? `RSI ${eRsi}→${nRsi}` : '';
+    const bbStr  = (eBB  != null && nBB  != null) ? `%b ${eBB.toFixed(2)}→${nBB.toFixed(2)}` : '';
+    reason = [rsiStr, bbStr].filter(Boolean).join(', ');
+
+  } else if (entryDriver === 'momentum_breakout') {
+    deltas = {};
+    if (nRet5 != null) deltas.return_5d = { entry: eRet5, now: nRet5 };
+    if (nBB   != null) deltas.bb_pct_b  = { entry: eBB,   now: nBB   };
+
+    const sustained   = nRet5 != null && nRet5 > 0 && (nBB == null || nBB > 0.55);
+    const invalidated = nRet5 != null && (nRet5 < 0 || (nBB != null && nBB < 0.45));
+
+    if (sustained) {
+      verdict = 'validated';
+    } else if (invalidated) {
+      verdict = 'invalidated';
+    } else {
+      verdict = 'irrelevant';
+    }
+    const ret5Str = nRet5 != null ? `return_5d=${nRet5.toFixed(1)}%` : '';
+    const bbStr2  = nBB   != null ? `%b=${nBB.toFixed(2)}` : '';
+    reason = [ret5Str, bbStr2].filter(Boolean).join(', ');
+
+  } else if (entryDriver === 'trend_pullback') {
+    deltas = {};
+    if (nRet5 != null) deltas.return_5d = { entry: eRet5, now: nRet5 };
+    if (nAdx  != null) deltas.adx_14    = { entry: eAdx,  now: nAdx  };
+
+    const resumed    = nRet5 != null && nRet5 > 0 && (nAdx == null || nAdx > 20);
+    const broke      = (nAdx != null && nAdx < 20) || (nRet5 != null && nRet5 < -3);
+
+    if (resumed) {
+      verdict = 'validated';
+    } else if (broke) {
+      verdict = 'invalidated';
+    } else {
+      verdict = 'irrelevant';
+    }
+    const ret5Str2 = nRet5 != null ? `return_5d=${nRet5.toFixed(1)}%` : '';
+    const adxStr   = nAdx  != null ? `ADX=${nAdx.toFixed(0)}` : '';
+    reason = [ret5Str2, adxStr].filter(Boolean).join(', ');
+
+  } else if (entryDriver === 'fundamental_value' || entryDriver === 'macro_tailwind') {
+    verdict = 'irrelevant';
+    reason  = 'fundamental/macro thesis — not technically verifiable';
+    deltas  = {};
+
+  } else {
+    // Unknown driver — cannot evaluate
+    return null;
+  }
+
+  return { verdict, reason, deltas };
+}
+
+/**
+ * Fetch entry contexts for a list of tickers from the backend.
+ * Returns the `contexts` map { TICKER: { entry_date, primary_entry_driver,
+ * entry_signals, trade_thesis } } or {} on failure.
+ * Caps tickers to 50.
+ *
+ * @param {string[]} tickers
+ * @returns {Promise<object>}
+ */
+async function fetchEntryContexts(tickers) {
+  if (!tickers || !tickers.length) return {};
+  if (typeof state !== 'undefined' && !state.serverOk) return {};
+  try {
+    const capped = tickers.slice(0, 50);
+    const params = new URLSearchParams({ tickers: capped.join(',') });
+    const resp = await fetch(`${API}/api/learning/entry-context?${params}`);
+    if (!resp.ok) return {};
+    const data = await resp.json();
+    return (data.ok && data.contexts) ? data.contexts : {};
+  } catch (_) { return {}; }
+}

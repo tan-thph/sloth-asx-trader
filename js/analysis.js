@@ -420,6 +420,13 @@ async function runAnalysis() {
 
   // Merged portfolio for analysis (deduplicated, weighted avg)
   const mp = mergedPortfolio();
+
+  // Phase 2: fetch entry contexts for all holdings (thesis-aware exit analysis).
+  // Fire early so it can resolve in parallel with other async fetches below.
+  // entryContexts is in scope for prompt-building AND post-response verdict computation.
+  const entryContexts = (typeof fetchEntryContexts === 'function')
+    ? await fetchEntryContexts(mp.map(h => h.ticker))
+    : {};
   const portfolioJson = JSON.stringify(mp.map(h => {
     const days = _daysHeld(h.ticker);
     const livePrice = state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice;
@@ -647,12 +654,28 @@ ${riskRows}`;
   })();
 
   const _acctLabel = state.activeAccount && state.activeAccount !== 'all' ? ` | Account: ${state.activeAccount.toUpperCase()}` : '';
+  // Build HOLDING_CONTEXT block: inject entry thesis per holding so Claude reasons thesis-aware
+  const _holdingCtxLines = mp
+    .filter(h => entryContexts[h.ticker])
+    .map(h => {
+      const ec = entryContexts[h.ticker];
+      const es = ec.entry_signals || {};
+      const rsiStr = es.rsi_14   != null ? `rsi=${es.rsi_14}` : '';
+      const bbStr  = es.bb_pct_b != null ? `bb%b=${Number(es.bb_pct_b).toFixed(2)}` : '';
+      const adxStr = es.adx_14   != null ? `adx=${es.adx_14}` : '';
+      const sigs   = [rsiStr, bbStr, adxStr].filter(Boolean).join(', ');
+      return `HOLDING_CONTEXT: ${h.ticker} | EntryDriver: ${ec.primary_entry_driver || 'untagged'} | EntryDate: ${ec.entry_date || '?'} | EntrySignals: ${sigs || 'none'}`;
+    });
+  const _holdingCtxBlock = _holdingCtxLines.length
+    ? '\n\nENTRY THESIS CONTEXT (original buy rationale per holding):\n' + _holdingCtxLines.join('\n')
+    : '';
+
   const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()} | TAX_LOSS_HARVEST_ACTIVE: ${inHarvestWindow}${_acctLabel}
 Account settings: brokerage $${state.settings.brokerage}/trade (round-trip $${state.settings.brokerage * 2}) | max ${state.settings.maxTradesPerDay} trades/day | min trade $${state.settings.minTradeSize}
 ACTIVE_REGIME: __REGIME_PLACEHOLDER__ (confidence: __CONF_PLACEHOLDER__)
 
 LIVE PORTFOLIO STATE:
-Holdings: ${portfolioJson}
+Holdings: ${portfolioJson}${_holdingCtxBlock}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
 RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
 ${recCtx}${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${rulesCtx}${indicatorCtx}
@@ -1447,6 +1470,28 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     toast(`Analysis done: ${cappedDedupedRecs.length} recommendation(s)`, 'success');
     // Fire desktop notification for high-conviction recs
     if (typeof alertHighConviction === 'function') alertHighConviction(cappedDedupedRecs);
+    // Phase 2+3: compute thesis verdict for SELL/TRIM recs deterministically
+    // using entry context fetched at the top of this function (entryContexts in scope).
+    cappedDedupedRecs.forEach(r => {
+      const action = (r.action || '').toUpperCase();
+      if (action !== 'SELL' && action !== 'TRIM') return;
+      const _ls = state.liveSignals?.[r.ticker];
+      const liveSnap = _ls ? {
+        rsi_14:    _ls.rsi_14    ?? null,
+        bb_pct_b:  _ls.bb_pct_b ?? null,
+        adx_14:    _ls.adx      ?? null,
+        atr_pct:   _ls.atr_pct  ?? null,
+        return_5d: _ls.return_5d ?? null,
+        return_20d:_ls.return_20d?? null,
+      } : null;
+      const ec = entryContexts[r.ticker];
+      r._thesisCheck = (ec && typeof computeThesisDrift === 'function')
+        ? computeThesisDrift(ec.primary_entry_driver, ec.entry_signals || {}, liveSnap)
+        : null;
+      r._entryDriver  = ec?.primary_entry_driver || null;
+      r.thesis_verdict = r._thesisCheck?.verdict ?? null;
+    });
+
     // Log recommendations to the Learning Loop backend (fire-and-forget)
     logRecsToLearningLoop(cappedDedupedRecs, _activeRegime, _debateResults);
     showPage('recommendations');
@@ -1558,6 +1603,8 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
           sell_urgency:           r.urgency           ?? null,
           // Sprint 37: Gap 7 — log alternativeTicker for better_opportunity cross-check
           alternative_ticker:     r.alternativeTicker ?? null,
+          // Phase 2+3: deterministic thesis verdict computed client-side
+          thesis_verdict:         r.thesis_verdict    ?? null,
         } : {}),
         // Sprint 67: BUY/TOP_UP structured entry driver (set by Claude). Normalised
         // to the allowed enum so a stray value lands as null rather than polluting

@@ -503,6 +503,38 @@ function renderPendingRecs(recs) {
         </div>`;
       })() : ''}
 
+      <!-- Thesis Check (SELL/TRIM only — shows when entry context was available) -->
+      ${isReducing && r._thesisCheck ? (() => {
+        const tc = r._thesisCheck;
+        const VERDICT_CONFIG = {
+          validated:   { icon: '✅', label: 'Validated',   color: 'var(--up)',           bg: 'var(--up-bg, #f0fdf4)',   border: '#86efac' },
+          invalidated: { icon: '❌', label: 'Invalidated', color: 'var(--down)',          bg: 'var(--down-bg, #fef2f2)', border: '#fca5a5' },
+          irrelevant:  { icon: '➖', label: 'Irrelevant',  color: 'var(--text-tertiary)', bg: 'var(--bg-inset)',         border: 'var(--border)' },
+        };
+        const vc = VERDICT_CONFIG[tc.verdict] || VERDICT_CONFIG.irrelevant;
+        // Show the first indicator delta pair as "Bought because / Now"
+        const deltaKeys = Object.keys(tc.deltas || {});
+        const firstKey  = deltaKeys[0];
+        const firstDelta = firstKey ? tc.deltas[firstKey] : null;
+        const fmt2 = v => v != null ? Number(v).toFixed(2) : '—';
+        const entryLabel = firstKey
+          ? `${firstKey.replace(/_/g, ' ')}: ${fmt2(firstDelta?.entry)}`
+          : (r._entryDriver || 'unknown');
+        const nowLabel = firstKey ? fmt2(firstDelta?.now) : '—';
+        return `
+        <div style="padding:8px 12px;background:${vc.bg};border:1px solid ${vc.border};border-left:3px solid ${vc.color};border-radius:var(--radius-md);margin-bottom:8px;font-size:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:10px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px">Thesis Check</span>
+            <span style="font-weight:600;color:${vc.color}">${vc.icon} ${vc.label}</span>
+          </div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:3px">
+            <span style="color:var(--text-secondary)">Bought because: <strong>${escapeHTML(r._entryDriver || 'untagged')}</strong> · Entry: <strong>${escapeHTML(entryLabel)}</strong></span>
+            <span style="color:var(--text-secondary)">Now: <strong>${escapeHTML(nowLabel)}</strong></span>
+          </div>
+          ${tc.reason ? `<div style="color:var(--text-tertiary);font-size:11px">${escapeHTML(tc.reason)}</div>` : ''}
+        </div>`;
+      })() : ''}
+
       <!-- Reasoning -->
       <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md);font-size:13px;line-height:1.65;margin-bottom:8px">
         <strong>Reasoning:</strong> ${escapeHTML(r.reasoning)}
@@ -1381,6 +1413,8 @@ function markExecuted(id, execPrice, execFee, execQty) {
                 exit_reason:         prExitReason,
                 actual_exit_price:   tradePrice,
                 holding_period_days: holdDays,
+                // Phase 2+3: propagate thesis verdict from the SELL/TRIM rec to parent BUY events
+                thesis_verdict:      rec._thesisCheck?.verdict ?? null,
                 ...(prPnlPct != null ? { realized_pnl_pct: prPnlPct } : {}),
                 ...(prPnlAud != null ? { realized_pnl_aud: prPnlAud } : {}),
               }),

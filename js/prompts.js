@@ -249,7 +249,18 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   ─────────────────────────────────────────────────────────────────────────────
 
-  SECTION 2B — ANTI-CHURN RULES
+  SECTION 2B — THESIS VALIDATION AT EXIT (context only)
+
+  When an ENTRY THESIS CONTEXT / HOLDING_CONTEXT block is present for a position you are
+  recommending to SELL/TRIM, you MUST state in reasoning[] whether the ORIGINAL EntryDriver
+  still holds, citing the relevant indicator move (e.g. "mean_reversion thesis: RSI reverted
+  28→54, target reached" or "momentum_breakout invalidated: volume/return faded"). Do NOT
+  output a verdict field — the engine computes thesis_verdict deterministically from the
+  entry-vs-current technicals. Your job is the qualitative narrative only.
+
+  ─────────────────────────────────────────────────────────────────────────────
+
+  SECTION 2C — ANTI-CHURN RULES
 
   1. If a BUY or TOP_UP was recommended on a ticker within the last 7 calendar days (check RECENT RECOMMENDATION HISTORY), you MUST NOT recommend SELL or TRIM on that same ticker now.
      CATASTROPHE is defined as ONE of the following, with explicit public disclosure:
