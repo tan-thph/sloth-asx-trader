@@ -121,6 +121,8 @@ async function renderLearningPage(gen) {
   renderSellOutcomesCard().catch(() => {});
   // Async: load thesis drift analytics card (Sprint 45)
   renderThesisDriftCard().catch(() => {});
+  // Async: load thesis accuracy matrix card (Phase 2+3)
+  renderThesisMatrixCard().catch(() => {});
   // Async: load execution alpha card (Sprint 63)
   renderExecutionAlphaCard().catch(() => {});
   // Async: load tag accuracy card (Gap 6)
@@ -903,10 +905,14 @@ function _renderLearningContent(d, brier) {
   // ── Calibration Quality card (async — filled by renderCalibQualityCard()) ──
   const calibQualityPlaceholder = `<div id="ll-calib-quality-card"></div>`;
 
+  // ── Thesis Accuracy Matrix card (async — filled by renderThesisMatrixCard()) ──
+  const thesisMatrixPlaceholder = `<div id="ll-thesis-matrix-card" class="section-gap"></div>`;
+
   return summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard + recentCard + failedCard + debateInsightsCard +
-    digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder + execAlphaPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
+    digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder +
+    thesisMatrixPlaceholder + execAlphaPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
 }
 
 // ── Postmortem digest — AI summary of recent failure patterns ─────────────────
@@ -2362,6 +2368,96 @@ async function renderThesisDriftCard() {
   } catch {
     el.innerHTML = '';
   }
+}
+
+// ── Thesis Accuracy Matrix card (Phase 2+3) ──────────────────────────────────
+// Shows per-driver × per-verdict breakdown: avg P&L, n, win rate.
+// Data comes from GET /api/learning/thesis-matrix.
+async function renderThesisMatrixCard() {
+  const el = document.getElementById('ll-thesis-matrix-card');
+  if (!el || !state.serverOk) return;
+
+  let d;
+  try {
+    const r = await fetch(`${API}/api/learning/thesis-matrix`);
+    if (!r.ok) { el.innerHTML = ''; return; }
+    d = await r.json();
+    if (!d.ok) { el.innerHTML = ''; return; }
+  } catch { el.innerHTML = ''; return; }
+
+  const nTotal  = d.n_total ?? 0;
+  const drivers = d.drivers || ['mean_reversion','momentum_breakout','trend_pullback','fundamental_value','macro_tailwind'];
+  const verdicts = d.verdicts || ['validated','invalidated','irrelevant'];
+  const matrix  = d.matrix || {};
+  const insight = d.insight || '';
+
+  if (nTotal === 0) {
+    el.innerHTML = `
+      <div class="card" style="margin-top:14px">
+        <div class="card-title" style="margin-bottom:8px">Thesis Accuracy Matrix</div>
+        <p class="text-xs text-muted">No closed thesis-tagged trades yet — builds as you close positions.</p>
+      </div>`;
+    return;
+  }
+
+  const fmtPnl   = v => v == null ? '—' : `${v >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`;
+  const pnlColor = v => v == null ? 'var(--text-tertiary)' : v >= 0 ? 'var(--up)' : 'var(--down)';
+  const fmtWr    = v => v == null ? '—' : `${Number(v).toFixed(0)}%`;
+
+  const VERDICT_LABELS = {
+    validated:   'Validated ✅',
+    invalidated: 'Invalidated ❌',
+    irrelevant:  'Irrelevant ➖',
+  };
+  const DRIVER_LABELS = {
+    mean_reversion:   'Mean Reversion',
+    momentum_breakout:'Momentum Breakout',
+    trend_pullback:   'Trend Pullback',
+    fundamental_value:'Fundamental Value',
+    macro_tailwind:   'Macro Tailwind',
+  };
+
+  const headerCols = verdicts.map(v =>
+    `<th data-label="${VERDICT_LABELS[v] || v}" style="text-align:center;font-size:11px;padding:6px 8px;color:var(--text-secondary);font-weight:600">${VERDICT_LABELS[v] || v}</th>`
+  ).join('');
+
+  const rows = drivers.map(dr => {
+    const cells = verdicts.map(vd => {
+      const cell = (matrix[dr] && matrix[dr][vd]) ? matrix[dr][vd] : null;
+      const n  = cell?.n ?? 0;
+      if (!n) return `<td data-label="${VERDICT_LABELS[vd] || vd}" style="text-align:center;padding:6px 8px;color:var(--text-tertiary);font-size:11px">—</td>`;
+      const avgPnl = cell.avg_pnl_pct;
+      const wr     = cell.win_rate;
+      return `<td data-label="${VERDICT_LABELS[vd] || vd}" style="text-align:center;padding:6px 8px">
+        <div style="font-size:13px;font-weight:600;color:${pnlColor(avgPnl)}">${fmtPnl(avgPnl)}</div>
+        <div style="font-size:10px;color:var(--text-tertiary)">${fmtWr(wr)} wr · n=${n}</div>
+      </td>`;
+    }).join('');
+    return `<tr>
+      <td data-label="Driver" style="padding:6px 8px;font-size:12px;font-weight:600;white-space:nowrap">${DRIVER_LABELS[dr] || dr}</td>
+      ${cells}
+    </tr>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="card" style="margin-top:14px">
+      <div class="card-title" style="margin-bottom:8px">Thesis Accuracy Matrix <span style="font-size:11px;font-weight:400;color:var(--text-tertiary)">(n=${nTotal} closed)</span></div>
+      ${insight ? `<p style="font-size:12px;color:var(--text-secondary);margin:0 0 10px;padding:8px;background:var(--bg-inset);border-radius:6px;border-left:3px solid var(--chart-1, #3b82f6)">${escapeHTML(insight)}</p>` : ''}
+      <div style="overflow-x:auto">
+        <table class="tbl-stack" style="width:100%;border-collapse:collapse">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text-secondary);font-weight:600">Driver</th>
+              ${headerCols}
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <p style="font-size:11px;color:var(--text-tertiary);margin:8px 0 0">
+        Cells show avg P&amp;L% · win rate · n. Builds as you close SELL/TRIM recs that were tagged with an entry driver.
+      </p>
+    </div>`;
 }
 
 // ── Execution Alpha card (Sprint 63) ─────────────────────────────────────────
