@@ -44,6 +44,59 @@ _calib_lock  = threading.Lock()
 
 bp = Blueprint("learning", __name__)
 
+# ── Thesis Tracking (Sprint 67) ───────────────────────────────────────────────
+# Structured entry-driver taxonomy. Mirrors the BUY-side counterpart of
+# sell_primary_driver and aligns with indicators.FACTOR_WEIGHTS so the
+# thesis-accuracy matrix ties back to the scanner's scoring factors.
+ENTRY_DRIVERS = frozenset({
+    "mean_reversion",      # oversold bounce: RSI low / price at lower BB
+    "momentum_breakout",   # volume + price thrust above resistance
+    "trend_pullback",      # established uptrend (ADX strong), buying a dip
+    "fundamental_value",   # cheap on PE / high yield vs RBA — non-technical
+    "macro_tailwind",      # sector rotation / commodity move — non-technical
+})
+
+
+def classify_entry_driver(sig: dict | None) -> str:
+    """Deterministically infer the dominant TECHNICAL entry driver from a signal
+    snapshot (the entry_signals_json shape: rsi_14, bb_pct_b, adx_14, atr_pct,
+    return_5d, return_20d).
+
+    Used to backfill historical BUY/TOP_UP rows for free (no Claude spend) and as
+    a cross-check against Claude's live primary_entry_driver tag.
+
+    fundamental_value / macro_tailwind cannot be inferred from price signals
+    alone, so this returns the best *technical* match or "unknown".
+    """
+    if not sig:
+        return "unknown"
+
+    def _f(key):
+        v = sig.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    rsi = _f("rsi_14")
+    bb  = _f("bb_pct_b")
+    adx = _f("adx_14")
+    r5  = _f("return_5d")
+    r20 = _f("return_20d")
+
+    # mean_reversion: oversold and/or sitting at the lower Bollinger band.
+    if (rsi is not None and rsi < 35) or (bb is not None and bb < 0.15):
+        return "mean_reversion"
+    # trend_pullback: strong trend (ADX) in an up 20d, buying a short-term dip.
+    if (adx is not None and adx > 25 and r20 is not None and r20 > 0
+            and r5 is not None and r5 < 0):
+        return "trend_pullback"
+    # momentum_breakout: recent thrust higher, near/above the upper band.
+    if (r5 is not None and r5 > 4) or (bb is not None and bb > 0.85) \
+            or (r20 is not None and r20 > 8):
+        return "momentum_breakout"
+    return "unknown"
+
 
 def _is_good_loss(r: dict) -> bool:
     """Returns True for losses/breakevenents that reflect disciplined execution,
@@ -247,8 +300,8 @@ def learning_log():
                      entry_signals_json, debate_synthesis_winner,
                      tags, trade_thesis,
                      sell_primary_driver, sell_secondary_factors, sell_urgency,
-                     alternative_ticker)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     alternative_ticker, primary_entry_driver)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -285,6 +338,7 @@ def learning_log():
                 data.get("sell_secondary_factors"),
                 data.get("sell_urgency"),
                 data.get("alternative_ticker"),
+                data.get("primary_entry_driver"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -298,6 +352,46 @@ def learning_log():
                 conn.execute("UPDATE prompt_versions SET total_calls = total_calls + 1 WHERE version=?", (pv,))
 
         return jsonify({"ok": True, "id": row_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/backfill-entry-drivers", methods=["POST"])
+def backfill_entry_drivers():
+    """Deterministically fill primary_entry_driver for historical BUY/TOP_UP rows
+    that have an entry_signals_json snapshot but no driver yet.
+
+    No Claude spend — uses classify_entry_driver() on the stored snapshot. Rows
+    classified 'unknown' are left NULL so a future Claude/manual tag can set them.
+    """
+    try:
+        updated = 0
+        skipped = 0
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT id, entry_signals_json
+                  FROM ai_learning_events
+                 WHERE recommendation IN ('BUY', 'TOP_UP')
+                   AND (primary_entry_driver IS NULL OR primary_entry_driver = '')
+                   AND entry_signals_json IS NOT NULL
+            """).fetchall()
+            for row in rows:
+                try:
+                    sig = json.loads(row["entry_signals_json"] or "{}")
+                except (ValueError, TypeError):
+                    skipped += 1
+                    continue
+                driver = classify_entry_driver(sig)
+                if driver == "unknown":
+                    skipped += 1
+                    continue
+                conn.execute(
+                    "UPDATE ai_learning_events SET primary_entry_driver=? WHERE id=?",
+                    (driver, row["id"]),
+                )
+                updated += 1
+        return jsonify({"ok": True, "updated": updated, "skipped": skipped,
+                        "candidates": len(rows)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

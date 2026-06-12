@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v11';
+const PROMPT_VERSION = '2026-06-v12';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -92,6 +92,30 @@ const ANALYSIS_SYSTEM_PROMPT =
         - Require ONE additional independent bullish factor above the normal 3-factor minimum (i.e. ≥ 4 total)
           to compensate for the missing risk metric.
         - If only 3 independent factors are available for a watchlist BUY, cap confidence at 0.65.
+
+  SECTION 1C — BUY/TOP_UP ENTRY DRIVER TAGGING
+
+  Every BUY or TOP_UP rec MUST include primary_entry_driver: exactly ONE tag naming
+  the single causally-dominant reason you are entering NOW. This is logged so the
+  learning loop can later test whether that specific reason held up at exit.
+
+  Choose the ONE that is the primary thesis (not merely present — dominant):
+    mean_reversion     — buying oversold weakness expecting reversion to the mean.
+                         (RSI < 35, price at/below lower Bollinger band, stretched ATR move down.)
+    momentum_breakout  — buying strength/continuation: price breaking resistance on a
+                         volume thrust; positive 5d/20d return with expanding range.
+    trend_pullback     — buying a dip WITHIN an established uptrend (ADX strong, price
+                         holding a rising EMA); the trend, not the dip, is the thesis.
+    fundamental_value  — primarily valuation/income: low PE, high franked yield vs the
+                         RBA rate, earnings revision — technicals are secondary.
+    macro_tailwind     — primarily a sector-rotation or commodity/macro move that favours
+                         this name; the stock is the vehicle for a top-down view.
+
+  RULES:
+  - Exactly one tag. If two seem to apply, pick the one your reasoning[] leans on most.
+  - The chosen driver must be reflected in factorsUsed[]/reasoning (e.g. a mean_reversion
+    entry must cite the oversold reading; a fundamental_value entry must cite the metric).
+  - SELL/TRIM recs do NOT use this field (they use primary_driver — see Section 2).
 
   SECTION 2 — SELL/TRIM DECISION TAGGING
 
@@ -456,6 +480,8 @@ const ANALYSIS_SYSTEM_PROMPT =
                                SELL/TRIM: (priceRange[0] - holding.avgPrice) x qty - brokerage),
     "taxBenefitEstimate":    number (optional — tax-loss harvest recs only),
     "grossedUpYield":        number (optional — income recs only, annualised after franking gross-up),
+    "primary_entry_driver":  string (BUY/TOP_UP only — required; one of: mean_reversion,
+                               momentum_breakout, trend_pullback, fundamental_value, macro_tailwind),
     "primary_driver":        string (SELL/TRIM only — required; one of the nine primary drivers),
     "secondary_factors":     string[] (SELL/TRIM only — 0-3 secondary tags from the allowed list),
     "urgency":               "immediate" | "routine" | "monitor" (SELL/TRIM only — required),
@@ -506,7 +532,8 @@ const ANALYSIS_SYSTEM_PROMPT =
         "bearCase": "China demand shock sends iron ore to $80/t; BHP rerates to 8x fwdPE.",
         "weightGuidance": "Accumulate (+1-2%)",
         "expectedProfit": 367.50,
-        "netProfit": 329.30
+        "netProfit": 329.30,
+        "primary_entry_driver": "fundamental_value"
       }
     ],
     "summary": "BHP: BUY — iron ore upgrade cycle, weak AUD tailwind. Macro: risk-on; RBA easing bias intact. Cash: deploy 50% to BHP; retain remainder.",

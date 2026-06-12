@@ -278,6 +278,12 @@ _LE_MIGRATIONS = [
     # §9.2 (Sprint 66): one-way slippage rate applied when resolving the virtual
     # outcome — ADV tier (core.adv_slippage) × regime multiplier. Audit field.
     ("virtual_slippage_applied", "REAL"),
+    # Sprint 67 (Thesis Tracking Phase 1): structured entry driver set by Claude at
+    # BUY/TOP_UP generation time — one of: mean_reversion | momentum_breakout |
+    # trend_pullback | fundamental_value | macro_tailwind. Enables the entry-driver ×
+    # exit-verdict thesis-accuracy matrix. entry_signals_json (the technical snapshot)
+    # and trade_thesis (free-text thesis) already exist and are reused as-is.
+    ("primary_entry_driver", "TEXT"),
 ]
 
 

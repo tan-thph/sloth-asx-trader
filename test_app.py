@@ -259,6 +259,86 @@ class TestLearningLoopRoutes(unittest.TestCase):
         resp = self.client.delete("/api/learning/event/9999999")
         self.assertEqual(resp.status_code, 404)
 
+    # ── Sprint 67: Thesis Tracking Phase 1 — entry driver ────────────────────
+
+    def test_log_stores_primary_entry_driver(self):
+        """POST /api/learning/log must persist primary_entry_driver for BUYs."""
+        payload = {
+            "ticker": "FMG", "recommendation": "BUY",
+            "prompt_version": "2026-06-v12", "ai_confidence": 0.71,
+            "primary_entry_driver": "mean_reversion",
+        }
+        r = self.client.post("/api/learning/log",
+                             data=json.dumps(payload),
+                             content_type="application/json")
+        ev_id = json.loads(r.data)["id"]
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT primary_entry_driver FROM ai_learning_events WHERE id=?",
+                (ev_id,)
+            ).fetchone()
+        self.assertEqual(row["primary_entry_driver"], "mean_reversion")
+
+    def test_classify_entry_driver_taxonomy(self):
+        """classify_entry_driver maps signal snapshots to the right driver."""
+        from routes.learning import classify_entry_driver, ENTRY_DRIVERS
+        # Oversold → mean_reversion
+        self.assertEqual(
+            classify_entry_driver({"rsi_14": 28, "bb_pct_b": 0.05}),
+            "mean_reversion")
+        # Lower-band touch with neutral RSI → mean_reversion
+        self.assertEqual(
+            classify_entry_driver({"rsi_14": 48, "bb_pct_b": 0.10}),
+            "mean_reversion")
+        # Strong uptrend, short-term dip → trend_pullback
+        self.assertEqual(
+            classify_entry_driver({"rsi_14": 55, "bb_pct_b": 0.5, "adx_14": 30,
+                                   "return_20d": 6, "return_5d": -1.5}),
+            "trend_pullback")
+        # Recent thrust higher → momentum_breakout
+        self.assertEqual(
+            classify_entry_driver({"rsi_14": 62, "bb_pct_b": 0.9, "return_5d": 6}),
+            "momentum_breakout")
+        # Empty / unclassifiable → unknown
+        self.assertEqual(classify_entry_driver({}), "unknown")
+        self.assertEqual(classify_entry_driver(None), "unknown")
+        # All technical drivers must be in the allowed enum
+        for d in ("mean_reversion", "momentum_breakout", "trend_pullback"):
+            self.assertIn(d, ENTRY_DRIVERS)
+
+    def test_backfill_entry_drivers(self):
+        """Backfill fills primary_entry_driver from entry_signals_json, skips unknown."""
+        # A BUY with an oversold snapshot but no driver yet
+        good = {
+            "ticker": "WBC", "recommendation": "BUY", "ai_confidence": 0.66,
+            "entry_signals_json": json.dumps({"rsi_14": 25, "bb_pct_b": 0.03}),
+        }
+        r = self.client.post("/api/learning/log", data=json.dumps(good),
+                             content_type="application/json")
+        good_id = json.loads(r.data)["id"]
+        # A BUY whose snapshot is unclassifiable → must stay NULL
+        vague = {
+            "ticker": "TLS", "recommendation": "BUY", "ai_confidence": 0.66,
+            "entry_signals_json": json.dumps({"rsi_14": 50, "bb_pct_b": 0.5}),
+        }
+        r2 = self.client.post("/api/learning/log", data=json.dumps(vague),
+                              content_type="application/json")
+        vague_id = json.loads(r2.data)["id"]
+
+        resp = self.client.post("/api/learning/backfill-entry-drivers")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body["ok"])
+        self.assertGreaterEqual(body["updated"], 1)
+
+        with _test_get_db() as conn:
+            g = conn.execute("SELECT primary_entry_driver FROM ai_learning_events WHERE id=?",
+                             (good_id,)).fetchone()
+            v = conn.execute("SELECT primary_entry_driver FROM ai_learning_events WHERE id=?",
+                             (vague_id,)).fetchone()
+        self.assertEqual(g["primary_entry_driver"], "mean_reversion")
+        self.assertIsNone(v["primary_entry_driver"], "unclassifiable snapshot stays NULL")
+
 
 class TestQuoteRoute(unittest.TestCase):
     """Smoke-test /api/quote — just checks response shape, not live price."""
@@ -914,11 +994,30 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_current(self):
-        """PROMPT_VERSION must be bumped to v11 after the §9.3 CorrToHoldings rules."""
+        """PROMPT_VERSION must be bumped to v12 after Sprint 67 entry-driver tagging."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v11'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v11 after §9.3 CorrToHoldings rules")
+        self.assertIn("PROMPT_VERSION = '2026-06-v12'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v12 after Sprint 67 entry-driver tagging")
+
+    def test_entry_driver_in_prompt(self):
+        """Sprint 67: ANALYSIS_SYSTEM_PROMPT must require primary_entry_driver on BUYs."""
+        with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("primary_entry_driver", src,
+                      "prompts.js must instruct Claude to emit primary_entry_driver")
+        for drv in ("mean_reversion", "momentum_breakout", "trend_pullback",
+                    "fundamental_value", "macro_tailwind"):
+            self.assertIn(drv, src, f"entry-driver enum '{drv}' missing from prompt")
+
+    def test_entry_driver_logged_in_analysis_js(self):
+        """Sprint 67: analysis.js must forward primary_entry_driver for BUY/TOP_UP."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("primary_entry_driver", src,
+                      "analysis.js must include primary_entry_driver in the log payload")
+        self.assertIn("_ENTRY_DRIVERS", src,
+                      "analysis.js must normalise the driver against the allowed enum")
 
     def test_calibration_is_context_only_in_system_prompt(self):
         """§8.3 (supersedes Stage 3): the system prompt must present CALIBRATION as

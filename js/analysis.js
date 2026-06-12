@@ -1456,6 +1456,13 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   }
 }
 
+// Sprint 67: allowed structured entry drivers (BUY/TOP_UP). Mirrors
+// learning.ENTRY_DRIVERS on the backend; used to normalise Claude's tag.
+const _ENTRY_DRIVERS = new Set([
+  'mean_reversion', 'momentum_breakout', 'trend_pullback',
+  'fundamental_value', 'macro_tailwind',
+]);
+
 // ── Learning Loop: log recommendations to backend ────────────────────────────
 // Fire-and-forget: called after cappedDedupedRecs is finalised.
 // Stores _learningId on each rec so markExecuted / markSkipped can update it.
@@ -1551,6 +1558,13 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
           sell_urgency:           r.urgency           ?? null,
           // Sprint 37: Gap 7 — log alternativeTicker for better_opportunity cross-check
           alternative_ticker:     r.alternativeTicker ?? null,
+        } : {}),
+        // Sprint 67: BUY/TOP_UP structured entry driver (set by Claude). Normalised
+        // to the allowed enum so a stray value lands as null rather than polluting
+        // the thesis-accuracy matrix; backfill can fill nulls deterministically.
+        ...(r.action === 'BUY' || r.action === 'TOP_UP' ? {
+          primary_entry_driver: _ENTRY_DRIVERS.has(r.primary_entry_driver)
+            ? r.primary_entry_driver : null,
         } : {}),
       };
       const resp = await fetch(`${API}/api/learning/log`, {
