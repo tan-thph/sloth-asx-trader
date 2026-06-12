@@ -1035,6 +1035,7 @@ function executeIntradayTrade(recId) {
     const intradayBuyEntry = {
       id:          Date.now(),
       date:        todayStr(),
+      timestamp:   nowSydney(),
       ticker:      rec.ticker,
       action:      'BUY',
       qty,
@@ -1045,6 +1046,8 @@ function executeIntradayTrade(recId) {
       status:      'open',
       sector,
       account:     'trading',
+      recId:       rec.id,
+      recExecuted: true,
       notes:       'Intraday BUY',
       entrySignals: {
         rsi_14:    _itSig.rsi_14    ?? null,

@@ -232,7 +232,11 @@ function renderJournal() {
                 : (t.parcelId
                     ? `<span class="badge badge-executed" title="Parcel #${t.parcelId}">P#${t.parcelId}</span>`
                     : `<span class="badge badge-pending" title="Click ⟳ Reconcile to fix">Missing</span>`);
-              const matchedRec = t.recId ? state.recHistory.find(r => r.id === t.recId) : null;
+              const matchedRec = t.recId
+                ? (state.recHistory.find(r => r.id === t.recId)
+                   || (state.dayTrading?.recommendations || []).find(r => r.id === t.recId)
+                   || (state.intraday?.recommendations   || []).find(r => r.id === t.recId))
+                : null;
               return `<tr>
                 <td class="text-xs">${t.date}</td>
                 <td class="text-xs text-muted">${t.timestamp||'&mdash;'}</td>

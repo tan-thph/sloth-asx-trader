@@ -329,6 +329,7 @@ function executeDayTrade(recId) {
       ? state.cgtParcels[state.cgtParcels.length - 1]
       : null;
 
+    const _swingSig = (state.liveSignals && state.liveSignals[rec.ticker]) || {};
     const entry = {
       id:          Date.now(),
       date:        todayStr(),
@@ -347,6 +348,15 @@ function executeDayTrade(recId) {
       recId:       rec.id,
       recExecuted: true,
       notes:       `SwingTrade | Target:$${rec.target} | Stop:$${rec.stopLoss} | R:R ${rec.rrRatio?.toFixed(1)}x | Hold:${rec.holdDays}d`,
+      entrySignals: {
+        rsi_14:    _swingSig.rsi_14    ?? null,
+        bb_pct_b:  _swingSig.bb_pct_b  ?? null,
+        adx_14:    _swingSig.adx ?? _swingSig.adx_14 ?? null,
+        atr_pct:   _swingSig.atr_pct   ?? null,
+        return_5d: _swingSig.return_5d ?? null,
+        return_20d:_swingSig.return_20d ?? null,
+        price:     parseFloat(entryPrice.toFixed(3)),
+      },
     };
     state.tradeJournal.unshift(entry);
     state.cash -= cost;   // applyBuyToPortfolio does not update cash; deduct manually
