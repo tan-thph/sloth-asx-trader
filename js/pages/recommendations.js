@@ -1348,8 +1348,8 @@ function markExecuted(id, execPrice, execFee, execQty) {
       ? +((realizedPnl / (entryP * qty)) * 100).toFixed(2) : null;
     const outcome = realizedPnl != null
       ? (realizedPnl > 0 ? 'win' : realizedPnl < 0 ? 'loss' : 'breakeven') : null;
-    const holdDays = (tradeEntry.date && today)
-      ? Math.max(0, Math.round((new Date(today) - new Date(tradeEntry.date)) / 86400000))
+    const holdDays = (tradeEntry.date && today && typeof parseDate === 'function')
+      ? Math.max(0, Math.round((parseDate(today).getTime() - parseDate(tradeEntry.date).getTime()) / 86400000))
       : null;
     const currentRegime = typeof state._lastRegime === 'string' ? state._lastRegime : null;
     const sector = rec.sector || (typeof getPortfolioHolding === 'function'

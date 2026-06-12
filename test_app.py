@@ -2623,18 +2623,26 @@ class TestIntradayStrategy(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_intraday_entry_window_gate(self):
-        """_in_entry_window must return False for times outside 10:45–15:00 AEST."""
+        """_in_entry_window must return False for times outside 10:45–15:00 Sydney."""
         import unittest.mock as _mock
-        from routes.intraday import _in_entry_window
         import datetime
+        from routes import intraday as _intraday_mod
 
-        # Mock UTC time such that AEST = 10:30 (before window)
-        fake_utc = datetime.datetime(2026, 5, 28, 0, 30, 0)  # 00:30 UTC = 10:30 AEST
+        # Use real aware datetimes so the minutes comparison always works.
+        _tz = _intraday_mod._SYDNEY_TZ
+        fake_before = datetime.datetime(2026, 5, 28, 10, 30, 0, tzinfo=_tz)
+        fake_inside = datetime.datetime(2026, 5, 28, 11,  0, 0, tzinfo=_tz)
+        fake_after  = datetime.datetime(2026, 5, 28, 15,  5, 0, tzinfo=_tz)
+
         with _mock.patch("routes.intraday.datetime") as mock_dt:
-            mock_dt.utcnow.return_value = fake_utc
-            mock_dt.side_effect = lambda *a, **kw: datetime.datetime(*a, **kw)
-            result = _in_entry_window()
-        self.assertFalse(result)
+            mock_dt.now.return_value = fake_before
+            self.assertFalse(_intraday_mod._in_entry_window())
+
+            mock_dt.now.return_value = fake_inside
+            self.assertTrue(_intraday_mod._in_entry_window())
+
+            mock_dt.now.return_value = fake_after
+            self.assertFalse(_intraday_mod._in_entry_window())
 
     def test_score_setup_zero_when_no_signals(self):
         """_score_setup must return 0 when no signals are present."""

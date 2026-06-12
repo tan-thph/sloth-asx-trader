@@ -13,6 +13,12 @@ import json
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FutureTimeout
 from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo as _ZoneInfo  # Python 3.8
+
+_SYDNEY_TZ = _ZoneInfo('Australia/Sydney')
 
 import numpy as np
 import pandas as pd
@@ -68,16 +74,16 @@ def _filter_today_bars(hist: pd.DataFrame) -> pd.DataFrame:
     Falls back to the last 73 rows (one full ASX trading day of 5m bars)
     if filtering produces fewer than 3 bars.
     """
-    today_aest = (datetime.utcnow() + timedelta(hours=10)).date()
+    today_sydney = datetime.now(_SYDNEY_TZ).date()
     try:
         idx = pd.DatetimeIndex(hist.index)
         if idx.tz is not None:
-            # tz-aware index — .date() gives the local date at each timestamp's tz
-            dates = [ts.date() for ts in idx]
+            # tz-aware index — convert to Sydney local before extracting date
+            dates = [ts.astimezone(_SYDNEY_TZ).date() for ts in idx]
         else:
-            # tz-naive — assume UTC, shift +10h for AEST
-            dates = [(pd.Timestamp(ts) + pd.Timedelta(hours=10)).date() for ts in idx]
-        mask = [d == today_aest for d in dates]
+            # tz-naive — assume UTC, convert to Sydney local (handles AEDT offset too)
+            dates = [pd.Timestamp(ts, tz='UTC').astimezone(_SYDNEY_TZ).date() for ts in idx]
+        mask = [d == today_sydney for d in dates]
         result = hist.loc[mask]
         if len(result) >= 3:
             return result
@@ -89,9 +95,9 @@ def _filter_today_bars(hist: pd.DataFrame) -> pd.DataFrame:
 # ── Entry window check ────────────────────────────────────────────────────────
 
 def _in_entry_window() -> bool:
-    """True between 10:45 and 15:00 AEST (minutes since midnight: 645–899)."""
-    now_aest = datetime.utcnow() + timedelta(hours=10)
-    mins = now_aest.hour * 60 + now_aest.minute
+    """True between 10:45 and 15:00 Sydney local time (handles AEST/AEDT automatically)."""
+    now_sydney = datetime.now(_SYDNEY_TZ)
+    mins = now_sydney.hour * 60 + now_sydney.minute
     return 645 <= mins < 900   # 10:45 = 645, 15:00 = 900
 
 
@@ -264,8 +270,8 @@ def intraday_scan():
     # disable VWAP-Discount setups (Mode B). Only Mode A (VWAP Recapture) remains
     # enabled in future — for now, all passes are blocked since only Mode B is implemented.
     spi_chg = float(body.get('spi_chg', 0) or 0)
-    _now_aest = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=10)))
-    _spi_defensive = spi_chg <= -1.5 and _now_aest.hour < 11
+    _now_sydney = datetime.now(_SYDNEY_TZ)
+    _spi_defensive = spi_chg <= -1.5 and _now_sydney.hour < 11
 
     if not tickers:
         return jsonify({}), 200

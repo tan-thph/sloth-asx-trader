@@ -80,6 +80,8 @@ function alertHighConviction(recs) {
 // ── Price alerts: stop / target hits on open AI recs ─────────────────────────
 // Called after every live price refresh (prices.js → refreshPrices).
 // Uses portfolio holding currentPrice as the live price source.
+// Direction-aware: BUY/TOP_UP use long frame (stop below, target above);
+// SELL/TRIM use short frame (stop above, target below). Re-arms after 2% retreat.
 
 function checkRecStopTargetAlerts() {
   const recs = state.recHistory || [];
@@ -90,31 +92,46 @@ function checkRecStopTargetAlerts() {
     if (h.ticker && h.currentPrice) priceMap[h.ticker] = h.currentPrice;
   }
 
-  // Find open executed recs that have a stop or target
-  const openRecs = recs.filter(r => r.executed && (r.outcome === 'open' || !r.outcome));
+  // Find open executed recs — skip any already closed in the journal so SELL/TRIM
+  // recs that closed immediately don't fire spurious stop alerts on the next refresh.
+  const closedJournalTickers = new Set(
+    (state.tradeJournal || []).filter(t => t.status === 'closed').map(t => t.recId)
+  );
+  const openRecs = recs.filter(r =>
+    r.executed && (r.outcome === 'open' || !r.outcome) && !closedJournalTickers.has(r.id)
+  );
 
   let anyFired = false;
   openRecs.forEach(r => {
     const price = priceMap[r.ticker] ?? priceMap[r.ticker + '.AX'];
     if (price == null) return;
 
+    // Direction: BUY/TOP_UP hold long (stop below, target above).
+    // SELL/TRIM hold short (stop above entry, target below) — invert the comparisons.
+    const isLong = !r.action || r.action === 'BUY' || r.action === 'TOP_UP';
+
     // Skip if we already alerted at this level — prevents firing on every refresh.
-    // Re-arm only when price re-enters the safe band (>5% buffer past trigger).
-    if (r.stopLoss && price <= r.stopLoss) {
+    // Re-arm only when price re-enters the safe band (2% buffer past trigger).
+    const stopHit    = isLong ? (r.stopLoss && price <= r.stopLoss)
+                               : (r.stopLoss && price >= r.stopLoss);
+    const targetHit  = isLong ? (r.target && price >= r.target)
+                               : (r.target && price <= r.target);
+
+    if (stopHit) {
       if (r._stopAlertedAt) return;
       fireAlert(
         `🛑 Stop hit: ${r.ticker}`,
-        `Live price $${price.toFixed(2)} ≤ stop $${r.stopLoss.toFixed(2)}. Consider exiting.`,
+        `Live price $${price.toFixed(2)} ${isLong ? '≤' : '≥'} stop $${r.stopLoss.toFixed(2)}. Consider exiting.`,
         `sloth-stop-${r.ticker}`
       );
       _proposeOutcomeRecording(r, 'stop', price);
       r._stopAlertedAt = new Date().toISOString();
       anyFired = true;
-    } else if (r.target && price >= r.target) {
+    } else if (targetHit) {
       if (r._targetAlertedAt) return;
       fireAlert(
         `✅ Target hit: ${r.ticker}`,
-        `Live price $${price.toFixed(2)} ≥ target $${r.target.toFixed(2)}. Consider taking profits.`,
+        `Live price $${price.toFixed(2)} ${isLong ? '≥' : '≤'} target $${r.target.toFixed(2)}. Consider taking profits.`,
         `sloth-target-${r.ticker}`
       );
       _proposeOutcomeRecording(r, 'target', price);
@@ -122,8 +139,10 @@ function checkRecStopTargetAlerts() {
       anyFired = true;
     } else {
       // Price retreated from trigger zone — re-arm so next breach alerts again.
-      if (r._stopAlertedAt   && r.stopLoss && price > r.stopLoss * 1.02) r._stopAlertedAt   = null;
-      if (r._targetAlertedAt && r.target   && price < r.target   * 0.98) r._targetAlertedAt = null;
+      const stopCleared   = isLong ? price > r.stopLoss * 1.02 : price < r.stopLoss * 0.98;
+      const targetCleared = isLong ? price < r.target   * 0.98 : price > r.target   * 1.02;
+      if (r._stopAlertedAt   && r.stopLoss && stopCleared)   r._stopAlertedAt   = null;
+      if (r._targetAlertedAt && r.target   && targetCleared) r._targetAlertedAt = null;
     }
   });
   if (anyFired && typeof scheduleSave === 'function') scheduleSave();
@@ -429,11 +448,15 @@ const _intradayClosedAlertedAt = {};  // posId → ISO timestamp (session-scoped
 function checkIntradayCloseouts() {
   if (!state.intraday || !(state.intraday.openPositions || []).length) return;
 
-  // Determine current AEST time in minutes since midnight (UTC+10 approx)
-  const now  = new Date();
-  const aest = new Date(now.getTime() + 10 * 3_600_000);
-  const hhmm = aest.getUTCHours() * 60 + aest.getUTCMinutes();
-  if (hhmm < 900) return;   // before 15:00 AEST — nothing to do yet
+  // Determine current Sydney local time in minutes since midnight.
+  // Uses Intl so the correct offset is used in both AEST (UTC+10) and AEDT (UTC+11).
+  const _sydneyParts = new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Sydney', hour: 'numeric', minute: 'numeric', hour12: false,
+  }).formatToParts(new Date());
+  const _sHour = parseInt((_sydneyParts.find(p => p.type === 'hour')   || {}).value || '0', 10);
+  const _sMin  = parseInt((_sydneyParts.find(p => p.type === 'minute') || {}).value || '0', 10);
+  const hhmm = _sHour * 60 + _sMin;
+  if (hhmm < 900) return;   // before 15:00 Sydney — nothing to do yet
 
   for (const pos of state.intraday.openPositions) {
     if (_intradayClosedAlertedAt[pos.id]) continue;   // already alerted this position

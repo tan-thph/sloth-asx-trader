@@ -118,7 +118,7 @@ async function saveStateToDb() {
         tradeJournal: state.tradeJournal,
         recHistory: state.recHistory,
         recommendations: state.recommendations,
-        settings: state.settings,
+        settings: (({ apiKey: _omit, ...rest }) => rest)(state.settings || {}),
         activityLog: _schedulerLog,
         portfolioHistory: state.portfolioHistory,
         cgtParcels: state.cgtParcels,

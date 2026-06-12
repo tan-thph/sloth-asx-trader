@@ -457,7 +457,8 @@ async function runAnalysis() {
   const withFeedback = state.recHistory.slice(5).filter(r => r.feedback && !withPnl.includes(r)).slice(0, 2);
   const recentRecs = [...new Set([...last5, ...withPnl, ...withFeedback])];
   const recCtx = recentRecs.length ? '\n\nRECENT RECOMMENDATION HISTORY (last 5 + key outcomes):\n' + recentRecs.map(r => {
-    const daysAgo = Math.floor((Date.now() - new Date(r.date)) / 86400000);
+    const _rDate = typeof parseDate === 'function' ? parseDate(r.date) : new Date(r.date);
+    const daysAgo = _rDate ? Math.floor((Date.now() - _rDate.getTime()) / 86400000) : '?';
     return `${r.date} (${daysAgo}d ago) ${r.action} ${r.ticker} @ $${r.priceRange?.[0]||'?'} → target $${r.target||'?'} | conf=${fmt(r.confidence*100,0)}% | outcome=${r.outcome||'open'} | actualPnL=${r.actualProfit!=null?'$'+fmt(r.actualProfit):'pending'}${r.feedback?' | FEEDBACK: "'+r.feedback+'"':''}`;
   }).join('\n') : '';
 
@@ -782,24 +783,23 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   // ── Regime transition detection ───────────────────────────────────────────
   // Track when the regime last changed so Claude can discount calibration data
   // that predates the transition (it may come from a prior market cycle).
+  // Capture prev BEFORE updating so the transition note can compare old vs new.
+  const _prevKnownRegime = state.lastKnownRegime;
   if (_activeRegime && _activeRegime !== 'unknown') {
-    const prev = state.lastKnownRegime;
-    if (prev && prev !== _activeRegime) {
+    if (_prevKnownRegime && _prevKnownRegime !== _activeRegime) {
       // Regime just changed — record the transition timestamp
-      state.lastKnownRegime = _activeRegime;
       state.regimeChangedAt = Date.now();
-    } else if (!prev) {
-      state.lastKnownRegime = _activeRegime;
     }
+    state.lastKnownRegime = _activeRegime;
   }
 
   // Inject calibration, regime, and (optional) debate into the final user message
   const _regimeDaysAgo = state.regimeChangedAt
     ? Math.floor((Date.now() - state.regimeChangedAt) / 86_400_000) : null;
   const _regimeTransitionNote =
-    (state.lastKnownRegime && state.lastKnownRegime !== _activeRegime &&
+    (_prevKnownRegime && _prevKnownRegime !== _activeRegime &&
      _regimeDaysAgo !== null && _regimeDaysAgo <= 7)
-      ? ` [TRANSITION: ${state.lastKnownRegime}→${_activeRegime} ${_regimeDaysAgo}d ago — calibration data for ${_activeRegime} may be from prior cycle]`
+      ? ` [TRANSITION: ${_prevKnownRegime}→${_activeRegime} ${_regimeDaysAgo}d ago — calibration data for ${_activeRegime} may be from prior cycle]`
       : '';
 
   // Regime-aware stop multiple for R:R guidance (Fix 3B)
@@ -1328,7 +1328,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         atr_14:      _sig.atr_14,
         adx:         _sig.adx,
         obv_trend:   _sig.obv_trend,
-        bb_pctb:     _sig.bb_pctb,
+        bb_pct_b:    _sig.bb_pct_b,
         score:       _sig.score,
         macd_signal: _sig.macd_signal,
         volume_ratio:_sig.volume_ratio,

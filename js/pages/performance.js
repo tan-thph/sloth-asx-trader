@@ -754,8 +754,8 @@ async function syncClosedTradesToLearningLoop() {
       const entryPrice = jMatch.entryPrice || jMatch.avgPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
       const qty = jMatch.qty || r.qty || 1;
       const pnlPct = entryPrice && qty ? (jMatch.pnl / (entryPrice * qty)) * 100 : null;
-      const holdDays = (jMatch.date && jMatch.closeDate)
-        ? Math.max(0, Math.round((new Date(jMatch.closeDate) - new Date(jMatch.date)) / 86400000))
+      const holdDays = (jMatch.date && jMatch.closeDate && typeof parseDate === 'function')
+        ? Math.max(0, Math.round((parseDate(jMatch.closeDate).getTime() - parseDate(jMatch.date).getTime()) / 86400000))
         : null;
       const holding = typeof getPortfolioHolding === 'function' ? getPortfolioHolding(r.ticker) : null;
       const sector = r.sector || holding?.sector || null;
@@ -881,14 +881,14 @@ function computeReconciledRecHistory() {
       t.recId === r.id && t.status === 'closed' && t.pnl != null
     );
     if (journalMatch) {
-      const outcome = journalMatch.pnl > 0 ? 'win' : journalMatch.pnl < 0 ? 'loss' : 'open';
+      const outcome = journalMatch.pnl > 0 ? 'win' : journalMatch.pnl < 0 ? 'loss' : 'breakeven';
       return { ...r, outcome, actualProfit: journalMatch.pnl };
     }
     const sameDayTrade = state.tradeJournal.find(t =>
       t.ticker === r.ticker && t.date === r.date && t.status === 'closed' && t.pnl != null
     );
     if (sameDayTrade) {
-      const outcome = sameDayTrade.pnl > 0 ? 'win' : sameDayTrade.pnl < 0 ? 'loss' : 'open';
+      const outcome = sameDayTrade.pnl > 0 ? 'win' : sameDayTrade.pnl < 0 ? 'loss' : 'breakeven';
       return { ...r, outcome, actualProfit: sameDayTrade.pnl };
     }
     return r;
