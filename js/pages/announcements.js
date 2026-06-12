@@ -372,6 +372,32 @@ function _renderAnnFilters(items) {
     </div>`;
 }
 
+// Group the integer part of a numeric string with thousands separators,
+// preserving sign and decimals. "24500000" → "24,500,000"; "2.50" → "2.50".
+function _groupInt(numStr) {
+  const sign = (numStr[0] === '-' || numStr[0] === '+') ? numStr[0] : '';
+  const body = sign ? numStr.slice(1) : numStr;
+  const dot = body.indexOf('.');
+  const intPart = dot === -1 ? body : body.slice(0, dot);
+  const decPart = dot === -1 ? '' : body.slice(dot);  // includes the '.'
+  return sign + intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + decPart;
+}
+
+// Format a key-figure value: add thousands separators to plain numbers (with an
+// optional currency prefix like $/US$/A$ and/or a trailing %), but leave dates,
+// ranges, and free text untouched. Always HTML-escapes the result.
+function _fmtKeyFig(v) {
+  if (v == null || v === '') return '';
+  const s = String(v).trim();
+  // prefix = leading non-numeric ($, US$, A$ …); core = the number; suffix = optional %
+  const m = s.match(/^([^\d+\-.]*)([+-]?\d[\d,]*(?:\.\d+)?)(\s*%?)$/);
+  if (m) {
+    const core = m[2].replace(/,/g, '');
+    return escapeHTML(m[1]) + _groupInt(core) + escapeHTML(m[3]);
+  }
+  return escapeHTML(s);
+}
+
 // ── Single announcement card ──────────────────────────────────
 function _renderAnnCard(ann) {
   const impact        = ann.impact_score != null ? Number(ann.impact_score) : null;
@@ -452,8 +478,8 @@ function _renderAnnCard(ann) {
                        background:var(--bg-primary);border:1px solid rgba(59,130,246,0.25);
                        border-radius:6px;min-width:60px">
             <span style="font-size:9px;color:var(--text-muted);text-transform:uppercase;
-                         letter-spacing:0.4px;white-space:nowrap">${k}</span>
-            <span style="font-size:12px;font-weight:700;color:#3b82f6;white-space:nowrap">${v}</span>
+                         letter-spacing:0.4px;white-space:nowrap">${escapeHTML(String(k))}</span>
+            <span style="font-size:12px;font-weight:700;color:#3b82f6;white-space:nowrap">${_fmtKeyFig(v)}</span>
           </span>`).join('')}
       </div>`
     : '';
