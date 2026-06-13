@@ -1336,6 +1336,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
     journalId: tradeEntry.id,
     _learningId: rec._learningId || null,
     _thesis: rec._thesis || null,
+    regime: rec._genRegime || null,
   };
   state.recHistory.unshift(histEntry);
 
@@ -1493,6 +1494,7 @@ function markSkipped(id) {
     stopLoss: rec.stopLoss, expectedProfit: rec.expectedProfit, netProfit: rec.netProfit,
     executed: false, executedAt: null, outcome: 'skipped', actualProfit: null,
     feedback: rec.feedback || null, _learningId: rec._learningId || null,
+    regime: rec._genRegime || null,
   });
   // Update learning loop: mark event as skipped (fire-and-forget)
   if (rec._learningId && state.serverOk) {

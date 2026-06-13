@@ -117,11 +117,11 @@ function _buildAttributionCard(closedTrades) {
       </tr>`;
     }).join('');
 
-  // Regime attribution (match via recId → recHistory.regime)
+  // Regime attribution (match via recId → recHistory.regime / _genRegime)
   const regimeMap = {};
   closedTrades.forEach(t => {
     const matchedRec = t.recId ? state.recHistory.find(r => r.id === t.recId) : null;
-    const regime = matchedRec?.regime || 'unknown';
+    const regime = matchedRec?.regime || matchedRec?._genRegime || 'unknown';
     if (!regimeMap[regime]) regimeMap[regime] = { wins: 0, losses: 0, pnl: 0 };
     if (t.pnl > 0)  regimeMap[regime].wins++;
     if (t.pnl < 0)  regimeMap[regime].losses++;
