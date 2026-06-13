@@ -713,9 +713,16 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   // Derive sectors + tickers from current portfolio for per-ticker memory branch.
   const _portfolioSectors = [...new Set(mergedPortfolio().map(h => h.sector).filter(Boolean))];
   const _portfolioTickers = mergedPortfolio().map(h => h.ticker).filter(Boolean);
+  // Sprint 71 Phase 3D: the full portfolio analysis is the DEEP feed path —
+  // request the token-heavy exemplar/playbook/cross-tab blocks. The cached system
+  // prompt means this learning block is the only marginal token cost. High-frequency
+  // intraday refreshes (if/when wired) should pass { deep: false } for the lean feed.
   const _calibrationNote = typeof fetchCalibrationBlock === 'function'
-    ? await fetchCalibrationBlock(_activeRegime, _portfolioSectors, _portfolioTickers)
+    ? await fetchCalibrationBlock(_activeRegime, _portfolioSectors, _portfolioTickers, { deep: true })
     : '';
+  // Phase 3A: concrete few-shot exemplars from own history (stashed by the fetch above).
+  const _exemplarsBlock = (typeof buildExemplarsBlock === 'function')
+    ? buildExemplarsBlock(window._calibExemplars) : '';
 
   // ── Historical lessons — contextual rules distilled from past adjudications ──
   // Fetches lessons matching any combo of (portfolio tickers, sectors, active regime).
@@ -818,7 +825,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   const fullUserMessage = userMessage
     .replace('__REGIME_PLACEHOLDER__', regimeLine)
     .replace('__CONF_PLACEHOLDER__', ((_regimeResult.confidence ?? 0) * 100).toFixed(0) + '%')
-    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote + _lessonsBlock)
+    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote + _exemplarsBlock + _lessonsBlock)
     .replace('__STOP_MULT_PLACEHOLDER__', String(_regimeStopMult))
     + _debatePreamble;
 
@@ -1549,15 +1556,49 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         ? buildDebateSummary(_debate)
         : null;
 
-      // entry_signals_json: compact snapshot of 6 key signals at log time for postmortem quality
+      // entry_signals_json: wide snapshot of the entry signature at log time (Sprint 71 Phase 1A).
+      // Keeps the original 6 fields + adds price-location/volume/trend/RS/setup/fundamental fields.
+      // All null-safe — the deterministic classifier treats the new fields as optional.
       const _sigs = state.liveSignals?.[r.ticker];
+      // pct distance helper: (price/ref − 1) × 100, null when either input is missing/zero.
+      const _pct = (px, ref) =>
+        (typeof px === 'number' && typeof ref === 'number' && ref)
+          ? +(((px / ref) - 1) * 100).toFixed(2)
+          : null;
       const entry_signals_json = _sigs ? JSON.stringify({
-        rsi_14:    _sigs.rsi_14   ?? null,
-        bb_pct_b:  _sigs.bb_pct_b ?? null,
-        adx_14:    _sigs.adx      ?? null,
-        atr_pct:   _sigs.atr_pct  ?? null,
-        return_5d: _sigs.return_5d  ?? null,
+        // — original 6 —
+        rsi_14:     _sigs.rsi_14   ?? null,
+        bb_pct_b:   _sigs.bb_pct_b ?? null,
+        adx_14:     _sigs.adx      ?? null,
+        atr_pct:    _sigs.atr_pct  ?? null,
+        return_5d:  _sigs.return_5d  ?? null,
         return_20d: _sigs.return_20d ?? null,
+        // — price location —
+        px_vs_sma20:   _pct(_sigs.current_price, _sigs.sma_20),
+        px_vs_sma50:   _pct(_sigs.current_price, _sigs.sma_50),
+        px_vs_sma200:  _pct(_sigs.current_price, _sigs.sma_200),
+        pct_from_high60: _pct(_sigs.current_price, _sigs.high_60d),
+        pct_from_low60:  _pct(_sigs.current_price, _sigs.low_60d),
+        // — volume —
+        rvol: (typeof _sigs.volume_today === 'number' && _sigs.volume_avg_20)
+                ? +(_sigs.volume_today / _sigs.volume_avg_20).toFixed(2) : null,
+        adv_20: _sigs.adv_20 ?? null,
+        // — trend (MACD) —
+        macd_hist:      _sigs.macd_hist      ?? null,
+        macd_hist_prev: _sigs.macd_hist_prev ?? null,
+        macd_bullish:   _sigs.macd_bullish   ?? null,
+        // — relative strength (not currently propagated to liveSignals → usually null) —
+        rs_score:    _sigs.rs_score    ?? null,
+        rs_5d_alpha: _sigs.rs_5d_alpha ?? null,
+        // — setup —
+        setup_score: _sigs.score ?? null,
+        // — fundamentals —
+        forward_pe:      _sigs.forward_pe      ?? null,
+        pb_ratio:        _sigs.pb_ratio        ?? null,
+        dividend_yield:  _sigs.dividend_yield  ?? null,
+        revenue_growth:  _sigs.revenue_growth  ?? null,
+        earnings_growth: _sigs.earnings_growth ?? null,
+        days_to_earnings: _sigs.days_to_earnings ?? null,
       }) : null;
 
       // L6: track synthesizer prediction for calibration feedback over time
@@ -1580,7 +1621,7 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         suggested_stop:      r.stopLoss ?? null,
         suggested_target:    r.target ?? null,
         rr_ratio:            rrRatio != null ? +rrRatio.toFixed(2) : null,
-        sector:              r.sector || holding?.sector || null,
+        sector:              r.sector || holding?.sector || state.liveSignals[r.ticker]?.sector || null,
         was_executed:             false,
         market_context:           (() => {
           const rowC = _corrM[r.ticker] || {};

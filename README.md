@@ -74,7 +74,7 @@ Live signals  →  Regime gate  →  Claude  →  Quant engine  →  Validator  
 
 ### Key concepts worth understanding
 
-- **The Learning Loop.** Every recommendation is logged and tracked to its outcome. Win rates by confidence band and regime are decay-weighted (recent trades count more, and faster in volatile markets) and fed back into *every* future analysis as compact calibration. Over time the system tells Claude where it has been over- or under-confident.
+- **The Learning Loop.** Every recommendation is logged and tracked to its outcome — including the actual price path it travelled (how far it ran against you and in your favour). Win rates by confidence band, regime, and **sector vs the whole market** (always expressed as a delta against your overall baseline — a 55% sector reads as strong in a 45% market and weak in a 65% one) are decay-weighted (recent trades count more, and faster in volatile markets) and fed back into *every* future analysis as compact calibration. At decision time the app even shows Claude a handful of your **own past wins and losses** in similar setups, using your actual entry conditions as the matching key. Over time the system tells Claude where it has been over- or under-confident, and which entry styles actually pay off when their thesis holds.
 - **Thesis Tracking.** Each BUY is tagged with *why* you entered (mean-reversion, momentum breakout, trend pullback, fundamental value, or macro tailwind) plus a technical snapshot. When you later sell, the app compares the original thesis against current conditions and records whether it was **validated, invalidated, or irrelevant** — then aggregates this into a Thesis Accuracy Matrix so you can see which entry styles actually pay off for you.
 - **Virtual outcomes.** Recommendations you *didn't* execute are still price-checked weeks later, so the calibration isn't biased toward only the trades you happened to take.
 - **Regime-aware everything.** Stops, sizing, heat limits, and calibration half-lives all shift with the detected market regime.
@@ -166,36 +166,42 @@ Batch-rank the ASX universe by composite technical score.
 The system's memory. Every rec is tracked to outcome and fed back as calibration.
 - Confidence-band accuracy with decay-weighted win rates and Wilson confidence intervals
 - Regime-adaptive calibration (shorter memory in volatile markets)
+- **Per-sector performance vs the whole market** — every sector win rate is shown as a signed delta against your overall baseline, so a 55% sector reads as strong in a 45% market and weak in a 65% one; historical null sectors are back-filled automatically from a local sector map
 - Virtual-outcome resolution for unexecuted recs
 - Sell-tag accuracy — did exits actually turn out justified?
 - **Thesis Accuracy Matrix** — entry driver × outcome verdict × average P&L
 - Persistent **trading lessons** scoped by ticker, sector, regime, or breadth
-- **Automatic, rule-based tagging & skill scoring** of every closed entry (see below) — reproducible and free, computed from the captured data
+- **Automatic, rule-based tagging & skill scoring** of every closed entry (see below) — reproducible and free, computed from the captured entry/exit data, including the trade's actual price path (MAE/MFE) and entry conditions. A single loss can carry **multiple root-cause tags**.
+- **Concrete past examples fed to the AI** — your recent losses and best wins (matched by entry conditions to your current setup) are surfaced to Claude as few-shot examples during full analysis, alongside a per-style conditional playbook of which entry conditions actually worked for you in this market
+- **Per-driver conditional playbook** — when you have enough closed trades by entry style, the calibration block tells Claude things like "mean_reversion: 61% WR when RSI<30 vs 38% when RSI>45" — so analysis adapts to your own pattern, not generic rules
 - Local **Ollama debate engine** — an *optional* manual second opinion: trade postmortems, skill scoring, and adversarial two-model argument, with an optional cloud adjudicator
-- **Trade Review drawer** — on the Journal page, expand any transaction (AI *or* manual) to see the entry technicals, thesis, drivers, verdict, and outcome side by side
+- **Trade Review drawer** — on the Journal page, expand any transaction (AI *or* manual) to see the entry technicals, thesis, drivers, verdict, MAE/MFE, and outcome side by side
 
 *Use it well:* read the matrix monthly and let the automatic tags do the bookkeeping. The calibration is only as good as the outcome data you give it.
 
 #### How trades get tagged & scored
 
-When a BUY/TOP_UP position closes, the app classifies *why it worked or didn't* and *how much of the result was skill vs luck* — **deterministically, by rule**, from the technical snapshot it captured at entry and exit. Same trade in, same tag out. No AI guessing by default; the local Ollama engine is available only as a manual override (see note below).
+When a BUY/TOP_UP position closes, the app classifies *why it worked or didn't* and *how much of the result was skill vs luck* — **deterministically, by rule**, from the technical snapshot it captured at entry, the snapshot at exit, and the trade's actual price path (the worst drawdown and best gain it reached while you held it). A single loss can carry **several root-cause tags at once** — an overconfident entry with a stop set too tight is both — so you see every applicable lesson, not just the first. Same trade in, same tags out. No AI guessing by default; the local Ollama engine is available only as a manual override (see note below).
 
 **Why it entered — entry drivers** (one per BUY): `mean_reversion` · `momentum_breakout` · `trend_pullback` · `fundamental_value` · `macro_tailwind`.
 
 **Whether that reason survived — exit verdict** (computed by comparing entry vs exit technicals): **validated** (the thesis played out) · **invalidated** (it reversed) · **irrelevant** (the thesis didn't drive the result).
 
-**Error tags** (losses/breakevens only — the first matching rule wins):
+**Error tags** (losses/breakevens only — **all applicable tags are assigned**, comma-separated; most-specific first):
 
 | Tag | Applied when |
 |---|---|
 | `thesis_broken` | The entry thesis was **invalidated** — the technical reason you bought reversed. |
-| `stop_too_tight` | Stopped out by ordinary noise while the thesis was *still intact* (stop sat inside ~1.5× ATR). |
+| `stop_too_tight` | Shaken out by noise while the thesis was still intact. Empirical test (when available): adverse excursion pierced the stop but price recovered ≥50% toward the target. Fallback: stop sat inside ~1.5× ATR. |
+| `missed_catalyst` | Entry crossed an earnings date within 14 days (deterministic check on captured data). For news/events, manual Ollama postmortem only. |
+| `early_exit` | Non-win manual exit where price later reached the target (MFE) or where a mechanical stop/target exit would have done ≥2pp better. |
+| `oversized` / `undersized` | Sizing was explicitly overridden at entry (captured via `checklist_bypasses`). |
 | `overconfident` | Stated confidence was high (≥ 75%) yet the trade lost. |
 | `poor_rr` | Entered with a planned reward:risk below 1.5. |
 | `poor_entry` | Entry was technically stretched for the chosen style (e.g. a "mean-reversion" buy that wasn't actually oversold). |
 | `regime_mismatch` | Bought into a risk-off or panic market. |
 | `none` | A loss with no systematic, learnable error. |
-| `missed_catalyst` / `external_shock` | **Manual only** — these need world knowledge (news, a known event) the rules can't infer, so they're assigned only when you run the Ollama/cloud postmortem. |
+| `external_shock` | **Manual only** — black swan / unpredictable event; needs world knowledge the rules can't infer. |
 
 **Skill score (0–10)** — separates skill from luck using the exit verdict and outcome, then nudges for discipline (letting winners reach target, respecting stops) and calibration (very confident + wrong is penalised):
 
@@ -276,7 +282,7 @@ Everything is configurable from the Settings page — no code editing:
 ## Running Tests
 
 ```bash
-python test_app.py   # 701 backend + integration tests
+python test_app.py   # 758 backend + integration tests
 npm run test:js      # 154 JS unit tests (quant engine, regime classifier, validator, thesis drift)
 ```
 

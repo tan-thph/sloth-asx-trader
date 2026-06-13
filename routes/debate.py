@@ -430,6 +430,8 @@ VALID_PM_TYPES = {
     "overconfident", "missed_catalyst", "regime_mismatch",
     "poor_entry", "stop_too_tight",
     "poor_rr", "external_shock", "thesis_broken", "none",
+    # Sprint 71 Phase 2B — additional deterministically-emitted tags.
+    "early_exit", "oversized", "undersized",
 }
 
 def _flatten_entry_signals(entry_signals_json: str) -> str:

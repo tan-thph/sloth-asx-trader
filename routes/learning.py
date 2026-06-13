@@ -136,13 +136,31 @@ def _sig_get(entry_signals_json, key):
 def classify_error_type_deterministic(row) -> str:
     """Deterministic error_type for a closed loss/breakeven, from real captured data.
 
-    Priority-ordered (most specific / most data-backed first). Returns one tag from
-    VALID_PM_TYPES (minus the two world-knowledge tags) or 'none'. Wins return
-    'none' — a win has no error to learn from.
+    Sprint 71 Phase 2A: returns a COMMA-SEPARATED set of ALL applicable tags,
+    ordered most-specific / most-data-backed → least-specific. A loss can carry
+    several distinct lessons (e.g. an overconfident entry that ALSO had a stop
+    sitting inside normal noise), and collapsing to a single tag threw away signal.
+    Wins / no-error still return 'none' — a win has no entry error to learn from.
+    Every tag is a member of VALID_PM_TYPES.
+
+    Emission order (the order tags appear in the joined string):
+      1. thesis_broken      — entry thesis demonstrably reversed (verdict invalidated)
+      2. stop_too_tight     — empirical (MAE/MFE) first, else ATR-distance heuristic
+      3. missed_catalyst    — earnings fell inside the holding window (partly deterministic)
+      4. early_exit         — manual exit that left a favourable move / mechanical edge on table
+      5. oversized/undersized — sizing-bypass token in checklist_bypasses
+      6. overconfident      — high stated conviction that did not pan out
+      7. poor_rr            — unfavourable planned risk/reward
+      8. poor_entry         — entry technically stretched for the stated driver
+      9. regime_mismatch    — bought into a bearish macro regime
 
     `row` is a sqlite Row or dict exposing: recommendation, outcome_status,
     realized_pnl_pct, ai_confidence, rr_ratio, exit_reason, regime, thesis_verdict,
-    suggested_stop, actual_entry_price, entry_signals_json, primary_entry_driver.
+    suggested_stop, suggested_target, actual_entry_price, entry_signals_json,
+    primary_entry_driver, mae_pct, mfe_pct, exec_mech_pnl_pct, checklist_bypasses,
+    holding_period_days. The MAE/MFE/exec_mech/holding fields are optional — every
+    new tag guards its None values and degrades to the legacy heuristic when data is
+    absent, so cached/legacy rows never raise.
     """
     def _g(key):
         try:
@@ -150,57 +168,141 @@ def classify_error_type_deterministic(row) -> str:
         except (KeyError, IndexError, TypeError):
             return row.get(key) if hasattr(row, "get") else None
 
+    def _fnum(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
     status = (_g("outcome_status") or "").lower()
     if status not in ("loss", "breakeven"):
         return "none"
 
-    rec     = (_g("recommendation") or "").upper()
-    conf    = _g("ai_confidence")
-    rr      = _g("rr_ratio")
-    verdict = (_g("thesis_verdict") or "")
-    exit_r  = (_g("exit_reason") or "")
-    regime  = (_g("regime") or "")
-    driver  = (_g("primary_entry_driver") or "")
-    esj     = _g("entry_signals_json")
+    rec      = (_g("recommendation") or "").upper()
+    conf     = _g("ai_confidence")
+    rr       = _g("rr_ratio")
+    verdict  = (_g("thesis_verdict") or "")
+    exit_r   = (_g("exit_reason") or "")
+    regime   = (_g("regime") or "")
+    driver   = (_g("primary_entry_driver") or "")
+    esj      = _g("entry_signals_json")
+    entry_px = _fnum(_g("actual_entry_price"))
+    stop_px  = _fnum(_g("suggested_stop"))
+    target_px = _fnum(_g("suggested_target"))
+    mae_pct  = _fnum(_g("mae_pct"))
+    mfe_pct  = _fnum(_g("mfe_pct"))
+    mech_pct = _fnum(_g("exec_mech_pnl_pct"))
+    realized = _fnum(_g("realized_pnl_pct"))
+    hold     = _g("holding_period_days")
+    bypasses = (_g("checklist_bypasses") or "").lower()
+
+    tags: list = []
+
+    def _add(tag):
+        if tag not in tags:
+            tags.append(tag)
 
     # 1. thesis_broken — the entry technical thesis demonstrably reversed.
-    #    This is now DATA-BACKED (the entry-vs-exit comparison) rather than guessed.
+    #    DATA-BACKED (the entry-vs-exit comparison) rather than guessed.
     if verdict == "invalidated":
-        return "thesis_broken"
+        _add("thesis_broken")
 
-    # 2. stop_too_tight — stopped out while the thesis was NOT invalidated, and the
-    #    stop sat inside ~1.5×ATR (i.e. shaken out by normal noise, not a real break).
+    # 2. stop_too_tight.
+    #    EMPIRICAL path (Sprint 71 Phase 2B): when MAE/MFE are available, tag it
+    #    when the trade was stopped out while the thesis stayed intact AND price
+    #    later recovered toward the target — i.e. the stop sat *inside* the eventual
+    #    favourable path (the adverse excursion was deeper than the stop, yet MFE
+    #    shows price subsequently climbed back toward where the target sat). The
+    #    target-distance proxy: MFE recovered to ≥50% of the planned target move.
+    #    Falls back to the ATR-distance heuristic when MAE/MFE are null.
     if exit_r == "stop_hit" and verdict in ("validated", "irrelevant", ""):
-        entry_px = _g("actual_entry_price")
-        stop_px  = _g("suggested_stop")
-        atr_pct  = _sig_get(esj, "atr_pct")
-        if entry_px and stop_px and float(entry_px) > 0 and atr_pct and atr_pct > 0:
-            stop_dist_pct = abs(float(entry_px) - float(stop_px)) / float(entry_px) * 100
+        atr_pct = _sig_get(esj, "atr_pct")
+        empirical_done = False
+        if mae_pct is not None and mfe_pct is not None and entry_px:
+            # Stop-distance as a % of entry (how far below entry the stop sat).
+            stop_dist_pct = (abs(entry_px - stop_px) / entry_px * 100) if stop_px else None
+            # Planned target move as a % of entry (favourable direction).
+            target_move_pct = ((target_px - entry_px) / entry_px * 100) if target_px else None
+            # The stop sat inside the eventual favourable path when the worst
+            # drawdown (MAE) pierced the stop level, yet best excursion (MFE)
+            # later recovered toward target.
+            if stop_dist_pct is not None and mae_pct <= -stop_dist_pct:
+                recovered = (
+                    (target_move_pct is not None and mfe_pct >= 0.5 * target_move_pct)
+                    or (target_move_pct is None and mfe_pct >= max(0.5 * stop_dist_pct, 1.0))
+                )
+                if recovered:
+                    _add("stop_too_tight")
+                empirical_done = True
+        if not empirical_done and entry_px and stop_px and entry_px > 0 and atr_pct and atr_pct > 0:
+            # Legacy ATR-distance heuristic: stop inside ~1.5×ATR ⇒ likely shaken
+            # out by normal noise rather than a genuine thesis break.
+            stop_dist_pct = abs(entry_px - stop_px) / entry_px * 100
             if stop_dist_pct < 1.5 * atr_pct:
-                return "stop_too_tight"
+                _add("stop_too_tight")
 
-    # 3. overconfident — high stated conviction that did not pan out.
-    if conf is not None and float(conf) >= 0.75:
-        return "overconfident"
+    # 3. missed_catalyst — partly deterministic (Sprint 71 Phase 2B): an earnings
+    #    event fell INSIDE the holding window and wasn't flagged at entry. World-
+    #    knowledge catalysts (news, index events) remain LLM-only.
+    dte = _sig_get(esj, "days_to_earnings")
+    if dte is not None:
+        try:
+            hold_days = int(hold) if hold is not None else None
+        except (TypeError, ValueError):
+            hold_days = None
+        if hold_days is not None and 0 <= dte <= hold_days:
+            _add("missed_catalyst")
 
-    # 4. poor_rr — took an unfavourable risk/reward to begin with.
-    if rr is not None and float(rr) < 1.5:
-        return "poor_rr"
+    # 4. early_exit — a manual (discretionary) exit on a non-win where price had
+    #    already offered the planned gain, or the mechanical rules would have done
+    #    materially better. Uses Phase 1 MFE + Phase-0 exec_mech_pnl_pct.
+    if exit_r == "manual":
+        early = False
+        # (a) MFE shows price reached/exceeded the planned target move before exit.
+        if mfe_pct is not None and entry_px and target_px:
+            target_move_pct = (target_px - entry_px) / entry_px * 100
+            if target_move_pct > 0 and mfe_pct >= target_move_pct:
+                early = True
+        # (b) the mechanical exit materially beats the realized P&L (≥2pp better).
+        if mech_pct is not None and realized is not None and mech_pct - realized >= 2.0:
+            early = True
+        if early:
+            _add("early_exit")
 
-    # 5. poor_entry — entry was technically stretched for the stated driver.
+    # 5. oversized / undersized — sizing discipline. Sizing context is not reliably
+    #    captured per-trade, so this is scoped to an explicit sizing bypass token in
+    #    checklist_bypasses (e.g. 'oversized_position' / 'undersized_position' /
+    #    'size_override'). We do NOT infer sizing from P&L — that would fabricate the
+    #    tag. (Limitation noted for Phase 3: richer sizing capture would let us tag
+    #    these from actual qty vs the quant engine's suggested qty.)
+    if bypasses:
+        if any(tok in bypasses for tok in ("oversize", "size_up", "size-up", "over_size")):
+            _add("oversized")
+        if any(tok in bypasses for tok in ("undersize", "size_down", "size-down", "under_size")):
+            _add("undersized")
+
+    # 6. overconfident — high stated conviction that did not pan out.
+    if conf is not None and _fnum(conf) is not None and _fnum(conf) >= 0.75:
+        _add("overconfident")
+
+    # 7. poor_rr — took an unfavourable risk/reward to begin with.
+    if rr is not None and _fnum(rr) is not None and _fnum(rr) < 1.5:
+        _add("poor_rr")
+
+    # 8. poor_entry — entry was technically stretched for the stated driver.
     rsi = _sig_get(esj, "rsi_14")
     bb  = _sig_get(esj, "bb_pct_b")
     if driver == "mean_reversion" and (
             (rsi is not None and rsi > 45) or (bb is not None and bb > 0.45)):
-        return "poor_entry"
+        _add("poor_entry")
     if driver in ("momentum_breakout", "trend_pullback") and bb is not None and bb > 0.95:
-        return "poor_entry"
+        _add("poor_entry")
 
-    # 6. regime_mismatch — bought into a bearish macro regime.
+    # 9. regime_mismatch — bought into a bearish macro regime.
     if rec in ("BUY", "TOP_UP") and regime in ("riskOff", "panic"):
-        return "regime_mismatch"
+        _add("regime_mismatch")
 
-    return "none"
+    return ",".join(tags) if tags else "none"
 
 
 def compute_skill_score_deterministic(row):
@@ -263,6 +365,89 @@ def compute_skill_score_deterministic(row):
     if rr is not None and float(rr) >= 2.0:
         base += 0.25
 
+    # Sprint 71 Phase 2C — path-quality modifier from MAE/MFE (when captured).
+    # A *win* that spent most of the hold deeply underwater (large negative MAE,
+    # little MFE headroom over the realized gain) leans toward luck → small penalty.
+    # A clean win (shallow MAE, comfortable MFE headroom) reflects a well-timed
+    # entry → small bonus. Only applied to wins; losses already carry the verdict
+    # and discipline signal. Guards all None values (legacy rows are unaffected).
+    if win:
+        mae = _g("mae_pct")
+        mfe = _g("mfe_pct")
+        try:
+            mae = float(mae) if mae is not None else None
+            mfe = float(mfe) if mfe is not None else None
+        except (TypeError, ValueError):
+            mae, mfe = None, None
+        if mae is not None and mfe is not None:
+            # Deep-MAE win (drawdown worse than −8%) with thin MFE headroom → luck.
+            if mae <= -8.0 and mfe < 8.0:
+                base -= 0.5
+            # Clean win: shallow drawdown and healthy favourable excursion → skill.
+            elif mae >= -3.0 and mfe >= 5.0:
+                base += 0.5
+
+    return round(max(0.0, min(10.0, base)), 1)
+
+
+def compute_skill_score_fallback(row):
+    """LOWER-TRUST skill score 0–10 for legacy rows that lack a thesis_verdict.
+
+    The primary scorer (compute_skill_score_deterministic) refuses to score a trade
+    with no entry-vs-exit comparison, because the verdict is what separates skill
+    from luck. This fallback produces a *reduced-trust* estimate from observable
+    outcome data only — outcome × R-multiple × exit-discipline — so legacy/uncaptured
+    rows are not silently treated as neutral forever.
+
+    It is DELIBERATELY NOT wired into _resolve_deterministic_tags: a verdict-backed
+    score and a no-verdict estimate must not be stored indistinguishably (that would
+    pollute the Phase 8 skill gate / calibration with lower-confidence numbers). It is
+    exposed for explicit, opt-in use (e.g. a future UI "estimate legacy" action or a
+    separate lower-weight calibration channel) and is unit-tested. Returns None only
+    when there is no usable outcome at all.
+
+    Scoring (centred on 5.0 = neutral):
+      win  → 6.0 base; loss/breakeven → 4.0 base
+      + R-multiple (realized_pnl_pct / planned stop-distance %) nudges ±1.5 max
+      + exit discipline: target_hit +0.5; disciplined stop loss +0.5; manual non-win −0.5
+    """
+    def _g(key):
+        try:
+            return row[key]
+        except (KeyError, IndexError, TypeError):
+            return row.get(key) if hasattr(row, "get") else None
+
+    def _fnum(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    status = (_g("outcome_status") or "").lower()
+    pnl    = _fnum(_g("realized_pnl_pct"))
+    if status not in ("win", "loss", "breakeven") and pnl is None:
+        return None
+    win = status == "win" or (status not in ("loss", "breakeven") and pnl is not None and pnl > 0)
+
+    base = 6.0 if win else 4.0
+
+    # R-multiple from realized P&L over the planned stop distance (risk taken).
+    entry_px = _fnum(_g("actual_entry_price"))
+    stop_px  = _fnum(_g("suggested_stop"))
+    if pnl is not None and entry_px and stop_px and entry_px > 0:
+        risk_pct = abs(entry_px - stop_px) / entry_px * 100
+        if risk_pct > 0:
+            r_mult = pnl / risk_pct
+            base += max(-1.5, min(1.5, r_mult * 0.5))
+
+    exit_r = (_g("exit_reason") or "")
+    if exit_r == "target_hit":
+        base += 0.5
+    if exit_r == "stop_hit" and not win:
+        base += 0.5
+    if exit_r == "manual" and not win:
+        base -= 0.5
+
     return round(max(0.0, min(10.0, base)), 1)
 
 
@@ -285,7 +470,9 @@ def _resolve_deterministic_tags(conn, cap: int = 50) -> int:
     rows = conn.execute("""
         SELECT id, recommendation, outcome_status, realized_pnl_pct, ai_confidence,
                rr_ratio, exit_reason, regime, thesis_verdict, suggested_stop,
-               actual_entry_price, entry_signals_json, primary_entry_driver,
+               suggested_target, actual_entry_price, entry_signals_json,
+               primary_entry_driver, mae_pct, mfe_pct, exec_mech_pnl_pct,
+               checklist_bypasses, holding_period_days,
                error_type, error_type_source, skill_score
           FROM ai_learning_events
          WHERE was_executed = 1
@@ -315,6 +502,42 @@ def _resolve_deterministic_tags(conn, cap: int = 50) -> int:
     return resolved
 
 
+def _resolve_missing_sectors(conn, cap: int = 50) -> int:
+    """Backfill `sector` on executed events that logged it null/empty, using the
+    static `core.SECTOR_MAP` (no network). Idempotent, capped per call, runs
+    lazily inside _calib_compute() beside the other _resolve_* resolvers.
+
+    Sector is a first-class analysis lens (calibration block + /api/learning/stats
+    by_sector), so a null sector silently drops the row from every sector stat.
+    This cleans historical rows that predate the liveSignals sector fallback.
+
+    SECTOR_MAP is keyed by the bare ASX code (no '.AX' suffix); learning events
+    store '.AX'-suffixed tickers, so we strip the suffix before lookup. Tickers
+    not in the map are skipped (left null) — never guessed.
+    """
+    from core import SECTOR_MAP
+    rows = conn.execute("""
+        SELECT id, ticker
+          FROM ai_learning_events
+         WHERE was_executed = 1
+           AND (sector IS NULL OR sector = '')
+           AND ticker IS NOT NULL
+         ORDER BY timestamp DESC
+         LIMIT ?
+    """, (cap,)).fetchall()
+
+    resolved = 0
+    for r in rows:
+        tk = (r["ticker"] or "").upper()
+        base = tk[:-3] if tk.endswith(".AX") else tk
+        sec = SECTOR_MAP.get(base)
+        if not sec:
+            continue
+        conn.execute("UPDATE ai_learning_events SET sector=? WHERE id=?", (sec, r["id"]))
+        resolved += 1
+    return resolved
+
+
 def _is_good_loss(r: dict) -> bool:
     """Returns True for losses/breakevenents that reflect disciplined execution,
     not analytical error — must be excluded from Phase 8's skill-gate.
@@ -327,9 +550,16 @@ def _is_good_loss(r: dict) -> bool:
         mean_loss and can keep the Phase 8 gate permanently locked.
       - error_type contains 'external_shock': black-swan events outside the
         model's control — including them punishes correct analysis for bad luck.
+
+    Accepts either a dict or a sqlite3.Row (the Phase 8 gate passes raw rows).
     """
-    et = (r.get("error_type") or "")
-    er = (r.get("exit_reason") or "")
+    def _f(key):
+        try:
+            return r[key]
+        except (KeyError, IndexError, TypeError):
+            return r.get(key) if hasattr(r, "get") else None
+    et = (_f("error_type") or "")
+    er = (_f("exit_reason") or "")
     return er == "protective_stop" or "external_shock" in et.split(",")
 
 
@@ -1104,6 +1334,50 @@ def learning_stats():
                 "by_success_type": dict(sorted(success_counts.items(), key=lambda x: -x[1])),
             }
 
+            # Sprint 71 sector analysis: per-sector stats framed vs the whole-market
+            # baseline. `wr_vs_market_pp` is the signed delta against `overall_win_rate`
+            # (the all-rows WR already returned at the top of this response) — the
+            # whole-ASX-market view IS the baseline, so an absolute sector WR is only
+            # actionable as a delta. dominant_error_tag splits multi-tag error_type on
+            # ',' (gotcha #45) and excludes 'none'/'external_shock'.
+            sector_rows = conn.execute("""
+                SELECT sector, outcome_status, realized_pnl_pct, error_type
+                  FROM ai_learning_events
+                 WHERE sector IS NOT NULL AND sector != ''
+                   AND outcome_status IN ('win','loss','breakeven')
+            """).fetchall()
+            _mkt_wr_pct = (wins / closed * 100) if closed else 0.0
+            sec_agg: dict = {}
+            for r in sector_rows:
+                sec = r["sector"]
+                a = sec_agg.setdefault(sec, {
+                    "n": 0, "wins": 0, "pnl_sum": 0.0, "pnl_n": 0, "err": {},
+                })
+                a["n"] += 1
+                if r["outcome_status"] == "win":
+                    a["wins"] += 1
+                if r["realized_pnl_pct"] is not None:
+                    a["pnl_sum"] += float(r["realized_pnl_pct"])
+                    a["pnl_n"]   += 1
+                # multi-tag split (gotcha #45) — losses/breakevens carry error_type
+                for tag in (r["error_type"] or "").split(","):
+                    tag = tag.strip()
+                    if tag and tag not in ("none", "external_shock"):
+                        a["err"][tag] = a["err"].get(tag, 0) + 1
+            by_sector = []
+            for sec, a in sec_agg.items():
+                wr_pct = (a["wins"] / a["n"] * 100) if a["n"] else None
+                dom = max(a["err"].items(), key=lambda x: x[1])[0] if a["err"] else None
+                by_sector.append({
+                    "sector":          sec,
+                    "n":               a["n"],
+                    "win_rate":        round(wr_pct, 1) if wr_pct is not None else None,
+                    "avg_pnl_pct":     round(a["pnl_sum"] / a["pnl_n"], 2) if a["pnl_n"] else None,
+                    "wr_vs_market_pp": round(wr_pct - _mkt_wr_pct, 1) if wr_pct is not None else None,
+                    "dominant_error_tag": dom,
+                })
+            by_sector.sort(key=lambda s: s["n"], reverse=True)
+
             # Failed tickers
             failed = conn.execute(
                 "SELECT ticker, error, context, timestamp FROM failed_tickers ORDER BY id DESC LIMIT 20"
@@ -1118,6 +1392,9 @@ def learning_stats():
                   AND outcome_status IN ('win','loss','breakeven')
             """).fetchall()
             phase8 = _compute_phase8_meta([dict(r) for r in skill_rows_raw])
+
+            # Sprint 71 Phase 2D: stop_too_tight tag-precision counterfactual.
+            stop_tag_precision_stat = _compute_stop_tag_precision(conn)
 
         oci = overall_ci
         # Gap 5: prompt regression detector (uses version_list already built above)
@@ -1146,6 +1423,8 @@ def learning_stats():
             "phase8":             phase8,           # Gap 2: skill-weighting gate status
             "prompt_regression":  prompt_regression, # Gap 5: prompt version regression
             "n_virtual_resolved": n_virtual_resolved, # virtual outcome count for UI display
+            "stop_tag_precision": stop_tag_precision_stat,  # Sprint 71 Phase 2D
+            "by_sector":          by_sector,    # Sprint 71: per-sector WR vs market baseline
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1611,8 +1890,329 @@ def _resolve_virtual_outcomes(conn) -> int:
     return resolved
 
 
+# ── Sprint 71 Phase 3A — few-shot exemplars from own trade history ────────────
+
+def _entry_signature(sig: dict | None) -> str:
+    """Compact, human-readable entry signature from an entry_signals_json dict.
+
+    Pulls the most diagnostic, non-placeholder fields (RSI, BB%B, px_vs_sma200,
+    setup_score, MACD-hist sign). Skips null fields. rs_score / rs_5d_alpha are
+    deliberately NOT featured — they are neutral placeholders today (see Phase 2
+    note in improvements.md), so surfacing them would imply real relative-strength
+    data that doesn't exist. Returns "" when no usable field is present.
+    """
+    if not sig:
+        return ""
+    parts = []
+    rsi = sig.get("rsi_14")
+    if isinstance(rsi, (int, float)):
+        parts.append(f"RSI{int(round(rsi))}")
+    bb = sig.get("bb_pct_b")
+    if isinstance(bb, (int, float)):
+        parts.append(f"%b{bb:.2f}")
+    px200 = sig.get("px_vs_sma200")
+    if isinstance(px200, (int, float)):
+        parts.append(f"vs200{px200:+.0f}%")
+    ss = sig.get("setup_score")
+    if isinstance(ss, (int, float)):
+        parts.append(f"setup{int(round(ss))}")
+    mh = sig.get("macd_hist")
+    if isinstance(mh, (int, float)):
+        parts.append("MACD+" if mh > 0 else "MACD-")
+    return " ".join(parts)
+
+
+def _compute_exemplars(conn, max_losses: int = 3, max_wins: int = 2,
+                       sector: str | None = None) -> list[str]:
+    """Return up-to (max_losses + max_wins) compact exemplar lines drawn from the
+    user's own CLOSED, EXECUTED BUY/TOP_UP history.
+
+    Each line: `ACTION TICKER @ <entry-signature> → <pnl%> in <Nd>, <tag(s)>`
+    Losses use error_type; wins use success_tags. Recency-ordered; tickers deduped
+    so the feed shows variety. Returns [] on empty history.
+
+    When `sector` is supplied (the dominant sector of the portfolio under analysis),
+    PREFER same-sector exemplars so the few-shot examples are sector-relevant, and
+    fall back to whole-market history only when too few same-sector trades exist
+    (fewer than the requested loss/win caps). Keeps the existing caps either way.
+    """
+    rows = conn.execute("""
+        SELECT recommendation, ticker, outcome_status, realized_pnl_pct,
+               holding_period_days, entry_signals_json, error_type, success_tags,
+               timestamp, sector
+          FROM ai_learning_events
+         WHERE was_executed = 1
+           AND recommendation IN ('BUY','TOP_UP')
+           AND outcome_status IN ('win','loss','breakeven')
+           AND realized_pnl_pct IS NOT NULL
+           AND entry_signals_json IS NOT NULL
+         ORDER BY timestamp DESC
+         LIMIT 120
+    """).fetchall()
+
+    # Sector preference: pull same-sector first; top up from whole-market only when
+    # the same-sector pool can't satisfy the caps. Preserves recency ordering.
+    if sector:
+        same  = [r for r in rows if (r["sector"] or "") == sector]
+        other = [r for r in rows if (r["sector"] or "") != sector]
+        same_losses = sum(1 for r in same if r["outcome_status"] in ("loss", "breakeven"))
+        same_wins   = sum(1 for r in same if r["outcome_status"] == "win")
+        # Only restrict to same-sector when BOTH buckets are deep enough; otherwise
+        # use same-sector first then top up with whole-market for variety/coverage.
+        if same_losses >= max_losses and same_wins >= max_wins:
+            rows = same
+        else:
+            rows = same + other
+
+    def _fmt(r) -> str | None:
+        try:
+            sig = json.loads(r["entry_signals_json"] or "{}")
+        except Exception:
+            sig = {}
+        signature = _entry_signature(sig)
+        if not signature:
+            return None
+        pnl  = float(r["realized_pnl_pct"])
+        days = r["holding_period_days"]
+        days_str = f" in {int(days)}d" if isinstance(days, (int, float)) and days else ""
+        if r["outcome_status"] == "win":
+            tags = (r["success_tags"] or "").strip()
+        else:
+            tags = (r["error_type"] or "").strip()
+        tag_str = f", {tags}" if tags and tags not in ("none", "") else ""
+        return (f"{r['recommendation']} {r['ticker']} @ {signature} → "
+                f"{pnl:+.1f}%{days_str}{tag_str}")
+
+    losses, wins = [], []
+    seen_l, seen_w = set(), set()
+    # Recent losses first (recency order preserved by the DESC query).
+    for r in rows:
+        if r["outcome_status"] in ("loss", "breakeven") and r["ticker"] not in seen_l:
+            line = _fmt(r)
+            if line:
+                losses.append(line)
+                seen_l.add(r["ticker"])
+        if len(losses) >= max_losses:
+            break
+    # Best recent wins — sort the win subset by realized P&L desc, dedupe tickers.
+    win_rows = sorted(
+        [r for r in rows if r["outcome_status"] == "win"],
+        key=lambda r: float(r["realized_pnl_pct"]), reverse=True,
+    )
+    for r in win_rows:
+        if r["ticker"] in seen_w:
+            continue
+        line = _fmt(r)
+        if line:
+            wins.append(line)
+            seen_w.add(r["ticker"])
+        if len(wins) >= max_wins:
+            break
+
+    return losses + wins
+
+
+# ── Sprint 71 Phase 3B — per-driver conditional playbook ──────────────────────
+
+def _compute_driver_playbook(conn, drivers: list[str], wilson_excludes,
+                             min_bucket_n: int = 5) -> list[str]:
+    """For each requested entry driver, emit a conditional win-rate line comparing
+    a 'favourable' vs 'unfavourable' entry-signal bucket, e.g.
+        mean_reversion: 61%WR when RSI<30 vs 38% when RSI>45 (n=12/8)
+
+    Buckets are driver-specific (RSI for mean_reversion / trend_pullback;
+    BB%B for momentum_breakout). Each bucket must clear `min_bucket_n` AND its
+    Wilson CI must exclude the OTHER bucket's win-rate (significance gate). Returns
+    [] when no driver qualifies. Drivers without a technical bucket rule are skipped.
+    """
+    if not drivers:
+        return []
+
+    rows = conn.execute("""
+        SELECT primary_entry_driver, outcome_status, entry_signals_json
+          FROM ai_learning_events
+         WHERE was_executed = 1
+           AND recommendation IN ('BUY','TOP_UP')
+           AND outcome_status IN ('win','loss','breakeven')
+           AND primary_entry_driver IS NOT NULL
+           AND entry_signals_json IS NOT NULL
+    """).fetchall()
+
+    by_driver: dict = {}
+    for r in rows:
+        drv = r["primary_entry_driver"]
+        try:
+            sig = json.loads(r["entry_signals_json"] or "{}")
+        except Exception:
+            sig = {}
+        by_driver.setdefault(drv, []).append((r["outcome_status"], sig))
+
+    # (field, lo_pred, lo_label, hi_pred, hi_label) per driver.
+    _BUCKETS = {
+        "mean_reversion": ("rsi_14",
+                           lambda v: v < 30, "RSI<30",
+                           lambda v: v > 45, "RSI>45"),
+        "trend_pullback": ("rsi_14",
+                           lambda v: v < 45, "RSI<45",
+                           lambda v: v > 60, "RSI>60"),
+        "momentum_breakout": ("bb_pct_b",
+                              lambda v: v > 0.80, "%b>0.8",
+                              lambda v: v < 0.55, "%b<0.55"),
+    }
+
+    out = []
+    for drv in drivers:
+        spec = _BUCKETS.get(drv)
+        if not spec or drv not in by_driver:
+            continue
+        field, lo_pred, lo_lbl, hi_pred, hi_lbl = spec
+        lo_w = lo_n = hi_w = hi_n = 0
+        for status, sig in by_driver[drv]:
+            v = sig.get(field)
+            if not isinstance(v, (int, float)):
+                continue
+            won = 1 if status == "win" else 0
+            if lo_pred(v):
+                lo_n += 1; lo_w += won
+            elif hi_pred(v):
+                hi_n += 1; hi_w += won
+        if lo_n < min_bucket_n or hi_n < min_bucket_n:
+            continue
+        lo_wr = lo_w / lo_n
+        hi_wr = hi_w / hi_n
+        # Significance: favourable bucket's CI must exclude the unfavourable WR.
+        if not wilson_excludes(lo_w, lo_n, hi_wr):
+            continue
+        out.append(
+            f"{drv}: {lo_wr*100:.0f}%WR when {lo_lbl} vs {hi_wr*100:.0f}% "
+            f"when {hi_lbl} (n={lo_n}/{hi_n})"
+        )
+    return out
+
+
+# ── Sprint 71 Phase 3C — conditional cross-tabs + negative confirmation ───────
+
+def _compute_setup_bucket_xtab(conn, wilson_excludes, min_n: int = 6) -> str:
+    """setup_score bucket × outcome cross-tab. Buckets the entry setup_score into
+    low(<40)/mid(40-65)/high(≥65) and reports win-rate per bucket where each clears
+    `min_n` and the high vs low CI separation is significant. Returns "" otherwise.
+    """
+    rows = conn.execute("""
+        SELECT outcome_status, entry_signals_json
+          FROM ai_learning_events
+         WHERE was_executed = 1
+           AND recommendation IN ('BUY','TOP_UP')
+           AND outcome_status IN ('win','loss','breakeven')
+           AND entry_signals_json IS NOT NULL
+    """).fetchall()
+
+    buckets = {"low": [0, 0], "mid": [0, 0], "high": [0, 0]}  # [wins, n]
+    for r in rows:
+        try:
+            sig = json.loads(r["entry_signals_json"] or "{}")
+        except Exception:
+            continue
+        ss = sig.get("setup_score")
+        if not isinstance(ss, (int, float)):
+            continue
+        key = "low" if ss < 40 else ("mid" if ss < 65 else "high")
+        buckets[key][1] += 1
+        if r["outcome_status"] == "win":
+            buckets[key][0] += 1
+
+    lo_w, lo_n = buckets["low"]
+    hi_w, hi_n = buckets["high"]
+    if lo_n < min_n or hi_n < min_n:
+        return ""
+    lo_wr, hi_wr = lo_w / lo_n, hi_w / hi_n
+    # Only surface when high-setup is significantly better than low-setup.
+    if not wilson_excludes(hi_w, hi_n, lo_wr):
+        return ""
+    return (f"setup_score: high(≥65)={hi_wr*100:.0f}%WR(n={hi_n}) vs "
+            f"low(<40)={lo_wr*100:.0f}%(n={lo_n})→favour high-setup entries")
+
+
+def _compute_driver_regime_xtab(conn, regime: str, wilson_excludes,
+                                min_n: int = 6) -> str:
+    """driver × regime cross-tab for the CURRENT regime. Finds the entry driver
+    whose win-rate in this regime most significantly diverges from its win-rate in
+    all other regimes (both buckets ≥ min_n, CI-gated). Returns "" otherwise.
+    """
+    if not regime:
+        return ""
+    rows = conn.execute("""
+        SELECT primary_entry_driver, regime, outcome_status
+          FROM ai_learning_events
+         WHERE was_executed = 1
+           AND recommendation IN ('BUY','TOP_UP')
+           AND outcome_status IN ('win','loss','breakeven')
+           AND primary_entry_driver IS NOT NULL
+    """).fetchall()
+
+    by_drv: dict = {}
+    for r in rows:
+        drv = r["primary_entry_driver"]
+        in_reg = (r["regime"] or "") == regime
+        won = 1 if r["outcome_status"] == "win" else 0
+        b = by_drv.setdefault(drv, {"in": [0, 0], "out": [0, 0]})
+        key = "in" if in_reg else "out"
+        b[key][1] += 1
+        b[key][0] += won
+
+    best = None
+    best_gap = 0.0
+    for drv, b in by_drv.items():
+        iw, in_ = b["in"]
+        ow, on_ = b["out"]
+        if in_ < min_n or on_ < min_n:
+            continue
+        iwr, owr = iw / in_, ow / on_
+        gap = abs(iwr - owr)
+        if gap > best_gap and wilson_excludes(iw, in_, owr):
+            best_gap = gap
+            best = (drv, iwr, in_, owr, on_)
+    if not best:
+        return ""
+    drv, iwr, in_, owr, on_ = best
+    flag = "✓" if iwr > owr else "⚠"
+    return (f"{flag}{drv}×{regime}:{iwr*100:.0f}%WR(n={in_}) vs "
+            f"{owr*100:.0f}% other-regimes(n={on_})")
+
+
+def _compute_sell_negative_confirmation(conn, cap: int = 3) -> str:
+    """Negative-confirmation line: SELL/TRIM calls that subsequently ROSE — i.e.
+    the model sold and the stock then climbed (sell_verify_verdict='invalidated'
+    OR a strongly positive sell_verify_sold_chg). Tells Claude what NOT to do.
+    Returns "" when no such case exists.
+    """
+    rows = conn.execute("""
+        SELECT ticker, sell_verify_sold_chg, sell_verify_verdict, sell_primary_driver
+          FROM ai_learning_events
+         WHERE recommendation IN ('SELL','TRIM')
+           AND sell_verify_date IS NOT NULL
+           AND sell_verify_sold_chg IS NOT NULL
+           AND (sell_verify_verdict = 'invalidated' OR sell_verify_sold_chg >= 8)
+         ORDER BY sell_verify_sold_chg DESC
+    """).fetchall()
+    if not rows:
+        return ""
+    seen = set()
+    parts = []
+    for r in rows:
+        tk = r["ticker"]
+        if tk in seen:
+            continue
+        seen.add(tk)
+        parts.append(f"{tk}+{r['sell_verify_sold_chg']:.0f}%")
+        if len(parts) >= cap:
+            break
+    if not parts:
+        return ""
+    return "⚠SELL→ROSE(don't repeat): " + ", ".join(parts)
+
+
 def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
-                   flipped_at: str = "", flipped_to: str = "") -> dict:
+                   flipped_at: str = "", flipped_to: str = "", deep: bool = False) -> dict:
     """
     Pure calibration computation. Returns a plain dict.
     Separated from the route so results can be TTL-cached (L4).
@@ -1739,6 +2339,19 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             # Sprint 70: lazily assign deterministic error_type + skill_score to
             # closed trades from the entry/exit capture (replaces the LLM tagger).
             _resolve_deterministic_tags(conn)
+            # Sprint 71 Phase 1B: lazily capture MAE/MFE path stats for closed
+            # executed BUY/TOP_UP trades — capped at 5, idempotent, degrades
+            # gracefully on yfinance failure (row left unresolved).
+            _resolve_mae_mfe(conn)
+            # Sprint 71 Phase 2D: lazily score the wider-stop counterfactual for
+            # stop_too_tight-tagged trades — capped at 5, idempotent. Feeds the
+            # tag-precision self-suppression gate below.
+            _resolve_stop_tag_counterfactual(conn)
+            # Sprint 71 sector hardening: backfill null sectors on historical
+            # executed rows from core.SECTOR_MAP (no network) so the sector
+            # analysis lens isn't silently censored. Capped at 50, idempotent.
+            _resolve_missing_sectors(conn)
+            _stop_tag_prec = _compute_stop_tag_precision(conn)
 
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
@@ -1802,6 +2415,31 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             # Sprint 45: thesis drift — compare manual exits vs target hits.
             _thesis_drift = _compute_thesis_drift(conn)
 
+            # Sprint 71 Phase 3B: distinct entry drivers among the requested
+            # portfolio tickers — used to scope the per-driver playbook (deep mode).
+            tickers_drivers: list[str] = []
+            if tickers_req:
+                _ph = ",".join("?" * len(tickers_req))
+                _dr_rows = conn.execute(
+                    f"""SELECT DISTINCT primary_entry_driver
+                          FROM ai_learning_events
+                         WHERE recommendation IN ('BUY','TOP_UP')
+                           AND primary_entry_driver IS NOT NULL
+                           AND ticker IN ({_ph})""",
+                    tuple(tickers_req),
+                ).fetchall()
+                tickers_drivers = [r["primary_entry_driver"] for r in _dr_rows]
+            # Fallback: if no per-ticker drivers (e.g. fresh holdings), use every
+            # driver that has closed history so the playbook can still surface.
+            if not tickers_drivers:
+                _all_dr = conn.execute(
+                    """SELECT DISTINCT primary_entry_driver
+                         FROM ai_learning_events
+                        WHERE recommendation IN ('BUY','TOP_UP')
+                          AND primary_entry_driver IS NOT NULL"""
+                ).fetchall()
+                tickers_drivers = [r["primary_entry_driver"] for r in _all_dr]
+
         # Gate: personalised calibration nudges require n ≥ 30 to avoid chasing noise.
         # Below that, return an ASX base-rate prior so the user message still has a
         # calibration anchor — Claude won't start from scratch for early-stage accounts.
@@ -1818,6 +2456,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                     "Apply conservative sizing (max 50% of normal qty) until n≥30 closed trades. "
                     "Do not override these priors with high confidence."
                 ),
+                "exemplars": [],
             }
 
         n = len(rows)
@@ -1855,6 +2494,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         _ESS_MIN = 6.0  # Kish ESS threshold — suppresses calibration when decay renders
                         # sample statistically unreliable (e.g. 1 fresh + 3 very stale trades)
         _MIN_NUDGE_N = 12  # Sprint 70: raw-count floor for behaviour-changing tag nudges.
+        # Sprint 71 Phase 2D: stop_too_tight tag-precision self-suppression gate.
+        _STOP_TAG_MIN_N    = 5    # min resolved counterfactuals before trusting precision
+        _STOP_TAG_PREC_MIN = 0.5  # <50% wider-stop-saved ⇒ tag unreliable, suppress nudge
 
         # 1. Confidence bands — ESS≥6 AND |delta|>5pp AND Wilson CI excludes the
         #    band midpoint (Sprint 70: the CI gate withholds small-n flukes).
@@ -1924,18 +2566,48 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                     else:
                         parts.append(f"⚠{regime}:no calibration data available")
 
-        # 3. Relevant sectors — ESS≥2.5 AND notable rate
+        # 3. Relevant sectors — framed as a DELTA vs the whole-ASX-market baseline.
+        # The baseline is the overall (all-rows) win rate — `mkt_wr`. An absolute
+        # sector WR is not actionable on its own (a 55% sector reads as strong in a
+        # 45% market and weak in a 65% market), so every sector line shows the
+        # signed delta and gates the ✓strong / ⚠underperform flag on it. The flag
+        # only fires when the sector's Wilson 95% CI (on RAW win/total counts)
+        # excludes the market baseline — withholds small-n flukes (gotcha #42).
+        # Deep mode: full per-sector breakdown. Light mode: one-line worst/best.
+        _mkt_wr = _wwr(calib_rows) if calib_rows else 0.0
+        _sector_lines = []   # (abs_delta, formatted_line, is_flagged)
         for sector in sectors:
             s_rows = [r for r in rows_all if r["sector"] == sector]
             if not s_rows:
                 continue
             if _ess(s_rows) < _ESS_MIN:
                 continue
-            wr = _wwr(s_rows)
-            if wr < 0.45:
-                parts.append(f"{sector}:{wr*100:.0f}%(n={len(s_rows)}) ⚠underperform")
-            elif wr > 0.72:
-                parts.append(f"{sector}:{wr*100:.0f}%(n={len(s_rows)}) ✓strong")
+            wr    = _wwr(s_rows)
+            delta = wr - _mkt_wr
+            s_wins  = sum(1 for r in s_rows if r["outcome_status"] == "win")
+            s_total = len(s_rows)
+            significant = _ci_excludes(s_wins, s_total, _mkt_wr)
+            flag = ""
+            if significant:
+                if delta <= -0.05:
+                    flag = " ⚠underperform"
+                elif delta >= 0.05:
+                    flag = " ✓strong"
+            line = (f"{sector}:{wr*100:.0f}%WR vs mkt {_mkt_wr*100:.0f}% "
+                    f"({delta*100:+.0f}pp,n={s_total}){flag}")
+            _sector_lines.append((abs(delta), line, bool(flag)))
+        if _sector_lines:
+            _sector_lines.sort(key=lambda x: x[0], reverse=True)
+            if deep:
+                # Full breakdown (most-divergent first) in the deep feed.
+                for _, line, _f in _sector_lines:
+                    parts.append(line)
+            else:
+                # Light feed: one compact summary line — the most divergent
+                # flagged sector (worst or best), or the most divergent overall.
+                flagged = [t for t in _sector_lines if t[2]]
+                pick = flagged[0] if flagged else _sector_lines[0]
+                parts.append("sector:" + pick[1])
 
         # 4. Strategy decay — recent 30d vs full window; only if clearly decaying (Δ<-15pp, n≥5)
         # Regime-specific sub-check: if global decay detected, compare current-regime recent trades.
@@ -2004,17 +2676,41 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                     short = {"overconfident": "OC", "missed_catalyst": "MC",
                              "regime_mismatch": "RM", "poor_entry": "PE",
                              "stop_too_tight": "ST", "poor_rr": "PR",
-                             "thesis_broken": "TB"}.get(top_et, top_et)
-                    parts.append(
-                        f"top_err:{short}({top_cnt}/{len(learnable_losses)}losses)→"
-                        + ("reduce conf" if top_et == "overconfident" else
-                           "check news" if top_et == "missed_catalyst" else
-                           "check regime fit" if top_et == "regime_mismatch" else
-                           "refine entry timing" if top_et == "poor_entry" else
-                           "widen stops" if top_et == "stop_too_tight" else
-                           "require min R:R 2.5" if top_et == "poor_rr" else
-                           "add re-validation step")
+                             "thesis_broken": "TB", "early_exit": "EE",
+                             "oversized": "OS", "undersized": "US"}.get(top_et, top_et)
+                    # Sprint 71 Phase 2D: self-suppress the "widen stops" nudge when the
+                    # stop_too_tight counterfactual precision is low — i.e. a wider stop
+                    # would NOT have rescued most of these trades, so the tag is firing on
+                    # losers whose real problem was the entry/thesis, not the stop width.
+                    # Mirrors the ⚠AUTO_TAGS_UNRELIABLE pattern.
+                    _stp = _stop_tag_prec or {}
+                    _stp_n    = _stp.get("n") or 0
+                    _stp_prec = _stp.get("precision")
+                    _stop_tag_unreliable = (
+                        top_et == "stop_too_tight"
+                        and _stp_n >= _STOP_TAG_MIN_N
+                        and _stp_prec is not None
+                        and _stp_prec < _STOP_TAG_PREC_MIN
                     )
+                    if _stop_tag_unreliable:
+                        parts.append(
+                            f"⚠STOP_TAG_UNRELIABLE({int(_stp_prec*100)}%wider-stop-saved,"
+                            f"n={_stp_n})→stop-width nudge suppressed"
+                        )
+                    else:
+                        parts.append(
+                            f"top_err:{short}({top_cnt}/{len(learnable_losses)}losses)→"
+                            + ("reduce conf" if top_et == "overconfident" else
+                               "check news" if top_et == "missed_catalyst" else
+                               "check regime fit" if top_et == "regime_mismatch" else
+                               "refine entry timing" if top_et == "poor_entry" else
+                               "widen stops" if top_et == "stop_too_tight" else
+                               "require min R:R 2.5" if top_et == "poor_rr" else
+                               "hold to plan/target" if top_et == "early_exit" else
+                               "reduce position size" if top_et == "oversized" else
+                               "size up to plan" if top_et == "undersized" else
+                               "add re-validation step")
+                        )
         # Gap 6: auto-tags unreliable and not enough manually-reviewed events — warn Claude.
         if not _auto_tags_ok and len(learnable_losses) < _MIN_NUDGE_N:
             parts.append(f"⚠AUTO_TAGS_UNRELIABLE({int(_auto_tag_agree*100)}%agree,n={_auto_tag_n})→err nudge suppressed")
@@ -2063,9 +2759,12 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             if ticker_parts:
                 parts.append("per-ticker:" + ",".join(ticker_parts))
 
-        # 8. Sector × current regime interaction — most actionable for ASX sector rotation.
-        # Only fires when current regime is known (passed in), ESS≥2.5, and win-rate
-        # differs from the overall by >12pp. Capped at 2 entries to stay within budget.
+        # 8. Sector × current regime interaction — most actionable for ASX sector
+        # rotation. Framed as a DELTA vs the whole-market baseline (overall WR),
+        # same convention as section 3. Fires when current regime is known, ESS≥6.0,
+        # |delta| ≥ 12pp, AND the sector's Wilson 95% CI excludes the market WR
+        # (significance gate, gotcha #42) — the ✓/⚠ flag only shows when the
+        # divergence clears the noise. Capped at 2 entries to stay within budget.
         if regime and len(calib_rows) >= 10:
             overall_wr = _wwr(calib_rows) if "overall_wr" not in dir() else overall_wr
             sx_rows = [r for r in calib_rows if r["regime"] == regime and r["sector"]]
@@ -2080,14 +2779,19 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 sx_wr  = _wwr(s_rows)
                 delta  = sx_wr - overall_wr
                 if abs(delta) >= 0.12:
-                    direction = "✓" if delta > 0 else "⚠"
-                    sx_parts.append(
-                        f"{sector}:{sx_wr*100:.0f}%(Δ{delta*100:+.0f}pp,ESS={sx_ess:.1f}){direction}"
-                    )
+                    sx_wins  = sum(1 for r in s_rows if r["outcome_status"] == "win")
+                    sx_total = len(s_rows)
+                    sig = _ci_excludes(sx_wins, sx_total, overall_wr)
+                    direction = ("✓" if delta > 0 else "⚠") if sig else ""
+                    sx_parts.append((
+                        abs(delta),
+                        f"{sector}:{sx_wr*100:.0f}% vs mkt {overall_wr*100:.0f}%"
+                        f"(Δ{delta*100:+.0f}pp,ESS={sx_ess:.1f}){direction}"
+                    ))
             if sx_parts:
                 # Sort by |delta| descending; keep top 2
-                sx_parts.sort(key=lambda x: abs(float(x.split("Δ")[1].split("pp")[0])), reverse=True)
-                parts.append(f"sector×{regime}:" + ",".join(sx_parts[:2]))
+                sx_parts.sort(key=lambda x: x[0], reverse=True)
+                parts.append(f"sector×{regime}:" + ",".join(p[1] for p in sx_parts[:2]))
 
         # 9. Sell tag validation — surface when a SELL driver is consistently reliable/unreliable.
         # Only verifiable drivers are included (target_reached, thesis_broken, stop_triggered,
@@ -2154,15 +2858,80 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         except Exception:
             pass  # never let thesis-matrix errors break calibration
 
+        # ── Sprint 71 Phase 3B/3C — heavy conditional blocks (deep mode only) ──
+        # These are the lowest-priority, most token-heavy lines. They are appended
+        # last so the priority-ordered truncation below drops them first, and are
+        # gated on `deep` so the high-frequency (light) refresh path never pays for
+        # them. The cached system prompt means this learning block is the only
+        # marginal token cost, so the light path stays lean.
+        exemplars: list[str] = []
+        if deep:
+            try:
+                for _pb in _compute_driver_playbook(conn, tickers_drivers, _ci_excludes):
+                    parts.append(_pb)
+            except Exception:
+                pass
+            try:
+                _dx = _compute_driver_regime_xtab(conn, regime, _ci_excludes)
+                if _dx:
+                    parts.append(_dx)
+            except Exception:
+                pass
+            try:
+                _sx = _compute_setup_bucket_xtab(conn, _ci_excludes)
+                if _sx:
+                    parts.append(_sx)
+            except Exception:
+                pass
+            try:
+                _neg = _compute_sell_negative_confirmation(conn)
+                if _neg:
+                    parts.append(_neg)
+            except Exception:
+                pass
+            # Exemplars ride a separate field (not the char-budgeted `parts`) so the
+            # concrete few-shot examples — the highest-impact behavioural lever — are
+            # never silently truncated by the calibration token budget. analysis.js
+            # injects them as their own EXEMPLARS: block.
+            #
+            # Sector preference: when the portfolio under analysis is concentrated in
+            # one sector, prefer same-sector exemplars. The dominant sector is the
+            # most common sector across the requested tickers (via core.SECTOR_MAP),
+            # falling back to the first requested `sectors` entry. _compute_exemplars
+            # falls back to whole-market when same-sector trades are too few.
+            _dominant_sector = None
+            try:
+                from core import SECTOR_MAP as _SMAP
+                _sec_counts: dict = {}
+                for _t in tickers_req:
+                    _b = _t.upper()
+                    _b = _b[:-3] if _b.endswith(".AX") else _b
+                    _s = _SMAP.get(_b)
+                    if _s:
+                        _sec_counts[_s] = _sec_counts.get(_s, 0) + 1
+                if _sec_counts:
+                    _dominant_sector = max(_sec_counts.items(), key=lambda x: x[1])[0]
+                elif sectors:
+                    _dominant_sector = sectors[0]
+            except Exception:
+                _dominant_sector = sectors[0] if sectors else None
+            try:
+                exemplars = _compute_exemplars(conn, sector=_dominant_sector)
+            except Exception:
+                exemplars = []
+
         if not parts:
-            return {"available": False, "block": None}
+            return {"available": False, "block": None,
+                    "exemplars": exemplars if deep else []}
 
         # ── Gap 8: token budget — priority-ordered truncation ─────────────────
         # Parts are appended in priority order (conf bands first, per-ticker last).
         # Drop from the end (lowest priority) until under the operating budget.
         # Hard ceiling applied as a safety net after truncation.
-        _CALIB_CHAR_BUDGET  = 400   # ~100 tokens target
-        _CALIB_CHAR_CEILING = 600   # ~150 tokens hard ceiling
+        # Deep mode raises the budget so the Phase 3 conditional blocks survive
+        # (they are intentionally part of the morning-briefing / weekly-review feed).
+        _CALIB_CHAR_BUDGET  = 900 if deep else 400   # ~225 / ~100 tokens target
+        _CALIB_CHAR_CEILING = 1100 if deep else 600  # ~275 / ~150 tokens hard ceiling
         while len(parts) > 1 and len("; ".join(parts)) > _CALIB_CHAR_BUDGET:
             parts.pop()
         block_body = "; ".join(parts)
@@ -2180,7 +2949,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             f"CALIBRATION({n}cls{virt_note},{date_from}→{date_to}{regime_tag}{excl_note}{hl_note}): "
             + block_body + "."
         )
-        return {"available": True, "block": block, "sample": n, "adjustments": adjustments}
+        return {"available": True, "block": block, "sample": n, "adjustments": adjustments,
+                "exemplars": exemplars if deep else []}
     except Exception as e:
         return {"error": str(e)}
 
@@ -2196,6 +2966,9 @@ def learning_calibration():
     - Regime freshness gate (L1: silent when 0 trades, warn at 1-2)
     - Error-type threshold lowered to 33% from 40% for earlier pattern detection (L2)
     - Sprint 44: regime-flip penalty — halve hl for first <10 trades in new regime
+    - Sprint 71 Phase 3D: deep=1 adds the token-heavy exemplar/playbook/cross-tab
+      blocks (morning-briefing / weekly-review path); light (default) is stats-only
+      for high-frequency intraday refreshes.
     """
     regime      = request.args.get("regime", "")
     sectors_str = request.args.get("sectors", "")
@@ -2203,18 +2976,20 @@ def learning_calibration():
     days        = min(int(request.args.get("days", 90)), 180)
     flipped_at  = request.args.get("flipped_at", "")
     flipped_to  = request.args.get("flipped_to", "")
+    deep        = request.args.get("deep", "") in ("1", "true", "True")
 
     # L4: serve from cache if fresh (Fix #8: lock protects dict access only)
     # flipped_at/flipped_to are not part of the cache key — they are short-lived
     # and the TTL (5 min) is shorter than the minimum meaningful penalty window.
-    cache_key = (regime, sectors_str, tickers_str, days)
+    # `deep` IS part of the key — deep and light produce materially different blocks.
+    cache_key = (regime, sectors_str, tickers_str, days, deep)
     with _calib_lock:
         cached = _calib_cache.get(cache_key)
         if cached and (time.time() - cached[1]) < _CALIB_TTL:
             return jsonify(cached[0])
 
     # Expensive computation runs outside the lock to avoid blocking other threads
-    result = _calib_compute(regime, sectors_str, tickers_str, days, flipped_at, flipped_to)
+    result = _calib_compute(regime, sectors_str, tickers_str, days, flipped_at, flipped_to, deep)
 
     if "error" not in result:
         with _calib_lock:
@@ -2370,6 +3145,121 @@ def _resolve_execution_alpha(conn, cap: int = 5) -> int:
     return resolved
 
 
+def _mae_mfe_from_ohlc(hist, entry: float):
+    """Pure helper: compute (mae_pct, mfe_pct) for a long entry over an OHLC frame.
+
+    mae_pct = (min(Low) − entry) / entry × 100   → worst drawdown (≤0 for longs)
+    mfe_pct = (max(High) − entry) / entry × 100  → best unrealised gain (≥0)
+
+    Stop-first intrabar convention (gotcha #42): a straddle bar's adverse extreme
+    (the Low) is always credited — we book the conservative drawdown by taking the
+    full min of Low across the window, consistent with _resolve_execution_alpha.
+    Returns (None, None) when the frame is empty or has no usable Low/High.
+    Casts numpy scalars to python floats (gotcha #21).
+    """
+    if hist is None or len(hist) == 0 or not entry:
+        return None, None
+    try:
+        low_min  = hist["Low"].min()
+        high_max = hist["High"].max()
+    except Exception:
+        return None, None
+    if low_min is None or high_max is None:
+        return None, None
+    import math
+    lo = float(low_min)
+    hi = float(high_max)
+    if math.isnan(lo) or math.isnan(hi):
+        return None, None
+    mae_pct = round((lo - entry) / entry * 100, 2)
+    mfe_pct = round((hi - entry) / entry * 100, 2)
+    return mae_pct, mfe_pct
+
+
+def _resolve_mae_mfe(conn, cap: int = 5) -> int:
+    """Lazily compute MAE/MFE path stats for unresolved executed closed BUY/TOP_UP.
+
+    For each qualifying trade, walk daily OHLC from the entry date across the hold
+    window (bounded by holding_period_days, with a small floor/ceiling so a single
+    same-day close or a stale row still yields a usable frame), then record the
+    worst drawdown (mae_pct) and best unrealised gain (mfe_pct) via
+    _mae_mfe_from_ohlc (stop-first intrabar convention, gotcha #42).
+
+    Writes mae_pct, mfe_pct, mae_mfe_resolved_at. Idempotent (skips rows already
+    resolved). Capped per call to bound yfinance round-trips. On fetch failure for
+    a row, that row is skipped (left unresolved) rather than crashing the batch.
+    """
+    try:
+        rows = conn.execute("""
+            SELECT id, ticker, actual_entry_price, timestamp, holding_period_days
+            FROM ai_learning_events
+            WHERE was_executed = 1
+              AND recommendation IN ('BUY', 'TOP_UP')
+              AND outcome_status IN ('win', 'loss', 'breakeven')
+              AND actual_entry_price IS NOT NULL
+              AND timestamp IS NOT NULL
+              AND mae_mfe_resolved_at IS NULL
+            ORDER BY timestamp DESC LIMIT ?
+        """, (cap,)).fetchall()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+
+    from datetime import datetime, timedelta
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    resolved = 0
+    for row in rows:
+        try:
+            entry = float(row["actual_entry_price"])
+        except (TypeError, ValueError):
+            continue
+        if entry <= 0:
+            continue
+        start_str = (row["timestamp"] or "")[:10]
+        if not start_str:
+            continue
+        # Bound the OHLC window to the holding period (+1 day buffer so the exit
+        # bar is included). Default to a 15-bar (~3wk) window when unknown.
+        try:
+            hold = int(row["holding_period_days"]) if row["holding_period_days"] is not None else 15
+        except (TypeError, ValueError):
+            hold = 15
+        hold = max(1, hold)
+        try:
+            start_dt = datetime.strptime(start_str, "%Y-%m-%d")
+            end_dt   = start_dt + timedelta(days=hold + 5)  # calendar buffer for weekends/holidays
+            end_str  = end_dt.strftime("%Y-%m-%d")
+        except ValueError:
+            end_str = None
+
+        ticker = row["ticker"] or ""
+        yf_sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+        try:
+            if end_str:
+                hist = yf.Ticker(yf_sym).history(start=start_str, end=end_str, interval="1d")
+            else:
+                hist = yf.Ticker(yf_sym).history(start=start_str, interval="1d")
+        except Exception:
+            continue
+        if hist is None or hist.empty:
+            continue
+
+        mae_pct, mfe_pct = _mae_mfe_from_ohlc(hist, entry)
+        if mae_pct is None or mfe_pct is None:
+            continue
+        conn.execute(
+            "UPDATE ai_learning_events SET mae_pct=?, mfe_pct=?, mae_mfe_resolved_at=? WHERE id=?",
+            (mae_pct, mfe_pct, now_iso, row["id"]))
+        resolved += 1
+    return resolved
+
+
 def _compute_execution_alpha(conn) -> dict:
     """Aggregate actual-vs-mechanical P&L over resolved executed trades."""
     rows = conn.execute("""
@@ -2421,6 +3311,170 @@ def execution_alpha():
     with get_db() as conn:
         _resolve_execution_alpha(conn)
         result = _compute_execution_alpha(conn)
+    return jsonify({**result, "ok": True})
+
+
+# ── stop_too_tight counterfactual validation (Sprint 71 Phase 2D) ─────────────
+# Regime → stop ATR multiple, mirroring regime-engine.js getRegimeModifiers().
+# A "wider stop" counterfactual uses the regime's stopAtrMult so we test the stop
+# the engine would *actually* place today, not an arbitrary multiple.
+_REGIME_STOP_ATR_MULT = {
+    "riskOn":   2.5, "trend":   2.5, "sideways": 2.5,
+    "highVol":  3.0, "riskOff": 3.5, "panic":    4.0,
+}
+_STOP_CF_DEFAULT_MULT = 2.5  # fallback when regime unknown
+
+
+def _wider_stop_would_have_saved(hist, entry: float, target: float,
+                                  atr_pct: float, stop_mult: float,
+                                  slip: float = 0.0):
+    """Pure counterfactual: on the given OHLC frame, would a WIDER stop
+    (entry − stop_mult×atr_pct%×entry) have let the trade reach `target` before
+    being stopped out?
+
+    Returns True (target first), False (wider stop still hit first), or None when
+    inputs are unusable (so the row can be excluded from the precision stat).
+
+    Stop-first intrabar convention (gotcha #42): if one bar straddles both the
+    wider stop and the target, the stop is assumed to fill first. A win must clear
+    the target by the slippage margin; the stop fills at the raw level.
+    """
+    if hist is None or len(hist) == 0 or not entry or entry <= 0:
+        return None
+    if atr_pct is None or atr_pct <= 0 or not target or target <= 0:
+        return None
+    wider_stop = entry * (1 - (stop_mult * atr_pct) / 100.0)
+    if wider_stop <= 0 or wider_stop >= entry:
+        return None
+    try:
+        for _, bar in hist.iterrows():
+            low  = float(bar["Low"])
+            high = float(bar["High"])
+            if low <= wider_stop:
+                return False          # wider stop hit first (stop-first convention)
+            if high >= target * (1 + slip):
+                return True           # reached target before the wider stop
+    except Exception:
+        return None
+    return None  # neither level hit within the available window — inconclusive
+
+
+def _resolve_stop_tag_counterfactual(conn, cap: int = 5) -> int:
+    """Lazily evaluate the wider-stop counterfactual for stop_too_tight-tagged
+    trades that have not yet been scored. Writes stop_cf_saved (1/0) to the event.
+
+    Idempotent (skips rows where stop_cf_saved IS NOT NULL), capped per call to
+    bound yfinance round-trips. Inconclusive rows (neither level hit, or unusable
+    inputs) are left NULL for a future attempt.
+    """
+    try:
+        rows = conn.execute("""
+            SELECT id, ticker, actual_entry_price, suggested_target, timestamp,
+                   regime, entry_signals_json, holding_period_days
+            FROM ai_learning_events
+            WHERE was_executed = 1
+              AND recommendation IN ('BUY', 'TOP_UP')
+              AND error_type IS NOT NULL AND error_type != ''
+              AND (',' || error_type || ',') LIKE '%,stop_too_tight,%'
+              AND stop_cf_saved IS NULL
+              AND actual_entry_price IS NOT NULL
+              AND suggested_target IS NOT NULL
+              AND timestamp IS NOT NULL
+            ORDER BY timestamp DESC LIMIT ?
+        """, (cap,)).fetchall()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+
+    from datetime import datetime, timedelta
+    resolved = 0
+    for row in rows:
+        try:
+            entry  = float(row["actual_entry_price"])
+            target = float(row["suggested_target"])
+        except (TypeError, ValueError):
+            continue
+        atr_pct = _sig_get(row["entry_signals_json"], "atr_pct")
+        if atr_pct is None:
+            continue
+        stop_mult = _REGIME_STOP_ATR_MULT.get(row["regime"] or "", _STOP_CF_DEFAULT_MULT)
+        start_str = (row["timestamp"] or "")[:10]
+        if not start_str:
+            continue
+        try:
+            hold = int(row["holding_period_days"]) if row["holding_period_days"] is not None else 30
+        except (TypeError, ValueError):
+            hold = 30
+        # Give the wider stop a longer window than the real (tight-stopped) hold —
+        # the whole point is whether more room would have let it recover to target.
+        window = max(30, hold + 15)
+        try:
+            start_dt = datetime.strptime(start_str, "%Y-%m-%d")
+            end_str  = (start_dt + timedelta(days=window + 5)).strftime("%Y-%m-%d")
+        except ValueError:
+            end_str = None
+        ticker = row["ticker"] or ""
+        yf_sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+        try:
+            if end_str:
+                hist = yf.Ticker(yf_sym).history(start=start_str, end=end_str, interval="1d")
+            else:
+                hist = yf.Ticker(yf_sym).history(start=start_str, interval="1d")
+        except Exception:
+            continue
+        if hist is None or hist.empty:
+            continue
+        saved = _wider_stop_would_have_saved(hist, entry, target, atr_pct, stop_mult)
+        if saved is None:
+            continue  # inconclusive — leave NULL, retry later
+        conn.execute(
+            "UPDATE ai_learning_events SET stop_cf_saved=? WHERE id=?",
+            (1 if saved else 0, row["id"]))
+        resolved += 1
+    return resolved
+
+
+def _compute_stop_tag_precision(conn) -> dict:
+    """Aggregate the stop_too_tight tag-precision stat from resolved counterfactuals.
+
+    precision = (# stop_too_tight trades a WIDER stop would have saved) / (# resolved).
+    A low precision means the tag is firing on trades that would have lost anyway
+    even with a wider stop — i.e. the stop wasn't really "too tight", the entry/thesis
+    was just wrong. _calib_compute() self-suppresses the widen-stops nudge in that case.
+    """
+    try:
+        rows = conn.execute("""
+            SELECT stop_cf_saved FROM ai_learning_events
+            WHERE was_executed = 1
+              AND error_type IS NOT NULL AND error_type != ''
+              AND (',' || error_type || ',') LIKE '%,stop_too_tight,%'
+              AND stop_cf_saved IS NOT NULL
+        """).fetchall()
+    except Exception:
+        return {"n": 0, "n_saved": 0, "precision": None}
+    n = len(rows)
+    n_saved = sum(1 for r in rows if r["stop_cf_saved"] == 1)
+    return {
+        "n":         n,
+        "n_saved":   n_saved,
+        "precision": round(n_saved / n, 3) if n else None,
+    }
+
+
+@bp.route("/api/learning/stop-tag-precision")
+def stop_tag_precision():
+    """stop_too_tight tag-precision: % of stop_too_tight-tagged trades that a wider
+    (regime stopAtrMult × ATR) stop would have rescued to target. Resolves up to 5
+    unresolved counterfactuals per call (lazy, bounded)."""
+    with get_db() as conn:
+        _resolve_stop_tag_counterfactual(conn)
+        result = _compute_stop_tag_precision(conn)
     return jsonify({**result, "ok": True})
 
 

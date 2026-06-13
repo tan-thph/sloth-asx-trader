@@ -1,5 +1,222 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-11 (§9 external-review triage added; Sprints 61–65 shipped: §8 pipeline integrity, execution alpha, retrain nudge, flag-don't-drop, macro-brief persistence)
+**Last Updated:** 2026-06-13 (Sprint 71 COMPLETE — Phases 1–3 IMPLEMENTED: wide entry snapshot + MAE/MFE capture; multi-tag emission, new error tags, MAE-based skill modifier, stop_too_tight counterfactual; few-shot exemplars + per-driver playbook + conditional cross-tabs + negative confirmation + deep/light feed mode. FOLLOW-ON: sector capture hardening + market-relative sector analysis)
+
+---
+
+## 0. COMPLETE — Sprint 71: Learning Loop Deepening (approved 2026-06-13)
+
+**Goal:** Make post-trade tagging data-backed instead of inferential, recover lost signal in the
+tag taxonomy, and feed Claude concrete past-experience exemplars (not just aggregate stats) at
+decision time. Three **sequential** phases — each depends on the previous phase's data, so they
+must land in order, executed by three workers in sequence.
+
+### Background — what exists today
+
+| Layer | Location | Current state |
+|---|---|---|
+| Entry snapshot | `js/analysis.js:1554` (`entry_signals_json`) | Only 6 fields: `rsi_14, bb_pct_b, adx_14, atr_pct, return_5d, return_20d` |
+| Outcome capture | `ai_learning_events` (`db.py:137`) | Realized P&L, exit_reason, `exec_mech_*`; **no path data (MAE/MFE)** |
+| Error tags | `routes/debate.py:429` `VALID_PM_TYPES` (9) | Deterministic classifier emits **one** tag, priority-ordered (`routes/learning.py:136`) |
+| Skill score | `routes/learning.py:206` | `thesis_verdict × outcome` quadrant + modifiers; verdict is **technical** drift only |
+| Feed to Claude | `js/analysis.js:682` | Calibration block + recent-rec history + lessons + HOLDING_CONTEXT — all **aggregate/statistical** |
+
+Backend already computes everything Phase 1 needs (`indicators.py`): `sma_20/50/200`,
+`high_60d/low_60d`, `volume_avg_20`, `adv_20`, `forward_pe`, `pb_ratio`, `dividend_yield`,
+`revenue_growth`, `earnings_growth`, `macd_line/signal/hist/hist_prev`, `rs_score`,
+`rs_5d_alpha`, `score` (0–100 setup score), `days_to_earnings`, `pre_earnings_risk`.
+
+### PHASE 1 — Foundational data capture (Worker 1) — IMPLEMENTED 2026-06-13
+
+**Why first:** every downstream tag and feed improvement wants richer entry/exit data.
+
+> **Status:** 1A + 1B shipped (working tree, not committed). `entry_signals_json` widened to ~24
+> null-safe fields in `js/analysis.js`; `mae_pct`/`mfe_pct`/`mae_mfe_resolved_at` columns added via
+> `_LE_MIGRATIONS`; `_resolve_mae_mfe(conn, cap=5)` + pure helper `_mae_mfe_from_ohlc()` added to
+> `routes/learning.py` and wired into `_calib_compute()` beside `_resolve_deterministic_tags`. Tests
+> added (string-presence, migration, math, resolver e2e, idempotency). Both suites green
+> (709 Python / 154 JS). **Note for Phase 2/3:** `rs_score` and `rs_5d_alpha` are NOT propagated to
+> `state.liveSignals` (only the composite `score` escapes `_score_ticker`), so those two snapshot
+> fields are currently always `null` — if Phase 2 needs them, surface them in `analyse_ticker()`'s
+> main return dict in `indicators.py` first.
+
+**1A. Widen the entry snapshot.** Files: `js/analysis.js` (~line 1554), `test_app.py`.
+Expand `entry_signals_json` from 6 → ~18 fields, all from `state.liveSignals[ticker]` (null-safe):
+- Price location: `px_vs_sma20/50/200` (`(price/sma−1)×100`), `pct_from_high60`, `pct_from_low60`.
+- Volume: `rvol` (latest vol / `volume_avg_20`; null if no current-vol field), `adv_20`.
+- Trend: `macd_hist`, `macd_hist_prev`, `macd_bullish`.
+- Relative strength: `rs_score`, `rs_5d_alpha`. Setup: `setup_score` (the 0–100 `score`).
+- Fundamentals: `forward_pe`, `pb_ratio`, `dividend_yield`, `revenue_growth`, `earnings_growth`, `days_to_earnings`.
+Keep the existing 6. Forward-looking only; the classifier must treat new fields as optional.
+Test: string-presence test mirroring the existing `entry_signals_json` test.
+
+**1B. MAE/MFE capture.** Files: `db.py` (`_LE_MIGRATIONS`), `routes/learning.py`, `test_app.py`.
+- New columns: `mae_pct REAL`, `mfe_pct REAL`, `mae_mfe_resolved_at TEXT`.
+- New resolver `_resolve_mae_mfe(conn, cap=5)`: for executed/closed BUY/TOP_UP with
+  `mae_mfe_resolved_at IS NULL` + `actual_entry_price` set, fetch OHLC entry→exit (reuse the
+  virtual-outcome OHLC path, **stop-first intrabar convention** — gotcha #42),
+  `mae_pct=(min(low)−entry)/entry×100`, `mfe_pct=(max(high)−entry)/entry×100`. Cap 5/call,
+  idempotent. Wire into `_calib_compute()` beside `_resolve_deterministic_tags` (inside the
+  `with get_db() as conn:` block, holding `_calib_lock` rules per gotcha #24).
+- Test: synthetic OHLC fixture (entry→dip→peak→exit) asserting MAE/MFE signs+values; migration test.
+
+### PHASE 2 — Tagging intelligence (Worker 2, after Worker 1) — IMPLEMENTED 2026-06-13
+
+**Why second:** needs Phase 1's MAE (empirical `stop_too_tight`) and wide snapshot (better `poor_entry`).
+
+> **Status:** 2A–2D shipped (working tree, not committed). Both suites green (734 Python / 154 JS).
+> - **2A:** `classify_error_type_deterministic` now returns a comma-separated set of ALL applicable
+>   tags (most→least specific). `_resolve_deterministic_tags` SELECT widened to fetch MAE/MFE/
+>   exec_mech/target/checklist/holding; stores the joined set, source stays `'deterministic'`,
+>   manual/auto tags never overwritten. The calibration "top error" nudge already split per-tag
+>   (audited, confirmed) and `failure_patterns.by_error_type` / `_is_good_loss` / `_is_shock` all
+>   split on `,`. Fixed a latent `_is_good_loss` bug (it called `.get` on raw sqlite3.Row in the
+>   Phase 8 gate — now Row-safe).
+> - **2B:** Added `early_exit`, `oversized`, `undersized` to `VALID_PM_TYPES` (debate.py). Emitted
+>   deterministically: `early_exit` (manual non-win where MFE reached target OR `exec_mech_pnl_pct`
+>   beats `realized_pnl_pct` by ≥2pp); `oversized`/`undersized` (scoped to a sizing token in
+>   `checklist_bypasses` — sizing data isn't otherwise captured, see limitation below);
+>   `missed_catalyst` now PARTLY deterministic (entry `days_to_earnings` inside `holding_period_days`);
+>   `stop_too_tight` now EMPIRICAL when MAE/MFE present (MAE pierced the stop yet MFE recovered ≥50%
+>   toward target), falling back to the legacy 1.5×ATR distance heuristic when MAE/MFE are null.
+> - **2C:** `compute_skill_score_deterministic` gains an MAE/MFE path-quality modifier (deep-MAE win
+>   with thin MFE → −0.5 luck penalty; clean shallow-MAE high-MFE win → +0.5). Still returns `None`
+>   without `thesis_verdict`. Added `compute_skill_score_fallback()` (outcome × R-multiple × exit-
+>   discipline) for legacy rows — documented as lower-trust, exposed + tested but DELIBERATELY NOT
+>   wired into the resolver so verdict-backed and estimate scores never mix in calibration.
+> - **2D:** `_wider_stop_would_have_saved()` (pure) + `_resolve_stop_tag_counterfactual()` (lazy,
+>   cap 5, writes new `stop_cf_saved INTEGER` column) + `_compute_stop_tag_precision()`. Wired into
+>   `_calib_compute()`; exposed via `/api/learning/stats` (`stop_tag_precision`) and new
+>   `GET /api/learning/stop-tag-precision`. When precision < 0.5 with n≥5, the top_err widen-stops
+>   nudge self-suppresses and emits `⚠STOP_TAG_UNRELIABLE` (mirrors `⚠AUTO_TAGS_UNRELIABLE`).
+> - **Foundational rs fix:** `analyse_ticker()` (indicators.py) now surfaces `rs_score` + `rs_5d_alpha`
+>   from the `_score_ticker` result (computed once, reused for `score`). They propagate to liveSignals
+>   but remain the neutral default (rs_score=5, rs_5d_alpha=None) because `analyse_ticker` calls
+>   `_score_ticker` without an index series — the snapshot fields now EXIST rather than being dropped.
+>
+> **Limitation for Phase 3:** per-trade sizing context (actual qty vs the quant engine's suggested
+> qty) is NOT captured, so `oversized`/`undersized` are scoped to explicit `checklist_bypasses`
+> tokens only. Richer sizing capture in Phase 3 would let those tags fire from real position data.
+
+**2A. Multi-tag emission.** `classify_error_type_deterministic` returns a comma-separated set of
+*all* applicable tags (most→least specific), not the first match. `_resolve_deterministic_tags`
+stores the joined set; keep `error_type_source='deterministic'`; never overwrite manual/auto.
+Audit the calibration "top error" nudge to count multi-tag rows per-tag.
+
+**2B. New error tags** (add to `VALID_PM_TYPES`, emit deterministically):
+- `early_exit` — manual exit, not a win, where `mfe_pct` shows price reached/exceeded target first,
+  or `exec_mech_pnl_pct` materially beats `realized_pnl_pct` (uses 1B).
+- `oversized`/`undersized` — from `checklist_bypasses` sizing bypass (scope to that if sizing data unreliable).
+- `missed_catalyst` (now partly deterministic) — loss where entry `days_to_earnings` fell inside the
+  holding window and wasn't flagged; world-knowledge catalysts stay LLM-only.
+- Make `stop_too_tight` **empirical** when MAE available (stopped out but price later recovered toward
+  target), falling back to the ATR-distance heuristic when MAE is null.
+
+**2C. Skill-score refinement.** Add a path-quality modifier from MFE/MAE (deep-MAE win → small luck
+penalty; clean high-MFE win → small bonus). Keep returning `None` without `thesis_verdict`, but add an
+optional reduced-weight fallback (outcome × R-multiple × exit-discipline) for legacy rows, documented
+as lower-trust.
+
+**2D. Counterfactual validation of `stop_too_tight`.** From OHLC, compute whether a wider stop
+(regime `stopAtrMult`) would have reached target; aggregate a tag-precision stat; expose via the stats
+endpoint; self-suppress the nudge when precision is low (mirror `AUTO_TAGS_UNRELIABLE`).
+
+### PHASE 3 — Feed enrichment (Worker 3, after Worker 2) — IMPLEMENTED 2026-06-13
+
+**Why last:** consumes Phase 2 tags + Phase 1 snapshot.
+
+> **Status:** 3A–3D shipped (working tree, not committed). Both suites green
+> (749 Python / 154 JS). All new feed blocks ride the existing calibration response
+> + token-budget ordering; the cached system prompt is untouched so the learning
+> block stays the only marginal token cost.
+> - **3A:** `_entry_signature(sig)` builds a compact signature from RSI / BB%B /
+>   px_vs_sma200 / setup_score / MACD-hist sign (rs_score/rs_5d_alpha deliberately
+>   excluded — neutral placeholders). `_compute_exemplars(conn, max_losses=3,
+>   max_wins=2)` returns `ACTION TICKER @ <sig> → <pnl%> in <Nd>, <tag(s)>` lines
+>   (losses by recency, wins by best P&L, tickers deduped). Surfaced as an
+>   `exemplars` array on the `/api/learning/calibration` response (deep mode only —
+>   one fewer frontend call). `buildExemplarsBlock()` in `learning-loop.js` renders
+>   the `EXEMPLARS:` block; `analysis.js` injects it via the calibration placeholder
+>   path (`_calibrationNote + _exemplarsBlock + _lessonsBlock`). Exemplars ride a
+>   separate field, NOT the char-budgeted `parts`, so the highest-impact few-shot
+>   lever is never silently truncated.
+> - **3B:** `_compute_driver_playbook(conn, drivers, _ci_excludes, min_bucket_n=5)`
+>   emits `mean_reversion: 61%WR when RSI<30 vs 38% when RSI>45 (n=12/8)`-style lines
+>   per portfolio driver. Buckets are driver-specific (RSI for mean_reversion /
+>   trend_pullback; BB%B for momentum_breakout). Gated on min bucket n AND the
+>   favourable bucket's Wilson CI excluding the unfavourable WR.
+> - **3C:** `_compute_setup_bucket_xtab()` (setup_score low/<40 · mid/40–65 · high/≥65),
+>   `_compute_driver_regime_xtab()` (current-regime vs other-regimes WR per driver),
+>   and `_compute_sell_negative_confirmation()` (`⚠SELL→ROSE(don't repeat): TICKER+X%`
+>   from `sell_verify_verdict='invalidated'` OR `sell_verify_sold_chg≥8`). All
+>   CI-gated, appended last in `parts` so they drop first under truncation.
+> - **3D:** `_calib_compute(..., deep=False)` gains a `deep` flag; the endpoint reads
+>   `?deep=1` and includes it in the TTL cache key. Deep mode appends the heavy
+>   playbook/cross-tab/negative blocks + computes exemplars and raises the char
+>   budget (900/1100 vs 400/600). `fetchCalibrationBlock(regime, sectors, tickers,
+>   {deep:true})` passes `&deep=1`; `analysis.js` (full portfolio analysis) requests
+>   deep. Light (default) = stats-only for high-frequency / intraday refreshes.
+>
+> **Limitations:** per-trade sizing context still not captured (carried over from
+> Phase 2); rs_score/rs_5d_alpha remain neutral placeholders so they're omitted from
+> exemplar signatures. Driver×regime / setup cross-tabs use RAW (un-decayed) counts
+> for their Wilson gate — they intentionally favour statistical power over recency,
+> matching the per-trade nature of the buckets.
+
+**3A. Few-shot exemplars.** Backend helper returns 2–3 recent losses + 1–2 best wins, each a compact
+line `ACTION TICKER @ entry-signature → outcome, tag(s)` (signature from the wide snapshot). Inject an
+`EXEMPLARS:` block in the user message (`analysis.js`), token-budgeted, beside the calibration block.
+
+**3B. Per-driver playbook.** For each `primary_entry_driver` in the portfolio under analysis, emit a
+conditional line, e.g. `mean_reversion: 61%WR when RSI<30 vs 38% when RSI>45 (n=…)`. Gate on n + Wilson-CI.
+
+**3C. Conditional calibration + negative-confirmation.** Add `driver × regime` and
+`setup_score_bucket × outcome` cross-tabs where n is sufficient; add a `sell_verify_*` negative line
+("SELL calls that subsequently rose"). Respect token-budget ordering (lowest-priority drops first).
+
+**3D. Light vs deep feed mode.** Full exemplar+playbook on the morning-briefing / weekly-review path;
+compressed stats-only on intraday refreshes (cached system prompt → learning block is the only marginal cost).
+
+### FOLLOW-ON — Sector capture hardening + sector-level analysis — IMPLEMENTED 2026-06-13
+
+> **Status:** shipped (working tree, not committed). Both suites green (758 Python / 154 JS — +9
+> Python tests in `TestSprint71SectorAnalysis`). No new statistical machinery — reuses the existing
+> GROUP BY + `_ci_excludes` Wilson-CI gate.
+> - **Capture hardening:** log payload sector fallback extended to
+>   `r.sector || holding?.sector || state.liveSignals[r.ticker]?.sector || null` (`js/analysis.js`).
+>   New backend resolver `_resolve_missing_sectors(conn, cap=50)` backfills historical null/empty
+>   sectors from `core.SECTOR_MAP` (no network; strips `.AX`; unknown tickers skipped; idempotent),
+>   wired into `_calib_compute()` beside the other `_resolve_*` calls under `_calib_lock` (gotcha #24).
+> - **Sector as a market-relative lens:** every sector stat is a DELTA vs the whole-ASX-market baseline
+>   (overall WR). The calibration section-3 sector line now reads
+>   `SECTOR:NN%WR vs mkt MM% (±Xpp,n=…)` with the ✓strong/⚠underperform flag gated on ESS≥6.0 + a
+>   Wilson-CI that excludes the market WR (gotcha #42). Deep mode emits the full per-sector breakdown;
+>   light mode collapses to a single `sector:<most-divergent>` summary. The sector×regime block
+>   (section 8) was already delta-framed — enriched with the explicit `vs mkt` label + a CI gate.
+> - **`/api/learning/stats` `by_sector`:** new array — per sector `{sector, n, win_rate, avg_pnl_pct,
+>   wr_vs_market_pp, dominant_error_tag}`, deltas referencing `overall_win_rate`. `dominant_error_tag`
+>   splits multi-tag `error_type` on `,` (gotcha #45).
+> - **Sector-aware exemplars:** `_compute_exemplars(conn, sector=…)` prefers same-sector loss/win
+>   exemplars (dominant sector derived from the requested tickers via `SECTOR_MAP`, else first
+>   requested sector), falling back to whole-market when too few. Caps unchanged.
+> - **Frontend:** no new param needed — the backend derives the dominant sector from the tickers
+>   already passed through `fetchCalibrationBlock(regime, sectors, tickers, {deep})`.
+> - New gotcha #48 documents the "sector stats are always a delta vs market" convention.
+
+### Cross-cutting requirements (all phases)
+
+1. Keep `python test_app.py` **and** `npm run test:js` green; add tests for new behavior.
+2. No new secrets logged. New `ai_learning_events` columns via the idempotent `_LE_MIGRATIONS` ALTER pattern.
+3. Honor gotchas: numpy→python casts (#21), `_calib_lock` (#24), stop-first intrabar + nudge significance gates (#42), deterministic tags bypass the auto-tag agree-rate gate (#41).
+4. **Do not commit** — leave changes in the working tree for review.
+5. Update `CLAUDE.md` (learning-loop section + gotchas) and this section's status as each phase lands.
+
+### Execution order
+
+Sequential — shared files (`routes/learning.py`, `js/analysis.js`, `db.py`) span phases, and Phase 2/3
+functionally require Phase 1's data, so parallel execution would corrupt files and waste dependent work.
+Worker 1 → Phase 1, then Worker 2 → Phase 2, then Worker 3 → Phase 3. **All three phases landed 2026-06-13.**
+
+---
 
 ## 0. Post-Sprint-53 audit — ML evaluation gap (2026-06-09)
 

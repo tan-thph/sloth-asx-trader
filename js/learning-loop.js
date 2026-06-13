@@ -328,9 +328,16 @@ function computeRRRealization(recHistory) {
  *
  * @param {string} regime   - Current market regime (e.g. 'riskOn')
  * @param {string[]} sectors - Sectors present in the current analysis
+ * @param {string[]} tickers - Portfolio tickers for per-ticker / playbook scoping
+ * @param {{deep?: boolean}} [opts] - Sprint 71 Phase 3D: deep mode requests the
+ *        token-heavy exemplar/playbook/cross-tab blocks (morning-briefing /
+ *        full portfolio analysis). Light (default) is stats-only for high-
+ *        frequency intraday refreshes. Exemplars (when present) are stashed on
+ *        window._calibExemplars for analysis.js to render as an EXEMPLARS: block.
  */
-async function fetchCalibrationBlock(regime, sectors, tickers) {
+async function fetchCalibrationBlock(regime, sectors, tickers, opts = {}) {
   window._calibAdjustments = null;   // §8.3: reset so a failed fetch never reuses stale nudges
+  window._calibExemplars   = null;   // Phase 3A: reset so a failed fetch never reuses stale exemplars
   if (typeof state === 'undefined' || !state.serverOk) return '';
   try {
     const params = new URLSearchParams();
@@ -342,6 +349,7 @@ async function fetchCalibrationBlock(regime, sectors, tickers) {
     const flippedTo = localStorage.getItem('regime_flipped_to');
     if (flippedAt) params.set('flipped_at', flippedAt);
     if (flippedTo) params.set('flipped_to', flippedTo);
+    if (opts && opts.deep) params.set('deep', '1');   // Phase 3D: deep feed mode
     const resp = await fetch(`${API}/api/learning/calibration?${params}`);
     if (!resp.ok) return '';
     const data = await resp.json();
@@ -349,8 +357,25 @@ async function fetchCalibrationBlock(regime, sectors, tickers) {
     // post-response (the text block is context only — Claude no longer does
     // the arithmetic). Stored on window so the same fetch serves both uses.
     if (data.available && data.adjustments) window._calibAdjustments = data.adjustments;
+    // Phase 3A: stash few-shot exemplars (deep mode only) for the EXEMPLARS: block.
+    if (Array.isArray(data.exemplars) && data.exemplars.length) {
+      window._calibExemplars = data.exemplars;
+    }
     return (data.available && data.block) ? '\n\n' + data.block : '';
   } catch (_) { return ''; }
+}
+
+/**
+ * Build the EXEMPLARS: block injected into the AI user message (Sprint 71 Phase 3A).
+ * Concrete few-shot examples from the user's own closed trades — the highest-impact
+ * behavioural lever. Returns '' when no exemplars are available.
+ *
+ * @param {string[]} exemplars - compact one-line strings from the backend
+ */
+function buildExemplarsBlock(exemplars) {
+  if (!Array.isArray(exemplars) || !exemplars.length) return '';
+  return '\n\nEXEMPLARS (your own recent closed trades — learn from these):\n'
+       + exemplars.map(e => '* ' + e).join('\n');
 }
 
 // ── Thesis Tracking Phase 2+3 ────────────────────────────────────────────────

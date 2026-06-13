@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** 2026-06-13 (Sprint 70: post-mortem tagging + skill scoring are now **deterministic** — driven by the entry/exit capture (`thesis_verdict`), replacing the blind local-LLM tagger. Calibration statistics tightened: ESS floor 2.5→6.0, nudge floors 3→12, Wilson-CI significance gate, Brier excludes breakevens, virtual outcomes stop-first.)
-**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–70 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block) · Thesis Tracking Live (Sprint 67–68) · Deterministic tagging/scoring Live (Sprint 70); LLM postmortem/skill demoted to manual override
+**Last Updated:** 2026-06-14 (Sprint 71: Learning Loop Deepening — Phase 1 widens entry signal capture to ~24 fields + MAE/MFE lazy resolver; Phase 2 multi-tag error emission, empirical stop-too-tight, skill score path-quality modifier, counterfactual stop validation; Phase 3 few-shot exemplars, per-driver playbook, cross-tabs, deep/light calibration feed split; sector analysis always market-relative delta, `_resolve_missing_sectors()` backfill, same-sector exemplar preference.)
+**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–71 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block) · Thesis Tracking Live (Sprint 67–68) · Deterministic tagging/scoring Live (Sprint 70); LLM postmortem/skill demoted to manual override · Sprint 71 Learning Deepening Live (data capture, multi-tag, MAE/MFE, exemplars, sector delta framing)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -51,7 +51,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `debate_summary`           | TEXT       | ≤200-char bull/bear summary stored at analysis time |
 | `prompt_hash`              | TEXT       | 12-char djb2 fingerprint of prompt version + regime + date |
 | `postmortem_debate`        | TEXT       | JSON blob of full adversarial debate transcript (Phase 3) |
-| `entry_signals_json`       | TEXT       | JSON snapshot of live signals at rec generation time — used by postmortem and skill-score prompts (Stage 1 / D5 / D6) |
+| `entry_signals_json`       | TEXT       | JSON snapshot of live signals at rec generation time (Sprint 71 Phase 1A: widened from 6 to ~24 fields). Original 6: `rsi_14`, `bb_pct_b`, `adx_14`, `atr_pct`, `return_5d`, `return_20d`. Phase 1 additions: `px_vs_sma20/50/200`, `pct_from_high60/low60`, `rvol`, `adv_20`, `macd_hist`, `macd_hist_prev`, `macd_bullish`, `rs_score`, `rs_5d_alpha`, `setup_score`, `forward_pe`, `pb_ratio`, `dividend_yield`, `revenue_growth`, `earnings_growth`, `days_to_earnings`. Used by postmortem/skill-score prompts (Stage 1 / D5 / D6) and by `_entry_signature()` for few-shot exemplars. |
 | `debate_synthesis_winner`  | TEXT       | Synthesizer verdict at analysis time: `'bull'`/`'bear'`/`'neutral'` for BUY recs, `'hold'`/`'exit'`/`'neutral'` for SELL/TRIM (Stage 4 / L6) |
 | `tags`                     | TEXT       | Comma-separated user trade tags (sprint-3C) |
 | `trade_thesis`             | TEXT       | Entry thesis captured at execution (sprint-3C) |
@@ -69,6 +69,10 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `sell_verify_sold_chg`     | REAL       | % price change of sold ticker from sell date → verify date (Sprint 37) |
 | `exec_mech_pnl_pct`        | REAL       | Execution-alpha tracker: simulated MECHANICAL exit P&L % (stop/target/15-bar time-stop, stop-first within a bar) for executed closed BUY/TOP_UP trades; lazily resolved by `_resolve_execution_alpha()` (≤5/call) (Sprint 63) |
 | `exec_mech_exit`           | TEXT       | `stop` / `target` / `time` — which mechanical rule fired in the simulation (Sprint 63) |
+| `mae_pct`                  | REAL       | Maximum Adverse Excursion % — worst intraday drawdown from entry during hold (≤0). Lazily filled by `_resolve_mae_mfe()` inside `_calib_compute()`. NULL until resolver runs. Stop-first intrabar convention (straddle bars book the loss). *(Sprint 71 Phase 1B)* |
+| `mfe_pct`                  | REAL       | Maximum Favorable Excursion % — best unrealised gain from entry during hold (≥0). Lazily filled by same resolver. NULL until resolved. *(Sprint 71 Phase 1B)* |
+| `mae_mfe_resolved_at`      | TEXT       | ISO timestamp when `_resolve_mae_mfe()` last processed this row. Idempotency guard — rows with a non-null value are skipped. *(Sprint 71 Phase 1B)* |
+| `stop_cf_saved`            | INTEGER    | 1 if a regime-`stopAtrMult`×ATR wider stop would have reached target (OHLC counterfactual); 0 otherwise. Written by `_resolve_stop_tag_counterfactual()`. Used by `_compute_stop_tag_precision()` — when precision <0.5 (n≥5) the `stop_too_tight` widen-stops nudge self-suppresses and emits `⚠STOP_TAG_UNRELIABLE`. NULL until resolved. *(Sprint 71 Phase 2D)* |
 | `sell_verify_alt_chg`      | REAL       | % price change of `alternative_ticker` from sell date → verify date (Sprint 37) |
 | `primary_entry_driver`     | TEXT       | Structured entry driver declared by Claude at BUY/TOP_UP generation: one of `mean_reversion` / `momentum_breakout` / `trend_pullback` / `fundamental_value` / `macro_tailwind`. Aligns with `indicators.FACTOR_WEIGHTS`. Backfillable for historical rows via `classify_entry_driver()` (Sprint 67) |
 | `thesis_verdict`           | TEXT       | Exit verdict — did the original entry driver play out? `validated` / `invalidated` / `irrelevant`. Computed client-side by `computeThesisDrift()` at SELL/TRIM time (entry-vs-current technicals), patched onto the **parent BUY/TOP_UP** event at position close. Joined with `primary_entry_driver` for the Thesis Accuracy Matrix. Distinct from `sell_verify_verdict` (which asks "was selling the right call") (Sprint 68) |
@@ -279,7 +283,7 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 
 ## Calibration Injection
 
-`fetchCalibrationBlock(regime, sectors, tickers)` in `analysis.js` calls `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` after regime detection. The backend:
+`fetchCalibrationBlock(regime, sectors, tickers, opts={})` in `analysis.js` calls `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX[&deep=1]` after regime detection. The full portfolio analysis path passes `{deep:true}` (opts); high-frequency / intraday refreshes use the default light feed. The backend:
 1. Fetches last 90 days of closed events (max 180d) — pure `_calib_compute()` function, TTL-cached 5 min (L4)
 2. Applies exponential + skill-weighted decay (`weight = time_decay × max(0.2, min(1.8, skill_score/5.0))`); half-life is **regime-adaptive** (20–60d, default 45d); unscored → sf=1.0. `skill_score` is deterministic since Sprint 70 (see Phase 8 note above)
 3. Excludes `external_shock` / `protective_stop` from confidence band calculations only
@@ -290,13 +294,17 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 7. Dominant error type threshold: 33% of losses, **min 12 losses** (`_MIN_NUDGE_N`, raised from 3 in Sprint 70)
 7b. **Dominant success tag nudge** *(Sprint 27):* mirrors L2 for wins. If ≥33% of tagged wins share a success tag and ESS≥6.0, emits `✓tag_name(N/Mwins,ESS=X.X)→lean into this` so Claude can reinforce winning patterns, not just avoid losing ones. Threshold: ≥33% of tagged wins, min 12 wins (`_MIN_NUDGE_N`, raised from 3 in Sprint 70). Supported tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`.
 8. Per-ticker stats: emits `per-ticker:BHP.AX:62%(Δ+14pp,ESS=3.2)✓strong` for portfolio tickers with >15pp delta vs overall WR (Stage 2 + Sprint 23)
-8b. **Sector × regime interaction** *(Sprint 28):* when current regime is known and ≥10 calib rows exist, groups rows by `sector × regime`, computes weighted WR per group, emits up to 2 sectors with |delta| ≥ 12pp vs overall WR and ESS ≥ 2.5. Format: `sector×riskOn:Materials:78%(Δ+22pp,ESS=3.1)✓,REITs:31%(Δ-25pp)⚠`. Most actionable for ASX sector rotation.
+8b. **Sector performance vs whole-market baseline** *(Sprint 71 sector analysis):* every sector line is expressed as a **delta vs the whole-ASX baseline** (overall WR), never as an absolute win rate. Light mode: `SECTOR:<most-divergent>` single summary. Deep mode: per-sector `SECTOR:NN%WR vs mkt MM% (±Xpp,n=…)` with ✓strong/⚠underperform flags firing only when ESS≥6.0 AND the sector Wilson 95% CI excludes the market WR. `_resolve_missing_sectors(conn)` backfills historical null sectors from `core.SECTOR_MAP` (no network; strips `.AX`; unknown tickers stay null) so the sector lens isn't silently censored. Historical gaps close over time without fetching.
+8c. **Sector × regime interaction** *(Sprint 28, updated Sprint 71):* groups rows by `sector × regime`; format aligned to market-relative delta: `sector×riskOn:Materials:78%(Δ+22pp,ESS=3.1)✓,REITs:31%(Δ-25pp)⚠`. CI-gated via `_ci_excludes`. Deep mode only. Most actionable for ASX sector rotation.
 9. Sell tag validation: emits `⚠SELL_TAG:time_stop(n=4,val=25%)→CUTTING WINNERS` or `✓SELL_TAG:target_rch(n=5,val=80%)→reliable` when a SELL driver is consistently unreliable/reliable (capped at 3 drivers, only verifiable drivers)
 10. Returns a block labelled with date range + regime for Claude context
 11. Auto-expire (events >120 days old → `expired`) runs on write path only, not on this GET (L3)
 
-Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` — never the system prompt (preserves Anthropic's server-side prompt cache).
-Target size: 30–60 tokens.
+Injected into **user message** via `__CALIBRATION_PLACEHOLDER__` — never the system prompt (preserves Anthropic's server-side prompt cache). The placeholder expands to `_calibrationNote + _exemplarsBlock + _lessonsBlock` (Sprint 71 Phase 3).
+
+**Deep vs light feed split** *(Sprint 71 Phase 3):* `_calib_compute(conn, ..., deep=False)`. Light (default) = stats-only (conf bands, regime, per-ticker, per-sector summary). Deep = all of the above plus per-driver conditional playbook (`mean_reversion: 61%WR when RSI<30 vs 38% when RSI>45`), driver×regime + setup_score cross-tabs, `⚠SELL→ROSE` negative-confirmation line, and a separate `exemplars` field (2–3 recent closed losses + 1–2 best wins as compact one-liners — `ACTION TICKER @ <entry-signature> → <pnl%> in <Nd>, <tag(s)>`). Exemplars are the highest-impact lever and ride a separate field (never char-budget-truncated); the heavy blocks (playbook/cross-tabs/negative line) live inside `parts` and drop first under truncation. Deep raises the char budget to 900/1100 (vs 400/600 light). `deep` is part of the TTL cache key. `buildExemplarsBlock()` in `learning-loop.js` renders exemplars into the `EXEMPLARS:` block from `window._calibExemplars`. Same-sector exemplars are preferred when the requested tickers share a dominant sector (via `core.SECTOR_MAP`), falling back to whole-market when too few.
+
+Target size: 30–60 tokens light / ~225 tokens deep.
 
 **Thesis-matrix calibration nudge** *(Sprint 68):* appended last (lowest priority, first to drop by the token budget). When a driver shows clear separation — validated win-rate vs invalidated win-rate gap ≥ 25pp with both buckets n≥5 — `_calib_compute()` emits a compact `THESIS:<driver> val=X% inval=Y%` token from `_compute_thesis_matrix(conn)` (reuses the open conn). Tells Claude which entry archetypes pay off only when their thesis holds, so it can tighten exits when reversion/momentum stalls.
 
@@ -355,21 +363,27 @@ into primary_entry_driver            Claude's sell reasoning is              (�
 
 **Scope: BUY/TOP_UP entries only.** `error_type` ("why the *entry* failed") and the `thesis_verdict` skill quadrant are entry-centric, so the resolver filters `recommendation IN ('BUY','TOP_UP')`. A SELL/TRIM `loss` just means a position was cut below its entry — exit-decision quality, already tracked by `sell_verify_verdict` — not an entry error. The parent BUY/TOP_UP events (which receive per-entry outcomes and the patched `thesis_verdict` at close) are the home for these tags.
 
-### `classify_error_type_deterministic(row)` → error_type
+### `classify_error_type_deterministic(row)` → error_type *(multi-tag since Sprint 71 Phase 2A)*
 
-Priority-ordered, most-specific / most-data-backed first. Wins return `none`.
+**Sprint 71 change: now returns ALL applicable tags joined as a comma-separated string** (e.g. `thesis_broken,overconfident,poor_rr`). Priority still matters — tags are ordered most-specific→least-specific, so `split(",")[0]` is the dominant tag. Every consumer must split on `,` before counting or comparing (gotcha #45 in CLAUDE.md). Wins return `none`.
 
 | Priority | Tag | Rule (from captured data) |
 |---|---|---|
-| 1 | `thesis_broken` | `thesis_verdict == 'invalidated'` — the entry technical thesis demonstrably reversed (data-backed, no longer guessed) |
-| 2 | `stop_too_tight` | `exit_reason=='stop_hit'` AND thesis NOT invalidated AND stop distance `< 1.5×ATR` (shaken out by noise; ATR from `entry_signals_json.atr_pct`, stop distance from `actual_entry_price`−`suggested_stop`) |
-| 3 | `overconfident` | `ai_confidence ≥ 0.75` on a loss |
-| 4 | `poor_rr` | `rr_ratio < 1.5` |
-| 5 | `poor_entry` | entry stretched for the driver — `mean_reversion` bought with RSI>45 or %b>0.45; `momentum_breakout`/`trend_pullback` bought with %b>0.95 |
-| 6 | `regime_mismatch` | BUY/TOP_UP entered in `riskOff`/`panic` |
+| 1 | `thesis_broken` | `thesis_verdict == 'invalidated'` — the entry technical thesis demonstrably reversed |
+| 2 | `stop_too_tight` | `exit_reason=='stop_hit'` AND thesis NOT invalidated. **Empirical (when MAE/MFE available):** adverse excursion pierced the stop AND price recovered ≥50% toward target (real-path evidence stop was too close). **Fallback (legacy/no MAE):** stop distance `< 1.5×ATR` (noise-range heuristic). *(Sprint 71 Phase 2B)* |
+| 3 | `missed_catalyst` | **Partly deterministic:** `entry_signals_json.days_to_earnings` was ≤14 AND the holding period crossed the earnings date. Requires the earnings field to be captured; otherwise manual LLM only. *(Sprint 71 Phase 2A)* |
+| 4 | `early_exit` | Non-win manual exit where either MFE reached target OR `exec_mech_pnl_pct` beats `realized_pnl_pct` by ≥2pp — winner that was cut short. *(Sprint 71 Phase 2A)* |
+| 5 | `oversized` / `undersized` | `checklist_bypasses` contains a sizing token — sizing was explicitly overridden at entry. *(Sprint 71 Phase 2A; sizing not otherwise captured)* |
+| 6 | `overconfident` | `ai_confidence ≥ 0.75` on a loss |
+| 7 | `poor_rr` | `rr_ratio < 1.5` |
+| 8 | `poor_entry` | entry stretched for the driver — `mean_reversion` bought with RSI>45 or %b>0.45; `momentum_breakout`/`trend_pullback` bought with %b>0.95 |
+| 9 | `regime_mismatch` | BUY/TOP_UP entered in `riskOff`/`panic` |
 | — | `none` | nothing matched |
 
-**Deliberately never emits `missed_catalyst` or `external_shock`** — those require world-knowledge (news, index events) the row does not contain. They remain available only via the optional manual LLM postmortem buttons.
+**Never emits `external_shock`** — requires world-knowledge the row does not contain; manual LLM only. `missed_catalyst` is now partly deterministic (earnings-window check) but still requires the `days_to_earnings` field to be captured.
+
+### Counterfactual stop validation *(Sprint 71 Phase 2D)*
+`_resolve_stop_tag_counterfactual(conn)` walks OHLC entry→exit for `stop_too_tight`-tagged rows, testing whether a regime `stopAtrMult`×ATR stop would have reached target instead. Writes `stop_cf_saved` (1/0). `_compute_stop_tag_precision(conn)` aggregates: when precision <0.5 (n≥5), `_calib_compute()` suppresses the `stop_too_tight` widen-stops nudge and emits `⚠STOP_TAG_UNRELIABLE`. Surfaced via `GET /api/learning/stop-tag-precision` and in `/api/learning/stats` as `stop_tag_precision`.
 
 ### `compute_skill_score_deterministic(row)` → 0–10 or None
 
@@ -386,7 +400,11 @@ The `thesis_verdict × outcome` quadrant *is* the skill-vs-luck split the LLM wa
 
 Modifiers (clamped 0–10): `target_hit` +0.5 · disciplined `stop_hit` loss +0.5 · `manual` exit on a still-`validated` thesis −0.5 · `conf≥0.80` & loss −1.0 · `conf<0.65` & win −0.5 · planned `rr≥2.0` +0.25.
 
+**MAE/MFE path-quality modifier** *(Sprint 71 Phase 2C):* `−0.5` for a deep-MAE thin-MFE win (MAE≤−10%, MFE<target-distance×0.5 — lucky survivor); `+0.5` for a clean shallow-MAE high-MFE win (MAE>−5%, MFE≥target-distance×0.5 — confident follow-through). Applied only when both `mae_pct` and `mfe_pct` are non-null. Misses and ambiguous paths get no modifier.
+
 **Returns `None` when `thesis_verdict` is absent** — we refuse to invent a skill score for legacy/uncaptured trades; those keep neutral calibration weight (`sf=1.0`) rather than getting a fabricated number.
+
+`compute_skill_score_fallback(row)` is a documented lower-trust estimate (outcome × R-multiple × exit-discipline) for legacy rows with no verdict — exposed and tested but **NOT wired into the resolver**; verdict-backed and fallback scores must not mix in calibration.
 
 ### Relationship to the LLM endpoints
 
@@ -406,8 +424,8 @@ Modifiers (clamped 0–10): `target_hit` +0.5 · disciplined `stop_hit` loss +0.
 | `POST /api/learning/log`                | Write  | Create new event |
 | `POST /api/learning/outcome`            | Write  | Update outcome, tags, exit_reason |
 | `DELETE /api/learning/event/<id>`       | Write  | Hard delete |
-| `GET /api/learning/stats`               | Read   | Aggregates for Learning Loop UI; includes `success_patterns`, `phase8_meta` (mann_whitney_z), `prompt_regression`, Wilson 95% CI on all win-rate fields |
-| `GET /api/learning/calibration`         | Read   | Decay-weighted, shock-excluded calibration block (5-min TTL, thread-safe `_calib_lock`) |
+| `GET /api/learning/stats`               | Read   | Aggregates for Learning Loop UI; includes `success_patterns`, `phase8_meta` (mann_whitney_z), `prompt_regression`, Wilson 95% CI on all win-rate fields, `stop_tag_precision`. *(Sprint 71)* also returns `by_sector`: per-sector `{sector, n, win_rate, avg_pnl_pct, wr_vs_market_pp, dominant_error_tag}` sorted by n desc. `wr_vs_market_pp` is the signed delta vs `overall_win_rate`; `dominant_error_tag` splits multi-tag `error_type` on `,` excluding `none`/`external_shock`. |
+| `GET /api/learning/calibration`         | Read   | Decay-weighted, shock-excluded calibration block (5-min TTL, thread-safe `_calib_lock`). `?deep=1` adds exemplars, per-driver playbook, cross-tabs, `⚠SELL→ROSE` line; `exemplars` on a separate field (never truncated). *(Sprint 71 Phase 3)* |
 | `GET /api/learning/calibration-stats`   | Read   | Brier score + reliability-diagram bins `{brier_score, n, bins:[{range,lo,hi,n,mean_confidence,actual_win_rate}]}` |
 | `GET /api/learning/digest-data`         | Read   | Structured failure data for the postmortem digest `{recent_failures, regime_stats, overall_wins, error_dist, exit_dist}` |
 | `GET /api/learning/sell-outcomes`       | Read   | Executed SELL/TRIM events with `sell_primary_driver` set and per-event `sell_verify_verdict` badges; `?force=1` triggers immediate re-resolve *(Sprint 37)* |
@@ -417,7 +435,8 @@ Modifiers (clamped 0–10): `target_hit` +0.5 · disciplined `stop_hit` loss +0.
 | `POST /api/learning/backfill-entry-drivers` | Write | Fills `primary_entry_driver` for historical BUY/TOP_UP rows from `entry_signals_json` via `classify_entry_driver()` (no Claude spend); `unknown` rows stay NULL. Returns `{ok, updated, skipped, candidates}` *(Sprint 67)* |
 | `GET /api/learning/entry-context`       | Read   | `?tickers=A,B` → `{ok, contexts:{TICKER:{entry_date, primary_entry_driver, entry_signals:{...}, trade_thesis}}}`; most recent BUY/TOP_UP per ticker (prefers executed); cap 50 *(Sprint 68)* |
 | `GET /api/learning/thesis-matrix`       | Read   | Entry-driver × `thesis_verdict` cross-tab `{ok, n_total, drivers, verdicts, matrix:{driver:{verdict:{n, avg_pnl_pct, win_rate}}}, insight}`; backed by `_compute_thesis_matrix(conn)` *(Sprint 68)* |
-| `GET /api/learning/trade-detail`        | Read   | `?ids=12,15` → `{ok, details:{id:{ticker, recommendation, entry_signals:{...}, trade_thesis, primary_entry_driver, thesis_verdict, sell_primary_driver, outcome_status, realized_pnl_pct, exit_reason, regime, ai_confidence, ...}}}`; per-trade detail for the Journal page's expandable drawer; cap 50 ids *(Sprint 69)* |
+| `GET /api/learning/trade-detail`        | Read   | `?ids=12,15` → `{ok, details:{id:{ticker, recommendation, entry_signals:{...}, trade_thesis, primary_entry_driver, thesis_verdict, sell_primary_driver, outcome_status, realized_pnl_pct, exit_reason, regime, ai_confidence, mae_pct, mfe_pct, ...}}}`; per-trade detail for the Journal page's expandable drawer; cap 50 ids *(Sprint 69; mae_pct/mfe_pct added Sprint 71)* |
+| `GET /api/learning/stop-tag-precision`  | Read   | `{ok, n, n_saved, precision}` — % of `stop_too_tight`-tagged trades where a regime `stopAtrMult`×ATR wider stop would have reached target (OHLC counterfactual). Resolves ≤5 rows/call lazily. Low precision (<0.5, n≥5) self-suppresses the widen-stops calibration nudge. *(Sprint 71 Phase 2D)* |
 | `GET /api/learning/execution-alpha`     | Read   | `{n, pending, avg_actual_pct, avg_mech_pct, alpha_pp, n_beat, n_lag, mech_exits}` — actual realized P&L vs simulated mechanical exit for executed BUY/TOP_UP; resolves ≤5 pending events per call. Display-only (no calibration nudge — `⚠EARLY_EXIT_DRAG` already covers exit-timing feedback) *(Sprint 63)* |
 | `DELETE /api/learning/lesson/<id>`      | Write  | Hard-delete one lesson *(Sprint 39)* |
 | `GET /api/learning/untagged`            | Read   | Loss/breakeven events with no `error_type` — batch-classify queue *(Sprint 38)* |
@@ -479,15 +498,17 @@ Modifiers (clamped 0–10): `target_hit` +0.5 · disciplined `stop_hit` loss +0.
 | Tag | Short | When to use | Calibration? |
 |-----|-------|-------------|--------------|
 | `overconfident` | OC | AI confidence too high for actual risk | ✅ Yes |
-| `missed_catalyst` | MC | Key event not accounted for | ✅ Yes |
+| `missed_catalyst` | MC | Key event not accounted for (partly deterministic: earnings-window check; else manual LLM) | ✅ Yes |
 | `regime_mismatch` | RM | Wrong strategy for regime | ✅ Yes |
 | `poor_entry` | PE | Timing/price suboptimal | ✅ Yes |
-| `stop_too_tight` | ST | Normal volatility triggered stop | ✅ Yes |
+| `stop_too_tight` | ST | Shaken out by noise (empirical MAE/MFE test or 1.5×ATR fallback) | ✅ Yes |
 | `poor_rr` | PR | R:R ratio too low from start | ✅ Yes |
-| `thesis_broken` | TB | New info invalidated thesis post-entry | ✅ Yes |
+| `thesis_broken` | TB | Entry thesis invalidated post-entry | ✅ Yes |
+| `early_exit` | EE | Non-win manual exit before MFE reached target (Sprint 71) | ✅ Yes |
+| `oversized` / `undersized` | OZ/UZ | Sizing bypass token in `checklist_bypasses` (Sprint 71) | ✅ Yes |
 | `external_shock` | ES | Black swan / unpredictable market event | ❌ Excluded |
 
-**Sprint 70 — how tags are assigned:** by default these are now set **deterministically** by `classify_error_type_deterministic()` (source `'deterministic'`). The data-derivable tags — `thesis_broken`, `stop_too_tight`, `overconfident`, `poor_rr`, `poor_entry`, `regime_mismatch` — are computed from the captured row. `missed_catalyst` (MC) and `external_shock` (ES) are **never auto-assigned** (they need world-knowledge); they only appear when a user runs the manual LLM postmortem (🤖/⚔️/⚖️). A manual or LLM tag always overrides the deterministic one.
+**Sprint 70–71 — how tags are assigned:** by default these are now set **deterministically** by `classify_error_type_deterministic()` (source `'deterministic'`). Since Sprint 71, the function emits **all** applicable tags as a comma-separated string — a single loss can carry multiple root causes. `missed_catalyst` is now partly deterministic (earnings-window check from `days_to_earnings`). `external_shock` is **never auto-assigned** (world-knowledge only). Deterministic tags carry `error_type_source='deterministic'` and bypass the `agree_rate` auto-tag gate. A manual or LLM tag always overrides.
 
 `protective_stop` exit_reason is excluded from confidence-band calibration — it classifies how the trade was exited (deliberate capital protection), not why the thesis failed. Protective stops are excluded from confidence calibration regardless of tags, but contribute to error pattern learning if they carry analytical error tags.
 
@@ -867,6 +888,16 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **Auto-refresh after "Classify All Untagged"** — `classifyAllPostmortems()` now calls `showPage('learning')` via `setTimeout(..., 800)` after the batch completes, so newly-assigned tags appear without a manual Refresh click.
   - WIN `success_tags` display moved exclusively to the Claude column; the Error tags column is now strictly for Ollama-classified error tags on loss/breakeven rows.
 
+- **Sprint 71 — Learning Loop Deepening (June 2026):**
+  - **Phase 1A — Wide entry capture:** `logRecsToLearningLoop()` in `analysis.js` now writes ~24 null-safe fields into `entry_signals_json` via a `_pct(px, ref)` helper for price-distance math. New fields: `px_vs_sma20/50/200`, `pct_from_high60/low60`, `rvol` (volume today / avg 20d), `adv_20`, `macd_hist`, `macd_hist_prev`, `macd_bullish`, `rs_score`, `rs_5d_alpha`, `setup_score`, `forward_pe`, `pb_ratio`, `dividend_yield`, `revenue_growth`, `earnings_growth`, `days_to_earnings`. `rs_score`/`rs_5d_alpha` exist in the snapshot (neutral placeholders — see CLAUDE.md gotcha #43). Sector fallback chain at log time: `r.sector || holding?.sector || liveSignals[r.ticker]?.sector || null`.
+  - **Phase 1B — MAE/MFE lazy resolver:** `_mae_mfe_from_ohlc(hist, entry)` pure helper (stop-first intrabar convention); `_resolve_mae_mfe(conn, cap=5)` wired into `_calib_compute()` alongside virtual/sell resolvers; DB columns `mae_pct`, `mfe_pct`, `mae_mfe_resolved_at`, `stop_cf_saved` added via `_LE_MIGRATIONS`. Idempotent (skips resolved rows), capped at 5/call, fails-safe on fetch error.
+  - **Phase 2A — Multi-tag + new tags:** `classify_error_type_deterministic()` returns comma-joined ALL applicable tags (ordered most→least specific). New tags: `early_exit` (cut winner; MFE reached target or exec_mech edge ≥2pp), `oversized`/`undersized` (sizing bypass token in `checklist_bypasses`), `missed_catalyst` (partly deterministic: entry `days_to_earnings ≤14`). `VALID_PM_TYPES` in `routes/debate.py` updated to include new tags.
+  - **Phase 2B — Empirical `stop_too_tight`:** when `mae_pct`/`mfe_pct` are available, tag fires only when adverse excursion pierced the stop AND price recovered ≥50% toward target. Falls back to legacy 1.5×ATR heuristic when MAE/MFE null.
+  - **Phase 2C — Skill-score path modifier:** `compute_skill_score_deterministic()` adds ±0.5 when MAE/MFE available — `−0.5` for deep-MAE thin-MFE win (lucky survivor), `+0.5` for shallow-MAE high-MFE win (clean follow-through). `compute_skill_score_fallback()` documented lower-trust score for legacy rows (NOT wired into resolver).
+  - **Phase 2D — Counterfactual stop validation:** `_wider_stop_would_have_saved(row, regime_mult)` OHLC test; `_resolve_stop_tag_counterfactual(conn)` writes `stop_cf_saved`; `_compute_stop_tag_precision(conn)` aggregates; self-suppresses widen-stops nudge to `⚠STOP_TAG_UNRELIABLE` when precision <0.5 (n≥5). `GET /api/learning/stop-tag-precision` dedicated endpoint; `stop_tag_precision` in `/api/learning/stats`. Regime stop multiples in `_REGIME_STOP_ATR_MULT` (mirror of JS `getRegimeModifiers().stopAtrMult`).
+  - **Phase 3 — Feed enrichment:** `_calib_compute(..., deep=False)` deep/light split; deep raises char budget 400/600 → 900/1100 and appends: `_compute_driver_playbook` (per-driver conditional WR), `_compute_setup_bucket_xtab` (low/mid/high setup_score), `_compute_driver_regime_xtab` (current vs other regimes), `_compute_sell_negative_confirmation` (`⚠SELL→ROSE`). All CI-gated via `_ci_excludes`. `_compute_exemplars(conn, sector=...)` returns 2–3 recent closed losses + 1–2 best wins as compact one-liners (signature from `_entry_signature`: RSI/BB%B/px_vs_sma200/setup_score/MACD-hist sign). Exemplars ride a separate `exemplars` field (never char-budget-truncated). `deep` is part of TTL cache key. `fetchCalibrationBlock(..., {deep:true})` in full portfolio analysis path; `buildExemplarsBlock()` renders from `window._calibExemplars`.
+  - **Sector analysis hardening:** `_resolve_missing_sectors(conn, cap=50)` fills null sector from `core.SECTOR_MAP` (no network; strips `.AX`); wired beside other `_resolve_*` calls inside `_calib_compute()`. Calibration sector lines always market-relative: `SECTOR:NN%WR vs mkt MM% (±Xpp,n=…)`; light = single most-divergent summary; deep = per-sector breakdown. `by_sector` added to `/api/learning/stats` response. Same-sector exemplars preferred (dominant sector derived from `SECTOR_MAP`), falling back to whole-market. `_compute_exemplars(conn, sector=...)` is CI-gated.
+  - **Tests:** 758 Python tests + 154 JS tests passing (added `TestSprint71Phase1` through `TestSprint71Sector` across `test_app.py`).
 - **Sprint 70 — Deterministic tagging/scoring + calibration rigor (June 2026):**
   - **`classify_error_type_deterministic(row)` / `compute_skill_score_deterministic(row)`** added to `routes/learning.py` (pure functions) + **`_resolve_deterministic_tags(conn)`** lazy resolver wired into `_calib_compute()` alongside the virtual/sell resolvers. Replaces the blind local-LLM postmortem/skill scorer as the default; LLM 🤖/🔬 endpoints unchanged but now manual override only (resolver fills NULLs, never overwrites). Tags carry `error_type_source='deterministic'`; skill_score requires a non-null `thesis_verdict` (else stays NULL → neutral weight).
   - **`_ESS_MIN` 2.5 → 6.0** and **`_MIN_NUDGE_N` 3 → 12** in `_calib_compute()` — conditional nudges need real statistical power; the old floors fired on 2–5 trades inside the sampling noise.
@@ -905,6 +936,11 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 8. ✅ **Regime-flip calibration penalty** — `fetchAndClassifyRegime()` writes flip timestamp to localStorage; `_calib_compute()` halves HL for first <10 trades; emits `⚠REGIME_FLIP` token. *(Sprint 44)*
 9. ✅ **Thesis Tracking** — structured `primary_entry_driver` on BUY/TOP_UP (Sprint 67); entry→exit comparison via `computeThesisDrift()` + `HOLDING_CONTEXT` injection; `thesis_verdict` column; Thesis Accuracy Matrix (`_compute_thesis_matrix`) + `THESIS:<driver>` calibration nudge; deterministic backfill. *(Sprint 67–68; PROMPT_VERSION → 2026-06-v13)*
 10. ✅ **Deterministic post-mortem tagging & skill scoring** — `classify_error_type_deterministic()` + `compute_skill_score_deterministic()` + `_resolve_deterministic_tags()` replace the blind local-LLM tagger, driven by the entry/exit capture (`thesis_verdict`). LLM 🤖/🔬 demoted to manual override. Calibration tightened: ESS 2.5→6.0, nudge floors 3→12, Wilson-CI band gate (`_ci_excludes`), Brier excludes breakevens, virtual outcomes stop-first. *(Sprint 70)*
+11. ✅ **Sprint 71 Learning Loop Deepening** — three-phase deepening of the data → feed pipeline:
+    - **Phase 1:** `entry_signals_json` widened to ~24 fields; `_resolve_mae_mfe(conn)` lazy resolver (MAE/MFE from OHLC, stop-first convention); DB columns `mae_pct`, `mfe_pct`, `mae_mfe_resolved_at`, `stop_cf_saved`; `rs_score`/`rs_5d_alpha` surfaced in `analyse_ticker()` main return dict.
+    - **Phase 2:** multi-tag `error_type` (comma-joined, ordered most→least specific); new tags `early_exit`, `oversized`, `undersized`, partly-deterministic `missed_catalyst`; empirical `stop_too_tight` via MAE/MFE (stop-pierce + 50% MFE recovery); skill-score path-quality modifier (±0.5 for deep-MAE/clean-win); counterfactual stop validation (`_resolve_stop_tag_counterfactual`, `_compute_stop_tag_precision`); `⚠STOP_TAG_UNRELIABLE` self-suppression; `GET /api/learning/stop-tag-precision`; `compute_skill_score_fallback()` (lower-trust, NOT wired in).
+    - **Phase 3:** `_calib_compute(..., deep=False)` with deep/light split; deep adds per-driver playbook (`_compute_driver_playbook`), driver×regime + setup_score cross-tabs (`_compute_driver_regime_xtab`, `_compute_setup_bucket_xtab`), `⚠SELL→ROSE` negative-confirmation line (`_compute_sell_negative_confirmation`), and `exemplars` field (`_compute_exemplars`, 2–3 losses + 1–2 wins, never truncated); `_entry_signature()` compact per-trade signature; char budget 400/600 → 900/1100 deep; `deep` is part of TTL cache key; `fetchCalibrationBlock(..., {deep:true})` in full portfolio path; `buildExemplarsBlock()` + `window._calibExemplars` in `learning-loop.js`.
+    - **Sector analysis:** sector always recorded (fallback: `holding?.sector || liveSignals[ticker]?.sector`); `_resolve_missing_sectors(conn)` backfills from `core.SECTOR_MAP`; calibration sector lines market-relative (`SECTOR:NN%WR vs mkt MM%`); Wilson-CI-gated `✓strong`/`⚠underperform`; `by_sector` in `/api/learning/stats`; same-sector exemplar preference. *(Sprint 71)*
 
 ---
 

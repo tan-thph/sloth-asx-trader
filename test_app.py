@@ -1049,6 +1049,24 @@ class TestStage1DataCapture(unittest.TestCase):
                       "analysis.js must include entry_signals_json in learning log payload")
         self.assertIn("liveSignals", src)
 
+    def test_entry_signals_json_wide_snapshot(self):
+        """Sprint 71 1A: entry_signals_json must carry the widened entry signature
+        (price location, volume, MACD, relative strength, setup, fundamentals)
+        in addition to the original 6 fields."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        # original 6 retained
+        for k in ("rsi_14", "bb_pct_b", "adx_14", "atr_pct", "return_5d", "return_20d"):
+            self.assertIn(k, src, f"entry_signals_json must retain {k}")
+        # new wide fields
+        for k in ("px_vs_sma20", "px_vs_sma50", "px_vs_sma200",
+                  "pct_from_high60", "pct_from_low60", "rvol", "adv_20",
+                  "macd_hist", "macd_hist_prev", "macd_bullish",
+                  "rs_score", "rs_5d_alpha", "setup_score",
+                  "forward_pe", "pb_ratio", "dividend_yield",
+                  "revenue_growth", "earnings_growth", "days_to_earnings"):
+            self.assertIn(k, src, f"entry_signals_json must include new field {k}")
+
     def test_detect_exit_reason_helper_present(self):
         """_detectExitReason must be defined in utils.js (single canonical copy) and
         referenced by both recommendations.js and performance.js."""
@@ -1119,7 +1137,7 @@ class TestStage2AutoClassification(unittest.TestCase):
         """fetchCalibrationBlock in learning-loop.js must accept tickers argument."""
         with open(os.path.join(ROOT, "js/learning-loop.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("async function fetchCalibrationBlock(regime, sectors, tickers)", src)
+        self.assertIn("async function fetchCalibrationBlock(regime, sectors, tickers, opts = {})", src)
         self.assertIn("tickers.join(',')", src)
 
     def test_analysis_passes_portfolio_tickers_to_calibration(self):
@@ -1127,7 +1145,8 @@ class TestStage2AutoClassification(unittest.TestCase):
         with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
             src = f.read()
         self.assertIn("_portfolioTickers", src)
-        self.assertIn("fetchCalibrationBlock(_activeRegime, _portfolioSectors, _portfolioTickers)", src)
+        # Sprint 71 Phase 3D: the call now passes a deep-mode opts arg as 4th param.
+        self.assertIn("fetchCalibrationBlock(_activeRegime, _portfolioSectors, _portfolioTickers, { deep: true })", src)
 
 
 class TestStage3PromptInstructions(unittest.TestCase):
@@ -4865,8 +4884,12 @@ class TestSprint70DeterministicTagging(unittest.TestCase):
         row = {"outcome_status": "loss", "recommendation": "BUY",
                "thesis_verdict": "invalidated", "realized_pnl_pct": -4.0,
                "ai_confidence": 0.9, "rr_ratio": 0.8}
-        # invalidated wins over overconfident/poor_rr — it is the most specific.
-        self.assertEqual(classify_error_type_deterministic(row), "thesis_broken")
+        # Sprint 71 Phase 2A: multi-tag — thesis_broken leads (most specific), then
+        # overconfident (conf≥0.75) and poor_rr (rr<1.5) also apply.
+        tags = classify_error_type_deterministic(row).split(",")
+        self.assertEqual(tags[0], "thesis_broken")  # most-specific first
+        self.assertIn("overconfident", tags)
+        self.assertIn("poor_rr", tags)
 
     def test_error_stop_too_tight_when_thesis_intact(self):
         from routes.learning import classify_error_type_deterministic
@@ -4984,7 +5007,11 @@ class TestSprint70DeterministicTagging(unittest.TestCase):
                 row = conn.execute(
                     "SELECT error_type, error_type_source, skill_score "
                     "FROM ai_learning_events WHERE id=?", (rid,)).fetchone()
-            self.assertEqual(row["error_type"], "thesis_broken")
+            # Sprint 71 Phase 2A: multi-tag — invalidated(0.70 conf,1.2 rr) →
+            # thesis_broken (leads) + poor_rr.
+            et_tags = (row["error_type"] or "").split(",")
+            self.assertEqual(et_tags[0], "thesis_broken")
+            self.assertIn("poor_rr", et_tags)
             self.assertEqual(row["error_type_source"], "deterministic")
             self.assertEqual(row["skill_score"], 2.0)  # invalidated+loss base, no modifiers net
         finally:
@@ -5055,6 +5082,420 @@ class TestSprint70DeterministicTagging(unittest.TestCase):
         win_pos  = buy_block.find('virtual_win')
         self.assertTrue(0 <= loss_pos < win_pos,
                         "stop (virtual_loss) must be checked before target (virtual_win)")
+
+
+class TestSprint71Phase1(unittest.TestCase):
+    """Sprint 71 Phase 1B — MAE/MFE path capture (columns + resolver + math)."""
+
+    def test_mae_mfe_columns_in_migrations(self):
+        """_LE_MIGRATIONS must declare the three new MAE/MFE columns."""
+        import db as _db
+        col_names = [c for c, _ in _db._LE_MIGRATIONS]
+        for c in ("mae_pct", "mfe_pct", "mae_mfe_resolved_at"):
+            self.assertIn(c, col_names, f"_LE_MIGRATIONS must include {c}")
+
+    def test_mae_mfe_columns_exist_after_migration(self):
+        """The columns must materialise on ai_learning_events after init_db()."""
+        from db import get_db
+        with get_db() as conn:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(ai_learning_events)").fetchall()}
+        for c in ("mae_pct", "mfe_pct", "mae_mfe_resolved_at"):
+            self.assertIn(c, cols, f"ai_learning_events must have {c} column")
+
+    def test_resolve_mae_mfe_wired_into_calib_compute(self):
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_resolve_mae_mfe(conn)", src,
+                      "_resolve_mae_mfe must be called inside _calib_compute's DB block")
+
+    def test_mae_mfe_from_ohlc_math(self):
+        """Pure helper: MAE negative (drawdown), MFE positive (gain), correct values."""
+        import pandas as pd
+        from routes.learning import _mae_mfe_from_ohlc
+        # entry 100. Window dips to a low of 90 then peaks to a high of 130.
+        hist = pd.DataFrame({
+            "Open":  [100.0, 95.0, 110.0],
+            "High":  [102.0, 98.0, 130.0],
+            "Low":   [ 98.0, 90.0, 112.0],
+            "Close": [ 99.0, 96.0, 128.0],
+        })
+        mae, mfe = _mae_mfe_from_ohlc(hist, 100.0)
+        self.assertEqual(mae, -10.0)   # (90-100)/100*100
+        self.assertEqual(mfe,  30.0)   # (130-100)/100*100
+        self.assertLess(mae, 0.0)
+        self.assertGreater(mfe, 0.0)
+
+    def test_mae_mfe_from_ohlc_empty(self):
+        import pandas as pd
+        from routes.learning import _mae_mfe_from_ohlc
+        mae, mfe = _mae_mfe_from_ohlc(pd.DataFrame(), 100.0)
+        self.assertIsNone(mae)
+        self.assertIsNone(mfe)
+
+    def test_resolve_mae_mfe_populates_row(self):
+        """End-to-end: insert a closed executed BUY, stub OHLC (entry→dip→peak→exit),
+        run the resolver, assert MAE/MFE signs+values and resolved-at set."""
+        import unittest.mock as _mock
+        import yfinance as yf
+        import pandas as pd
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _resolve_mae_mfe
+            with _test_get_db() as conn:
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       realized_pnl_pct, actual_entry_price, holding_period_days,
+                       was_executed, timestamp)
+                    VALUES ('recommendation','BHP','BUY','win',5.0,100.0,3,1,
+                            '2026-01-05 10:00:00')
+                """)
+                rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+                # entry 100 → dip low 88 → peak high 125 → exit
+                fake_hist = pd.DataFrame({
+                    "Open":  [100.0, 92.0, 118.0],
+                    "High":  [101.0, 95.0, 125.0],
+                    "Low":   [ 96.0, 88.0, 116.0],
+                    "Close": [ 98.0, 93.0, 124.0],
+                }, index=pd.to_datetime(["2026-01-05", "2026-01-06", "2026-01-07"]))
+
+                class _FakeTicker:
+                    def history(self, **kw):
+                        return fake_hist
+
+                with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                    n = _resolve_mae_mfe(conn)
+                self.assertEqual(n, 1)
+                row = conn.execute(
+                    "SELECT mae_pct, mfe_pct, mae_mfe_resolved_at "
+                    "FROM ai_learning_events WHERE id=?", (rid,)).fetchone()
+            self.assertEqual(row["mae_pct"], -12.0)  # (88-100)/100*100
+            self.assertEqual(row["mfe_pct"],  25.0)  # (125-100)/100*100
+            self.assertLess(row["mae_pct"], 0.0)
+            self.assertGreater(row["mfe_pct"], 0.0)
+            self.assertIsNotNone(row["mae_mfe_resolved_at"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolve_mae_mfe_idempotent(self):
+        """Already-resolved rows (mae_mfe_resolved_at set) must be skipped."""
+        import unittest.mock as _mock
+        import yfinance as yf
+        import pandas as pd
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _resolve_mae_mfe
+            with _test_get_db() as conn:
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       realized_pnl_pct, actual_entry_price, holding_period_days,
+                       was_executed, timestamp, mae_pct, mfe_pct, mae_mfe_resolved_at)
+                    VALUES ('recommendation','CBA','BUY','win',5.0,100.0,3,1,
+                            '2026-01-05 10:00:00',-5.0,5.0,'2026-01-09T00:00:00')
+                """)
+
+                class _FakeTicker:
+                    def history(self, **kw):
+                        raise AssertionError("resolver must not refetch resolved rows")
+
+                with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                    n = _resolve_mae_mfe(conn)
+                self.assertEqual(n, 0)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+
+class TestSprint71Phase2(unittest.TestCase):
+    """Sprint 71 Phase 2 — tagging intelligence: multi-tag emission, new error tags
+    (early_exit / oversized / undersized / empirical stop_too_tight / partly-
+    deterministic missed_catalyst), MAE-based skill modifier + legacy fallback,
+    and the stop_too_tight wider-stop counterfactual + self-suppression."""
+
+    # ── 2A multi-tag emission ────────────────────────────────────────────────
+    def test_multi_tag_returns_comma_set(self):
+        """A loss satisfying several conditions returns ALL applicable tags joined."""
+        from routes.learning import classify_error_type_deterministic
+        # invalidated thesis + high conf + poor rr → 3 distinct lessons.
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "invalidated", "ai_confidence": 0.85,
+               "rr_ratio": 1.0, "exit_reason": "manual"}
+        tags = classify_error_type_deterministic(row).split(",")
+        self.assertIn("thesis_broken", tags)
+        self.assertIn("overconfident", tags)
+        self.assertIn("poor_rr", tags)
+        self.assertEqual(tags[0], "thesis_broken")  # most-specific leads
+
+    def test_clean_loss_single_tag(self):
+        """A loss with only one applicable condition stays single-tag (no commas)."""
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "ai_confidence": 0.60,
+               "rr_ratio": 3.0, "regime": "riskOn"}
+        self.assertEqual(classify_error_type_deterministic(row), "none")
+
+    # ── 2B early_exit ────────────────────────────────────────────────────────
+    def test_early_exit_fires_from_mfe(self):
+        """Manual non-win exit where MFE reached the planned target → early_exit."""
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "validated", "exit_reason": "manual",
+               "actual_entry_price": 100.0, "suggested_target": 110.0,
+               "mfe_pct": 12.0,  # price reached +12% (>+10% target) before exit
+               "ai_confidence": 0.6, "rr_ratio": 3.0}
+        self.assertIn("early_exit", classify_error_type_deterministic(row).split(","))
+
+    def test_early_exit_fires_from_exec_mech(self):
+        """Mechanical exit beating realized by ≥2pp → early_exit."""
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "validated", "exit_reason": "manual",
+               "actual_entry_price": 100.0, "suggested_target": 110.0,
+               "realized_pnl_pct": -3.0, "exec_mech_pnl_pct": 5.0,  # +8pp better
+               "ai_confidence": 0.6, "rr_ratio": 3.0}
+        self.assertIn("early_exit", classify_error_type_deterministic(row).split(","))
+
+    def test_early_exit_not_fired_on_clean_row(self):
+        """A stop-out loss with no favourable MFE/mech edge must not tag early_exit."""
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "invalidated", "exit_reason": "stop_hit",
+               "actual_entry_price": 100.0, "suggested_target": 110.0,
+               "mfe_pct": 2.0, "realized_pnl_pct": -5.0, "exec_mech_pnl_pct": -5.0}
+        self.assertNotIn("early_exit", classify_error_type_deterministic(row).split(","))
+
+    # ── 2B missed_catalyst (partly deterministic) ────────────────────────────
+    def test_missed_catalyst_fires_when_earnings_in_window(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "exit_reason": "stop_hit",
+               "entry_signals_json": '{"days_to_earnings": 4}',
+               "holding_period_days": 10, "ai_confidence": 0.6, "rr_ratio": 3.0}
+        self.assertIn("missed_catalyst", classify_error_type_deterministic(row).split(","))
+
+    def test_missed_catalyst_not_fired_when_earnings_outside_window(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "exit_reason": "stop_hit",
+               "entry_signals_json": '{"days_to_earnings": 40}',
+               "holding_period_days": 10, "ai_confidence": 0.6, "rr_ratio": 3.0}
+        self.assertNotIn("missed_catalyst", classify_error_type_deterministic(row).split(","))
+
+    # ── 2B oversized / undersized ────────────────────────────────────────────
+    def test_oversized_from_checklist_bypass(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "checklist_bypasses": "oversize_position",
+               "ai_confidence": 0.6, "rr_ratio": 3.0}
+        self.assertIn("oversized", classify_error_type_deterministic(row).split(","))
+
+    def test_undersized_from_checklist_bypass(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "checklist_bypasses": "undersize_position",
+               "ai_confidence": 0.6, "rr_ratio": 3.0}
+        self.assertIn("undersized", classify_error_type_deterministic(row).split(","))
+
+    def test_sizing_tags_not_fired_without_bypass(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "checklist_bypasses": "",
+               "ai_confidence": 0.6, "rr_ratio": 3.0}
+        tags = classify_error_type_deterministic(row).split(",")
+        self.assertNotIn("oversized", tags)
+        self.assertNotIn("undersized", tags)
+
+    # ── 2B empirical stop_too_tight + ATR fallback ───────────────────────────
+    def test_stop_too_tight_empirical_fires(self):
+        """MAE pierced the stop yet MFE recovered toward target → empirical ST."""
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "validated", "exit_reason": "stop_hit",
+               "actual_entry_price": 100.0, "suggested_stop": 97.0,  # 3% stop
+               "suggested_target": 110.0,
+               "mae_pct": -4.0,   # dipped below the 3% stop
+               "mfe_pct": 8.0,    # later recovered to +8% (≥50% of +10% target)
+               "entry_signals_json": '{"atr_pct": 1.0}'}  # ATR heuristic would NOT fire (3% > 1.5%)
+        self.assertIn("stop_too_tight", classify_error_type_deterministic(row).split(","))
+
+    def test_stop_too_tight_empirical_suppressed_when_no_recovery(self):
+        """MAE pierced the stop but price never recovered → NOT stop_too_tight."""
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "validated", "exit_reason": "stop_hit",
+               "actual_entry_price": 100.0, "suggested_stop": 97.0,
+               "suggested_target": 110.0,
+               "mae_pct": -8.0, "mfe_pct": 1.0,  # kept falling, no recovery
+               "entry_signals_json": '{"atr_pct": 1.0}'}
+        self.assertNotIn("stop_too_tight", classify_error_type_deterministic(row).split(","))
+
+    def test_stop_too_tight_falls_back_to_atr_when_no_mae(self):
+        """mae/mfe null → use the ATR-distance heuristic (stop inside 1.5×ATR)."""
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "validated", "exit_reason": "stop_hit",
+               "actual_entry_price": 100.0, "suggested_stop": 99.0,  # 1% stop
+               "entry_signals_json": '{"atr_pct": 2.0}'}  # 1.5×ATR=3% > 1% → fires
+        self.assertIn("stop_too_tight", classify_error_type_deterministic(row).split(","))
+
+    # ── 2C skill-score path-quality modifier ─────────────────────────────────
+    def test_skill_deep_mae_win_scores_below_clean_win(self):
+        from routes.learning import compute_skill_score_deterministic
+        base = {"outcome_status": "win", "thesis_verdict": "validated",
+                "exit_reason": "target_hit", "ai_confidence": 0.75, "rr_ratio": 2.0}
+        deep = compute_skill_score_deterministic({**base, "mae_pct": -12.0, "mfe_pct": 6.0})
+        clean = compute_skill_score_deterministic({**base, "mae_pct": -2.0, "mfe_pct": 9.0})
+        self.assertLess(deep, clean)
+
+    def test_skill_path_modifier_absent_without_mae(self):
+        """No MAE/MFE → modifier is a no-op (legacy rows unaffected)."""
+        from routes.learning import compute_skill_score_deterministic
+        with_no_path = compute_skill_score_deterministic(
+            {"outcome_status": "win", "thesis_verdict": "validated",
+             "exit_reason": "target_hit", "ai_confidence": 0.75, "rr_ratio": 2.0})
+        # 8 base +0.5 target +0.25 rr = 8.75 → rounded to 1dp = 8.8 (matches the
+        # Sprint 70 test_skill_quadrant_validated_win_high baseline behaviour).
+        self.assertEqual(with_no_path, 8.8)
+
+    # ── 2C legacy fallback ───────────────────────────────────────────────────
+    def test_fallback_scores_legacy_row(self):
+        """compute_skill_score_fallback produces a score with NO thesis_verdict."""
+        from routes.learning import compute_skill_score_fallback
+        s = compute_skill_score_fallback(
+            {"outcome_status": "win", "realized_pnl_pct": 6.0,
+             "actual_entry_price": 100.0, "suggested_stop": 97.0,
+             "exit_reason": "target_hit"})
+        self.assertIsNotNone(s)
+        self.assertGreaterEqual(s, 0.0)
+        self.assertLessEqual(s, 10.0)
+        self.assertGreater(s, 5.0)  # a profitable, disciplined win is above neutral
+
+    def test_primary_scorer_still_none_without_verdict(self):
+        """Primary scorer must NOT use the fallback — still None without verdict."""
+        from routes.learning import compute_skill_score_deterministic
+        self.assertIsNone(compute_skill_score_deterministic(
+            {"outcome_status": "win", "realized_pnl_pct": 6.0}))
+
+    # ── 2B VALID_PM_TYPES ────────────────────────────────────────────────────
+    def test_valid_pm_types_has_new_tags(self):
+        from routes.debate import VALID_PM_TYPES
+        for t in ("early_exit", "oversized", "undersized", "missed_catalyst"):
+            self.assertIn(t, VALID_PM_TYPES)
+
+    # ── 2A top-error nudge counts multi-tag rows per-tag ─────────────────────
+    def test_top_err_nudge_counts_multi_tag_per_tag(self):
+        """A multi-tag loss row contributes to EACH of its tags in the counter."""
+        # Mirror the counting logic used in _calib_compute's top_err block.
+        learnable_losses = [
+            {"error_type": "thesis_broken,poor_rr"},
+            {"error_type": "poor_rr"},
+            {"error_type": "overconfident"},
+        ]
+        type_counts: dict = {}
+        for r in learnable_losses:
+            et = r.get("error_type")
+            if et:
+                for tag in et.split(","):
+                    tag = tag.strip()
+                    if tag and tag != "external_shock":
+                        type_counts[tag] = type_counts.get(tag, 0) + 1
+        # poor_rr appears in 2 rows even though one row is compound.
+        self.assertEqual(type_counts["poor_rr"], 2)
+        self.assertEqual(type_counts["thesis_broken"], 1)
+        self.assertEqual(type_counts["overconfident"], 1)
+
+    # ── 2D stop_too_tight counterfactual ─────────────────────────────────────
+    def test_wider_stop_would_have_saved_true(self):
+        """A wider stop that lets price reach target before the wider stop → True."""
+        import pandas as pd
+        from routes.learning import _wider_stop_would_have_saved
+        # entry 100, atr_pct 2, mult 2.5 → wider stop = 100*(1-5%) = 95.
+        # price dips to 96 (above wider stop) then reaches target 110.
+        hist = pd.DataFrame({
+            "Open": [100.0, 97.0, 105.0], "High": [101.0, 99.0, 111.0],
+            "Low":  [ 97.0, 96.0, 104.0], "Close": [98.0, 98.0, 110.0]})
+        self.assertTrue(_wider_stop_would_have_saved(hist, 100.0, 110.0, 2.0, 2.5))
+
+    def test_wider_stop_would_have_saved_false(self):
+        """Even a wider stop is breached before target → False."""
+        import pandas as pd
+        from routes.learning import _wider_stop_would_have_saved
+        # wider stop = 95; price drops straight to 90.
+        hist = pd.DataFrame({
+            "Open": [100.0, 93.0], "High": [101.0, 94.0],
+            "Low":  [ 97.0, 90.0], "Close": [98.0, 91.0]})
+        self.assertFalse(_wider_stop_would_have_saved(hist, 100.0, 110.0, 2.0, 2.5))
+
+    def test_stop_tag_precision_in_stats_response(self):
+        """/api/learning/stats must include stop_tag_precision."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with asx_server.app.test_client() as c:
+                resp = c.get("/api/learning/stats")
+                data = resp.get_json()
+            self.assertIn("stop_tag_precision", data)
+            self.assertIn("precision", data["stop_tag_precision"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_stop_cf_column_in_migrations(self):
+        import db as _db
+        col_names = [c for c, _ in _db._LE_MIGRATIONS]
+        self.assertIn("stop_cf_saved", col_names)
+
+    def test_calib_suppresses_stop_nudge_when_precision_low(self):
+        """Low counterfactual precision → ⚠STOP_TAG_UNRELIABLE token, no widen-stops nudge."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _calib_compute
+            import unittest.mock as _mock
+            import yfinance as yf
+            # Build ≥30 closed losses tagged stop_too_tight, with resolved
+            # counterfactuals where a wider stop would NOT have saved them (precision 0).
+            with _test_get_db() as conn:
+                for i in range(34):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           realized_pnl_pct, ai_confidence, rr_ratio, exit_reason,
+                           thesis_verdict, error_type, error_type_source,
+                           actual_entry_price, suggested_stop, suggested_target,
+                           regime, was_executed, stop_cf_saved, timestamp)
+                        VALUES ('recommendation',?,'BUY','loss',-4.0,0.6,3.0,'stop_hit',
+                                'validated','stop_too_tight','deterministic',
+                                100.0,97.0,110.0,'riskOn',1,0,datetime('now'))
+                    """, (f"T{i}.AX",))
+            # Stub yfinance so lazy resolvers inside _calib_compute don't hit network.
+            class _FakeTicker:
+                def history(self, **kw):
+                    import pandas as pd
+                    return pd.DataFrame()
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                result = _calib_compute("riskOn", "", "", 90)
+            block = result.get("block", "")
+            self.assertIn("STOP_TAG_UNRELIABLE", block)
+            # The top_err stop_too_tight nudge ("top_err:ST(...)→widen stops") must be
+            # suppressed. (A separate RR≥2.0 nudge may also say "widen stops" — that is
+            # a different, legitimate nudge, so we assert on the top_err-specific token.)
+            self.assertNotIn("top_err:ST", block)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    # ── foundational rs_score / rs_5d_alpha surfacing ────────────────────────
+    def test_analyse_ticker_surfaces_rs_fields(self):
+        """rs_score / rs_5d_alpha keys must be present in analyse_ticker's return."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"rs_score":', src)
+        self.assertIn('"rs_5d_alpha":', src)
+        # And that they're sourced from the _score_data dict (the score pattern).
+        self.assertIn("_score_data.get(\"rs_score\")", src)
 
 
 class TestSprint41PlanAB(unittest.TestCase):
@@ -7614,6 +8055,672 @@ class TestSprint67CorrContextTraceabilityAndBatch(unittest.TestCase):
         self.assertIn("_LOCAL_ESCALATE_WEIGHT_PCT = 10", self.client_js)
         self.assertIn("escalating to Claude", self.client_js)
         self.assertIn("no Claude key to escalate", self.client_js)
+
+
+class TestSprint71Phase3(unittest.TestCase):
+    """Sprint 71 Phase 3 — feed enrichment: few-shot exemplars, per-driver
+    playbook, conditional cross-tabs + negative confirmation, deep/light mode."""
+
+    @staticmethod
+    def _clean_events(conn):
+        conn.execute("DELETE FROM ai_learning_events")
+
+    # ── 3A entry signature + exemplars ───────────────────────────────────────
+    def test_entry_signature_shape(self):
+        from routes.learning import _entry_signature
+        sig = {"rsi_14": 28.4, "bb_pct_b": 0.07, "px_vs_sma200": -3.2,
+               "setup_score": 72, "macd_hist": 0.5,
+               "rs_score": 5, "rs_5d_alpha": None}
+        s = _entry_signature(sig)
+        self.assertIn("RSI28", s)
+        self.assertIn("%b0.07", s)
+        self.assertIn("vs200-3%", s)
+        self.assertIn("setup72", s)
+        self.assertIn("MACD+", s)
+        # rs_score / rs_5d_alpha must NOT be surfaced (neutral placeholder).
+        # The signature carries setup_score=5? no — assert the rs_score VALUE (5)
+        # never leaks as an "rs5"/"alpha" token.
+        self.assertNotIn("rs5", s.lower())
+        self.assertNotIn("alpha", s.lower())
+
+    def test_entry_signature_skips_nulls_and_empty(self):
+        from routes.learning import _entry_signature
+        self.assertEqual(_entry_signature(None), "")
+        self.assertEqual(_entry_signature({}), "")
+        self.assertEqual(_entry_signature({"rsi_14": None, "bb_pct_b": None}), "")
+        # MACD- for negative hist
+        self.assertIn("MACD-", _entry_signature({"macd_hist": -0.3}))
+
+    def test_compute_exemplars_line_shape_and_caps(self):
+        """Crafted win + loss events produce compact ACTION TICKER @ sig → outcome
+        lines, respecting the win/loss count caps."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _compute_exemplars
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # 4 losses (cap 3) + 3 wins (cap 2)
+                for i in range(4):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           realized_pnl_pct, holding_period_days, was_executed,
+                           entry_signals_json, error_type, timestamp)
+                        VALUES ('recommendation',?, 'BUY','loss',?,?,1,?,?,?)
+                    """, (f"L{i}.AX", -4.0 - i, 5 + i,
+                          json.dumps({"rsi_14": 55, "bb_pct_b": 0.6,
+                                      "px_vs_sma200": -2, "setup_score": 40}),
+                          "poor_entry",
+                          f"2026-01-1{i} 10:00:00"))
+                for i in range(3):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           realized_pnl_pct, holding_period_days, was_executed,
+                           entry_signals_json, success_tags, timestamp)
+                        VALUES ('recommendation',?, 'BUY','win',?,?,1,?,?,?)
+                    """, (f"W{i}.AX", 10.0 + i * 5, 8,
+                          json.dumps({"rsi_14": 30, "bb_pct_b": 0.1,
+                                      "setup_score": 75}),
+                          "confluence_entry",
+                          f"2026-01-2{i} 10:00:00"))
+                lines = _compute_exemplars(conn)
+            self.assertEqual(len(lines), 5)            # 3 losses + 2 wins
+            self.assertTrue(all("→" in ln for ln in lines))
+            self.assertTrue(any("BUY L" in ln for ln in lines))
+            # Best wins first by P&L: W2 (+20%) should appear; lowest win W0 dropped
+            win_lines = [ln for ln in lines if "BUY W" in ln]
+            self.assertEqual(len(win_lines), 2)
+            self.assertTrue(any("+20.0%" in ln for ln in win_lines))
+            # tag + holding-days present
+            self.assertTrue(any("poor_entry" in ln for ln in lines))
+            self.assertTrue(any("confluence_entry" in ln for ln in lines))
+            self.assertTrue(any("in 8d" in ln for ln in win_lines))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_compute_exemplars_empty_history(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _compute_exemplars
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                self.assertEqual(_compute_exemplars(conn), [])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_exemplars_block_present_in_analysis_js(self):
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("buildExemplarsBlock", src)
+        self.assertIn("_exemplarsBlock", src)
+        # injected alongside the calibration placeholder
+        self.assertIn("_calibrationNote + _exemplarsBlock + _lessonsBlock", src)
+
+    def test_exemplars_block_builder_in_learning_loop_js(self):
+        with open(os.path.join(ROOT, "js", "learning-loop.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function buildExemplarsBlock", src)
+        self.assertIn("EXEMPLARS", src)
+        self.assertIn("window._calibExemplars", src)
+        # deep mode option wired into the fetch
+        self.assertIn("opts && opts.deep", src)
+        self.assertIn("params.set('deep', '1')", src)
+
+    # ── 3B per-driver playbook ───────────────────────────────────────────────
+    def test_driver_playbook_fires_with_sufficient_n(self):
+        from routes.learning import _compute_driver_playbook, _ci_excludes
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # mean_reversion: 9/10 wins when RSI<30, 1/10 wins when RSI>45
+                for i in range(10):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           was_executed, primary_entry_driver, entry_signals_json,
+                           realized_pnl_pct, timestamp)
+                        VALUES ('recommendation',?, 'BUY',?,1,'mean_reversion',?,1.0,
+                                datetime('now'))
+                    """, (f"MR{i}.AX", "win" if i < 9 else "loss",
+                          json.dumps({"rsi_14": 25})))
+                for i in range(10):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           was_executed, primary_entry_driver, entry_signals_json,
+                           realized_pnl_pct, timestamp)
+                        VALUES ('recommendation',?, 'BUY',?,1,'mean_reversion',?,1.0,
+                                datetime('now'))
+                    """, (f"MX{i}.AX", "win" if i < 1 else "loss",
+                          json.dumps({"rsi_14": 60})))
+                out = _compute_driver_playbook(conn, ["mean_reversion"], _ci_excludes)
+            self.assertTrue(out)
+            self.assertIn("mean_reversion", out[0])
+            self.assertIn("RSI<30", out[0])
+            self.assertIn("RSI>45", out[0])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_driver_playbook_gated_below_n(self):
+        from routes.learning import _compute_driver_playbook, _ci_excludes
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # Only 2 per bucket — below min_bucket_n=5 → no line.
+                for rsi, n in ((25, 2), (60, 2)):
+                    for i in range(n):
+                        conn.execute("""
+                            INSERT INTO ai_learning_events
+                              (event_type, ticker, recommendation, outcome_status,
+                               was_executed, primary_entry_driver, entry_signals_json,
+                               realized_pnl_pct, timestamp)
+                            VALUES ('recommendation',?, 'BUY','win',1,'mean_reversion',?,1.0,
+                                    datetime('now'))
+                        """, (f"S{rsi}{i}.AX", json.dumps({"rsi_14": rsi})))
+                out = _compute_driver_playbook(conn, ["mean_reversion"], _ci_excludes)
+            self.assertEqual(out, [])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    # ── 3C cross-tabs + negative confirmation ────────────────────────────────
+    def test_setup_bucket_xtab_fires(self):
+        from routes.learning import _compute_setup_bucket_xtab, _ci_excludes
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # high setup wins 9/10, low setup wins 1/10
+                for ss, wins, n in ((75, 9, 10), (30, 1, 10)):
+                    for i in range(n):
+                        conn.execute("""
+                            INSERT INTO ai_learning_events
+                              (event_type, ticker, recommendation, outcome_status,
+                               was_executed, entry_signals_json, realized_pnl_pct,
+                               timestamp)
+                            VALUES ('recommendation',?, 'BUY',?,1,?,1.0,datetime('now'))
+                        """, (f"SS{ss}{i}.AX", "win" if i < wins else "loss",
+                              json.dumps({"setup_score": ss})))
+                line = _compute_setup_bucket_xtab(conn, _ci_excludes)
+            self.assertIn("setup_score", line)
+            self.assertIn("high", line)
+            self.assertIn("low", line)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_driver_regime_xtab_fires(self):
+        from routes.learning import _compute_driver_regime_xtab, _ci_excludes
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # momentum_breakout: 9/10 wins in riskOn, 1/10 wins elsewhere
+                for reg, wins, n in (("riskOn", 9, 10), ("riskOff", 1, 10)):
+                    for i in range(n):
+                        conn.execute("""
+                            INSERT INTO ai_learning_events
+                              (event_type, ticker, recommendation, outcome_status,
+                               was_executed, primary_entry_driver, regime,
+                               realized_pnl_pct, timestamp)
+                            VALUES ('recommendation',?, 'BUY',?,1,'momentum_breakout',?,1.0,
+                                    datetime('now'))
+                        """, (f"DR{reg}{i}.AX", "win" if i < wins else "loss", reg))
+                line = _compute_driver_regime_xtab(conn, "riskOn", _ci_excludes)
+            self.assertIn("momentum_breakout", line)
+            self.assertIn("riskOn", line)
+            self.assertIn("other-regimes", line)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_negative_confirmation_sell_rose(self):
+        from routes.learning import _compute_sell_negative_confirmation
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, sell_verify_date,
+                       sell_verify_verdict, sell_verify_sold_chg, sell_primary_driver,
+                       timestamp)
+                    VALUES ('recommendation','XYZ.AX','SELL','2026-02-01',
+                            'invalidated', 18.0, 'thesis_broken', datetime('now'))
+                """)
+                line = _compute_sell_negative_confirmation(conn)
+            self.assertIn("SELL→ROSE", line)
+            self.assertIn("XYZ.AX", line)
+            self.assertIn("+18%", line)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_negative_confirmation_empty_when_no_rise(self):
+        from routes.learning import _compute_sell_negative_confirmation
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, sell_verify_date,
+                       sell_verify_verdict, sell_verify_sold_chg, sell_primary_driver,
+                       timestamp)
+                    VALUES ('recommendation','OK.AX','SELL','2026-02-01',
+                            'validated', -12.0, 'thesis_broken', datetime('now'))
+                """)
+                self.assertEqual(_compute_sell_negative_confirmation(conn), "")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    # ── 3D deep vs light feed mode ───────────────────────────────────────────
+    def _seed_deep_dataset(self, conn):
+        """≥30 closed events with drivers/setup so all deep blocks can fire."""
+        self._clean_events(conn)
+        # 30 momentum_breakout BUYs, half in riskOn, varied setup/RSI/bb.
+        for i in range(34):
+            won  = "win" if i % 2 == 0 else "loss"
+            reg  = "riskOn" if i % 2 == 0 else "riskOff"
+            rsi  = 25 if i % 2 == 0 else 60
+            bb   = 0.85 if i % 2 == 0 else 0.4
+            ss   = 75 if i % 2 == 0 else 30
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, outcome_status,
+                   ai_confidence, realized_pnl_pct, holding_period_days,
+                   was_executed, primary_entry_driver, regime, sector,
+                   entry_signals_json, error_type, success_tags, timestamp)
+                VALUES ('recommendation',?, 'BUY',?,0.7,?,5,1,'mean_reversion',?,
+                        'Materials',?,?,?,datetime('now'))
+            """, (f"D{i}.AX", won, 6.0 if won == "win" else -4.0, reg,
+                  json.dumps({"rsi_14": rsi, "bb_pct_b": bb, "setup_score": ss,
+                              "px_vs_sma200": 3, "macd_hist": 0.4}),
+                  None if won == "win" else "poor_entry",
+                  "confluence_entry" if won == "win" else None))
+
+    def test_deep_mode_includes_exemplars_and_playbook(self):
+        from routes.learning import _calib_compute
+        import unittest.mock as _mock
+        import yfinance as yf
+        import pandas as pd
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._seed_deep_dataset(conn)
+
+            class _FakeTicker:
+                def history(self, **kw):
+                    return pd.DataFrame()
+
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                deep = _calib_compute("riskOn", "", "", 90, deep=True)
+                light = _calib_compute("riskOn", "", "", 90, deep=False)
+            # Deep returns concrete exemplars; light does not.
+            self.assertTrue(deep.get("exemplars"))
+            self.assertEqual(light.get("exemplars"), [])
+            # Deep block carries the per-driver playbook conditional; light omits it.
+            self.assertIn("mean_reversion:", deep.get("block", ""))
+            self.assertIn("when RSI", deep.get("block", ""))
+            self.assertNotIn("when RSI", light.get("block", ""))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_calibration_endpoint_deep_param(self):
+        """GET /api/learning/calibration?deep=1 returns exemplars; default does not."""
+        from routes.learning import _calib_cache
+        import unittest.mock as _mock
+        import yfinance as yf
+        import pandas as pd
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._seed_deep_dataset(conn)
+            _calib_cache.clear()
+
+            class _FakeTicker:
+                def history(self, **kw):
+                    return pd.DataFrame()
+
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                with asx_server.app.test_client() as c:
+                    deep = c.get("/api/learning/calibration?regime=riskOn&deep=1").get_json()
+                    light = c.get("/api/learning/calibration?regime=riskOn").get_json()
+            self.assertTrue(deep.get("exemplars"))
+            self.assertEqual(light.get("exemplars"), [])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_calib_compute_accepts_deep_kwarg(self):
+        """Signature must accept the deep parameter (Phase 3D)."""
+        import inspect
+        from routes.learning import _calib_compute
+        self.assertIn("deep", inspect.signature(_calib_compute).parameters)
+
+
+class TestSprint71SectorAnalysis(unittest.TestCase):
+    """Sprint 71 sector hardening + sector-level analysis framed vs the
+    whole-ASX-market baseline."""
+
+    @staticmethod
+    def _clean_events(conn):
+        conn.execute("DELETE FROM ai_learning_events")
+
+    class _FakeTicker:
+        def history(self, **kw):
+            import pandas as pd
+            return pd.DataFrame()
+
+    def _stub_yf(self):
+        """Context manager stubbing yfinance.Ticker so the lazy resolvers inside
+        _calib_compute never hit the network."""
+        import unittest.mock as _mock
+        import yfinance as yf
+        return _mock.patch.object(yf, "Ticker", return_value=self._FakeTicker())
+
+    # ── 1. liveSignals sector fallback in the log payload ────────────────────
+    def test_log_payload_livesignals_sector_fallback(self):
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn(
+            "r.sector || holding?.sector || state.liveSignals[r.ticker]?.sector || null",
+            src,
+            "log payload must fall back to state.liveSignals[...].sector",
+        )
+
+    # ── 2. _resolve_missing_sectors backfill ─────────────────────────────────
+    def test_resolve_missing_sectors_fills_from_map(self):
+        from routes.learning import _resolve_missing_sectors
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # BHP.AX → Materials (in SECTOR_MAP); ZZZX.AX → unknown (skipped)
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       was_executed, sector, timestamp)
+                    VALUES ('recommendation','BHP.AX','BUY','win',1,NULL,datetime('now'))
+                """)
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       was_executed, sector, timestamp)
+                    VALUES ('recommendation','ZZZX.AX','BUY','win',1,'',datetime('now'))
+                """)
+                n = _resolve_missing_sectors(conn)
+                self.assertEqual(n, 1, "only BHP.AX should be filled (ZZZX unknown)")
+                bhp = conn.execute(
+                    "SELECT sector FROM ai_learning_events WHERE ticker='BHP.AX'"
+                ).fetchone()
+                zzz = conn.execute(
+                    "SELECT sector FROM ai_learning_events WHERE ticker='ZZZX.AX'"
+                ).fetchone()
+                self.assertEqual(bhp[0], "Materials")
+                self.assertIn(zzz[0], (None, ""))   # unknown ticker left untouched
+                # Idempotent — second call resolves nothing new.
+                self.assertEqual(_resolve_missing_sectors(conn), 0)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolve_missing_sectors_wired_into_calib_compute(self):
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        idx = src.index("def _calib_compute(")
+        body = src[idx:idx + 12000]
+        self.assertIn("_resolve_missing_sectors(conn)", body,
+                      "_resolve_missing_sectors must run inside _calib_compute")
+
+    # ── 3. calibration sector line shows vs-market delta + is gated ──────────
+    def _seed_sector_dataset(self, conn):
+        """Whole-market baseline ~50% WR; Materials strongly underperforms,
+        Healthcare strongly outperforms, each with enough n to clear the CI gate."""
+        self._clean_events(conn)
+        rows = []
+        # Baseline filler — other sectors at ~50% (Financials, 20 rows 10/10).
+        for i in range(20):
+            rows.append(("F%d.AX" % i, "Financials", "win" if i < 10 else "loss"))
+        # Materials: 14 rows, 2 wins → ~14% WR (well below market, n high).
+        for i in range(14):
+            rows.append(("M%d.AX" % i, "Materials", "win" if i < 2 else "loss"))
+        # Healthcare: 14 rows, 13 wins → ~93% WR (well above market).
+        for i in range(14):
+            rows.append(("H%d.AX" % i, "Healthcare", "win" if i < 13 else "loss"))
+        for tk, sec, won in rows:
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, outcome_status,
+                   ai_confidence, was_executed, sector, regime, timestamp)
+                VALUES ('recommendation',?, 'BUY',?,0.7,1,?, 'riskOn', datetime('now'))
+            """, (tk, won, sec))
+
+    def test_calibration_sector_line_shows_vs_market_delta(self):
+        from routes.learning import _calib_compute
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._seed_sector_dataset(conn)
+            with self._stub_yf():
+                res = _calib_compute("riskOn", "Materials,Healthcare", "", 90, deep=True)
+            block = res.get("block", "")
+            self.assertIn("vs mkt", block, "sector line must show the market baseline")
+            self.assertIn("Materials:", block)
+            self.assertIn("⚠underperform", block)
+            self.assertIn("Healthcare:", block)
+            self.assertIn("✓strong", block)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_calibration_sector_gated_below_n(self):
+        from routes.learning import _calib_compute
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # Baseline filler so n≥30 gate passes, but Materials has only 3 rows
+                # (ESS < 6.0 → no sector line emitted).
+                for i in range(30):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           ai_confidence, was_executed, sector, regime, timestamp)
+                        VALUES ('recommendation',?, 'BUY',?,0.7,1,'Financials','riskOn',
+                                datetime('now'))
+                    """, ("F%d.AX" % i, "win" if i % 2 == 0 else "loss"))
+                for i in range(3):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           ai_confidence, was_executed, sector, regime, timestamp)
+                        VALUES ('recommendation',?, 'BUY','loss',0.7,1,'Materials','riskOn',
+                                datetime('now'))
+                    """, ("M%d.AX" % i,))
+            with self._stub_yf():
+                res = _calib_compute("riskOn", "Materials", "", 90, deep=True)
+            block = res.get("block", "")
+            self.assertNotIn("Materials:", block,
+                             "sector below ESS floor must be suppressed")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    # ── 4. /api/learning/stats by_sector ─────────────────────────────────────
+    def test_stats_by_sector_with_vs_market_and_dominant_tag(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # Whole-market: 10 wins / 10 losses → 50% baseline.
+                # Financials: 8 rows, 6 wins (75%, +25pp vs market), dominant
+                # error tag among losses = 'poor_entry' (multi-tag split).
+                for i in range(8):
+                    won = "win" if i < 6 else "loss"
+                    et = None if won == "win" else "poor_entry,overconfident"
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           realized_pnl_pct, was_executed, sector, error_type, timestamp)
+                        VALUES ('recommendation',?, 'BUY',?,?,1,'Financials',?,datetime('now'))
+                    """, ("F%d.AX" % i, won, 5.0 if won == "win" else -3.0, et))
+                # Materials: 12 rows, 4 wins (~33%) — drags market down; losses
+                # tagged 'poor_entry' once + 'thesis_broken' many → dominant differs.
+                for i in range(12):
+                    won = "win" if i < 4 else "loss"
+                    et = None if won == "win" else "thesis_broken"
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           realized_pnl_pct, was_executed, sector, error_type, timestamp)
+                        VALUES ('recommendation',?, 'BUY',?,?,1,'Materials',?,datetime('now'))
+                    """, ("M%d.AX" % i, won, 5.0 if won == "win" else -3.0, et))
+            with asx_server.app.test_client() as c:
+                data = c.get("/api/learning/stats").get_json()
+            self.assertIn("by_sector", data)
+            by_sec = {s["sector"]: s for s in data["by_sector"]}
+            self.assertIn("Financials", by_sec)
+            self.assertIn("Materials", by_sec)
+            mkt = data["overall_win_rate"]
+            fin = by_sec["Financials"]
+            self.assertEqual(fin["n"], 8)
+            self.assertAlmostEqual(fin["wr_vs_market_pp"],
+                                   round(fin["win_rate"] - mkt, 1), places=1)
+            # dominant_error_tag uses multi-tag split (gotcha #45): Financials
+            # losses are tagged poor_entry,overconfident → both counted; either is
+            # acceptable as dominant (tie), but must be one of them.
+            self.assertIn(fin["dominant_error_tag"], ("poor_entry", "overconfident"))
+            self.assertEqual(by_sec["Materials"]["dominant_error_tag"], "thesis_broken")
+            self.assertIsNotNone(fin["avg_pnl_pct"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    # ── 5. exemplars prefer same-sector when supplied ────────────────────────
+    def _seed_exemplar_sectors(self, conn):
+        self._clean_events(conn)
+        # Materials: 3 losses + 2 wins (enough to satisfy caps on its own).
+        for i in range(3):
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, outcome_status,
+                   realized_pnl_pct, holding_period_days, was_executed,
+                   sector, entry_signals_json, error_type, timestamp)
+                VALUES ('recommendation',?, 'BUY','loss',?,5,1,'Materials',?,'poor_entry',?)
+            """, ("ML%d.AX" % i, -4.0 - i,
+                  json.dumps({"rsi_14": 55, "bb_pct_b": 0.6, "setup_score": 40}),
+                  "2026-01-1%d 10:00:00" % i))
+        for i in range(2):
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, outcome_status,
+                   realized_pnl_pct, holding_period_days, was_executed,
+                   sector, entry_signals_json, success_tags, timestamp)
+                VALUES ('recommendation',?, 'BUY','win',?,8,1,'Materials',?,'confluence_entry',?)
+            """, ("MW%d.AX" % i, 12.0 + i,
+                  json.dumps({"rsi_14": 28, "bb_pct_b": 0.1, "setup_score": 75}),
+                  "2026-01-2%d 10:00:00" % i))
+        # Healthcare: extra trades that should be excluded when Materials is supplied.
+        for i in range(3):
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, outcome_status,
+                   realized_pnl_pct, holding_period_days, was_executed,
+                   sector, entry_signals_json, error_type, timestamp)
+                VALUES ('recommendation',?, 'BUY','loss',?,5,1,'Healthcare',?,'poor_entry',?)
+            """, ("HL%d.AX" % i, -5.0,
+                  json.dumps({"rsi_14": 50, "bb_pct_b": 0.5, "setup_score": 35}),
+                  "2026-02-1%d 10:00:00" % i))
+
+    def test_exemplars_prefer_same_sector(self):
+        from routes.learning import _compute_exemplars
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._seed_exemplar_sectors(conn)
+                lines = _compute_exemplars(conn, sector="Materials")
+            # Materials has enough in both buckets → exemplars must be all-Materials.
+            self.assertTrue(lines)
+            self.assertTrue(all("M" in ln.split()[1] for ln in lines))
+            self.assertFalse(any(" HL" in ln for ln in lines),
+                             "Healthcare must be excluded when Materials suffices")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_exemplars_fall_back_when_sector_too_few(self):
+        from routes.learning import _compute_exemplars
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # Only 1 Materials loss (below cap) → must top up from whole-market.
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       realized_pnl_pct, holding_period_days, was_executed,
+                       sector, entry_signals_json, error_type, timestamp)
+                    VALUES ('recommendation','MAT.AX','BUY','loss',-4.0,5,1,'Materials',?,
+                            'poor_entry','2026-01-10 10:00:00')
+                """, (json.dumps({"rsi_14": 55, "bb_pct_b": 0.6, "setup_score": 40}),))
+                for i in range(3):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           realized_pnl_pct, holding_period_days, was_executed,
+                           sector, entry_signals_json, error_type, timestamp)
+                        VALUES ('recommendation',?, 'BUY','loss',-5.0,5,1,'Healthcare',?,
+                                'poor_entry',?)
+                    """, ("HL%d.AX" % i,
+                          json.dumps({"rsi_14": 50, "bb_pct_b": 0.5, "setup_score": 35}),
+                          "2026-02-1%d 10:00:00" % i))
+                lines = _compute_exemplars(conn, sector="Materials")
+            # Materials alone can't fill the loss cap → whole-market tops up.
+            self.assertTrue(any(" MAT" in ln for ln in lines))
+            self.assertTrue(any(" HL" in ln for ln in lines),
+                            "must top up from whole-market when same-sector too few")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    # ── 6. deep vs light: full sector breakdown only in deep ─────────────────
+    def test_sector_breakdown_deep_vs_light(self):
+        from routes.learning import _calib_compute
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._seed_sector_dataset(conn)
+            with self._stub_yf():
+                deep = _calib_compute("riskOn", "Materials,Healthcare", "", 90, deep=True)
+                light = _calib_compute("riskOn", "Materials,Healthcare", "", 90, deep=False)
+            d_block = deep.get("block", "")
+            l_block = light.get("block", "")
+            # The section-3 sector breakdown lines carry the "vs mkt" delta form
+            # ("Materials:NN%WR vs mkt MM%..."). Deep emits one such line PER sector;
+            # light collapses to a single "sector:<most-divergent>" summary line.
+            # (The separate sector×regime block — section 8 — is regime-conditional
+            # and present in both modes, so we key off the distinctive "%WR vs mkt"
+            # breakdown form, not the bare "Sector:" prefix.)
+            d_breakdown = d_block.count("WR vs mkt")
+            l_breakdown = l_block.count("WR vs mkt")
+            self.assertGreaterEqual(d_breakdown, 2,
+                                    "deep must emit a vs-mkt line per qualifying sector")
+            self.assertEqual(l_breakdown, 1,
+                             "light must collapse to a single vs-mkt summary line")
+            # Light's single breakdown line is prefixed 'sector:'.
+            self.assertIn("sector:", l_block)
+        finally:
+            asx_server.get_db = _orig_get_db
 
 
 if __name__ == "__main__":

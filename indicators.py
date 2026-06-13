@@ -751,6 +751,10 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     except Exception:
         pass
 
+    # Compute the setup score once and reuse it for score + rs_score + rs_5d_alpha
+    # (Sprint 71 Phase 2 — avoids a double call to _score_ticker).
+    _score_data = _score_ticker(close.values, volume.values) or {}
+
     return {
         "ticker":      ticker.upper(),
         "asx_ticker":  t,
@@ -838,8 +842,15 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "entry_range":      [entry_low, entry_high],
         "trend_signals":    {k: (bool(v) if v is not None else None) for k, v in trend_signals.items()},
 
-        # Composite score (0-100) from _score_ticker
-        "score": (_score_ticker(close.values, volume.values) or {}).get("score"),
+        # Composite score (0-100) + relative-strength fields from _score_ticker.
+        # Surfaced so rs_score / rs_5d_alpha propagate to state.liveSignals (Sprint 71
+        # Phase 2). _score_ticker is called without index_closes here, so rs_score is the
+        # neutral default (5) and rs_5d_alpha is None unless an index series is supplied —
+        # but the fields now exist in the snapshot rather than being silently dropped.
+        # numpy scalars are already python floats/ints out of _score_ticker (gotcha #21).
+        "score":       _score_data.get("score"),
+        "rs_score":    _score_data.get("rs_score"),
+        "rs_5d_alpha": _score_data.get("rs_5d_alpha"),
 
         # Earnings proximity
         "days_to_earnings": days_to_earnings,

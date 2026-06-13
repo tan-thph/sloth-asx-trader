@@ -289,6 +289,20 @@ _LE_MIGRATIONS = [
     # computeThesisDrift() at SELL/TRIM time, patched onto the parent BUY/TOP_UP event
     # at position close. Joined with primary_entry_driver for the thesis-accuracy matrix.
     ("thesis_verdict", "TEXT"),
+    # Sprint 71 (Learning Loop Deepening Phase 1B): MAE/MFE path capture for executed,
+    # closed BUY/TOP_UP trades. Lazily resolved by _resolve_mae_mfe() in _calib_compute()
+    # by scanning entry→exit daily OHLC (stop-first intrabar convention). mae_pct is the
+    # worst drawdown (≤0 for longs); mfe_pct is the best unrealised gain (≥0). Used by
+    # Phase 2 tag intelligence (empirical stop_too_tight / early_exit) and skill scoring.
+    ("mae_pct",             "REAL"),  # max adverse excursion: (min(low)−entry)/entry×100
+    ("mfe_pct",             "REAL"),  # max favourable excursion: (max(high)−entry)/entry×100
+    ("mae_mfe_resolved_at", "TEXT"),  # ISO timestamp when MAE/MFE were computed (idempotency)
+    # Sprint 71 Phase 2D: stop_too_tight counterfactual result. 1 = a wider (regime
+    # stopAtrMult × ATR) stop would have let the trade reach target; 0 = it would have
+    # stopped out anyway (tag was a false positive — entry/thesis was the real problem).
+    # NULL = not yet resolved / inconclusive. Feeds the tag-precision self-suppression
+    # gate in _calib_compute() (⚠STOP_TAG_UNRELIABLE).
+    ("stop_cf_saved",       "INTEGER"),
 ]
 
 
