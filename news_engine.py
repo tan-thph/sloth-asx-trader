@@ -190,7 +190,6 @@ def _strip_urls(text: str) -> str:
     text = re.sub(r'\bwww\.\S+', '', text)
     # Collapse whitespace left behind by removals
     return re.sub(r'\s{2,}', ' ', text).strip()
-logging.basicConfig(level=logging.DEBUG)
 
 # ── Optional dependency guards ────────────────────────────────────────────────
 try:
@@ -236,7 +235,7 @@ MARKET_FEEDS = [
         "name":    "Reuters Australia",
         "url":     "https://feeds.reuters.com/reuters/AustraliaNews",
         "type":    "news",
-        "enabled": True,
+        "enabled": False,  # Reuters shut down public RSS feeds in 2020 — feed returns 404
     },
     {
         "key":     "asx_announcements",
@@ -1097,11 +1096,34 @@ class GoogleLLM:
         if not self.api_key:
             return None
         ticker_str = ", ".join(portfolio_tickers[:20]) if portfolio_tickers else "none"
+
+        context_block = ""
+        if _is_earnings_dividend_article(title, content or ""):
+            tickers_to_enrich = _extract_article_tickers(title, content or "", portfolio_tickers)
+            if tickers_to_enrich:
+                ctx_parts: list[str] = []
+                for tk in tickers_to_enrich:
+                    ctx = _fetch_ticker_context(tk)
+                    if ctx:
+                        ctx_parts.append(f'--- Historical data for {tk} ---\n{ctx}')
+                if ctx_parts:
+                    context_block = (
+                        '\n'.join(ctx_parts)
+                        + '\n\nSentiment calibration rules (apply when historical data above is present):\n'
+                        '- Earnings / profit: reported > prior FY or > forward EPS estimate → bullish; '
+                        'reported < prior FY or significant miss → bearish; in-line → neutral\n'
+                        '- Revenue: acceleration in YoY growth → bullish lean; deceleration or decline → bearish lean\n'
+                        '- Dividends: increase vs recent history → bullish; cut or suspension → bearish; '
+                        'maintained / in-line → neutral\n'
+                        '- Override article tone if the hard data contradicts it\n'
+                    )
+        context_block = context_block.replace('{', '(').replace('}', ')')
+
         prompt = self.CLASSIFY_PROMPT.format(
             title=title[:200],
-            content=(content or "")[:700],
+            content=_strip_urls((content or ""))[:700],
             tickers=ticker_str,
-            context="",
+            context=context_block,
         )
         try:
             resp = requests.post(
@@ -1160,11 +1182,34 @@ class GroqLLM:
         if not self.api_key:
             return None
         ticker_str = ", ".join(portfolio_tickers[:20]) if portfolio_tickers else "none"
+
+        context_block = ""
+        if _is_earnings_dividend_article(title, content or ""):
+            tickers_to_enrich = _extract_article_tickers(title, content or "", portfolio_tickers)
+            if tickers_to_enrich:
+                ctx_parts: list[str] = []
+                for tk in tickers_to_enrich:
+                    ctx = _fetch_ticker_context(tk)
+                    if ctx:
+                        ctx_parts.append(f'--- Historical data for {tk} ---\n{ctx}')
+                if ctx_parts:
+                    context_block = (
+                        '\n'.join(ctx_parts)
+                        + '\n\nSentiment calibration rules (apply when historical data above is present):\n'
+                        '- Earnings / profit: reported > prior FY or > forward EPS estimate → bullish; '
+                        'reported < prior FY or significant miss → bearish; in-line → neutral\n'
+                        '- Revenue: acceleration in YoY growth → bullish lean; deceleration or decline → bearish lean\n'
+                        '- Dividends: increase vs recent history → bullish; cut or suspension → bearish; '
+                        'maintained / in-line → neutral\n'
+                        '- Override article tone if the hard data contradicts it\n'
+                    )
+        context_block = context_block.replace('{', '(').replace('}', ')')
+
         prompt = self.CLASSIFY_PROMPT.format(
             title=title[:200],
-            content=(content or "")[:700],
+            content=_strip_urls((content or ""))[:700],
             tickers=ticker_str,
-            context="",
+            context=context_block,
         )
         try:
             resp = requests.post(
@@ -1327,7 +1372,7 @@ class NewsPipeline:
         # ── 2. Scrape per-ticker feeds (capped to avoid hammering) ───────────
         # Yahoo Finance and Google News require a real browser User-Agent;
         # the generic scanner UA gets 403 / login-page redirects.
-        for ticker in all_tickers[:12]:
+        for ticker in all_tickers[:30]:
             for fn, delay, use_browser in [
                 (_ticker_yahoo_rss,  0.15, True),
                 (_ticker_google_rss, 0.25, True),

@@ -1945,9 +1945,25 @@ def _ann_exists(conn: sqlite3.Connection, ann_id: str) -> bool:
 
 
 def save_announcement(ann: Dict, db_path: Optional[str | Path] = None) -> bool:
-    """Insert or replace an announcement record. Returns True if inserted."""
+    """Insert or replace an announcement record. Returns True if inserted.
+
+    If the record already exists but has no pdf_text (prior download failure)
+    and the incoming ann now has pdf_text, we patch the existing row rather
+    than silently discarding the content.
+    """
     with get_db(db_path) as conn:
         if _ann_exists(conn, ann["id"]):
+            # Patch pdf_text if the existing record is missing it
+            new_text = ann.get("pdf_text") or ""
+            if new_text:
+                existing = conn.execute(
+                    "SELECT pdf_text FROM announcements WHERE id=?", (ann["id"],)
+                ).fetchone()
+                if existing and not (existing["pdf_text"] or "").strip():
+                    conn.execute(
+                        "UPDATE announcements SET pdf_text=?, processed=? WHERE id=?",
+                        (new_text, ann.get("processed", 1), ann["id"]),
+                    )
             return False
         conn.execute(
             """
@@ -2514,12 +2530,18 @@ _RUN_SLOTS = ("10:30", "15:00")  # Sydney time
 
 
 def _should_run(now_sydney: datetime, last_slot: Optional[str]) -> Optional[str]:
-    """Return the slot string if we should fire now, else None."""
+    """Return the slot string if we should fire now, else None.
+
+    Uses a 2-minute window per slot so a busy server that misses the exact
+    minute still fires within the same check cycle (loop sleeps 60 s).
+    """
     if now_sydney.weekday() >= 5:  # Sat=5, Sun=6
         return None
-    current_hm = now_sydney.strftime("%H:%M")
+    now_minutes = now_sydney.hour * 60 + now_sydney.minute
     for slot in _RUN_SLOTS:
-        if current_hm == slot and last_slot != slot:
+        hh, mm = slot.split(":")
+        slot_minutes = int(hh) * 60 + int(mm)
+        if 0 <= now_minutes - slot_minutes < 2 and last_slot != slot:
             return slot
     return None
 
