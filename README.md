@@ -170,10 +170,44 @@ The system's memory. Every rec is tracked to outcome and fed back as calibration
 - Sell-tag accuracy — did exits actually turn out justified?
 - **Thesis Accuracy Matrix** — entry driver × outcome verdict × average P&L
 - Persistent **trading lessons** scoped by ticker, sector, regime, or breadth
-- Local **Ollama debate engine** — trade postmortems, skill scoring, and adversarial two-model argument, with an optional cloud adjudicator
+- **Automatic, rule-based tagging & skill scoring** of every closed entry (see below) — reproducible and free, computed from the captured data
+- Local **Ollama debate engine** — an *optional* manual second opinion: trade postmortems, skill scoring, and adversarial two-model argument, with an optional cloud adjudicator
 - **Trade Review drawer** — on the Journal page, expand any transaction (AI *or* manual) to see the entry technicals, thesis, drivers, verdict, and outcome side by side
 
-*Use it well:* tag your losses honestly and read the matrix monthly. The calibration is only as good as the outcome data you give it.
+*Use it well:* read the matrix monthly and let the automatic tags do the bookkeeping. The calibration is only as good as the outcome data you give it.
+
+#### How trades get tagged & scored
+
+When a BUY/TOP_UP position closes, the app classifies *why it worked or didn't* and *how much of the result was skill vs luck* — **deterministically, by rule**, from the technical snapshot it captured at entry and exit. Same trade in, same tag out. No AI guessing by default; the local Ollama engine is available only as a manual override (see note below).
+
+**Why it entered — entry drivers** (one per BUY): `mean_reversion` · `momentum_breakout` · `trend_pullback` · `fundamental_value` · `macro_tailwind`.
+
+**Whether that reason survived — exit verdict** (computed by comparing entry vs exit technicals): **validated** (the thesis played out) · **invalidated** (it reversed) · **irrelevant** (the thesis didn't drive the result).
+
+**Error tags** (losses/breakevens only — the first matching rule wins):
+
+| Tag | Applied when |
+|---|---|
+| `thesis_broken` | The entry thesis was **invalidated** — the technical reason you bought reversed. |
+| `stop_too_tight` | Stopped out by ordinary noise while the thesis was *still intact* (stop sat inside ~1.5× ATR). |
+| `overconfident` | Stated confidence was high (≥ 75%) yet the trade lost. |
+| `poor_rr` | Entered with a planned reward:risk below 1.5. |
+| `poor_entry` | Entry was technically stretched for the chosen style (e.g. a "mean-reversion" buy that wasn't actually oversold). |
+| `regime_mismatch` | Bought into a risk-off or panic market. |
+| `none` | A loss with no systematic, learnable error. |
+| `missed_catalyst` / `external_shock` | **Manual only** — these need world knowledge (news, a known event) the rules can't infer, so they're assigned only when you run the Ollama/cloud postmortem. |
+
+**Skill score (0–10)** — separates skill from luck using the exit verdict and outcome, then nudges for discipline (letting winners reach target, respecting stops) and calibration (very confident + wrong is penalised):
+
+| At exit, the thesis was… | Trade won | Trade lost |
+|---|---|---|
+| **Validated** | ~8 — right read, made money (skill) | ~6 — right read, stopped on noise (unlucky, good process) |
+| **Irrelevant** | ~5.5 | ~4 |
+| **Invalidated** | ~3 — wrong read, won anyway (luck) | ~2 — wrong read, lost (misread) |
+
+Trades with no captured exit comparison keep a neutral weight rather than getting a made-up score.
+
+> **Where Ollama fits now:** the local debate engine no longer tags trades automatically — the rules above do. Reach for the 🤖 / ⚔️ / ⚖️ buttons on the Learning page when you want a second opinion, a `missed_catalyst`/`external_shock` judgment the rules can't make, or to tag a SELL/TRIM exit (the automatic tagger only handles entries). A manual run overrides the rule-based tag for that trade.
 
 ### News & Announcements
 - RSS aggregator with TF-IDF deduplication across feeds, and LLM sentiment classification per article
@@ -242,7 +276,7 @@ Everything is configurable from the Settings page — no code editing:
 ## Running Tests
 
 ```bash
-python test_app.py   # 682 backend + integration tests
+python test_app.py   # 701 backend + integration tests
 npm run test:js      # 154 JS unit tests (quant engine, regime classifier, validator, thesis drift)
 ```
 
