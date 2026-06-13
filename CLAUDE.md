@@ -22,7 +22,11 @@ pip install -r requirements.txt
 python asx_server.py
 # Then open asx_trading.html in a browser.
 
-# Production-grade (multi-worker, threaded)
+# Production-grade (multi-threaded) — Windows
+python waitress_server.py
+
+# Production-grade (multi-worker) — Linux / macOS only
+# gunicorn uses fcntl which is POSIX-only and does NOT work on Windows
 pip install gunicorn
 gunicorn -c gunicorn.conf.py 'asx_server:app'
 ```

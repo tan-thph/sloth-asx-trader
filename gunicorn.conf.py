@@ -1,15 +1,20 @@
 """
-gunicorn.conf.py — production-grade WSGI server config.
+gunicorn.conf.py — production-grade WSGI server config (Linux / macOS only).
 
-Run instead of `python asx_server.py` to get:
-  • Multiple workers (one process per CPU is overkill; we use threads inside one
-    or two workers since most blocking is I/O on yfinance).
-  • Graceful worker recycling.
-  • Pre-fork model so SQLite + scheduler thread are initialised cleanly.
+gunicorn uses fcntl which is a POSIX-only module — it does NOT run on Windows.
+On Windows use waitress_server.py instead:
 
-Usage:
+    python waitress_server.py          # Windows / macOS / Linux
+
+On Linux / macOS you can also use gunicorn:
+
     pip install gunicorn
     gunicorn -c gunicorn.conf.py 'asx_server:app'
+
+Compared to `python asx_server.py` (Flask dev server), both options give:
+  • Proper multi-threaded request handling (not Flask's single-threaded default)
+  • Graceful shutdown that terminates the ngrok tunnel cleanly
+  • Production-level logging
 """
 
 import multiprocessing

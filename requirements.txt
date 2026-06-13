@@ -4,6 +4,7 @@
 # ── Core ─────────────────────────────────────────────────────
 flask>=3.0
 flask-cors>=4.0
+waitress>=3.0              # production WSGI server (Windows-compatible alternative to gunicorn)
 yfinance>=0.2.36
 pandas>=2.0
 numpy>=1.26

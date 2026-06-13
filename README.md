@@ -34,8 +34,12 @@ Then open the app one of two ways:
 - **Served by Flask (recommended):** browse to **http://localhost:5000** — the whole app is served from the backend on a single origin.
 - **From disk:** open `asx_trading.html` directly in your browser. It will talk to the backend on `localhost:5000`.
 
-**Production mode** (multi-worker, recommended for daily use):
+**Production mode** (multi-threaded, recommended for daily use):
 ```bash
+# Windows (and macOS/Linux) — waitress is pure Python, no POSIX deps
+python waitress_server.py
+
+# Linux / macOS only — gunicorn uses fcntl which does not exist on Windows
 pip install gunicorn
 gunicorn -c gunicorn.conf.py 'asx_server:app'
 ```
