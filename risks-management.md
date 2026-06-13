@@ -323,6 +323,137 @@ The **Learning** page is where you close the loop. A practical weekly routine:
 
 ---
 
+# Part 4 — Factor Stability (Market Scanner)
+
+## What it is
+
+The **Factor Stability** tab lives inside Market Scanner. It answers a specific, important question: **are the signals the scanner uses to score stocks actually predictive of future returns, or do they just look good in retrospect?**
+
+Every stock in a market scan gets a score from 0 to 100. That score is built from five factor components — Trend, Pullback, Volume, Momentum, and Relative Strength — weighted according to `FACTOR_WEIGHTS` in `indicators.py`. The default weights (Trend 30, Pullback 30, Volume 20, Momentum 10, RS 10) are reasonable priors, but the market's factor landscape shifts. What predicted forward returns two years ago may not predict them now. Factor Stability is the periodic check that the weights still earn their keep.
+
+## The underlying test — Information Coefficient (IC)
+
+For each factor signal, the test computes its **Information Coefficient**: a Spearman rank correlation between the factor signal value (measured today) and the actual stock return 20 trading days later.
+
+- **IC = +1.0** — the factor perfectly ranks stocks by their subsequent return. Higher signal = higher return. Ideal.
+- **IC = 0.0** — the factor has no relationship with forward returns. It's noise.
+- **IC = −1.0** — the factor is perfectly *anti*-predictive. Higher signal = lower return. The factor should be removed or inverted.
+
+In practice, a factor IC of 0.05–0.15 is considered useful in equity markets. Anything below 0.03 in absolute value is indistinguishable from noise at the sample sizes the ASX provides.
+
+## K-fold cross-validation — why it matters
+
+The test doesn't just measure IC on the full history, which would let a factor look good by fitting to the past. It uses **K-fold cross-validation** (default 5 folds):
+
+1. The price history for your selected tickers is divided into K equal time slices.
+2. For each fold, that slice becomes the **out-of-sample (test) window** — data the factor was never tuned on.
+3. The remaining slices become the **in-sample (train) window**.
+4. Both IC values are recorded, and the process repeats K times.
+5. Final ICs are averaged across all folds.
+
+The result: two IC values per factor — **train IC** (in-sample, optimistic) and **test IC** (out-of-sample, honest). The test IC is the one that matters.
+
+## The eight factors tested
+
+The stability test evaluates eight granular sub-signals that feed into the five high-level scanner components:
+
+| Factor | What it measures | High signal = |
+|---|---|---|
+| `above_sma20` | Price above 20-day SMA | Short-term uptrend intact |
+| `above_sma50` | Price above 50-day SMA | Medium-term trend intact |
+| `sma20_rising` | 20-day SMA slope positive | Trend accelerating |
+| `rsi_zone` | RSI in 35–55 zone (ideal pullback RSI) | Healthy reset — not oversold panic, not overbought |
+| `pullback_pct` | Price 5–20% below its 90-day high | Textbook pullback entry window |
+| `vol_surge` | 5-day average volume > 1.5× 20-day average | Accumulation underway |
+| `momentum_5d` | 5-day return % | Short-term price momentum |
+| `momentum_20d` | 20-day return % | Medium-term price momentum |
+
+These are more granular than the five high-level `FACTOR_WEIGHTS` — the stability test drills into the sub-components to find which specific signals are carrying the weight.
+
+## Reading the results
+
+### Per-factor verdict
+
+| Verdict | Stability ratio (test_ic / train_ic) | What it means | Action |
+|---|---|---|---|
+| **stable** | ≥ 0.6 | Factor predicts returns OOS almost as well as in-sample. | Keep or increase weight. |
+| **marginal** | 0.3–0.6 | Some OOS predictive power, weaker than in-sample. | Acceptable — monitor. |
+| **weak** | 0.2–0.3 | OOS power is thin. Might be noise. | Consider reducing weight. |
+| **overfitted** | Negative (sign flip) | Factor that looked positive in-sample *inverts* OOS — a fitted artefact, not signal. | **Reduce weight to zero** or remove. |
+| **noise** | |test_ic| < 0.03 | IC too small to distinguish from random. | Reduce weight. |
+| **insufficient_data** | — | Not enough bars in the test window. | Run with more tickers or a longer period. |
+
+### Stability ratio
+
+`stability = test_ic / train_ic`
+
+A ratio of 1.0 means the OOS IC matches the in-sample IC perfectly — the factor generalises completely. A ratio of 0.5 means half the in-sample signal survives. A negative ratio means the OOS relationship flipped sign — the classic signature of curve-fitting.
+
+> A factor with a high train IC but a negative stability ratio is actively dangerous: it passed the in-sample screen but does the *opposite* of what you want in live trading. This is the pattern factor stability is specifically designed to catch.
+
+### Overall Weighted IC
+
+A single summary number: the weighted average of absolute test ICs across all factors, weighted by their current `_FACTOR_WEIGHTS`. Higher is better.
+
+- **> 0.10** — good overall factor quality
+- **0.05–0.10** — acceptable
+- **< 0.05** — the scanner score may be driven more by noise than signal
+
+### Suggested weights row
+
+The UI shows a "suggested weights" row that scales factor weights proportionally to their out-of-sample IC. This is the empirically-derived weight set — if you update `FACTOR_WEIGHTS` in `indicators.py` to match these values, the scanner score will reflect actual predictive power rather than prior beliefs.
+
+## How to run it
+
+On the **Market Scanner** page → **Factor Stability** tab:
+
+1. Select **tickers** — paste in your portfolio or a representative sample. Use at least 10 diverse names; more is better.
+2. Set **period** — `2y` recommended. Longer periods give more stable fold estimates.
+3. Set **folds** (2–10, default 5) — more folds = more robust estimate but slower.
+4. Set **forward bars** (default 20) — the number of trading days you're trying to predict. 20 bars ≈ 4 weeks.
+5. Click **Run**.
+
+The endpoint calls `POST /api/scanner/factor-stability`, fetches 2 years of adjusted OHLCV for each ticker, runs K-fold IC on the 8 granular factors, and returns results in ~10–30 seconds.
+
+## When to run it
+
+**Run it quarterly**, or after a major market regime change (a sharp selloff/rally, a regime flip that persists for 4+ weeks). Factor effectiveness is regime-dependent:
+
+- Momentum factors tend to work better in trend/riskOn regimes and poorly in panic/sideways.
+- Mean-reversion factors (RSI zone, pullback_pct) work better in ranging/highVol markets.
+- Volume factors tend to be more consistent across regimes.
+
+If you run it and see `vol_surge: overfitted`, that's a signal to reduce the Volume weight in `indicators.py` for this market environment. If `above_sma50: stable` but `momentum_5d: noise`, consider shifting weight from momentum toward trend.
+
+## Updating the weights
+
+When the stability test recommends different weights:
+
+1. Open `indicators.py`.
+2. Find `FACTOR_WEIGHTS` (line ~361):
+   ```python
+   FACTOR_WEIGHTS = {
+       "trend":    30,
+       "pullback": 30,
+       "volume":   20,
+       "momentum": 10,
+       "rs":       10,
+   }
+   ```
+3. Update the values to match the suggested weights row from the Factor Stability output. **The five values must sum to exactly 100** — the code emits a warning at import time if they don't.
+4. No server restart needed — `_score_ticker()` reads `FACTOR_WEIGHTS` at runtime.
+
+> The stability test evaluates 8 sub-factors; the `FACTOR_WEIGHTS` dict controls 5 high-level groups. Use the sub-factor results directionally: if `above_sma20`, `above_sma50`, and `sma20_rising` are all stable, the Trend group deserves high weight. If `momentum_5d` is noise and `momentum_20d` is weak, reduce the Momentum weight.
+
+## What factor stability does not tell you
+
+- It measures **linear rank correlation** (Spearman). It will miss a factor that's useful in a non-linear way (e.g. only matters at extremes).
+- It uses **price returns as ground truth**. A factor that predicts volatility or drawdown risk is invisible to it.
+- A **short history** (< 80 bars per fold) can produce noisy IC estimates — treat borderline verdicts with scepticism on small samples.
+- It does not account for **transaction costs**. A factor with a modest IC might still be worthwhile if it drives slow-turnover, low-cost positions.
+
+---
+
 # How the three work together
 
 A complete risk-management workflow uses all three in sequence:
