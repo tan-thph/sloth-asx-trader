@@ -4849,6 +4849,214 @@ class TestFix18VirtualOutcomes(unittest.TestCase):
         self.assertIn("virtual_loss", src)
 
 
+class TestSprint70DeterministicTagging(unittest.TestCase):
+    """Sprint 70 — deterministic post-mortem tagging + skill scoring driven by the
+    entry/exit capture (thesis_verdict), replacing the blind local-LLM tagger."""
+
+    # ── classify_error_type_deterministic ────────────────────────────────────
+    def test_error_win_returns_none(self):
+        from routes.learning import classify_error_type_deterministic
+        self.assertEqual(
+            classify_error_type_deterministic({"outcome_status": "win"}), "none")
+
+    def test_error_thesis_broken_from_invalidated_verdict(self):
+        """thesis_verdict='invalidated' is the data-backed thesis_broken signal."""
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "invalidated", "realized_pnl_pct": -4.0,
+               "ai_confidence": 0.9, "rr_ratio": 0.8}
+        # invalidated wins over overconfident/poor_rr — it is the most specific.
+        self.assertEqual(classify_error_type_deterministic(row), "thesis_broken")
+
+    def test_error_stop_too_tight_when_thesis_intact(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "validated", "exit_reason": "stop_hit",
+               "actual_entry_price": 100.0, "suggested_stop": 99.0,  # 1% stop
+               "entry_signals_json": '{"atr_pct": 2.0}',  # 1.5xATR = 3% > 1% stop
+               "ai_confidence": 0.7}
+        self.assertEqual(classify_error_type_deterministic(row), "stop_too_tight")
+
+    def test_error_overconfident(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "ai_confidence": 0.82,
+               "exit_reason": "manual", "rr_ratio": 2.5}
+        self.assertEqual(classify_error_type_deterministic(row), "overconfident")
+
+    def test_error_poor_rr(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "ai_confidence": 0.6,
+               "rr_ratio": 1.2}
+        self.assertEqual(classify_error_type_deterministic(row), "poor_rr")
+
+    def test_error_regime_mismatch_fallback(self):
+        from routes.learning import classify_error_type_deterministic
+        row = {"outcome_status": "loss", "recommendation": "BUY",
+               "thesis_verdict": "irrelevant", "ai_confidence": 0.6,
+               "rr_ratio": 2.5, "regime": "panic"}
+        self.assertEqual(classify_error_type_deterministic(row), "regime_mismatch")
+
+    def test_error_never_emits_world_knowledge_tags(self):
+        """Deterministic path must never emit missed_catalyst / external_shock."""
+        from routes.learning import classify_error_type_deterministic
+        import itertools
+        verdicts = ["validated", "invalidated", "irrelevant", ""]
+        regimes  = ["riskOn", "riskOff", "panic", "trend", ""]
+        for v, reg in itertools.product(verdicts, regimes):
+            tag = classify_error_type_deterministic(
+                {"outcome_status": "loss", "recommendation": "BUY",
+                 "thesis_verdict": v, "regime": reg, "ai_confidence": 0.5,
+                 "rr_ratio": 3.0})
+            self.assertNotIn(tag, ("missed_catalyst", "external_shock"))
+
+    # ── compute_skill_score_deterministic ────────────────────────────────────
+    def test_skill_none_without_verdict(self):
+        """No thesis_verdict → no captured comparison → refuse to invent a score."""
+        from routes.learning import compute_skill_score_deterministic
+        self.assertIsNone(compute_skill_score_deterministic(
+            {"outcome_status": "win", "thesis_verdict": None}))
+
+    def test_skill_quadrant_validated_win_high(self):
+        from routes.learning import compute_skill_score_deterministic
+        s = compute_skill_score_deterministic(
+            {"outcome_status": "win", "thesis_verdict": "validated",
+             "exit_reason": "target_hit", "ai_confidence": 0.75, "rr_ratio": 2.0})
+        self.assertGreaterEqual(s, 8.0)  # 8 base +0.5 target +0.25 rr
+
+    def test_skill_quadrant_invalidated_win_is_luck(self):
+        """Wrong read that won anyway scores low — it was luck, not skill."""
+        from routes.learning import compute_skill_score_deterministic
+        s = compute_skill_score_deterministic(
+            {"outcome_status": "win", "thesis_verdict": "invalidated",
+             "exit_reason": "manual", "ai_confidence": 0.7})
+        self.assertLessEqual(s, 3.5)
+
+    def test_skill_validated_loss_beats_invalidated_loss(self):
+        """Unlucky (validated+loss) must score above bad-read (invalidated+loss)."""
+        from routes.learning import compute_skill_score_deterministic
+        unlucky = compute_skill_score_deterministic(
+            {"outcome_status": "loss", "thesis_verdict": "validated",
+             "exit_reason": "stop_hit", "ai_confidence": 0.7})
+        bad_read = compute_skill_score_deterministic(
+            {"outcome_status": "loss", "thesis_verdict": "invalidated",
+             "exit_reason": "stop_hit", "ai_confidence": 0.7})
+        self.assertGreater(unlucky, bad_read)
+
+    def test_skill_clamped_0_10(self):
+        from routes.learning import compute_skill_score_deterministic
+        s = compute_skill_score_deterministic(
+            {"outcome_status": "loss", "thesis_verdict": "invalidated",
+             "exit_reason": "manual", "ai_confidence": 0.95})
+        self.assertGreaterEqual(s, 0.0)
+        self.assertLessEqual(s, 10.0)
+
+    # ── _ci_excludes significance gate ───────────────────────────────────────
+    def test_ci_excludes_withholds_small_n(self):
+        """3-of-5 (60% WR) must NOT clear the CI gate vs a 65% threshold — too noisy."""
+        from routes.learning import _ci_excludes
+        self.assertFalse(_ci_excludes(3, 5, 0.65))
+
+    def test_ci_excludes_fires_on_clear_signal(self):
+        """5-of-40 (12.5% WR) clearly excludes a 65% threshold."""
+        from routes.learning import _ci_excludes
+        self.assertTrue(_ci_excludes(5, 40, 0.65))
+
+    # ── _resolve_deterministic_tags (DB integration) ─────────────────────────
+    def test_resolver_fills_and_marks_source(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _resolve_deterministic_tags
+            with _test_get_db() as conn:
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       realized_pnl_pct, ai_confidence, rr_ratio, exit_reason,
+                       thesis_verdict, was_executed, timestamp)
+                    VALUES ('recommendation','BHP','BUY','loss',-5.0,0.70,1.2,
+                            'manual','invalidated',1,datetime('now'))
+                """)
+                rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                n = _resolve_deterministic_tags(conn)
+                self.assertGreaterEqual(n, 1)
+                row = conn.execute(
+                    "SELECT error_type, error_type_source, skill_score "
+                    "FROM ai_learning_events WHERE id=?", (rid,)).fetchone()
+            self.assertEqual(row["error_type"], "thesis_broken")
+            self.assertEqual(row["error_type_source"], "deterministic")
+            self.assertEqual(row["skill_score"], 2.0)  # invalidated+loss base, no modifiers net
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolver_does_not_overwrite_manual_tag(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _resolve_deterministic_tags
+            with _test_get_db() as conn:
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       realized_pnl_pct, error_type, error_type_source,
+                       thesis_verdict, was_executed, timestamp)
+                    VALUES ('recommendation','CBA','BUY','loss',-3.0,
+                            'poor_entry','manual','invalidated',1,datetime('now'))
+                """)
+                rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                _resolve_deterministic_tags(conn)
+                row = conn.execute(
+                    "SELECT error_type, error_type_source FROM ai_learning_events "
+                    "WHERE id=?", (rid,)).fetchone()
+            # Manual tag preserved — deterministic only fills NULLs.
+            self.assertEqual(row["error_type"], "poor_entry")
+            self.assertEqual(row["error_type_source"], "manual")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolver_ignores_sell_trim(self):
+        """error_type/skill are entry-centric — SELL/TRIM events must not be tagged."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _resolve_deterministic_tags
+            with _test_get_db() as conn:
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       realized_pnl_pct, thesis_verdict, was_executed, timestamp)
+                    VALUES ('recommendation','ANZ','TRIM','loss',-4.0,
+                            'invalidated',1,datetime('now'))
+                """)
+                rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                _resolve_deterministic_tags(conn)
+                row = conn.execute(
+                    "SELECT error_type, skill_score FROM ai_learning_events "
+                    "WHERE id=?", (rid,)).fetchone()
+            self.assertIsNone(row["error_type"])
+            self.assertIsNone(row["skill_score"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolver_called_in_calib_compute(self):
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_resolve_deterministic_tags(conn)", src)
+
+    # ── virtual-outcome stop-first regression ────────────────────────────────
+    def test_virtual_outcome_stop_checked_before_target(self):
+        """BUY virtual resolution must check the stop (Low<=stop) BEFORE the target
+        so a straddle bar books the conservative loss, not an optimistic win."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        buy_block = src.split("# BUY: stop below entry")[1].split("\n\n")[0]
+        loss_pos = buy_block.find('virtual_loss')
+        win_pos  = buy_block.find('virtual_win')
+        self.assertTrue(0 <= loss_pos < win_pos,
+                        "stop (virtual_loss) must be checked before target (virtual_win)")
+
+
 class TestSprint41PlanAB(unittest.TestCase):
     """Sprint 41 — Plan A (regime-aware SELL/TRIM stop) + Plan B (high_60d/low_60d)."""
 

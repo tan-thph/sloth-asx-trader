@@ -99,6 +99,222 @@ def classify_entry_driver(sig: dict | None) -> str:
     return "unknown"
 
 
+# ── Deterministic post-mortem tagging (Sprint 70) ─────────────────────────────
+# Replaces the blind local-LLM postmortem/skill scorer. Driven by the entry/exit
+# capture feature: thesis_verdict is the entry-vs-exit TECHNICAL comparison
+# (validated/invalidated/irrelevant) computed by computeThesisDrift() at SELL/TRIM
+# time, plus entry_signals_json (entry technicals) and the standard numeric
+# outcome fields. Everything here is reproducible — same row → same tag/score — so
+# it can feed calibration without the LLM-noise problem that motivated the rewrite.
+#
+# Deliberately does NOT emit missed_catalyst / external_shock: those need
+# world-knowledge (news, index events) the row does not contain. They remain
+# available only via the optional manual LLM postmortem buttons.
+
+
+def _sig_get(entry_signals_json, key):
+    """Pull one float field out of the stored entry_signals_json blob.
+
+    Accepts either a JSON string (DB shape) or an already-parsed dict. Returns
+    None for missing/unparseable values so callers can treat absence uniformly.
+    """
+    sig = entry_signals_json
+    if isinstance(sig, str):
+        try:
+            sig = json.loads(sig)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(sig, dict):
+        return None
+    v = sig.get(key)
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_error_type_deterministic(row) -> str:
+    """Deterministic error_type for a closed loss/breakeven, from real captured data.
+
+    Priority-ordered (most specific / most data-backed first). Returns one tag from
+    VALID_PM_TYPES (minus the two world-knowledge tags) or 'none'. Wins return
+    'none' — a win has no error to learn from.
+
+    `row` is a sqlite Row or dict exposing: recommendation, outcome_status,
+    realized_pnl_pct, ai_confidence, rr_ratio, exit_reason, regime, thesis_verdict,
+    suggested_stop, actual_entry_price, entry_signals_json, primary_entry_driver.
+    """
+    def _g(key):
+        try:
+            return row[key]
+        except (KeyError, IndexError, TypeError):
+            return row.get(key) if hasattr(row, "get") else None
+
+    status = (_g("outcome_status") or "").lower()
+    if status not in ("loss", "breakeven"):
+        return "none"
+
+    rec     = (_g("recommendation") or "").upper()
+    conf    = _g("ai_confidence")
+    rr      = _g("rr_ratio")
+    verdict = (_g("thesis_verdict") or "")
+    exit_r  = (_g("exit_reason") or "")
+    regime  = (_g("regime") or "")
+    driver  = (_g("primary_entry_driver") or "")
+    esj     = _g("entry_signals_json")
+
+    # 1. thesis_broken — the entry technical thesis demonstrably reversed.
+    #    This is now DATA-BACKED (the entry-vs-exit comparison) rather than guessed.
+    if verdict == "invalidated":
+        return "thesis_broken"
+
+    # 2. stop_too_tight — stopped out while the thesis was NOT invalidated, and the
+    #    stop sat inside ~1.5×ATR (i.e. shaken out by normal noise, not a real break).
+    if exit_r == "stop_hit" and verdict in ("validated", "irrelevant", ""):
+        entry_px = _g("actual_entry_price")
+        stop_px  = _g("suggested_stop")
+        atr_pct  = _sig_get(esj, "atr_pct")
+        if entry_px and stop_px and float(entry_px) > 0 and atr_pct and atr_pct > 0:
+            stop_dist_pct = abs(float(entry_px) - float(stop_px)) / float(entry_px) * 100
+            if stop_dist_pct < 1.5 * atr_pct:
+                return "stop_too_tight"
+
+    # 3. overconfident — high stated conviction that did not pan out.
+    if conf is not None and float(conf) >= 0.75:
+        return "overconfident"
+
+    # 4. poor_rr — took an unfavourable risk/reward to begin with.
+    if rr is not None and float(rr) < 1.5:
+        return "poor_rr"
+
+    # 5. poor_entry — entry was technically stretched for the stated driver.
+    rsi = _sig_get(esj, "rsi_14")
+    bb  = _sig_get(esj, "bb_pct_b")
+    if driver == "mean_reversion" and (
+            (rsi is not None and rsi > 45) or (bb is not None and bb > 0.45)):
+        return "poor_entry"
+    if driver in ("momentum_breakout", "trend_pullback") and bb is not None and bb > 0.95:
+        return "poor_entry"
+
+    # 6. regime_mismatch — bought into a bearish macro regime.
+    if rec in ("BUY", "TOP_UP") and regime in ("riskOff", "panic"):
+        return "regime_mismatch"
+
+    return "none"
+
+
+def compute_skill_score_deterministic(row):
+    """Deterministic skill-vs-luck score 0–10 for a closed trade, or None.
+
+    The core signal is the thesis_verdict × outcome quadrant — exactly the
+    skill/luck split the LLM was being asked to guess, but now read straight from
+    the captured entry-vs-exit comparison:
+
+        validated  + win  → 8.0  (right read, made money — skill)
+        validated  + loss → 6.0  (right read, stopped on noise — unlucky, good process)
+        irrelevant + win  → 5.5  (thesis didn't drive it, won)
+        irrelevant + loss → 4.0  (thesis didn't drive it, lost)
+        invalidated+ win  → 3.0  (wrong read, won anyway — luck)
+        invalidated+ loss → 2.0  (wrong read, lost — bad analysis)
+
+    Returns None when thesis_verdict is absent (no capture data) — we refuse to
+    invent a skill score for legacy/uncaptured trades; those keep neutral weight.
+    """
+    def _g(key):
+        try:
+            return row[key]
+        except (KeyError, IndexError, TypeError):
+            return row.get(key) if hasattr(row, "get") else None
+
+    verdict = (_g("thesis_verdict") or "")
+    if verdict not in ("validated", "invalidated", "irrelevant"):
+        return None
+
+    status = (_g("outcome_status") or "").lower()
+    pnl    = _g("realized_pnl_pct")
+    win    = status == "win" or (status not in ("loss", "breakeven") and pnl is not None and float(pnl) > 0)
+
+    base = {
+        ("validated",   True):  8.0, ("validated",   False): 6.0,
+        ("irrelevant",  True):  5.5, ("irrelevant",  False): 4.0,
+        ("invalidated", True):  3.0, ("invalidated", False): 2.0,
+    }[(verdict, win)]
+
+    exit_r = (_g("exit_reason") or "")
+    conf   = _g("ai_confidence")
+    rr     = _g("rr_ratio")
+
+    # Discipline modifiers
+    if exit_r == "target_hit":
+        base += 0.5                      # let the winner run to plan
+    if exit_r == "stop_hit" and not win:
+        base += 0.5                      # respected the stop — disciplined loss
+    if exit_r == "manual" and not win and verdict == "validated":
+        base -= 0.5                      # bailed early on a thesis that was still intact
+
+    # Confidence-calibration modifiers
+    if conf is not None:
+        if float(conf) >= 0.80 and not win:
+            base -= 1.0                  # very confident and wrong
+        if float(conf) < 0.65 and win:
+            base -= 0.5                  # won, but low conviction — closer to luck
+
+    # Planned R:R discipline
+    if rr is not None and float(rr) >= 2.0:
+        base += 0.25
+
+    return round(max(0.0, min(10.0, base)), 1)
+
+
+def _resolve_deterministic_tags(conn, cap: int = 50) -> int:
+    """Lazily fill error_type + skill_score for closed, executed events that lack
+    them, using the deterministic functions above. Idempotent, capped per call,
+    runs alongside _resolve_virtual_outcomes / _resolve_sell_outcomes.
+
+    error_type_source is set to 'deterministic' so the calibration auto-tag gate
+    (which only distrusts LLM 'auto' tags) treats these as reliable. Manual/LLM
+    tags already present are never overwritten — they win.
+
+    Scoped to BUY/TOP_UP entries only: error_type ("why the entry failed") and the
+    thesis_verdict skill quadrant are entry-centric. A SELL/TRIM 'loss' just means a
+    position was cut below its entry — that is exit-decision quality, tracked
+    separately by sell_verify_verdict, not an entry error. The parent BUY/TOP_UP
+    events (which receive per-entry outcomes and the patched thesis_verdict at
+    close) are the correct home for these tags.
+    """
+    rows = conn.execute("""
+        SELECT id, recommendation, outcome_status, realized_pnl_pct, ai_confidence,
+               rr_ratio, exit_reason, regime, thesis_verdict, suggested_stop,
+               actual_entry_price, entry_signals_json, primary_entry_driver,
+               error_type, error_type_source, skill_score
+          FROM ai_learning_events
+         WHERE was_executed = 1
+           AND recommendation IN ('BUY','TOP_UP')
+           AND outcome_status IN ('win','loss','breakeven')
+           AND (skill_score IS NULL
+                OR (outcome_status IN ('loss','breakeven')
+                    AND (error_type IS NULL OR error_type = '')))
+         ORDER BY timestamp DESC
+         LIMIT ?
+    """, (cap,)).fetchall()
+
+    resolved = 0
+    for r in rows:
+        sets, vals = [], []
+        if r["outcome_status"] in ("loss", "breakeven") and not (r["error_type"] or ""):
+            sets.append("error_type=?");        vals.append(classify_error_type_deterministic(r))
+            sets.append("error_type_source=?"); vals.append("deterministic")
+        if r["skill_score"] is None:
+            sk = compute_skill_score_deterministic(r)
+            if sk is not None:
+                sets.append("skill_score=?"); vals.append(sk)
+        if sets:
+            vals.append(r["id"])
+            conn.execute(f"UPDATE ai_learning_events SET {', '.join(sets)} WHERE id=?", vals)
+            resolved += 1
+    return resolved
+
+
 def _is_good_loss(r: dict) -> bool:
     """Returns True for losses/breakevenents that reflect disciplined execution,
     not analytical error — must be excluded from Phase 8's skill-gate.
@@ -270,6 +486,24 @@ def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float] |
     lo = max(0.0, (centre - spread) * 100)
     hi = min(100.0, (centre + spread) * 100)
     return round(lo, 1), round(hi, 1)
+
+
+def _ci_excludes(successes: int, n: int, threshold: float) -> bool:
+    """True iff the Wilson 95% CI for successes/n lies entirely on one side of
+    `threshold` (a fraction 0–1). Used to gate behaviour-changing nudges: only
+    emit when the observed win-rate is *significantly* off the reference, so a
+    3-of-5 fluke (whose CI spans the threshold) is correctly withheld.
+
+    Operates on RAW integer counts (significance) even though the magnitude of the
+    nudge is taken from the decay-weighted rate — counts carry the statistical
+    power, weighting only re-centres the point estimate.
+    """
+    ci = _wilson_ci(successes, n)
+    if not ci:
+        return False
+    lo, hi = ci
+    t = threshold * 100
+    return lo > t or hi < t
 
 
 def _expire_old_events(conn) -> None:
@@ -1083,10 +1317,13 @@ def learning_calibration_stats():
     """
     try:
         with get_db() as conn:
+            # Sprint 70: Brier is a binary-outcome score. Breakevens were previously
+            # folded in as 'loss' (0.0), biasing the score and the reliability bins.
+            # Exclude them — only unambiguous win/loss outcomes belong here.
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status
                 FROM ai_learning_events
-                WHERE outcome_status IN ('win','loss','breakeven')
+                WHERE outcome_status IN ('win','loss')
                   AND ai_confidence IS NOT NULL
             """).fetchall()
 
@@ -1341,14 +1578,20 @@ def _resolve_virtual_outcomes(conn) -> int:
         # This is used as `hold_days` for speed_weight — rewards fast resolutions.
         bars_to_resolution = 0
         for i, (_, bar) in enumerate(hist.iterrows(), 1):
+            # Sprint 70: STOP-FIRST intrabar convention. When a single daily bar's
+            # range straddles BOTH the stop and the target, the real intraday path
+            # is unknown; the conservative backtest convention is to assume the stop
+            # hit first. The previous target-first ordering always booked the win,
+            # inflating virtual win rates that feed calibration. This now matches the
+            # stop-first convention in _resolve_execution_alpha().
             if is_exit:
-                # SELL/TRIM: falling price = thesis confirmed (target below entry)
-                if bar["Low"]  <= target * (1 - slip): outcome = "virtual_win";  bars_to_resolution = i; break
+                # SELL/TRIM: stop above entry (loss), target below entry (win)
                 if bar["High"] >= stop:                outcome = "virtual_loss"; bars_to_resolution = i; break
+                if bar["Low"]  <= target * (1 - slip): outcome = "virtual_win";  bars_to_resolution = i; break
             else:
-                # BUY: rising price = thesis confirmed (target above entry)
-                if bar["High"] >= target * (1 + slip): outcome = "virtual_win";  bars_to_resolution = i; break
+                # BUY: stop below entry (loss), target above entry (win)
                 if bar["Low"]  <= stop:                outcome = "virtual_loss"; bars_to_resolution = i; break
+                if bar["High"] >= target * (1 + slip): outcome = "virtual_win";  bars_to_resolution = i; break
 
         # virtual_open: neither level was hit — use full bar count as hold_days
         # (the position drifted for the entire available history without resolution)
@@ -1493,6 +1736,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             _resolve_virtual_outcomes(conn)
             # Sprint 37: lazy-resolve sell tag outcomes (Gap 3 + Gap 7) — capped at 5.
             _resolve_sell_outcomes(conn)
+            # Sprint 70: lazily assign deterministic error_type + skill_score to
+            # closed trades from the entry/exit capture (replaces the LLM tagger).
+            _resolve_deterministic_tags(conn)
 
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
@@ -1603,10 +1849,15 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         calib_rows = [r for r in rows_all if not _is_shock(r)]
         n_excluded = n - len([r for r in rows if not _is_shock(r)])
 
-        _ESS_MIN = 2.5  # Kish ESS threshold — suppresses calibration when decay renders
+        # Sprint 70: ESS floor raised 2.5→6.0. A conditional win-rate claim needs
+        # real statistical power; 2.5 effective trades licensed conclusions from
+        # noise. 6.0 is the minimum at which a ±5pp delta starts to clear its CI.
+        _ESS_MIN = 6.0  # Kish ESS threshold — suppresses calibration when decay renders
                         # sample statistically unreliable (e.g. 1 fresh + 3 very stale trades)
+        _MIN_NUDGE_N = 12  # Sprint 70: raw-count floor for behaviour-changing tag nudges.
 
-        # 1. Confidence bands — decay-weighted ESS≥2.5 AND |delta|>5pp
+        # 1. Confidence bands — ESS≥6 AND |delta|>5pp AND Wilson CI excludes the
+        #    band midpoint (Sprint 70: the CI gate withholds small-n flukes).
         for label, lo, hi, mid in [("60-70", 0.60, 0.70, 0.65), ("70-80", 0.70, 0.80, 0.75),
                                     ("80-90", 0.80, 0.90, 0.85)]:
             subset = [r for r in calib_rows if lo <= (r["ai_confidence"] or 0) < hi]
@@ -1619,7 +1870,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 continue
             wr    = _wwr(subset)
             delta = wr - mid
-            if abs(delta) > 0.05:
+            raw_wins = sum(1 for r in subset if r["outcome_status"] == "win")
+            if abs(delta) > 0.05 and _ci_excludes(raw_wins, len(subset), mid):
                 adj_val = round(max(-0.15, min(0.10, delta * 0.8)), 2)
                 adjustments["bands"][label] = adj_val
                 parts.append(f"conf {label}%:{wr*100:.0f}%WR(Δ{delta*100:+.0f}pp,adj{adj_val:+.2f},ESS={ess:.1f})")
@@ -1736,7 +1988,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         if not _auto_tags_ok:
             learnable_losses = [r for r in learnable_losses
                                 if (r["error_type_source"] or "") != "auto"]
-        if len(learnable_losses) >= 3:
+        if len(learnable_losses) >= _MIN_NUDGE_N:
             type_counts: dict = {}
             for r in learnable_losses:
                 et = r["error_type"] if "error_type" in r.keys() else None
@@ -1764,14 +2016,14 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                            "add re-validation step")
                     )
         # Gap 6: auto-tags unreliable and not enough manually-reviewed events — warn Claude.
-        if not _auto_tags_ok and len(learnable_losses) < 3:
+        if not _auto_tags_ok and len(learnable_losses) < _MIN_NUDGE_N:
             parts.append(f"⚠AUTO_TAGS_UNRELIABLE({int(_auto_tag_agree*100)}%agree,n={_auto_tag_n})→err nudge suppressed")
 
         # 6b. Dominant success tag — mirror of L2 dominant error check
         # Only emit when ESS of wins is high enough to trust the pattern.
         wins_tagged = [r for r in rows_all if r["outcome_status"] == "win"
                        and r.get("success_tags") and r["success_tags"] not in ("", "none")]
-        if len(wins_tagged) >= 3:
+        if len(wins_tagged) >= _MIN_NUDGE_N:
             win_ess = _ess(wins_tagged)
             if win_ess >= _ESS_MIN:
                 stag_counts: dict = {}

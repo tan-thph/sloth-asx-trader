@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** 2026-06-12 (Sprint 67–68: Thesis Tracking — structured entry-driver tagging, entry→exit thesis comparison, Thesis Accuracy Matrix. PROMPT_VERSION → 2026-06-v13.)
-**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–68 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block) · Thesis Tracking Live (Sprint 67–68)
+**Last Updated:** 2026-06-13 (Sprint 70: post-mortem tagging + skill scoring are now **deterministic** — driven by the entry/exit capture (`thesis_verdict`), replacing the blind local-LLM tagger. Calibration statistics tightened: ESS floor 2.5→6.0, nudge floors 3→12, Wilson-CI significance gate, Brier excludes breakevens, virtual outcomes stop-first.)
+**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–70 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block) · Thesis Tracking Live (Sprint 67–68) · Deterministic tagging/scoring Live (Sprint 70); LLM postmortem/skill demoted to manual override
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -45,9 +45,9 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `actual_entry_price`  | REAL       | Actual fill price |
 | `actual_exit_price`   | REAL       | Actual exit price |
 | `sector`              | TEXT       | GICS sector |
-| `error_type`          | TEXT       | Comma-separated tags (loss/breakeven only) |
-| `error_type_source`   | TEXT       | `'manual'` / `'auto'` / `'debated-consensus'` / `'debated-merged'` / `'debated-singleton'` / `'debated'` / `'debated-synthesis'` (Phase 3 neutral synthesis) / `'adjudicated'` (cloud adjudicator) |
-| `skill_score`              | REAL       | 0–10 analysis quality vs luck (Ollama scored) |
+| `error_type`          | TEXT       | Comma-separated tags (loss/breakeven only). **Default source is deterministic since Sprint 70** — `classify_error_type_deterministic()` fills it from the captured data; LLM/manual tags override (only NULLs are auto-filled) |
+| `error_type_source`   | TEXT       | `'deterministic'` (Sprint 70 default — rule engine over the entry/exit capture) / `'manual'` / `'auto'` (LLM 🤖) / `'debated-consensus'` / `'debated-merged'` / `'debated-singleton'` / `'debated'` / `'debated-synthesis'` (Phase 3 neutral synthesis) / `'adjudicated'` (cloud adjudicator) |
+| `skill_score`              | REAL       | 0–10 analysis quality vs luck. **Deterministic since Sprint 70** — `compute_skill_score_deterministic()` reads the `thesis_verdict × outcome` skill-vs-luck quadrant; NULL when `thesis_verdict` is absent (no captured comparison → no fabricated score). The 🔬 Ollama scorer remains as a manual override |
 | `debate_summary`           | TEXT       | ≤200-char bull/bear summary stored at analysis time |
 | `prompt_hash`              | TEXT       | 12-char djb2 fingerprint of prompt version + regime + date |
 | `postmortem_debate`        | TEXT       | JSON blob of full adversarial debate transcript (Phase 3) |
@@ -100,8 +100,14 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 2. **Trade Executed** (`recommendations.js` → `markExecuted()`)
    - `POST /api/learning/outcome` — updates entry price, outcome fields
    - `exit_reason` auto-detected via `_detectExitReason(exitPrice, stopLoss, target)` — sets `stop_hit`/`target_hit` (±0.5% tolerance) or falls back to `manual` (Stage 1); function now lives in `js/utils.js` (hoisted Sprint 43)
-   - Auto-reconciles parent BUY/TOP_UP learning events when a SELL/TRIM fully closes the position (Stage 1) — also patches `thesis_verdict` onto each parent from the SELL rec's `_thesisCheck.verdict` (Sprint 68)
-   - **No longer auto-triggers postmortem/skill-score** — these must be initiated via the 🤖/🔬 buttons on the Learning page (hotfix a888eec)
+   - Auto-reconciles parent BUY/TOP_UP learning events when a SELL/TRIM fully closes the position (Stage 1) — also patches `thesis_verdict` onto each parent from the SELL rec's `_thesisCheck.verdict` (Sprint 68). This is what makes the parent BUY carry the entry-vs-exit comparison the deterministic scorer reads.
+   - **No longer auto-triggers the LLM postmortem/skill-score** — those remain manual via the 🤖/🔬 buttons (hotfix a888eec). The **deterministic** error_type + skill_score are filled automatically instead (next step).
+
+2b. **Deterministic tagging + scoring** (`routes/learning.py` → `_resolve_deterministic_tags(conn)`, Sprint 70)
+   - Runs lazily inside `_calib_compute()` on every calibration fetch (alongside `_resolve_virtual_outcomes` / `_resolve_sell_outcomes`); capped at 50/call, idempotent, fills NULLs only.
+   - `classify_error_type_deterministic(row)` assigns `error_type` (source `'deterministic'`) for closed losses/breakevens from real captured data — see the dedicated section below.
+   - `compute_skill_score_deterministic(row)` assigns `skill_score` from the `thesis_verdict × outcome` quadrant; leaves NULL when no verdict.
+   - Manual/LLM tags are never overwritten (only `error_type IS NULL` / `skill_score IS NULL` rows are touched), so the 🤖/🔬 buttons still act as overrides.
 
 3. **Trade Closed** (`performance.js` → `syncClosedTradesToLearningLoop()`)
    - Reconciles journal against `rec_history` and patches outcome for closed trades
@@ -169,11 +175,13 @@ All calibration sections now use Kish's ESS formula:
 ```
 ESS = (Σwi)² / Σwi²
 ```
-Threshold is **ESS ≥ 2.5**. Below this, the system emits a warning token rather than a confidence nudge:
+Threshold is **ESS ≥ 6.0** *(raised from 2.5 in Sprint 70)*. Below this, the system emits a warning token rather than a confidence nudge:
 ```
-conf 70-80%:⚠low ESS=1.6(n=4)—data too stale for reliable calibration
+conf 70-80%:⚠low ESS=4.1(n=6)—data too stale for reliable calibration
 ```
-Equal-weight samples behave the same as before (4 trades, equal weights → ESS = 4.0). Stale samples are correctly gated regardless of raw count.
+Equal-weight samples behave the same as before (6 trades, equal weights → ESS = 6.0). Stale samples are correctly gated regardless of raw count.
+
+> **Sprint 70 — why 6.0, not 2.5:** an ESS of 2.5 means ~2–3 effective trades, and a ±5pp win-rate delta off 2–3 points is pure noise. The old floor licensed conclusions from samples too small to mean anything; 6.0 is the minimum at which a band nudge starts to clear its Wilson CI (see the Wilson-CI significance gate in Calibration Injection). Behaviour-changing tag nudges have a separate raw-count floor `_MIN_NUDGE_N=12` (raised from 3). Aggregate Wilson-CI'd stats on the Learning page are *always* shown — only the prompt-injected nudges are gated.
 
 **3b. Hierarchical regime fallbacks** ✅ (L1, ESS-integrated, Sprint 24)
 When the active regime has ESS < 2.5 (e.g. recently transitioned), rather than emitting nothing, the system falls through three levels:
@@ -216,6 +224,8 @@ weight = time_decay × sf
 ```
 Centering at 5 means unscored events (`skill_score=NULL`) fall back to `sf=1.0` — identical to a neutral-scored trade. A high-skill trade (score=8) gets `sf=1.6`, amplifying its calibration signal; a low-skill trade (score=2) gets `sf=0.4`, down-weighting lucky wins. The old formula (`max(0.2, skill/10)`) centred at 10 and penalised all scored trades vs unscored, which was backwards. Phase 8 is fully live via `_compute_phase8_meta()` (Sprint 31): Mann-Whitney U gate (z>1.28, one-sided p<0.10) compares skill scores for wins vs losses — when the gate fails, `sf=1.0` for all events regardless of `skill_score`. Activates automatically once 10+ scored events exist where wins score statistically higher than losses.
 
+> **Sprint 70 — the skill score feeding this is now deterministic.** Previously `skill_score` came from a 4B–9B local model guessing skill-vs-luck from a one-line trade summary — noise that then *re-weighted every other calibration statistic*. It is now computed by `compute_skill_score_deterministic()` from the `thesis_verdict × outcome` quadrant (validated+win=8 skill, validated+loss=6 unlucky, invalidated+win=3 luck, invalidated+loss=2 bad-read, + discipline/calibration modifiers). Because the input is reproducible and grounded in the entry-vs-exit comparison, keeping it in the weighting is now defensible rather than amplifying LLM noise. Scores only exist where `thesis_verdict` exists; legacy/uncaptured trades stay NULL → `sf=1.0` (neutral), so they are never penalised by a fabricated number. The Phase 8 gate still arbitrates whether scores actually predict outcomes before any amplification is applied.
+
 > **Bug fix (hotfix 16bba99):** The Phase 8 gate now runs in **both** `_compute_phase8_meta()` (stats endpoint) and `_calib_compute()` (calibration block). Previously the calibration block used a raw mean comparison instead of the Mann-Whitney U z-score — this meant Phase 8 in the calibration block could activate on a single high-skill outlier, incorrectly amplifying or suppressing event weights. The fix aligns both code paths: `_phase8_active = _mann_whitney_z(win_skills, loss_skills) > 1.28`.
 
 **Phase 6: Calibration quality debate card** ✅ *(Sprint 26)*
@@ -257,6 +267,8 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 **Virtual outcomes / paper-trade skipped recs** ✅ *(Sprint 36 + Sprint 44)*
 `_resolve_virtual_outcomes(conn)` runs lazily inside `_calib_compute()`. For `was_executed=0` recs ≥30 days old with non-null stop and target, it fetches OHLCV history and checks whether `high ≥ target` (virtual_win) or `low ≤ stop` (virtual_loss). Results written to `virtual_outcome` and fed back into calibration at 0.75× weight via `rows_all`. Prevents the pessimism loop where suppressed calibration produces no new outcomes. Frontend shows virtual outcome count in the calibration stats card.
 
+> **Sprint 70 — stop-first intrabar convention.** The bar scan now checks the **stop before the target** within each daily bar (for both BUY and SELL/TRIM). When a single bar's range straddles both levels the real intraday path is unknown, so the conservative backtest assumption is that the stop hit first. The previous target-first ordering always booked the win on a straddle bar, inflating virtual win rates that feed calibration. This now matches the stop-first convention already used by `_resolve_execution_alpha()`.
+
 **Sprint 66 addition — asymmetric fill slippage (§9.2):** virtual resolution no longer assumes perfect fills. One-way slippage = ADV tier (`core.adv_slippage`: 0.05%–0.35% from the event's stored `adv_20` snapshot; missing → thin-name tier) × regime multiplier (highVol 1.5× · riskOff 1.25× · panic 2×). A virtual WIN must clear the target by the margin (`High ≥ target×(1+slip)` for BUY; `Low ≤ target×(1−slip)` for SELL/TRIM); losses trigger at the raw stop — pessimistic by construction. The applied rate is stored in `virtual_slippage_applied` and shown in the `~W`/`~L` chip tooltip. The same convention degrades the execution-alpha mechanical baseline (stop fills at `stop×(1−slip)`, time-stops at `close×(1−slip)`).
 
 **Sprint 44 addition — virtual speed weighting:** `_resolve_virtual_outcomes()` also writes `virtual_speed_weight = min(1.0, 7.0 / bars_to_resolution)` to the `ai_learning_events` row (`virtual_speed_weight REAL` column added via `_LE_MIGRATIONS`). `bars_to_resolution` is the 1-indexed bar number at which the target or stop was **first hit** during the daily OHLCV bar scan — NOT total elapsed time from creation to today. A virtual win resolved in 7 bars (target hit on day 7) gets weight=1.0; one where target is only hit on bar 30 gets ~0.23. Unresolved (virtual_open) uses the total bar count of the history fetch. In `_calib_compute()`, the effective weight for virtual rows is `0.75 × virtual_speed_weight` — fast hits are treated nearly as strongly as executed outcomes; slow drifts are further discounted. This prevents a slow-moving unexecuted rec from inflating calibration as much as a clean, fast win.
@@ -269,13 +281,14 @@ The quant engine already binds Claude's calibrated confidence to Kelly position 
 
 `fetchCalibrationBlock(regime, sectors, tickers)` in `analysis.js` calls `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` after regime detection. The backend:
 1. Fetches last 90 days of closed events (max 180d) — pure `_calib_compute()` function, TTL-cached 5 min (L4)
-2. Applies exponential + skill-weighted decay (`weight = time_decay × max(0.2, min(1.8, skill_score/5.0))`); half-life is **regime-adaptive** (20–60d, default 45d); unscored → sf=1.0
+2. Applies exponential + skill-weighted decay (`weight = time_decay × max(0.2, min(1.8, skill_score/5.0))`); half-life is **regime-adaptive** (20–60d, default 45d); unscored → sf=1.0. `skill_score` is deterministic since Sprint 70 (see Phase 8 note above)
 3. Excludes `external_shock` / `protective_stop` from confidence band calculations only
-4. Only emits findings where **ESS ≥ 2.5** (Kish's formula) — replaces raw n≥3 guard (Sprint 23)
+4. Only emits findings where **ESS ≥ 6.0** (Kish's formula) — raised from 2.5 in Sprint 70 (was raw n≥3 before Sprint 23)
+4b. **Confidence-band Wilson-CI significance gate** *(Sprint 70):* a band nudge fires only when `_ci_excludes(raw_wins, n, midpoint)` — i.e. the Wilson 95% CI on the band's **raw** win/total lies entirely on one side of the band midpoint. This withholds small-n flukes (a 3-of-5 = 60% band whose CI spans the 65% midpoint stays silent) even when the decay-weighted point estimate looks off. Counts carry the significance; weighting only re-centres the magnitude
 5. Low-ESS subsets emit a warning token rather than a calibration nudge (Sprint 23)
 6. Warns on low-ESS same-regime data rather than silently omitting (L1 + Sprint 23)
-7. Dominant error type threshold: 33% of losses, min 3 losses (L2, lowered from 40%/4)
-7b. **Dominant success tag nudge** *(Sprint 27):* mirrors L2 for wins. If ≥33% of tagged wins share a success tag and ESS≥2.5, emits `✓tag_name(N/Mwins,ESS=X.X)→lean into this` so Claude can reinforce winning patterns, not just avoid losing ones. Threshold: ≥33% of tagged wins, min 3 wins. Supported tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`.
+7. Dominant error type threshold: 33% of losses, **min 12 losses** (`_MIN_NUDGE_N`, raised from 3 in Sprint 70)
+7b. **Dominant success tag nudge** *(Sprint 27):* mirrors L2 for wins. If ≥33% of tagged wins share a success tag and ESS≥6.0, emits `✓tag_name(N/Mwins,ESS=X.X)→lean into this` so Claude can reinforce winning patterns, not just avoid losing ones. Threshold: ≥33% of tagged wins, min 12 wins (`_MIN_NUDGE_N`, raised from 3 in Sprint 70). Supported tags: `confluence_entry`, `trend_aligned`, `catalyst_driven`, `tight_stop_well_placed`, `momentum_entry`.
 8. Per-ticker stats: emits `per-ticker:BHP.AX:62%(Δ+14pp,ESS=3.2)✓strong` for portfolio tickers with >15pp delta vs overall WR (Stage 2 + Sprint 23)
 8b. **Sector × regime interaction** *(Sprint 28):* when current regime is known and ≥10 calib rows exist, groups rows by `sector × regime`, computes weighted WR per group, emits up to 2 sectors with |delta| ≥ 12pp vs overall WR and ESS ≥ 2.5. Format: `sector×riskOn:Materials:78%(Δ+22pp,ESS=3.1)✓,REITs:31%(Δ-25pp)⚠`. Most actionable for ASX sector rotation.
 9. Sell tag validation: emits `⚠SELL_TAG:time_stop(n=4,val=25%)→CUTTING WINNERS` or `✓SELL_TAG:target_rch(n=5,val=80%)→reliable` when a SELL driver is consistently unreliable/reliable (capped at 3 drivers, only verifiable drivers)
@@ -331,6 +344,58 @@ into primary_entry_driver            Claude's sell reasoning is              (�
 - The strongest matrix row also feeds the calibration block as a `THESIS:<driver>` nudge (see Calibration Injection above).
 
 > **Backfill caveat:** entry drivers are backfillable from `entry_signals_json`; `thesis_verdict` is **not** (it needs exit-time signals, which only exist going forward). The matrix fills as positions close after Sprint 68 ships.
+
+---
+
+## Deterministic Post-Mortem Tagging & Skill Scoring *(Sprint 70)*
+
+**Why this replaced the LLM tagger.** Through Sprint 69, `error_type` and `skill_score` were produced by a local Ollama model (default `qwen3:9b`, degrading to as small as `gemma3:2b`) reading a single flattened trade-summary line. That model was *structurally blind* to what it was judging — it never saw the price path between entry and exit, the in-hold market context, or any news/catalyst — yet was asked to assign timing tags (`stop_too_tight` vs `thesis_broken`) and a 0–10 skill-vs-luck score that those distinctions depend on. The five guardrail layers bolted on top (grammar-constrained JSON, vocabulary validation, logical sanity-check stripping, a deterministic `thesis_broken` rescue, and a human tag-review gate) were themselves evidence the core was unreliable. And `skill_score`/`success_tags` reached the live Claude prompt with *no* review at all — `skill_score` even re-weighted every other calibration statistic.
+
+**The fix uses the entry/exit capture instead of guessing.** The Thesis Tracking columns (`entry_signals_json`, `market_context`, `primary_entry_driver`, and especially `thesis_verdict` — the deterministic entry-vs-exit technical comparison patched onto the parent BUY at close) provide real before/after data. Two pure functions in `routes/learning.py` consume it; `_resolve_deterministic_tags(conn)` applies them lazily in `_calib_compute()` (capped 50/call, idempotent, fills NULLs only, `error_type_source='deterministic'`).
+
+**Scope: BUY/TOP_UP entries only.** `error_type` ("why the *entry* failed") and the `thesis_verdict` skill quadrant are entry-centric, so the resolver filters `recommendation IN ('BUY','TOP_UP')`. A SELL/TRIM `loss` just means a position was cut below its entry — exit-decision quality, already tracked by `sell_verify_verdict` — not an entry error. The parent BUY/TOP_UP events (which receive per-entry outcomes and the patched `thesis_verdict` at close) are the home for these tags.
+
+### `classify_error_type_deterministic(row)` → error_type
+
+Priority-ordered, most-specific / most-data-backed first. Wins return `none`.
+
+| Priority | Tag | Rule (from captured data) |
+|---|---|---|
+| 1 | `thesis_broken` | `thesis_verdict == 'invalidated'` — the entry technical thesis demonstrably reversed (data-backed, no longer guessed) |
+| 2 | `stop_too_tight` | `exit_reason=='stop_hit'` AND thesis NOT invalidated AND stop distance `< 1.5×ATR` (shaken out by noise; ATR from `entry_signals_json.atr_pct`, stop distance from `actual_entry_price`−`suggested_stop`) |
+| 3 | `overconfident` | `ai_confidence ≥ 0.75` on a loss |
+| 4 | `poor_rr` | `rr_ratio < 1.5` |
+| 5 | `poor_entry` | entry stretched for the driver — `mean_reversion` bought with RSI>45 or %b>0.45; `momentum_breakout`/`trend_pullback` bought with %b>0.95 |
+| 6 | `regime_mismatch` | BUY/TOP_UP entered in `riskOff`/`panic` |
+| — | `none` | nothing matched |
+
+**Deliberately never emits `missed_catalyst` or `external_shock`** — those require world-knowledge (news, index events) the row does not contain. They remain available only via the optional manual LLM postmortem buttons.
+
+### `compute_skill_score_deterministic(row)` → 0–10 or None
+
+The `thesis_verdict × outcome` quadrant *is* the skill-vs-luck split the LLM was being asked to guess — now read straight from the captured comparison:
+
+| `thesis_verdict` | outcome | base | interpretation |
+|---|---|---|---|
+| validated   | win  | 8.0 | right read, made money — skill |
+| validated   | loss | 6.0 | right read, stopped on noise — unlucky, good process |
+| irrelevant  | win  | 5.5 | thesis didn't drive it, won |
+| irrelevant  | loss | 4.0 | thesis didn't drive it, lost |
+| invalidated | win  | 3.0 | wrong read, won anyway — luck |
+| invalidated | loss | 2.0 | wrong read, lost — bad analysis |
+
+Modifiers (clamped 0–10): `target_hit` +0.5 · disciplined `stop_hit` loss +0.5 · `manual` exit on a still-`validated` thesis −0.5 · `conf≥0.80` & loss −1.0 · `conf<0.65` & win −0.5 · planned `rr≥2.0` +0.25.
+
+**Returns `None` when `thesis_verdict` is absent** — we refuse to invent a skill score for legacy/uncaptured trades; those keep neutral calibration weight (`sf=1.0`) rather than getting a fabricated number.
+
+### Relationship to the LLM endpoints
+
+`POST /api/debate/postmortem` (🤖) and `POST /api/debate/skill` (🔬) still exist and are unchanged, but are now **optional manual overrides** — the resolver only fills NULLs, so a manual/`auto`/`adjudicated` tag always wins. Deterministic tags carry `error_type_source='deterministic'` and are **not** subject to the `agree_rate` auto-tag gate (that gate only distrusts `'auto'`/LLM tags, since the deterministic path is reliable by construction). ⚠ If auto-triggering of the LLM postmortem is ever re-introduced, it would race the resolver and could shadow the deterministic tags — keep it manual.
+
+### Also tightened in Sprint 70
+
+- **Brier score** (`GET /api/learning/calibration-stats`) now excludes `breakeven` (binary win/loss only). Folding breakevens in as `0.0` (loss) had biased the score and the reliability-diagram bins.
+- **ESS floor** 2.5→6.0, **nudge floors** 3→12 (`_MIN_NUDGE_N`), **Wilson-CI significance gate** on band nudges, **virtual-outcome stop-first** convention — all detailed in their respective sections above.
 
 ---
 
@@ -421,6 +486,8 @@ into primary_entry_driver            Claude's sell reasoning is              (�
 | `poor_rr` | PR | R:R ratio too low from start | ✅ Yes |
 | `thesis_broken` | TB | New info invalidated thesis post-entry | ✅ Yes |
 | `external_shock` | ES | Black swan / unpredictable market event | ❌ Excluded |
+
+**Sprint 70 — how tags are assigned:** by default these are now set **deterministically** by `classify_error_type_deterministic()` (source `'deterministic'`). The data-derivable tags — `thesis_broken`, `stop_too_tight`, `overconfident`, `poor_rr`, `poor_entry`, `regime_mismatch` — are computed from the captured row. `missed_catalyst` (MC) and `external_shock` (ES) are **never auto-assigned** (they need world-knowledge); they only appear when a user runs the manual LLM postmortem (🤖/⚔️/⚖️). A manual or LLM tag always overrides the deterministic one.
 
 `protective_stop` exit_reason is excluded from confidence-band calibration — it classifies how the trade was exited (deliberate capital protection), not why the thesis failed. Protective stops are excluded from confidence calibration regardless of tags, but contribute to error pattern learning if they carry analytical error tags.
 
@@ -699,7 +766,9 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | PARTIAL verdict: keep intersection only | Higher confidence than either model's full output. A tag both agreed on is stronger signal than either individual response |
 | Phase 3 neutral synthesis replaces challenger model | Earlier design: Model A defends vs Model B (challenger bias toward B regardless of quality). Current: both positions presented as equal inputs to a neutral reconciliation pass. More balanced and produces more consistent results |
 | Sanity check after final tags determined | Catches model self-contradictions like `stop_too_tight` on a 43%-distance stop. Cheaper and more reliable than asking the model to verify its own output |
-| ESS instead of raw trade count for calibration gates | Raw count misrepresents statistical power when most weights are near zero. Kish ESS = (Σwi)²/Σwi² correctly reflects a sample dominated by one fresh trade vs N equally-weighted trades. Threshold 2.5 — below this a warning token replaces a calibration nudge |
+| ESS instead of raw trade count for calibration gates | Raw count misrepresents statistical power when most weights are near zero. Kish ESS = (Σwi)²/Σwi² correctly reflects a sample dominated by one fresh trade vs N equally-weighted trades. Threshold **6.0** (Sprint 70, raised from 2.5) — below this a warning token replaces a calibration nudge |
+| Deterministic tagging/scoring over local-LLM (Sprint 70) | A 2B–9B model judging a trade from a one-line summary — no price path, no in-hold context — manufactures low-quality labels that then steer the live Claude prompt (skill_score even re-weights all calibration). The entry/exit capture (`thesis_verdict`) gives real before/after data, so the data-derivable tags and the skill-vs-luck quadrant are computed by rule. Reproducible, free, and grounded. World-knowledge tags (`missed_catalyst`/`external_shock`) are left to the optional manual LLM since no rule can infer them |
+| Wilson-CI gate + higher floors over "surface more signal" (Sprint 70) | The old ESS 2.5 / n≥3 thresholds with 5pp effect sizes fired nudges on samples too small to clear their own confidence interval — sophisticated-looking math on noise. Gating each behaviour-changing nudge behind a Wilson-CI significance check (and ESS≥6 / n≥12) means the loop withholds judgment until the data earns it. Aggregate Wilson-CI'd stats remain always-visible; only prompt-injected nudges are gated |
 | `format_schema` for Ollama JSON calls | Engine-level constraint eliminates the regex fallback parser chain. When the schema is provided, Ollama guarantees the output is valid JSON matching the schema — `_strip_think_tags`, reverse-scanning, and field regexes are still present as defensive safety nets but will rarely trigger |
 | `_flatten_entry_signals()` for prompt injection | Raw `entry_signals_json` contains ~40+ fields including NaN values, arrays, and metadata. Injecting it verbatim wastes ~200 tokens and confuses smaller models. Flattening to 12 key fields in a single line reduces overhead and improves signal extraction accuracy |
 | SQLite `timeout=30` (up from 10) | Concurrent postmortem + debate + price-refresh writes can all arrive within seconds during market close. 30s gives queued writers enough time to succeed without aborting |
@@ -798,6 +867,13 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
   - **Auto-refresh after "Classify All Untagged"** — `classifyAllPostmortems()` now calls `showPage('learning')` via `setTimeout(..., 800)` after the batch completes, so newly-assigned tags appear without a manual Refresh click.
   - WIN `success_tags` display moved exclusively to the Claude column; the Error tags column is now strictly for Ollama-classified error tags on loss/breakeven rows.
 
+- **Sprint 70 — Deterministic tagging/scoring + calibration rigor (June 2026):**
+  - **`classify_error_type_deterministic(row)` / `compute_skill_score_deterministic(row)`** added to `routes/learning.py` (pure functions) + **`_resolve_deterministic_tags(conn)`** lazy resolver wired into `_calib_compute()` alongside the virtual/sell resolvers. Replaces the blind local-LLM postmortem/skill scorer as the default; LLM 🤖/🔬 endpoints unchanged but now manual override only (resolver fills NULLs, never overwrites). Tags carry `error_type_source='deterministic'`; skill_score requires a non-null `thesis_verdict` (else stays NULL → neutral weight).
+  - **`_ESS_MIN` 2.5 → 6.0** and **`_MIN_NUDGE_N` 3 → 12** in `_calib_compute()` — conditional nudges need real statistical power; the old floors fired on 2–5 trades inside the sampling noise.
+  - **`_ci_excludes(successes, n, threshold)`** helper (Wilson 95% CI significance gate) added next to `_wilson_ci`; confidence-band nudges must pass it on raw counts before firing.
+  - **Brier score** (`learning_calibration_stats`) query changed `IN ('win','loss','breakeven')` → `IN ('win','loss')` — breakevens no longer biased into the score/bins as losses.
+  - **Virtual-outcome stop-first:** `_resolve_virtual_outcomes()` bar scan checks the stop before the target within each bar (both directions), matching `_resolve_execution_alpha()`; a straddle bar books the conservative loss.
+  - **Tests:** `TestSprint70DeterministicTagging` in `test_app.py` (18 cases — every error-tag branch, the skill quadrant, None-without-verdict, the CI gate, resolver fill + no-overwrite, and the stop-first regression).
 - **Tag button HTML fix (May 2026):** `JSON.stringify()` double-quotes broke `onclick` attribute parsing. Fixed with `.replace(/"/g, '&quot;')`.
 - **Calibration default window:** 90d default, 180d hard cap — more data for decay weighting to work with.
 - **Protective stop UX:** 🛡? button only shows on `stop_hit` loss/breakeven rows. Clicking sets `exit_reason = 'protective_stop'` via `POST /api/learning/outcome`. Green 🛡 badge confirms exclusion from confidence calibration.
@@ -828,6 +904,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 7. ✅ **Thesis drift detection** — `_compute_thesis_drift(conn)` + `GET /api/learning/thesis-drift` + `renderThesisDriftCard()` on Learning page. *(Sprint 45)*
 8. ✅ **Regime-flip calibration penalty** — `fetchAndClassifyRegime()` writes flip timestamp to localStorage; `_calib_compute()` halves HL for first <10 trades; emits `⚠REGIME_FLIP` token. *(Sprint 44)*
 9. ✅ **Thesis Tracking** — structured `primary_entry_driver` on BUY/TOP_UP (Sprint 67); entry→exit comparison via `computeThesisDrift()` + `HOLDING_CONTEXT` injection; `thesis_verdict` column; Thesis Accuracy Matrix (`_compute_thesis_matrix`) + `THESIS:<driver>` calibration nudge; deterministic backfill. *(Sprint 67–68; PROMPT_VERSION → 2026-06-v13)*
+10. ✅ **Deterministic post-mortem tagging & skill scoring** — `classify_error_type_deterministic()` + `compute_skill_score_deterministic()` + `_resolve_deterministic_tags()` replace the blind local-LLM tagger, driven by the entry/exit capture (`thesis_verdict`). LLM 🤖/🔬 demoted to manual override. Calibration tightened: ESS 2.5→6.0, nudge floors 3→12, Wilson-CI band gate (`_ci_excludes`), Brier excludes breakevens, virtual outcomes stop-first. *(Sprint 70)*
 
 ---
 
