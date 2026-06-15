@@ -17,8 +17,8 @@ const _AGENT_MAX_TOKENS = {
   // 8000 → 10000 (Sprint 68): the 2026-06-11 15:35 run reported out=8000 — the
   // cap exactly — with 7 recs. Tool-schema input counts against max_tokens; a
   // larger portfolio would truncate the tool input and fail the whole parse.
-  portfolio: 10000,
-  analyst:   3000,
+  portfolio: 12000,
+  analyst:   5000,
   pm:        3000,
   dayTrade:  4000,
   universe:  4000,
@@ -201,7 +201,7 @@ async function callClaude(agentType, userMessage, options = {}) {
   const key = useProxy ? null : getApiKey();
   if (!useProxy && !key) throw new Error('No API key — add one in Settings (or enable backend proxy)');
 
-  const maxTokens = options.maxTokens ?? _AGENT_MAX_TOKENS[agentType] ?? 3000;
+  const maxTokens = options.maxTokens ?? _AGENT_MAX_TOKENS[agentType] ?? 12000;
   const noCache   = options.noCache   ?? _AGENT_NO_CACHE[agentType]   ?? false;
 
   // ── Build messages array ────────────────────────────────────────────────────
@@ -343,8 +343,8 @@ async function callClaude(agentType, userMessage, options = {}) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text:          responseText,
-          system_prompt: _sysText.slice(0, 20000),
-          user_message:  _userText.slice(0, 30000),
+          system_prompt: _sysText.slice(0, 50000),
+          user_message:  _userText.slice(0, 50000),
           agent_type:    agentType,
           model:         CLAUDE_MODEL,
           usage,
