@@ -90,6 +90,8 @@ Data Gaps Handling — Good call. Add defensive code in post-processing to auto-
 Watchlist vs Portfolio — Add explicit negative constraint in prompt.
 Macro Override Fallback — Change n/a to neutral | 50 to prevent logic failures.
 
+5.6. Analyst Summary truncated in Recommendations tab. Make app to display full sentences. Suggest how to do it.
+
 6. Day Trading Strategy
 
 Cap the Kelly Fraction: Hardcode the maximum Kelly fraction to 0.15 in quant-engine.js to protect against the negative skew inherent in mean-reversion trading.
@@ -110,7 +112,8 @@ at Live Signals, the app will utlise those data and record them. I also want to 
 the technical data that are dedicated for day trading strategy.
 
 9. Is the confidence correction in Recommendation based on ESS too harsh? If I execute rec
-that has confidence correctin (deducted by 15%), how would it impact Learning Loop?
+that has confidence correctin (deducted by 15%), how would it impact Learning Loop? And how the confidence correction adjust when we have lodged
+many recs?
 
 10. Execution trade windown in Day Trading disappear when I munually change the broker
 fee
@@ -166,7 +169,11 @@ How the Claude API call will handle those day trading setups?
 
 25. Check where ORG and GMG in Day Trading history - Swing - on 17 Jun came from. Can't see any info regarding close those trades
 
-26. Issues with Risk management dashboard:
+26. I want to keep Active Setups in Day Trading and dispaly live prices with P&L. Check why EVT.AX disappeared in Active Setups after
+I ran the Day Trade Scan again. 
+Add filter to History tab in Day Trading as well and show P&L in dollar values.
+
+27. Issues with Risk management dashboard:
 16:45:34 ERROR yfinance     
 2 Failed downloads:
 /home/tanth/projects/sloth-asx-trader/routes/market.py:595: FutureWarning: The default fill_method='pad' in DataFrame.pct_change is deprecated and will be removed in a future version. Either fill in any non-leading NA values prior to calling pct_change or specify 'fill_method=None' to not fill NA values.
@@ -179,3 +186,14 @@ How the Claude API call will handle those day trading setups?
 
 
 Risk data unavailable — Unexpected token 'N', ...","EVT.AX":NaN,"FMG":"... is not valid JSON
+
+28. In Notifications, it showed "Scammer: 17 high-score tickers". Click to review but when I click, doesn't action.
+Also, how is the Market Scanner different from Day Trading tab in term of setups and strategy?
+
+29. RBA board meeting date in Dashboard is incorrect. August: 10–11 (Decision on August 11)September: 28–29 (Decision on September 29)November: 2–3 (Decision on November 3)December: 7–8 (Decision on December 8)
+
+30. Does the Portfolio Forward Yield calculated correctly in Morning Macro? Because estimated annual div income was 4.57% yield on cost in Portfolio.
+
+31. Acccount tags in Portfolio are hilighted in white when selected, so they are not visible in light theme
+
+32. How News and Announcements are fetched to the API call?
