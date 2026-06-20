@@ -18,7 +18,9 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 # ── Bootstrap: import the Flask app ──────────────────────────────────────────
 ROOT = os.path.dirname(__file__)
@@ -926,6 +928,25 @@ class TestInfraImprovements(unittest.TestCase):
         asx_server.init_db()
         cls.client = asx_server.app.test_client()
         asx_server.app.config["TESTING"] = True
+        # The Claude-proxy tests below exercise the real key-file write/clear
+        # path. routes.claude.CLAUDE_API_KEY_FILE is an absolute path to the
+        # real claude-api.txt at the repo root — patch it to a scratch temp
+        # file for the duration of this class so tests never touch (and
+        # never delete) the user's actual stored API key.
+        import routes.claude as claude_routes
+        cls._claude_key_file_patch = mock.patch.object(
+            claude_routes, "CLAUDE_API_KEY_FILE",
+            os.path.join(tempfile.gettempdir(), "test_claude_api_key_scratch.txt"))
+        cls._claude_key_file_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._claude_key_file_patch.stop()
+        scratch = os.path.join(tempfile.gettempdir(), "test_claude_api_key_scratch.txt")
+        try:
+            os.remove(scratch)
+        except OSError:
+            pass
 
     def test_db_module_exposes_get_db(self):
         import db as db_module
