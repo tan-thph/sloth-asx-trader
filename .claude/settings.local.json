@@ -111,7 +111,21 @@
       "Read(//dev/**)",
       "Bash(./env/Scripts/python.exe -m unittest test_app.TestSprint41PlanAB.test_indicators_emits_high_60d_low_60d -v)",
       "Bash(env/Scripts/python.exe -m unittest test_app.TestSprint41PlanAB.test_indicators_emits_high_60d_low_60d -v)",
-      "Bash(env/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('test_app.py', encoding='utf-8'\\).read\\(\\)\\)\")"
+      "Bash(env/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('test_app.py', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(env/Scripts/python.exe -c \"import asx_server\")",
+      "Bash(echo \"journal exit: $?\")",
+      "Bash(rm -f asx_trader.lock)",
+      "Bash(echo \"started PID $!\")",
+      "Bash(env/Scripts/python.exe -c \"import py_compile; py_compile.compile\\('routes/import_csv.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(ps -W)",
+      "Bash(powershell -Command \"Stop-Process -Id 5492 -Force\")",
+      "Bash(echo \"exit code: $?\")",
+      "Bash(pkill -f \"asx_server.py\")",
+      "Bash(powershell -Command \"Get-Process -Id 14220,4424 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path\")",
+      "Bash(cat asx_trader.lock)",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"ProcessId=14220\\\\\" | Select-Object CommandLine\")",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"ProcessId=4424\\\\\" | Select-Object CommandLine\")",
+      "Bash(powershell -Command \"Stop-Process -Id 14220,4424 -Force -ErrorAction SilentlyContinue\")"
     ]
   }
 }

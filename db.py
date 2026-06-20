@@ -400,6 +400,25 @@ def init_db():
         """)
 
 
+def quick_integrity_check() -> str:
+    """Run PRAGMA quick_check (fast structural sanity check, not a full
+    integrity_check) once at startup. Returns 'ok' on success, or a
+    semicolon-joined string of the reported problems otherwise.
+
+    This is intentionally non-blocking — callers should log loudly but
+    never crash/refuse to start on a non-'ok' result, since a false
+    positive (or a check that's merely slow) would itself be an incident.
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+        if len(rows) == 1 and str(rows[0][0]).strip().lower() == "ok":
+            return "ok"
+        return "; ".join(str(r[0]) for r in rows)
+    except Exception as exc:
+        return f"quick_check failed to run: {exc}"
+
+
 def backup_db(keep: int = 7) -> str | None:
     """Copy DB to a dated backup file; prune oldest if > keep copies exist.
 

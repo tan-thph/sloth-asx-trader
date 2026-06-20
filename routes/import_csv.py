@@ -26,6 +26,28 @@ from flask import Blueprint, jsonify, request
 
 bp = Blueprint("import_csv", __name__)
 
+# ── Corporate-action detection ────────────────────────────────────────────────
+# Broker exports often interleave genuine BUY/SELL trade rows with corporate-action
+# rows for the SAME ticker — dividend reinvestment, bonus/rights issues, demergers,
+# scheme-of-arrangement share cancellations, off-market transfers. None of these are
+# ordinary trades and none should be silently classified as a BUY (the historical bug:
+# `"SELL" if "SELL" in desc else "BUY"` defaulted every non-SELL description to BUY,
+# fabricating phantom parcels with wrong cost bases for tickers with corporate-action
+# history — e.g. BHP's 2015 South32 demerger, Amcor's 2019 ASX scheme of arrangement
+# delisting/relisting as AMC, or SHL bonus/SPP issues). Explicitly recognise and skip
+# these so the user can apply them manually (DRP button, manual parcel edit) instead.
+_CORPORATE_ACTION_TOKENS = (
+    "DEMERGER", "BONUS ISSUE", "BONUS SHARE", "SCHEME OF ARRANGEMENT", "SCHEME ARRANGEMENT",
+    "OFF-MARKET TRANSFER", "OFF MARKET TRANSFER", "CASH DIVIDEND", "DIVIDEND REINVEST",
+    "DRP", "SHARE PURCHASE PLAN", "RIGHTS ISSUE", "CAPITAL RETURN", "SPP ALLOTMENT",
+    "ROLL OVER", "ROLLOVER", "CONSOLIDATION", "SHARE CONSOLIDATION", "ENTITLEMENT",
+)
+
+
+def _is_corporate_action(desc: str) -> bool:
+    return any(tok in desc for tok in _CORPORATE_ACTION_TOKENS)
+
+
 # ── Date normalisation ────────────────────────────────────────────────────────
 
 def _parse_date(raw: str) -> str | None:
@@ -82,6 +104,14 @@ def _parse_commsec(rows: list[dict]) -> tuple[list, list]:
 
         if price <= 0 or shares <= 0:
             skipped.append({"row": i, "reason": "zero price or shares"})
+            continue
+
+        if _is_corporate_action(desc):
+            skipped.append({"row": i, "reason": f"corporate action, not a trade — apply manually: {desc!r}"})
+            continue
+
+        if "BUY" not in desc and "SELL" not in desc:
+            skipped.append({"row": i, "reason": f"unrecognised transaction type, not a trade — apply manually: {desc!r}"})
             continue
 
         action = "SELL" if "SELL" in desc else "BUY"
@@ -209,6 +239,16 @@ def _parse_generic(rows: list[dict]) -> tuple[list, list]:
 
         if price <= 0 or shares <= 0:
             skipped.append({"row": i, "reason": "zero price or shares"})
+            continue
+
+        # Only treat as a corporate action / unrecognised type when an explicit action
+        # column exists and its value isn't a plain BUY/SELL — a sheet with no action
+        # column at all intentionally defaults every row to BUY (see col_action fallback above).
+        if col_action and _is_corporate_action(action):
+            skipped.append({"row": i, "reason": f"corporate action, not a trade — apply manually: {action!r}"})
+            continue
+        if col_action and "BUY" not in action and "SELL" not in action:
+            skipped.append({"row": i, "reason": f"unrecognised transaction type, not a trade — apply manually: {action!r}"})
             continue
 
         out.append({

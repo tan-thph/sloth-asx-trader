@@ -18,6 +18,29 @@ function _journalRegimeBadge(regime) {
   return `<span style="background:${c.bg};color:${c.fg};border-radius:3px;padding:1px 5px;font-size:10px;font-weight:600;white-space:nowrap">${regime}</span>`;
 }
 
+// "FROM REC?" provenance badge — distinguishes regular AI Recommendations from
+// Day Trading / Intraday recs from purely manual or imported trades.
+// t.recId non-null => AI-sourced; which recHistory the id resolves against tells us
+// whether it came from the regular portfolio Recommendations flow or the Day Trading /
+// Intraday flow. Manual/imported trades have recId === null.
+function _journalProvenanceBadge(t) {
+  if (!t.recId) {
+    return '<span class="badge badge-skipped" title="Manually entered or CSV-imported trade — no linked AI recommendation">✋ Manual</span>';
+  }
+  const inRecHistory = (state.recHistory || []).some(r => r.id === t.recId);
+  const inDayTrading  = !inRecHistory && (
+    (state.dayTrading?.recommendations || []).some(r => r.id === t.recId) ||
+    (state.intraday?.recommendations   || []).some(r => r.id === t.recId)
+  );
+  const execLabel = t.recExecuted ? 'Yes' : 'No';
+  if (inDayTrading) {
+    return `<span class="badge ${t.recExecuted?'badge-executed':'badge-skipped'}" title="From Day Trading / Intraday recommendation — executed: ${execLabel}">📈 Day Trade</span>`;
+  }
+  // Default to the regular AI Recommendations flow (covers both resolved matches and
+  // legacy rows whose parent rec has since been pruned from recHistory).
+  return `<span class="badge ${t.recExecuted?'badge-executed':'badge-skipped'}" title="From AI Recommendations — executed: ${execLabel}">🤖 AI</span>`;
+}
+
 function renderJournal() {
   // ── Initialise filter state (matches recHistoryFilter shape) ──────────────
   // Migrate old shape {type,value} or missing fields to current shape
@@ -217,7 +240,7 @@ function renderJournal() {
           <thead><tr>
             <th>Date</th><th>Time</th><th>Ticker</th><th>Action</th>
             <th>Qty</th><th>Entry</th><th>Exit</th><th>Fees</th>
-            <th>Gross P&L</th><th>Status</th><th>Parcel</th><th>From Rec?</th><th>Regime</th><th></th>
+            <th>Gross P&L</th><th>Status</th><th>Parcel</th><th>FROM REC?</th><th>Regime</th><th></th>
           </tr></thead>
           <tbody>
             ${filtered.map(t => {
@@ -249,7 +272,7 @@ function renderJournal() {
                 <td class="${pnl!=null?(pnl>=0?'text-success':'text-danger'):'text-muted'}">${pnl!=null?(pnl>=0?'+':'')+' $'+fmt(Math.abs(pnl)):'Open'}</td>
                 <td><span class="badge ${t.status==='open'?'badge-open':'badge-closed'}">${t.status}</span></td>
                 <td>${parcelBadge}</td>
-                <td><span class="badge ${t.recId&&t.recExecuted?'badge-executed':'badge-skipped'}" title="${matchedRec?._thesis ? 'Thesis: '+matchedRec._thesis : ''}">${t.recId?(t.recExecuted?'Rec: Yes':'Rec: No'):'Manual'}</span>${matchedRec?._thesis?'<span style="font-size:10px;margin-left:3px" title="'+escapeHTML(matchedRec._thesis)+'">📋</span>':''}</td>
+                <td>${_journalProvenanceBadge(t)}${matchedRec?._thesis?'<span style="font-size:10px;margin-left:3px" title="'+escapeHTML(matchedRec._thesis)+'">📋</span>':''}</td>
                 <td>${_journalRegimeBadge(matchedRec?.regime)}</td>
                 <td style="white-space:nowrap">
                   <button class="btn btn-sm" id="jtoggle-${realIdx}" onclick="toggleJournalDetail(${realIdx})" title="Show technicals & thesis">▸</button>

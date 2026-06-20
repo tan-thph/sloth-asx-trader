@@ -1022,6 +1022,9 @@ function executeIntradayTrade(recId) {
     // and is included in NAV / price refresh cycles (refreshPrices loops state.portfolio).
     const sector = (state.liveSignals?.[rec.ticker] || {}).sector || 'Other';
     applyBuyToPortfolio(rec.ticker, qty, entryPrice, todayStr(), brokerage, sector, 'trading');
+    const newParcel = (state.cgtParcels || []).length
+      ? state.cgtParcels[state.cgtParcels.length - 1]
+      : null;
 
     // Seed liveSignals with the entry price immediately so Live/P&L renders on the first
     // renderPage() call after this dialog closes — before the next refreshPrices() fires.
@@ -1047,6 +1050,7 @@ function executeIntradayTrade(recId) {
       status:      'open',
       sector,
       account:     'trading',
+      parcelId:    newParcel ? newParcel.id : null,
       recId:       rec.id,
       recExecuted: true,
       notes:       'Intraday BUY',
@@ -1074,10 +1078,13 @@ function executeIntradayTrade(recId) {
     // Record ML training snapshot for intraday trade
     if (typeof dtSaveSnapshot === 'function') {
       const itSig = Object.assign({}, (state.liveSignals && state.liveSignals[rec.ticker]) || {}, {
-        intraday_rsi:        rec._intradayRsi || null,
-        vwap_pct:            rec._vwapPct     || null,
-        volume_acceleration: rec._volumeAccel || null,
-        score:               rec.setupScore   || null,
+        intraday_rsi:        rec.intradayRsi   ?? null,
+        vwap_pct:            rec.pctFromVwap   ?? null,
+        // No upstream numeric volume-acceleration metric exists yet — intraday-strategy.js
+        // only computes a boolean `vol_rising` flag (3-bar mean vs rolling mean), not a
+        // continuous acceleration value, so this column stays null rather than faking a number.
+        volume_acceleration: null,
+        score:               rec.intradayScore ?? rec.setupScore ?? null,
       });
       dtSaveSnapshot(rec, 'intraday', itSig, state.macroData || {}, entryPrice, qty)
         .then(function(snapId) { if (snapId) newPos._snapshotId = snapId; scheduleSave(); });

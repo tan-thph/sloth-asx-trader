@@ -104,8 +104,26 @@ async function runDayTradeAnalysis() {
   // ── Quantitative setup detection (no Claude) ─────────────────────────────────
   const { passing: candidates, stats: filterStats } = _dtPreFilterWithStats(allTickers);
   const newRecs = _dtBuildRecs(candidates, _ap, _dtPortCtx, _dtRegime);
+  const newRecTickers = new Set(newRecs.map(r => r.ticker));
 
-  state.dayTrading.recommendations = newRecs;
+  // Mirrors the merge-by-ticker protection in runUniverseScan(): never wholesale-
+  // overwrite state.dayTrading.recommendations. Executed/closed/dismissed (or
+  // manually-added) recs must survive a rescan regardless of whether they
+  // reappear in this scan's candidate set — overwriting them would silently
+  // desync the Active Setups UI from positions that are actually still open
+  // (or already closed) in state.intraday.openPositions / the trade journal.
+  const kept = (state.dayTrading.recommendations || []).filter(r => r.status !== 'pending');
+
+  // Previously-pending recs that did NOT reappear in this scan's results must
+  // not be silently dropped either — keep them flagged _stale and age them out
+  // after a few consecutive missed scans (same cutoff as runUniverseScan()).
+  const MAX_STALE_SCANS = 3;
+  const stalePrevPending = (state.dayTrading.recommendations || [])
+    .filter(r => r.status === 'pending' && !newRecTickers.has(r.ticker))
+    .map(r => ({ ...r, _stale: true, _staleScans: (r._staleScans || 0) + 1 }))
+    .filter(r => r._staleScans <= MAX_STALE_SCANS);
+
+  state.dayTrading.recommendations = [...kept, ...stalePrevPending, ...newRecs];
   const _rejLine = `BB:${filterStats.bb} ADV:${filterStats.adv} SMA:${filterStats.sma} ADX:${filterStats.adx}${filterStats.vov ? ` VoV:${filterStats.vov}` : ''}${filterStats.noData ? ` NoData:${filterStats.noData}` : ''}`;
   const _bb = state.dayTrading._breadthBlocked;
   const _bbNote = _bb

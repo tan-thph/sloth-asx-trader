@@ -115,7 +115,7 @@ def _req_end(resp):
 # ── SQLite database ─────────────────────────────────────────────────────────────
 # Schema, get_db(), init_db(), log_failed_ticker() live in db.py so route
 # modules can import them without dragging in Flask.
-from db import DB_PATH, get_db, init_db, backup_db, log_failed_ticker as _log_failed_ticker_impl
+from db import DB_PATH, get_db, init_db, backup_db, quick_integrity_check, log_failed_ticker as _log_failed_ticker_impl
 
 # Separate notifications database (notifications.db — not mixed into trading data)
 from notifications_db import init_notif_db
@@ -130,6 +130,32 @@ init_dt_db()
 _bak = backup_db()
 if _bak:
     log.info("DB backup: %s", _bak)
+
+# ── Startup integrity sanity check (non-blocking) ───────────────────────────
+# PRAGMA quick_check is much cheaper than a full integrity_check and is
+# sufficient to catch the kind of WAL/page corruption seen in the 2026-06-20
+# incident (see CLAUDE.md gotcha #49). This NEVER blocks startup — a false
+# positive (or simply a slow check on a big DB) would be its own incident.
+# It only makes the warning loud and unmissable if something IS wrong.
+try:
+    _ic_result = quick_integrity_check()
+    if _ic_result != "ok":
+        log.critical(
+            "=" * 70 + "\n"
+            "DATABASE INTEGRITY CHECK FAILED on startup!\n"
+            "PRAGMA quick_check reported: %s\n"
+            "This does NOT block startup, but the DB may be corrupted.\n"
+            "Next steps:\n"
+            "  1. Run `PRAGMA integrity_check` for full details.\n"
+            "  2. If corrupted, restore the latest backup: %s.bak-YYYYMMDD\n"
+            "     (kept 7 days, see backup_db() in db.py).\n"
+            "  3. See CLAUDE.md gotcha #49 for the recovery procedure.\n" + "=" * 70,
+            _ic_result, DB_PATH,
+        )
+        print(f"\n*** CRITICAL: DB integrity check failed: {_ic_result} ***")
+        print(f"*** See server.log / CLAUDE.md gotcha #49 for recovery steps ***\n")
+except Exception as _ic_exc:
+    log.warning("Startup integrity check itself failed to run (non-fatal): %s", _ic_exc)
 
 # Keep the existing name for internal call sites
 _log_failed_ticker = _log_failed_ticker_impl
@@ -265,7 +291,79 @@ def serve_static(filename):
 # ── Claude API proxy lives in routes/claude.py (registered below) ─────────────
 
 
+def _acquire_single_instance_lock():
+    """Best-effort single-instance guard to stop two server processes
+    (e.g. `python asx_server.py` AND `python waitress_server.py`, or a
+    stray process from a crashed session) from writing to asx_trader.db
+    concurrently — the suspected cause of the 2026-06-20 WAL corruption
+    incident (see CLAUDE.md gotcha #49).
+
+    Defaults to PERMISSIVE on any ambiguity: if the lockfile is unreadable,
+    malformed, or the liveness check itself errors, we log a warning and
+    let startup proceed rather than risk blocking a legitimate restart.
+    """
+    lock_path = DB_PATH.parent / "asx_trader.lock"
+    my_pid = os.getpid()
+
+    try:
+        if lock_path.exists():
+            try:
+                old_pid_text = lock_path.read_text().strip()
+                old_pid = int(old_pid_text)
+            except (ValueError, OSError) as exc:
+                log.warning("Lockfile %s unreadable/malformed (%s) — proceeding anyway.", lock_path, exc)
+                old_pid = None
+
+            if old_pid is not None and old_pid != my_pid:
+                alive = True  # assume alive unless proven dead — fail-safe direction
+                try:
+                    os.kill(old_pid, 0)
+                    # No exception raised: on POSIX this means the PID exists.
+                    # On Windows, os.kill(pid, 0) also raises OSError for a
+                    # dead/nonexistent PID, so reaching here means it's alive.
+                except OSError:
+                    alive = False
+                except Exception as exc:
+                    # Unexpected error from the liveness probe itself — don't
+                    # block startup on something we don't understand.
+                    log.warning("PID liveness check raised unexpectedly (%s) — proceeding anyway.", exc)
+                    alive = False
+
+                if alive:
+                    log.critical(
+                        "Another server instance appears to be running (PID %d, lockfile %s). "
+                        "Refusing to start a second instance against the same asx_trader.db — "
+                        "concurrent writers risk WAL corruption (see CLAUDE.md gotcha #49). "
+                        "If you're sure no other instance is running, delete the lockfile and retry.",
+                        old_pid, lock_path,
+                    )
+                    print(f"\n*** REFUSING TO START: another instance (PID {old_pid}) holds {lock_path} ***")
+                    print("*** Stop the other instance, or delete the lockfile if it's stale, then retry. ***\n")
+                    raise SystemExit(1)
+                else:
+                    log.info("Stale lockfile from dead PID %d — reclaiming.", old_pid)
+
+        lock_path.write_text(str(my_pid))
+
+        def _release_lock():
+            try:
+                if lock_path.exists() and lock_path.read_text().strip() == str(my_pid):
+                    lock_path.unlink()
+            except Exception:
+                pass  # best-effort cleanup only
+
+        import atexit as _atexit_lock
+        _atexit_lock.register(_release_lock)
+
+    except SystemExit:
+        raise
+    except Exception as exc:
+        # Any other unexpected failure in the guard itself: don't block startup.
+        log.warning("Single-instance lock check failed unexpectedly (%s) — proceeding anyway.", exc)
+
+
 if __name__ == "__main__":
+    _acquire_single_instance_lock()
     print("=" * 60)
     print("  ASX Trading Assistant – Backend Server")
     print("  http://localhost:5000")

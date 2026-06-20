@@ -100,8 +100,15 @@ function statusBadge(s) {
   if(s==='pending')  return '<span class="badge badge-pending">Pending</span>';
   return '';
 }
-function getPortfolioHolding(ticker) {
-  return state.portfolio.find(h => h.ticker === ticker.toUpperCase());
+// account param (optional) — when provided, only matches the holding in that
+// account. When omitted, behavior is unchanged: first ticker match wins
+// regardless of account (existing callers continue to work as before).
+function getPortfolioHolding(ticker, account) {
+  const symbol = ticker.toUpperCase();
+  if (account) {
+    return state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === account);
+  }
+  return state.portfolio.find(h => h.ticker === symbol);
 }
 
 // ── mergeLiveMacro ────────────────────────────────────────────────────────────

@@ -1279,8 +1279,28 @@ function markExecuted(id, execPrice, execFee, execQty) {
   let tradeEntry;
   let realizedPnl = null;   // will be set for SELL/TRIM when holding exists
 
+  // Determine which account's holding this SELL/TRIM applies to. The rec itself
+  // carries no account marker (analysis.js builds recs from mergedPortfolio()
+  // across all accounts without tagging one back on). If exactly one account
+  // holds this ticker, use that account unambiguously; if more than one account
+  // holds it, executing against the wrong one would silently corrupt the other
+  // account's holding, so fall back to the old 'personal' default and warn loudly
+  // rather than guess.
+  const _matchingHoldings = state.portfolio.filter(h => h.ticker === rec.ticker.toUpperCase());
+  const _distinctAccts = [...new Set(_matchingHoldings.map(h => h.account || 'personal'))];
+  let sellAccount;
+  if (_distinctAccts.length === 1) {
+    sellAccount = _distinctAccts[0];
+  } else if (_distinctAccts.length > 1) {
+    sellAccount = 'personal';
+    console.warn(`[markExecuted] ${rec.ticker} is held in multiple accounts (${_distinctAccts.join(', ')}) — ` +
+      `defaulting SELL/TRIM to 'personal'. Verify the correct account was debited.`);
+  } else {
+    sellAccount = 'personal';
+  }
+
   if (isReducing) {
-    const holding = getPortfolioHolding(rec.ticker);
+    const holding = getPortfolioHolding(rec.ticker, _distinctAccts.length === 1 ? sellAccount : undefined);
     if (holding && holding.shares >= qty) {
       // Derive open date from earliest live parcel so Performance hold-duration is accurate
       const liveParcels = (state.cgtParcels || []).filter(p => p.ticker === rec.ticker && (p.shares || 0) > 0);
@@ -1288,14 +1308,14 @@ function markExecuted(id, execPrice, execFee, execQty) {
         ? liveParcels.reduce((earliest, p) => (p.date && p.date < earliest ? p.date : earliest), liveParcels[0].date || today)
         : null;
       const prevDisposalLen = state.cgtDisposals.length;
-      const { disposals } = applySellToPortfolio(rec.ticker, qty, tradePrice, fees, today);
+      const { disposals } = applySellToPortfolio(rec.ticker, qty, tradePrice, fees, today, undefined, sellAccount);
       realizedPnl = disposalsToPnl(disposals);
       tradeEntry = {
         id: state.tradeJournal.length + 1, date: openDate || today, ticker: rec.ticker, action: rec.action,
         qty, entryPrice: holding.avgPrice, exitPrice: tradePrice, fees,
         status: 'closed', pnl: realizedPnl, closeDate: today,
         disposalIds: disposals.map((_, i) => prevDisposalLen + i),
-        recId: rec.id, recExecuted: true, timestamp: time
+        recId: rec.id, recExecuted: true, timestamp: time, account: sellAccount
       };
     } else {
       tradeEntry = {
@@ -1319,8 +1339,57 @@ function markExecuted(id, execPrice, execFee, execQty) {
     };
   }
 
-  // Save to journal
-  state.tradeJournal.unshift(tradeEntry);
+  // Save to journal — but first guard against creating a duplicate entry for a
+  // position that was already opened/closed via the Day Trading close functions
+  // (closeIntradayPosition / _closeDayTrade), which patch an existing open entry
+  // by recId or _journalId rather than creating a new one. If this SELL/TRIM is
+  // closing a position whose open leg is still sitting in the journal as
+  // status:'open' for the same ticker+account, patch that entry instead of
+  // unshifting a duplicate.
+  let _existingOpenEntry = null;
+  if (isReducing) {
+    _existingOpenEntry = (state.tradeJournal || []).find(e =>
+      e.status === 'open' && e.ticker === rec.ticker &&
+      (e.account || 'personal') === sellAccount &&
+      (e.recId === rec.id || e.qty === qty)
+    ) || (state.tradeJournal || []).find(e =>
+      e.status === 'open' && e.ticker === rec.ticker && (e.account || 'personal') === sellAccount
+    );
+  }
+  if (_existingOpenEntry) {
+    _existingOpenEntry.exitPrice  = tradeEntry.exitPrice;
+    _existingOpenEntry.fees       = (_existingOpenEntry.fees || 0) + (tradeEntry.fees || 0);
+    _existingOpenEntry.pnl        = tradeEntry.pnl;
+    _existingOpenEntry.status     = tradeEntry.status;
+    _existingOpenEntry.closeDate  = tradeEntry.closeDate || today;
+    if (tradeEntry.disposalIds) _existingOpenEntry.disposalIds = tradeEntry.disposalIds;
+    tradeEntry = _existingOpenEntry;
+  } else {
+    state.tradeJournal.unshift(tradeEntry);
+  }
+
+  // Day Trading sync: if the closed holding was in the 'trading' account, the
+  // position may have originated from Day Trading's own flows (executeDayTrade /
+  // executeIntradayTrade), which keep their own bookkeeping in
+  // state.dayTrading.recommendations[] and state.intraday.openPositions[] —
+  // neither of which markExecuted() (the generic Recommendations close path)
+  // otherwise touches. Only act when we can positively match an entry by ticker
+  // (+ status), never blind-clear.
+  if (isReducing && sellAccount === 'trading') {
+    const dtRec = (state.dayTrading && state.dayTrading.recommendations || [])
+      .find(r => r.ticker === rec.ticker && r.status === 'executed');
+    if (dtRec) {
+      dtRec.status      = 'closed';
+      dtRec._closedAt    = today;
+      dtRec._closePrice  = tradePrice;
+    }
+    if (state.intraday && Array.isArray(state.intraday.openPositions)) {
+      const posIdx = state.intraday.openPositions.findIndex(p => p.ticker === rec.ticker);
+      if (posIdx !== -1) {
+        state.intraday.openPositions.splice(posIdx, 1);
+      }
+    }
+  }
 
   // Save to recHistory — include all execution details so backtest can use them
   const histEntry = {
