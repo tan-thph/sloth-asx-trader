@@ -28,6 +28,7 @@ key.txt
 *.key
 secrets.json
 ngrok.yml
+claude-api.txt
 
 # OS files
 .DS_Store
