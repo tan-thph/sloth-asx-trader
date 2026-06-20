@@ -1,5 +1,5 @@
 # Sloth ASX Trader — Improvement Roadmap (Personal Use)
-**Last Updated:** 2026-06-21 (Sprint 72 — DB corruption incident resolved; note.txt triage of 35 user-reported issues: Tiers 1-4 (34 issues) implemented/answered and verified; item #10 needs user input)
+**Last Updated:** 2026-06-21 (Sprint 72 — DB corruption incident resolved; note.txt triage of 35 user-reported issues: all 35 implemented/answered and verified, including #10 — see below)
 
 ---
 
@@ -66,11 +66,15 @@ Status legend: ✅ done · 🔧 ready to implement (root cause confirmed) · �
 | 33 | Consider llama.cpp vs current Groq free API | Strategic/infra decision, not a bug — no code change made. Quick framing: Groq's free tier is fast (LPU hardware) and zero local setup cost, but is rate-limited and depends on an external service being up; llama.cpp gives full local control and no rate limits but costs local compute/RAM and setup effort, and quality depends entirely on which local model you can run well. Given the existing Ollama local-LLM path already exists for the opt-in local-analysis feature, llama.cpp would mostly be a performance upgrade *within* that same opt-in path, not a replacement for Groq's distinct use case (news sentiment) — worth a deeper look only if local-LLM latency is currently a pain point. |
 | 35 | AI Call #24 returned `{}` | Could not retrieve — log row id=24 was one of the rows lost in the DB corruption recovery (only `ai_call_log` ids 1-10 survived; row 24 wasn't among the salvageable rowid ranges). No way to retrospectively diagnose this specific call; if it recurs, the row will be in the now-healthy DB and can be inspected via `GET /api/log/ai_call/<id>`. |
 
-**Still open (needs your input, not resolved by investigation):**
+### Item #10 — Anthropic API key not persisting — ✅ FIXED 2026-06-21
 
-| # | Issue | Why |
-|---|---|---|
-| 10 | Anthropic API key not persisting | Investigated thoroughly across two passes (save/load code, the `_omit`-from-DB-save pattern, and `init.js` load order — `loadStateFromDb()` is correctly awaited *before* `renderPage()`, so there's no race). The code as written should not reproduce this. Need from you: are you in direct mode or backend-proxy mode? Does it happen every refresh or intermittently? Browser private/incognito mode? |
+Static code review of the save/load path, the `_omit`-from-DB-save pattern, and `init.js` load order found nothing wrong — `loadStateFromDb()` is correctly awaited *before* `renderPage()`, no race. Asked the user for clarification: confirmed **backend-proxy mode**, normal (non-incognito) browser. The user's actual ask reframed the fix: rather than chase a phantom persistence bug in the existing SQLite-backed proxy-key storage, store the key in a plain local file instead — removes the dependency on the database entirely (which is what nearly caused the key to be lost during the 2026-06-20 DB corruption incident) and makes it trivial to scrub before any public release.
+
+- ✅ `routes/claude.py`: added `claude-api.txt` (git-ignored, repo root) as the primary key store. `_resolve_proxy_key()` reads the file first, falls back to the legacy SQLite `settings` row (so any key saved before this change keeps working). `POST /api/claude/settings` now writes/clears the file (and clears the legacy DB row on an empty key, for good measure).
+- ✅ Added `claude-api.txt` to `.gitignore`.
+- ✅ **End-to-end verified** (not just unit-tested): started the real server, POSTed a test key, confirmed the file was written and git-ignored, confirmed `GET has_key` flips true, confirmed `POST /api/claude/proxy` actually forwards the file-sourced key to api.anthropic.com (got a genuine upstream `authentication_error` rather than the local `no_proxy_key` error — proves the wiring, not just the save). **Hard-killed the server process and restarted it — the key survived**, which is the actual scenario the original bug report described. Confirmed clearing the key deletes the file.
+- 🐛 **Bug found during this testing, not before:** `asx_trader.lock` (the Tier-4 single-instance lockfile) was untracked but not git-ignored, so it would've shown up as repo clutter on every server start. Added to `.gitignore` in a follow-up commit.
+- 📄 Documented as CLAUDE.md gotcha #50 (file-over-DB pattern for server-side secrets).
 
 ### Tier 4 — larger features — ✅ ALL DONE 2026-06-21
 
