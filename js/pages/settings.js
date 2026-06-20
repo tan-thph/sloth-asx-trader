@@ -182,13 +182,13 @@ python3 asx_server.py</pre>
                   placeholder="custom"
                   title="Custom interval in minutes (1–480)"
                   oninput="setCustomInterval(this)"
-                  style="width:72px;padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid ${![15,30,60,90,120].includes(state.settings.scheduleIntervalMins)?'var(--accent)':'var(--border-medium)'};background:var(--bg-primary);color:var(--text-primary);font-size:12px;text-align:center">
+                  style="width:72px;padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid ${![15,30,60,90,120].includes(state.settings.scheduleIntervalMins)?'var(--accent-primary)':'var(--border-medium)'};background:var(--bg-primary);color:var(--text-primary);font-size:12px;text-align:center">
                 <span class="text-xs text-muted">min</span>
               </div>
             </div>
             <div class="text-xs text-muted" style="margin-top:4px">
               Currently: every <strong>${state.settings.scheduleIntervalMins} minute${state.settings.scheduleIntervalMins!==1?'s':''}</strong>
-              ${![15,30,60,90,120].includes(state.settings.scheduleIntervalMins)?'<span style="margin-left:4px;padding:1px 6px;border-radius:8px;background:var(--accent);color:#fff;font-size:10px">custom</span>':''}
+              ${![15,30,60,90,120].includes(state.settings.scheduleIntervalMins)?'<span style="margin-left:4px;padding:1px 6px;border-radius:8px;background:var(--accent-primary);color:#fff;font-size:10px">custom</span>':''}
             </div>
           </div>
 
@@ -307,7 +307,7 @@ python3 asx_server.py</pre>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" ${state.settings.compactMode ? 'checked' : ''}
             onchange="settingsToggleCompact(this.checked)">
-          <span style="font-size:12px;color:${state.settings.compactMode ? 'var(--accent)' : 'var(--text-muted)'}">
+          <span style="font-size:12px;color:${state.settings.compactMode ? 'var(--accent-primary)' : 'var(--text-muted)'}">
             ${state.settings.compactMode ? 'On' : 'Off'}
           </span>
         </label>
@@ -350,7 +350,7 @@ python3 asx_server.py</pre>
       <div class="card-title">App Info</div>
       <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:12px;align-items:baseline">
         <span class="text-muted">Prompt version</span>
-        <span style="font-family:monospace;color:var(--accent)">${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : '—'}</span>
+        <span style="font-family:monospace;color:var(--accent-primary)">${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : '—'}</span>
         <span class="text-muted">Claude model</span>
         <span style="font-family:monospace">${typeof CLAUDE_MODEL !== 'undefined' ? CLAUDE_MODEL : '—'}</span>
         <span class="text-muted">Server</span>
@@ -377,7 +377,7 @@ python3 asx_server.py</pre>
 
       <details open style="margin-bottom:8px">
         <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:6px">
-          <span style="color:var(--accent)">▸</span> Sprint 13 — Polish &amp; UX (2026-05)
+          <span style="color:var(--accent-primary)">▸</span> Sprint 13 — Polish &amp; UX (2026-05)
         </summary>
         <ul style="font-size:12px;color:var(--text-secondary);margin:6px 0 4px 16px;line-height:1.8">
           <li>Compact/density mode — Settings toggle reduces padding &amp; table rows</li>
@@ -390,7 +390,7 @@ python3 asx_server.py</pre>
 
       <details style="margin-bottom:8px">
         <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:6px">
-          <span style="color:var(--accent)">▸</span> Sprint 12 — Look-ahead bias fix (2026-05)
+          <span style="color:var(--accent-primary)">▸</span> Sprint 12 — Look-ahead bias fix (2026-05)
         </summary>
         <ul style="font-size:12px;color:var(--text-secondary);margin:6px 0 4px 16px;line-height:1.8">
           <li>AI Replay switched to nominal prices (auto_adjust=False) — matches executed prices</li>
@@ -403,7 +403,7 @@ python3 asx_server.py</pre>
 
       <details style="margin-bottom:8px">
         <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:6px">
-          <span style="color:var(--accent)">▸</span> Sprint 10–11 — Intraday &amp; universe (2026-04)
+          <span style="color:var(--accent-primary)">▸</span> Sprint 10–11 — Intraday &amp; universe (2026-04)
         </summary>
         <ul style="font-size:12px;color:var(--text-secondary);margin:6px 0 4px 16px;line-height:1.8">
           <li>⚡ Intraday Day-Trade tab — ASX20/50/100/200 universe selector, 5m scanner</li>
@@ -416,7 +416,7 @@ python3 asx_server.py</pre>
 
       <details style="margin-bottom:8px">
         <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:6px">
-          <span style="color:var(--accent)">▸</span> Sprint 9 — Logging &amp; compare (2026-03)
+          <span style="color:var(--accent-primary)">▸</span> Sprint 9 — Logging &amp; compare (2026-03)
         </summary>
         <ul style="font-size:12px;color:var(--text-secondary);margin:6px 0 4px 16px;line-height:1.8">
           <li>Full prompt+response logging — every Claude call stored in ai_call_log</li>

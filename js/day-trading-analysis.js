@@ -505,9 +505,26 @@ async function runUniverseScan() {
 
   const newRecs = _dtBuildRecs(candidates, _uAp, _uPortCtx, _uRegime)
     .map(r => ({ ...r, source: 'universe', universeKey }));
+  const newRecTickers = new Set(newRecs.map(r => r.ticker));
 
+  // Non-pending-universe recs (executed/closed/dismissed, or manually-added) are
+  // untouched by this merge — same as before.
   const kept = (state.dayTrading.recommendations || []).filter(r => r.status !== 'pending' || r.source !== 'universe');
-  state.dayTrading.recommendations = [...kept, ...newRecs];
+
+  // Previously-pending universe recs that did NOT reappear in this scan's results
+  // (filtered out by thresholds, crowded out by a per-scan cap, etc.) must not be
+  // silently dropped — the ticker may still be a setup the user is tracking. Keep
+  // them, flagged _stale, and age them out after a few consecutive missed scans
+  // so Active Setups doesn't accumulate dead entries forever.
+  // TODO: 3 consecutive missed scans is a judgement call (mirrors the existing
+  // _dtDismissStaleRecs 3-day age cutoff above) — revisit if it proves too eager/lax.
+  const MAX_STALE_SCANS = 3;
+  const stalePrevPending = (state.dayTrading.recommendations || [])
+    .filter(r => r.status === 'pending' && r.source === 'universe' && !newRecTickers.has(r.ticker))
+    .map(r => ({ ...r, _stale: true, _staleScans: (r._staleScans || 0) + 1 }))
+    .filter(r => r._staleScans <= MAX_STALE_SCANS);
+
+  state.dayTrading.recommendations = [...kept, ...stalePrevPending, ...newRecs];
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
   const _ubb = state.dayTrading._breadthBlocked;

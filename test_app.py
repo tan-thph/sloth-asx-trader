@@ -3257,6 +3257,107 @@ class TestSprint19VitestInfrastructure(unittest.TestCase):
         self.assertIn("stop must be above entry", src)
 
 
+class TestAiCall20ValidationFixes(unittest.TestCase):
+    """AI Call #20 (2026-06-17) manual review found 4 response-quality issues that
+    should be caught deterministically rather than relying on prompt wording alone:
+    1) GMG REJECT-but-still-in-recs[], 2) SHL SELL-but-deferring-anti-churn,
+    4) WES netProfit not reconciling to real unrealisedPnl. (#3 — catastrophe-clause
+    misapplication — is a free-text judgement call, not deterministically checkable,
+    and is intentionally NOT covered here.)"""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "js", "response-validator.js"), encoding="utf-8") as f:
+            cls.validator_src = f.read()
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            cls.analysis_src = f.read()
+
+    # ── Issue 1/2: reject/defer contradiction rule exists in the validator ─────
+
+    def test_reject_defer_contradiction_rule_present(self):
+        """validator must define a business rule catching reject/defer language
+        co-occurring with a non-HOLD action."""
+        self.assertIn("reject-defer-contradiction", self.validator_src)
+        self.assertIn("_REJECT_DEFER_PHRASES", self.validator_src)
+
+    def test_reject_defer_phrase_list_covers_ai_call_20_cases(self):
+        """Phrase list must cover the exact language seen in AI Call #20:
+        GMG 'REJECT GMG' and SHL 'anti-churn block applies... deferring'."""
+        self.assertIn("anti-churn block applies", self.validator_src)
+        self.assertIn("deferring to", self.validator_src)
+        # Generic "reject <TICKER>" pattern (not hardcoded to GMG specifically)
+        self.assertIn("_REJECT_TICKER_RE", self.validator_src)
+        self.assertIn(r"\breject\s+[A-Z0-9]{2,5}\b", self.validator_src)
+
+    def test_reject_defer_rule_skips_hold_and_no_reasoning(self):
+        """Rule must not misfire on HOLD recs or recs with no reasoning text."""
+        rule_idx = self.validator_src.index("id: 'reject-defer-contradiction'")
+        rule_body = self.validator_src[rule_idx:rule_idx + 600]
+        self.assertIn("r.action === 'HOLD'", rule_body)
+        self.assertIn("!r.reasoning", rule_body)
+
+    def test_reject_defer_contradiction_is_unfixable_not_silently_patched(self):
+        """The contradiction rule must have no inline `fix` — it requires either a
+        repair-retry (existing _buildRepairMessage loop) or demotion out of recs[],
+        never a silent client-side patch that hides the contradiction."""
+        rule_idx = self.validator_src.index("id: 'reject-defer-contradiction'")
+        rule_end = self.validator_src.index("},", rule_idx)
+        # find the closing of this rule object (next top-level rule starts after
+        # the matching message() function) — slice a generous window and confirm
+        # no `fix:` key appears before the next rule id
+        next_rule_idx = self.validator_src.index("id: 'anti-churn-flip'")
+        rule_block = self.validator_src[rule_idx:next_rule_idx]
+        self.assertNotIn("fix:", rule_block,
+                         "reject/defer contradiction must not be auto-fixed silently")
+
+    # ── Issue 1/2: analysis.js auto-demotes the contradiction out of recs[] ────
+
+    def test_analysis_demotes_self_contradicting_recs(self):
+        """analysis.js validator step must detect the contradiction error message
+        and drop the rec from recs[] (not just flag-and-keep like other errors),
+        since the AI itself already decided the trade shouldn't be actionable."""
+        self.assertIn("validatorDemoted", self.analysis_src)
+        self.assertIn("contradictionHit", self.analysis_src)
+        # Must actually return [] (drop) for the contradiction case, not keep the rec
+        demote_idx = self.analysis_src.index("contradictionHit = errors.find")
+        demote_block = self.analysis_src[demote_idx:demote_idx + 400]
+        self.assertIn("return [];", demote_block)
+
+    def test_analysis_demotion_runs_before_generic_flag_path(self):
+        """The contradiction-demotion check must run before the generic
+        flag-don't-drop fallback so a contradicting rec is never shown as an
+        executable card with just a warning banner."""
+        demote_at = self.analysis_src.index("contradictionHit")
+        flag_at   = self.analysis_src.index("validatorFlagged.push")
+        self.assertLess(demote_at, flag_at,
+                        "contradiction demotion must be checked before generic flagging")
+
+    # ── Issue 4: AI-supplied netProfit/expectedProfit/riskAUD/rewardAUD stripped ──
+
+    def test_validator_strips_untrusted_ai_numeric_fields(self):
+        """Per CLAUDE.md Rule 4 (Claude never computes netProfit/expectedProfit —
+        qty stays 0, the quant engine sizes post-response), validateRec() must
+        strip any AI-supplied netProfit/expectedProfit/riskAUD/rewardAUD rather
+        than let them leak through unrecomputed."""
+        self.assertIn("_AI_UNTRUSTED_NUMERIC_FIELDS", self.validator_src)
+        for field in ["netProfit", "expectedProfit", "riskAUD", "rewardAUD"]:
+            self.assertIn(field, self.validator_src)
+        self.assertIn("_stripUntrustedAiFields", self.validator_src)
+        # Must be wired into validateRec
+        validate_rec_idx = self.validator_src.index("function validateRec(rec)")
+        validate_rec_body = self.validator_src[validate_rec_idx:validate_rec_idx + 300]
+        self.assertIn("_stripUntrustedAiFields", validate_rec_body)
+
+    def test_analysis_already_recomputes_netprofit_engine_side(self):
+        """Defense-in-depth check: confirm the live analysis.js pipeline already
+        overwrites netProfit/expectedProfit from the quant engine / real cost basis
+        (FIX #2 / §8.2) rather than trusting the AI's raw value — the validator-side
+        strip in response-validator.js is a backstop for any path that doesn't go
+        through this recompute (e.g. getValidatedAnalysisWithRepair used standalone)."""
+        self.assertIn("_netProfitEngine", self.analysis_src)
+        self.assertIn("r.netProfit = (sellPrice - holding.avgPrice) * qty - fees", self.analysis_src)
+
+
 class TestSuccessTagsIntegration(unittest.TestCase):
     """Success tags: calibration nudge + success_patterns in stats."""
 
@@ -5523,9 +5624,10 @@ class TestSprint41PlanAB(unittest.TestCase):
             src = f.read()
         self.assertIn('"high_60d"', src)
         self.assertIn('"low_60d"', src)
-        # Must use safe_float and tail(60) OHLCV slices
-        self.assertIn("high.tail(60).max()", src)
-        self.assertIn("low.tail(60).min()", src)
+        # Must use safe_float and tail(60) on the UNADJUSTED (nominal) OHLCV slices
+        # — see TestSprint72UnadjustedFibZones for the auto_adjust=False rationale.
+        self.assertIn("high_raw.tail(60).max()", src)
+        self.assertIn("low_raw.tail(60).min()", src)
 
     def test_prompts_signal4_uses_high_60d_low_60d(self):
         """prompts.js Signal #4 must reference high_60d and low_60d (not just return_60d)."""
@@ -5581,6 +5683,111 @@ class TestSprint42Fibonacci(unittest.TestCase):
         with open(os.path.join(ROOT, "js", "day-trading-analysis.js"), encoding="utf-8") as f:
             src = f.read()
         self.assertIn("no Claude call", src)
+
+
+class TestSprint72UnadjustedFibZones(unittest.TestCase):
+    """Sprint 72 — high_60d/low_60d must come from an UNADJUSTED (auto_adjust=False)
+    history fetch, not the auto_adjust=True series used for RSI/MACD/SMA/etc.
+
+    Adjusted historical prices retroactively shift the whole series down for
+    dividends/splits paid since each bar, so they don't represent the nominal
+    price level a day-trader actually saw on the chart on that date. The
+    Fibonacci day-trade zone (high_60d/low_60d) needs the real nominal levels.
+    """
+
+    def test_analyse_ticker_fetches_unadjusted_series_separately(self):
+        """analyse_ticker() must call stk.history with auto_adjust=False as a second fetch."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("auto_adjust=True", src)
+        self.assertIn("auto_adjust=False", src)
+        self.assertIn("hist_raw", src)
+        self.assertIn("high_raw", src)
+        self.assertIn("low_raw", src)
+
+    def test_analyse_ticker_unadjusted_fetch_applies_same_guards(self):
+        """The unadjusted fetch must still go through _drop_forming_bar/_sanity_check."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Both guards must be invoked on hist_raw, not just hist.
+        self.assertIn("_drop_forming_bar(hist_raw)", src)
+        self.assertIn("_sanity_check(hist_raw, ticker)", src)
+
+    def test_analyse_ticker_unadjusted_fetch_falls_back_to_stooq(self):
+        """If the unadjusted yfinance fetch is empty/short, fall back to _fetch_stooq_history."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Look at the secondary-fetch block specifically (after the primary Stooq fallback).
+        idx = src.index("hist_raw = stk.history")
+        block = src[idx:idx + 800]
+        self.assertIn("_fetch_stooq_history(ticker, period)", block)
+
+    def test_other_indicators_still_use_adjusted_series(self):
+        """RSI/MACD/SMA/Bollinger/ATR must still read from the adjusted `high`/`low`/`close`
+        series — only high_60d/low_60d should switch to the unadjusted series."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("compute_rsi(close, 14)", src)
+        self.assertIn("compute_atr(high, low, close)", src)
+        self.assertIn("compute_bollinger(close)", src)
+        # high_60d/low_60d must NOT reference the plain adjusted high/low directly.
+        self.assertNotIn("high.tail(60).max()", src)
+        self.assertNotIn("low.tail(60).min()", src)
+
+    def test_analyse_ticker_high60d_low60d_use_unadjusted_values(self):
+        """End-to-end: when the adjusted and unadjusted series diverge (simulating a
+        split/dividend retroactive adjustment), high_60d/low_60d must reflect the
+        UNADJUSTED nominal series, not the adjusted one used for everything else."""
+        import unittest.mock as _mock
+        import numpy as np
+        import pandas as pd
+        import indicators as ind
+
+        n = 120
+        idx = pd.date_range("2025-01-01", periods=n, freq="D")
+
+        # Adjusted series: scaled down (as if a 2:1 split/large dividend retroactively
+        # halved historical prices). Peaks at 50.
+        adj_close = np.linspace(40, 50, n)
+        adj_df = pd.DataFrame({
+            "Open":   adj_close - 0.5,
+            "High":   adj_close + 0.5,
+            "Low":    adj_close - 1.0,
+            "Close":  adj_close,
+            "Volume": np.full(n, 1_000_000),
+        }, index=idx)
+
+        # Unadjusted (nominal) series: roughly double the adjusted prices — what a
+        # trader actually saw on the chart historically. Peaks at 100.
+        raw_close = adj_close * 2
+        raw_df = pd.DataFrame({
+            "Open":   raw_close - 1.0,
+            "High":   raw_close + 1.0,
+            "Low":    raw_close - 2.0,
+            "Close":  raw_close,
+            "Volume": np.full(n, 1_000_000),
+        }, index=idx)
+
+        def _fake_history(period=None, auto_adjust=None, **kw):
+            return raw_df if auto_adjust is False else adj_df
+
+        with _mock.patch.object(ind.yf, "Ticker") as mock_tk:
+            mock_tk.return_value.history.side_effect = _fake_history
+            mock_tk.return_value.info = {}
+            # Force the forming-bar guard to no-op regardless of wall-clock time.
+            with _mock.patch("indicators._dt_mod") as mock_dt:
+                import datetime as _real_dt
+                mock_dt.datetime.utcnow.return_value = _real_dt.datetime.utcnow().replace(hour=12)
+                mock_dt.timedelta.side_effect = lambda **kw: _real_dt.timedelta(**kw)
+                result = ind.analyse_ticker("FAKE", period="6mo")
+
+        self.assertNotIn("error", result)
+        # high_60d/low_60d must come from the unadjusted (raw_df) series — its tail-60
+        # high is ~101 and low is ~88.7 — clearly distinguishable from the adjusted
+        # series' tail-60 high (~50.5) / low (~39.4).
+        self.assertGreater(result["high_60d"], 90)
+        self.assertLess(result["low_60d"], 90)
+        self.assertGreater(result["low_60d"], 80)
 
 
 class TestSprint42StooqFallback(unittest.TestCase):
@@ -8044,7 +8251,7 @@ class TestSprint67CorrContextTraceabilityAndBatch(unittest.TestCase):
     def test_portfolio_token_cap_raised(self):
         """out=8000 hit the cap exactly on the 15:35 run — tool input counts
         against max_tokens, so the cap must exceed observed peak usage."""
-        self.assertIn("portfolio: 10000", self.client_js)
+        self.assertIn("portfolio: 12000", self.client_js)
 
     # ── §9.5 local-LLM size escalation ────────────────────────────────────
     def test_local_llm_escalation(self):

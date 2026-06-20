@@ -640,7 +640,7 @@ function _annSettingsPanelHTML(status) {
           ${(state.news.settings.groq_api_key)
             ? '<span style="font-size:11px;background:#dcfce7;color:#16a34a;padding:1px 7px;border-radius:9px">&#10003; Key saved</span>'
             : '<span style="font-size:11px;background:#fef9c3;color:#92400e;padding:1px 7px;border-radius:9px">No key set</span>'}
-          <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent)">Settings</a></span>
+          <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent-primary)">Settings</a></span>
         </div>
         <div>
           <label style="${lblSt}">Groq Model</label>
@@ -656,7 +656,7 @@ function _annSettingsPanelHTML(status) {
           ${(state.news.settings.google_api_key)
             ? '<span style="font-size:11px;background:#dcfce7;color:#16a34a;padding:1px 7px;border-radius:9px">&#10003; Key saved</span>'
             : '<span style="font-size:11px;background:#fef9c3;color:#92400e;padding:1px 7px;border-radius:9px">No key set</span>'}
-          <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent)">Settings</a></span>
+          <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent-primary)">Settings</a></span>
         </div>
         <div>
           <label style="${lblSt}">Model

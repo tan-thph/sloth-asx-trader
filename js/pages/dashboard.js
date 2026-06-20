@@ -7,7 +7,7 @@ const _STALE_DAYS = 14;
 // RBA Board meeting dates — updated annually. Source: rba.gov.au/monetary-policy/rba-board-meetings/
 const _RBA_MEETINGS_2026 = [
   '2026-02-18', '2026-04-01', '2026-05-20', '2026-07-08',
-  '2026-08-19', '2026-09-30', '2026-11-04', '2026-12-09',
+  '2026-08-11', '2026-09-29', '2026-11-03', '2026-12-08',
 ];
 const _RBA_MEETINGS_2027 = [
   '2027-02-03', '2027-03-31', '2027-05-05', '2027-07-07',

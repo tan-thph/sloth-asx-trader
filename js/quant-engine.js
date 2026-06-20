@@ -101,8 +101,12 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   const qtyByRisk = Math.floor(riskCapital / stopDist);
 
   // Position-size cap
+  // Hard max position weight is a % of NET WORTH (cash + total holdings value),
+  // not allocatedCash alone — a position can only be "15% of the portfolio" if
+  // the portfolio includes the cash sitting alongside it. `capital` above is
+  // already allocatedCash + portfolioValue, i.e. net worth.
   const maxPosPct = _ap.maxPositionPct ?? QUANT_CONFIG.maxPositionPct;
-  const qtyByPosition = Math.floor((allocatedCash * maxPosPct) / price);
+  const qtyByPosition = Math.floor((capital * maxPosPct) / price);
 
   // Liquidity cap (5% of 20-day average share volume — in SHARES, not dollars)
   // Fix #29: reject when ADV data is unavailable rather than treating as unconstrained.

@@ -127,7 +127,7 @@ function _renderCompareTable(tickers) {
     const sector = d.sector || '';
     return `<th style="text-align:center;padding:8px 12px;min-width:110px">
       <div style="font-size:15px;font-weight:700;color:var(--text-primary)">${escapeHTML(t)}</div>
-      <div style="font-size:12px;color:var(--accent);font-weight:600">${price}</div>
+      <div style="font-size:12px;color:var(--accent-primary);font-weight:600">${price}</div>
       ${sector ? `<div style="font-size:10px;color:var(--text-muted)">${escapeHTML(sector)}</div>` : ''}
     </th>`;
   }).join('');

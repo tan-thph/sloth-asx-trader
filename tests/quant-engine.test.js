@@ -152,7 +152,8 @@ describe('computeTradeParams — early exits', () => {
 describe('computeTradeParams — sizing constraints', () => {
   it('qty is bounded by account-risk constraint', () => {
     // With 1% of $150k = $1500 risk, stopDist = 2.5*0.2 = 0.5 → max qty = 3000
-    // But position-size cap (20% of $50k / $10) = 1000 should bind first
+    // Position-size cap is 20% of net worth ($150k, not just allocatedCash) / $10 = 3000 too —
+    // liquidity/Kelly bind first here. The assertion below holds regardless of which binds.
     const r = computeTradeParams('X', makeSignals(), makeCtx(), makeAnalyst());
     expect(r.ok).toBe(true);
     // qty * stopDist should not exceed riskCapital
@@ -186,7 +187,9 @@ describe('computeTradeParams — sizing constraints', () => {
     const stopDist  = price - r.stopLoss;
     const capital   = 50_000 + 100_000;
     const qtyRisk   = Math.floor(capital * 0.01 / stopDist);
-    const qtyPos    = Math.floor(50_000  * 0.20 / price);
+    // Position-size cap is 20% of NET WORTH (cash + holdings), not allocatedCash alone —
+    // a position is capped relative to the whole portfolio it sits inside.
+    const qtyPos    = Math.floor(capital * 0.20 / price);
     expect(r.qty).toBeLessThanOrEqual(qtyRisk + 1);  // +1 for vol scalar rounding
     expect(r.qty).toBeLessThanOrEqual(qtyPos  + 1);
   });

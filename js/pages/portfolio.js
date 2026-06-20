@@ -36,7 +36,7 @@ function renderPortfolio() {
           <div class="metric-card">
             <div class="metric-label">Est. Annual Div Income</div>
             <div class="metric-value text-success">$${fmt(annualIncome)}</div>
-            <div class="metric-sub">${fmt(yieldOnCost)}% yield on cost</div>
+            <div class="metric-sub" title="Annual dividend income ÷ original cost basis (avg purchase price). See Morning Macro for the same income ÷ current market value figure — they differ when price has moved since purchase.">${fmt(yieldOnCost)}% yield on cost</div>
           </div>` : '';
       })()}
     </div>
@@ -94,7 +94,7 @@ function renderPortfolio() {
       const cur = state.activeAccount || 'all';
       return `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
         ${['all','personal','super','trading'].map(a => `
-          <button class="btn btn-sm" style="${a===cur?'background:var(--accent);color:#fff;border-color:var(--accent)':''}" onclick="state.activeAccount='${a}';renderPage()">${_ACCT_LABELS[a]}</button>
+          <button class="btn btn-sm" style="${a===cur?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="state.activeAccount='${a}';renderPage()">${_ACCT_LABELS[a]}</button>
         `).join('')}
         ${cur !== 'all' ? `<span class="text-xs text-muted" style="align-self:center;margin-left:4px">Viewing ${_ACCT_LABELS[cur]} account — analysis and signals use this account's holdings only.</span>` : ''}
       </div>`;
@@ -337,7 +337,7 @@ function renderPortfolio() {
           <div class="card-title" style="margin:0">Dividend Income Schedule</div>
           <div class="text-xs text-muted" style="margin-top:3px;line-height:1.7">
             <span>Est. annual income: <strong class="text-success">$${fmt(totalAnnualIncome)}</strong>
-            · Div yield: <strong>${fmt(totalFwdYield)}%</strong>
+            · <span title="Annual dividend income ÷ current market value (matches Morning Macro's Portfolio Forward Yield). The YoC column below uses cost basis instead — they differ when price has moved since purchase.">Div yield (mkt value): <strong>${fmt(totalFwdYield)}%</strong></span>
             ${annCapGainYield !== 0 ? `· Cap gain: <strong class="${annCapGainYield >= 0 ? 'text-success' : 'text-danger'}" title="Annualised capital gain (floored at 1yr — recent buys show total unrealised %)">${annCapGainYield >= 0 ? '+' : ''}${fmt(annCapGainYield)}%</strong>` : ''}
             · <span title="Dividend yield + annualised capital appreciation">Total return: <strong class="${totalReturnYield >= rba ? 'text-success' : 'text-danger'}">${fmt(totalReturnYield)}%</strong></span>
             · vs RBA ${rba.toFixed(2)}%:
@@ -963,7 +963,7 @@ function _buildSectorSidebar(merged, totalValue) {
             <span class="text-muted">${fmt(w, 1)}%</span>
           </div>
           <div style="background:var(--bg-secondary);border-radius:3px;height:7px;overflow:hidden">
-            <div style="width:${barPct}%;height:100%;background:var(--accent);border-radius:3px;transition:width 0.3s"></div>
+            <div style="width:${barPct}%;height:100%;background:var(--accent-primary);border-radius:3px;transition:width 0.3s"></div>
           </div>
         </div>`;
       }).join('')}

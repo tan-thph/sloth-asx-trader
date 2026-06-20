@@ -111,7 +111,7 @@ def _seasonality_cached(ticker: str) -> dict:
     close = hist["Close"]
     if hasattr(close, "squeeze"):
         close = close.squeeze()
-    returns = close.pct_change().dropna()
+    returns = close.pct_change(fill_method=None).dropna()
     by_month: dict[int, list[float]] = {}
     for idx, val in returns.items():
         m = idx.month
@@ -285,7 +285,7 @@ def _macro_payload() -> dict:
 
             # A-VIX: realized 20-day annualized volatility (ASX local volatility gauge)
             if len(close) >= 21:
-                daily_rets = close.pct_change().dropna().iloc[-20:]
+                daily_rets = close.pct_change(fill_method=None).dropna().iloc[-20:]
                 asx_vol_20d = round(float(daily_rets.std() * (252 ** 0.5) * 100), 1)
             else:
                 asx_vol_20d = None
@@ -592,7 +592,7 @@ def portfolio_risk():
             closes = raw[["Close"]] if "Close" in raw.columns else raw
 
         closes = closes.dropna(how="all")
-        returns = closes.pct_change().dropna(how="all")
+        returns = closes.pct_change(fill_method=None).dropna(how="all")
 
         bench_col = benchmark if benchmark in returns.columns else None
         bench_ret = returns[bench_col] if bench_col else None
@@ -636,14 +636,14 @@ def portfolio_risk():
                     max_dd = dd
 
             metrics[ticker] = {
-                "volatility_ann": round(vol_ann, 2),
-                "sharpe":         round(sharpe, 3),
-                "beta":           round(beta, 3),
-                "return_30d":     round(ret_30d, 2),
-                "return_90d":     round(ret_90d, 2),
-                "var_95":         round(var_95, 2),
-                "cvar_95":        round(cvar_95, 2),
-                "max_drawdown":   round(max_dd, 2),
+                "volatility_ann": safe_float(round(vol_ann, 2)),
+                "sharpe":         safe_float(round(sharpe, 3)),
+                "beta":           safe_float(round(beta, 3)),
+                "return_30d":     safe_float(round(ret_30d, 2)),
+                "return_90d":     safe_float(round(ret_90d, 2)),
+                "var_95":         safe_float(round(var_95, 2)),
+                "cvar_95":        safe_float(round(cvar_95, 2)),
+                "max_drawdown":   safe_float(round(max_dd, 2)),
                 "data_points":    len(tr),
             }
 
@@ -656,7 +656,7 @@ def portfolio_risk():
                 correlation[t] = {}
                 for j, bt in enumerate(port_cols):
                     t2 = tickers[asx_tickers.index(bt)]
-                    correlation[t][t2] = round(float(corr.iloc[i, j]), 3)
+                    correlation[t][t2] = safe_float(round(float(corr.iloc[i, j]), 3))
 
         return jsonify({"metrics": metrics, "correlation": correlation, "tickers": tickers})
 

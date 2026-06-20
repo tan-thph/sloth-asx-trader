@@ -312,7 +312,14 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
   const detObj = (det && typeof det === 'object') ? det : null;
 
   // Resolve fields from richest available source: backend detail → client rec → manual entry.
-  const thesis      = detObj?.trade_thesis || matchedRec?._thesis || t.thesis || null;
+  // `trade_thesis` is only ever populated when a human typed a note into the optional
+  // "thesis" field at execution time (recommendations.js _thesis) — for the vast majority
+  // of AI-sourced trades it's NULL even though Claude's own rationale (rationale_summary)
+  // was captured at log time. Fall back to that so the drawer doesn't say "No thesis
+  // recorded." right above an "explanation" line that duplicates the same missing info.
+  const thesis        = detObj?.trade_thesis || matchedRec?._thesis || t.thesis || null;
+  const thesisIsFallback = !thesis && !!detObj?.rationale_summary;
+  const thesisDisplay = thesis || detObj?.rationale_summary || null;
   const entryDriver = detObj?.primary_entry_driver || matchedRec?.primary_entry_driver || null;
   const exitDriver  = detObj?.sell_primary_driver || null;
   const verdict     = detObj?.thesis_verdict || matchedRec?.thesis_verdict || null;
@@ -338,8 +345,25 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
   }
 
   // Thesis + drivers block
+  // Verdicts come from computeThesisDrift() (learning-loop.js), which compares the
+  // entry-time technicals against current technicals for the position's entry driver:
+  //  - validated:   the technical pattern that justified entry (e.g. oversold RSI/%b for
+  //                  mean_reversion, positive 5d return for momentum_breakout, ADX>20 trend
+  //                  resumption for trend_pullback) is confirmed by the latest snapshot.
+  //  - invalidated: the same comparison shows the setup broke down (RSI/%b worsened,
+  //                  momentum reversed, trend lost strength) — the original reason to hold
+  //                  no longer applies.
+  //  - irrelevant:  the driver is fundamental_value/macro_tailwind (not technically
+  //                  verifiable), the driver is unrecognised, or the entry/now technicals
+  //                  are too ambiguous to call either way.
+  const VC_TOOLTIP = {
+    validated:   'Validated: the technical setup that justified the original entry (e.g. oversold reversal, momentum, or trend resumption) is still confirmed by current price action.',
+    invalidated: 'Invalidated: the technical setup that justified the entry has broken down (e.g. momentum reversed, trend lost strength) — the original thesis no longer holds.',
+    irrelevant:  'Irrelevant: the entry driver is fundamental/macro (not technically verifiable), unrecognised, or there is not enough entry-vs-current technical data to judge whether the thesis held.',
+  };
   const VC = { validated:['var(--up)','✅ Validated'], invalidated:['var(--down)','❌ Invalidated'], irrelevant:['var(--text-tertiary)','➖ Irrelevant'] };
   const vc = verdict ? (VC[verdict] || ['var(--text-tertiary)', verdict]) : null;
+  const vcTitle = verdict ? (VC_TOOLTIP[verdict] || '') : '';
   const driverChip = (label, val, color) => val
     ? `<span style="display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;background:${color||'var(--bg-surface)'};border:1px solid var(--border);margin-right:5px">${label}: ${escapeHTML(String(val).replace(/_/g,' '))}</span>`
     : '';
@@ -348,10 +372,12 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
     <div style="margin-bottom:6px">
       ${driverChip('Entry', entryDriver)}
       ${driverChip('Exit', exitDriver)}
-      ${vc ? `<span style="font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid ${vc[0]};color:${vc[0]}">${vc[1]}</span>` : ''}
+      ${vc ? `<span style="font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid ${vc[0]};color:${vc[0]};cursor:help" title="${escapeHTML(vcTitle)}">${vc[1]}</span>` : ''}
     </div>
-    <div style="font-size:12px;line-height:1.45">${thesis ? escapeHTML(thesis) : '<span class="text-muted" style="font-style:italic">No thesis recorded.</span>'}</div>
-    ${detObj?.rationale_summary && detObj.rationale_summary !== thesis ? `<div style="font-size:11px;color:var(--text-tertiary);margin-top:5px">${escapeHTML(detObj.rationale_summary)}</div>` : ''}
+    <div style="font-size:12px;line-height:1.45">${thesisDisplay
+        ? (thesisIsFallback ? '<span class="text-xs text-muted" style="font-style:italic">(Claude\'s rationale — no explicit thesis note was recorded) </span>' : '') + escapeHTML(thesisDisplay)
+        : '<span class="text-muted" style="font-style:italic">No thesis recorded.</span>'}</div>
+    ${detObj?.rationale_summary && detObj.rationale_summary !== thesisDisplay ? `<div style="font-size:11px;color:var(--text-tertiary);margin-top:5px">${escapeHTML(detObj.rationale_summary)}</div>` : ''}
   </div>`;
 
   // Outcome line (prefer backend, fall back to journal)

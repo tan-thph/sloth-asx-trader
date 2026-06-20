@@ -27,6 +27,75 @@
 // postmortem_debate JSON blob without re-fetching from the server.
 let _learningEventsById = {};
 
+// ── Error-tag taxonomy + tag-cell renderers ───────────────────────────────────
+// Hoisted to module scope (not just inside _renderLearningContent) so that
+// tagLearningEvent() can re-render a single row's tag cell after a targeted
+// PATCH without needing a full showPage('learning') re-render.
+const _LL_ERROR_TYPE_LABELS = {
+  overconfident:   { label: 'Overconfident',    color: '#dc2626' },
+  missed_catalyst: { label: 'Missed catalyst',  color: '#d97706' },
+  regime_mismatch: { label: 'Regime mismatch',  color: '#7c3aed' },
+  poor_entry:      { label: 'Poor entry',       color: '#ea580c' },
+  stop_too_tight:  { label: 'Stop too tight',   color: '#0891b2' },
+  poor_rr:         { label: 'Poor R:R',         color: '#6b7280' },
+  external_shock:  { label: 'External shock',   color: '#be185d' },
+  thesis_broken:   { label: 'Thesis broken',    color: '#92400e' },
+};
+
+// Tag buttons — LOSS and BREAKEVEN only; wins don't get error tags (errors on wins = luck, not failure).
+// Multiple tags supported — stored as comma-separated string ("overconfident,regime_mismatch").
+// Each button toggles independently; auto-tagged buttons show 🤖 prefix + dashed border.
+const _LL_TAG_STATUSES    = new Set(['loss', 'breakeven']);
+const _LL_CLOSED_STATUSES = new Set(['win', 'loss', 'breakeven']); // kept for postmortem compat
+
+function _llTagButtons(evId, currentTagStr, tagSource) {
+  const activeTags = new Set(
+    (currentTagStr || '').split(',').map(t => t.trim()).filter(Boolean)
+  );
+  const tags = [
+    ['overconfident',   'OC', 'Overconfident — stated AI confidence was too high for actual risk'],
+    ['missed_catalyst', 'MC', 'Missed catalyst — key earnings/news/macro event not accounted for'],
+    ['regime_mismatch', 'RM', 'Regime mismatch — wrong strategy for the prevailing market regime'],
+    ['poor_entry',      'PE', 'Poor entry — timing or price was suboptimal'],
+    ['stop_too_tight',  'ST', 'Stop too tight — normal volatility triggered stop before the move played out'],
+    ['poor_rr',         'PR', 'Poor R:R — reward:risk ratio was too low from the start'],
+    ['external_shock',  'ES', 'External shock — outcome driven by unpredictable event (policy, black swan)'],
+    ['thesis_broken',   'TB', 'Thesis broken — invalidated by new information that emerged after entry'],
+  ];
+  const escapedCurrent = JSON.stringify(currentTagStr || '').replace(/"/g, '&quot;');
+  return `<div style="display:flex;gap:2px;flex-wrap:wrap">` +
+    tags.map(([key, short, tip]) => {
+      const active  = activeTags.has(key);
+      const isAuto  = active && tagSource === 'auto';
+      const meta    = _LL_ERROR_TYPE_LABELS[key] || { color: '#6b7280' };
+      const border  = active
+        ? (isAuto ? `1.5px dashed ${meta.color}` : `1px solid ${meta.color}`)
+        : `1px solid ${meta.color}55`;
+      return `<button
+        onclick="toggleLearningTag(${evId}, ${escapedCurrent}, '${key}')"
+        title="${tip}${isAuto ? ' (auto — click to toggle)' : ''}"
+        style="font-size:9px;padding:1px 5px;border-radius:2px;line-height:1.5;cursor:pointer;
+               border:${border};font-weight:${active ? 700 : 500};
+               background:${active ? meta.color : 'transparent'};
+               color:${active ? '#fff' : meta.color}"
+      >${isAuto && active ? '🤖 ' : ''}${short}</button>`;
+    }).join('') +
+  `</div>`;
+}
+
+// tagCell: error tags only for loss/breakeven; open/win/expired get nothing.
+// When error_type='none' (reviewed-clean), shows a small ✓ badge so it's
+// distinguishable from unreviewed rows, then still renders the buttons for re-tagging.
+function _llTagCell(evId, currentTagStr, status, tagSource) {
+  if (!_LL_TAG_STATUSES.has(status)) return '';
+  const noneBadge = (currentTagStr === 'none')
+    ? `<span title="Reviewed by Ollama — no systematic error found"
+             style="font-size:9px;padding:1px 5px;border-radius:2px;margin-right:3px;
+                    color:var(--text-muted);border:1px solid var(--border);display:inline-block">✓ no error</span>`
+    : '';
+  return noneBadge + _llTagButtons(evId, currentTagStr, tagSource);
+}
+
 // ── Batch classify state — persists across page re-renders ───────────────────
 // renderLearningPage() calls _syncClassifyUI() after every re-render so the
 // progress bar survives scheduleSave() / refreshPrices() re-render cycles.
@@ -535,59 +604,12 @@ function _renderLearningContent(d, brier) {
     const col = map[o] || '#9ca3af';
     return `<span style="background:${col}20;color:${col};border-radius:3px;padding:1px 6px;font-size:10px;font-weight:600">${o || 'open'}</span>`;
   };
-  // Tag buttons — LOSS and BREAKEVEN only; wins don't get error tags (errors on wins = luck, not failure).
-  // Multiple tags supported — stored as comma-separated string ("overconfident,regime_mismatch").
-  // Each button toggles independently; auto-tagged buttons show 🤖 prefix + dashed border.
-  const TAG_STATUSES    = new Set(['loss', 'breakeven']);
-  const CLOSED_STATUSES = new Set(['win', 'loss', 'breakeven']); // kept for postmortem compat
-
-  const tagButtons = (evId, currentTagStr, tagSource) => {
-    const activeTags = new Set(
-      (currentTagStr || '').split(',').map(t => t.trim()).filter(Boolean)
-    );
-    const tags = [
-      ['overconfident',   'OC', 'Overconfident — stated AI confidence was too high for actual risk'],
-      ['missed_catalyst', 'MC', 'Missed catalyst — key earnings/news/macro event not accounted for'],
-      ['regime_mismatch', 'RM', 'Regime mismatch — wrong strategy for the prevailing market regime'],
-      ['poor_entry',      'PE', 'Poor entry — timing or price was suboptimal'],
-      ['stop_too_tight',  'ST', 'Stop too tight — normal volatility triggered stop before the move played out'],
-      ['poor_rr',         'PR', 'Poor R:R — reward:risk ratio was too low from the start'],
-      ['external_shock',  'ES', 'External shock — outcome driven by unpredictable event (policy, black swan)'],
-      ['thesis_broken',   'TB', 'Thesis broken — invalidated by new information that emerged after entry'],
-    ];
-    const escapedCurrent = JSON.stringify(currentTagStr || '').replace(/"/g, '&quot;');
-    return `<div style="display:flex;gap:2px;flex-wrap:wrap">` +
-      tags.map(([key, short, tip]) => {
-        const active  = activeTags.has(key);
-        const isAuto  = active && tagSource === 'auto';
-        const meta    = errorTypeLabels[key] || { color: '#6b7280' };
-        const border  = active
-          ? (isAuto ? `1.5px dashed ${meta.color}` : `1px solid ${meta.color}`)
-          : `1px solid ${meta.color}55`;
-        return `<button
-          onclick="toggleLearningTag(${evId}, ${escapedCurrent}, '${key}')"
-          title="${tip}${isAuto ? ' (auto — click to toggle)' : ''}"
-          style="font-size:9px;padding:1px 5px;border-radius:2px;line-height:1.5;cursor:pointer;
-                 border:${border};font-weight:${active ? 700 : 500};
-                 background:${active ? meta.color : 'transparent'};
-                 color:${active ? '#fff' : meta.color}"
-        >${isAuto && active ? '🤖 ' : ''}${short}</button>`;
-      }).join('') +
-    `</div>`;
-  };
-
-  // tagCell: error tags only for loss/breakeven; open/win/expired get nothing.
-  // When error_type='none' (reviewed-clean), shows a small ✓ badge so it's
-  // distinguishable from unreviewed rows, then still renders the buttons for re-tagging.
-  const tagCell = (evId, currentTagStr, status, tagSource) => {
-    if (!TAG_STATUSES.has(status)) return '';
-    const noneBadge = (currentTagStr === 'none')
-      ? `<span title="Reviewed by Ollama — no systematic error found"
-               style="font-size:9px;padding:1px 5px;border-radius:2px;margin-right:3px;
-                      color:var(--text-muted);border:1px solid var(--border);display:inline-block">✓ no error</span>`
-      : '';
-    return noneBadge + tagButtons(evId, currentTagStr, tagSource);
-  };
+  // Tag buttons / tag cell — hoisted to module scope as _llTagButtons()/_llTagCell()
+  // (and _LL_TAG_STATUSES) so tagLearningEvent() can patch a single row's tag
+  // cell after a tag click without a full page re-render. Kept as local aliases
+  // here so the rest of this function doesn't need renaming.
+  const TAG_STATUSES = _LL_TAG_STATUSES;
+  const tagCell      = _llTagCell;
 
   const recentCard = `
     <div class="card section-gap">
@@ -748,7 +770,7 @@ function _renderLearningContent(d, brier) {
                   <td data-label="Regime" style="padding:3px 6px;color:var(--text-muted);font-size:11px">${ev.regime||'—'}</td>
                   <td data-label="Outcome" style="padding:3px 6px;white-space:nowrap">${outcomeChip(ev.outcome_status)}${protectiveEl}${virtualChip}</td>
                   <td data-label="P&L%" style="padding:3px 6px;text-align:right;color:${pnlColor}">${pnlStr}</td>
-                  <td data-label="Error tags" style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
+                  <td id="ll-tagcell-${ev.id}" data-label="Error tags" style="padding:3px 6px">${tagCell(ev.id, ev.error_type, ev.outcome_status, ev.error_type_source)}</td>
                   <td data-label="Claude tags" style="padding:3px 6px">${claudeTagsEl}</td>
                   <td data-label="🔬 Skill" style="padding:3px 6px;white-space:nowrap">
                     <div style="display:inline-flex;align-items:center;gap:2px">
@@ -2687,8 +2709,19 @@ async function tagLearningEvent(id, errorType) {
     });
     const result = await resp.json();
     if (result.ok) {
-      // Re-render learning page so button active state reflects new tag correctly
-      showPage('learning');
+      // Targeted patch: update the cached event + just this row's tag cell,
+      // instead of a full showPage('learning') re-render (which resets scroll,
+      // collapses open <details>, and aborts in-flight async card loads).
+      const ev = _learningEventsById[id];
+      if (ev) {
+        ev.error_type = et;
+        // Manual edits from this UI are no longer an unreviewed auto-tag.
+        if (ev.error_type_source === 'auto') ev.error_type_source = 'manual';
+      }
+      const cell = document.getElementById(`ll-tagcell-${id}`);
+      if (cell && ev) {
+        cell.innerHTML = _llTagCell(id, ev.error_type, ev.outcome_status, ev.error_type_source);
+      }
     } else {
       toast('Tag error: ' + (result.error || 'unknown'), 'error');
     }

@@ -23,6 +23,11 @@ var _dtHistLoading = false; // true = fetch already in flight — prevents dupli
 var _dtHistOffset = 0;
 var _dtHistMore   = false;
 var _dtStats      = null;  // summary stats
+var _dtHistFilter = { ticker: '', outcome: 'all', recordType: 'executed' }; // client-side history filter state
+// recordType: 'executed' (default — real trades only) | 'all' (executed + shadow ML training rows)
+// Shadow rows (record_type='shadow') are written by the ML bias-correction pipeline for
+// below-threshold setups (see routes/day_trade_training.py _resolve_shadow_outcomes) — they
+// are never executed/closed and resolve via r_multiple after ~8 days, not exit_price/exit_date.
 
 /* ── Feature builder ─────────────────────────────────────────────────────── */
 /**
@@ -131,7 +136,16 @@ function dtSaveSnapshot(rec, tradeType, signals, macroData, entryPrice, execQty,
     stop_loss:   rec.stopLoss || null,
     hold_days:   rec.holdDays || null,
     confidence:  rec.confidence || null,
-    regime:      (state.currentRegime && state.currentRegime.regime) || null,
+    // Prefer the regime stamped on the rec at scan time (_dtBuildRecs sets
+    // rec.regime from state.currentRegime at the moment the setup was found).
+    // Falling back to the LIVE state.currentRegime here was the bug: a rec can
+    // sit pending for up to 3 days (_dtDismissStaleRecs) before execution, and
+    // regime can flip — or not be classified yet at all on first page load —
+    // by the time dtSaveSnapshot() fires, silently mislabeling/nulling the
+    // snapshot's regime. Mirrors the recHistory regime-stamp fix (4bf219a).
+    regime:      (rec.regime && rec.regime !== 'unknown' ? rec.regime : null)
+                 || (state.currentRegime && state.currentRegime.regime)
+                 || null,
     entry_date:  todayStr(),
     entry_price: price,
     qty:         execQty || rec.qty || null,
@@ -247,7 +261,8 @@ function dtLoadModel() {
 function dtLoadHistory(reset) {
   if (reset) { _dtHistItems = null; _dtHistOffset = 0; _dtHistMore = false; }
   var limit = 20;
-  return fetch('/api/daytrading/history?limit=' + limit + '&offset=' + _dtHistOffset)
+  var recordType = (_dtHistFilter && _dtHistFilter.recordType) || 'executed';
+  return fetch('/api/daytrading/history?limit=' + limit + '&offset=' + _dtHistOffset + '&record_type=' + recordType)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
@@ -350,12 +365,70 @@ function renderDtHistoryTab() {
       </div>`;
   }
 
+  // Client-side filtering (ticker substring + outcome). Backend supports an
+  // `outcome` query param too, but since pages are accumulated client-side
+  // via "Load more", filtering the already-fetched _dtHistItems keeps the
+  // UX simple and matches the convention used by other pages (e.g. journal.js).
+  // recordType is the exception — it's applied server-side (dtLoadHistory passes
+  // it as a query param) because shadow rows can dominate a page of "executed"
+  // results, so the toggle re-fetches from offset 0 rather than post-filtering.
+  var hf = _dtHistFilter;
+  var filteredItems = items;
+  if (hf.ticker) {
+    var tQuery = hf.ticker.toUpperCase();
+    filteredItems = filteredItems.filter(function(it) { return it.ticker && it.ticker.toUpperCase().indexOf(tQuery) !== -1; });
+  }
+  if (hf.outcome !== 'all') {
+    filteredItems = filteredItems.filter(function(it) { return (it.outcome || 'open') === hf.outcome; });
+  }
+  var hasHistFilters = !!hf.ticker || hf.outcome !== 'all' || hf.recordType !== 'executed';
+
+  var filterHTML = `
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.6px">Filters</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="text-xs text-muted">${filteredItems.length} of ${items.length} shown</span>
+          ${hasHistFilters ? `<button class="btn btn-sm" onclick="resetDtHistFilter()">✕ Clear filters</button>` : ''}
+        </div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+        <div>
+          <div class="form-label" style="margin-bottom:3px">Ticker</div>
+          <input type="text" placeholder="e.g. CBA" value="${hf.ticker}"
+            oninput="setDtHistFilterKey('ticker', this.value.toUpperCase())"
+            style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:12px;width:80px">
+        </div>
+        <div>
+          <div class="form-label" style="margin-bottom:3px">Outcome</div>
+          <select onchange="setDtHistFilterKey('outcome', this.value)"
+            style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:12px">
+            <option value="all"        ${hf.outcome==='all'       ?'selected':''}>All outcomes</option>
+            <option value="win"        ${hf.outcome==='win'       ?'selected':''}>Win ✓</option>
+            <option value="loss"       ${hf.outcome==='loss'      ?'selected':''}>Loss ✗</option>
+            <option value="breakeven"  ${hf.outcome==='breakeven' ?'selected':''}>Breakeven</option>
+            <option value="open"       ${hf.outcome==='open'      ?'selected':''}>Open</option>
+          </select>
+        </div>
+        <div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;padding-bottom:5px"
+            title="Shadow records are ML training data written for below-threshold setups — never executed, never manually closed. They resolve via r_multiple after ~8 days instead of an exit price/date.">
+            <input type="checkbox" ${hf.recordType === 'all' ? 'checked' : ''}
+              onchange="setDtHistFilterKey('recordType', this.checked ? 'all' : 'executed')">
+            🔬 Show shadow records (ML training data, not real trades)
+          </label>
+        </div>
+      </div>
+    </div>`;
+
   var rowsHTML = '';
   if (items.length === 0) {
     rowsHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">No completed trades recorded yet.<br>Execute a day trade to start building your history.</div>';
+  } else if (filteredItems.length === 0) {
+    rowsHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">No trades match the current filters.</div>';
   } else {
     rowsHTML = `
-      <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <table class="tbl-stack" style="width:100%;border-collapse:collapse;font-size:12px">
         <thead>
           <tr style="border-bottom:1px solid var(--border);color:var(--text-secondary)">
             <th style="text-align:left;padding:5px 4px">Ticker</th>
@@ -363,6 +436,7 @@ function renderDtHistoryTab() {
             <th style="text-align:left;padding:5px 4px">Entry</th>
             <th style="text-align:right;padding:5px 4px">Exit</th>
             <th style="text-align:right;padding:5px 4px">P&L%</th>
+            <th style="text-align:right;padding:5px 4px">P&L $</th>
             <th style="text-align:center;padding:5px 4px">Hold</th>
             <th style="text-align:left;padding:5px 4px">Outcome</th>
             <th style="text-align:left;padding:5px 4px">Regime</th>
@@ -370,7 +444,7 @@ function renderDtHistoryTab() {
           </tr>
         </thead>
         <tbody>
-          ${items.map(_dtHistRow).join('')}
+          ${filteredItems.map(_dtHistRow).join('')}
         </tbody>
       </table>
       ${_dtHistMore
@@ -391,8 +465,40 @@ function renderDtHistoryTab() {
         </div>
       </div>
       ${statsHTML}
+      ${filterHTML}
       ${rowsHTML}
     </div>`;
+}
+
+/* ── History filter state helpers ────────────────────────────────────────── */
+function setDtHistFilterKey(key, value) {
+  _dtHistFilter[key] = value;
+  var el = document.getElementById('dt-tab-content');
+  if (key === 'recordType') {
+    // recordType is a server-side query param (not a client-side post-filter like
+    // ticker/outcome) — must re-fetch from offset 0 so pagination/has_more reflect
+    // the new scope.
+    if (el) el.innerHTML = _dtHistLoadingHTML();
+    dtLoadHistory(true).then(function() {
+      if (el) el.innerHTML = renderDtHistoryTab();
+    });
+    return;
+  }
+  if (el) el.innerHTML = renderDtHistoryTab();
+}
+
+function resetDtHistFilter() {
+  var recordTypeChanged = _dtHistFilter.recordType !== 'executed';
+  _dtHistFilter = { ticker: '', outcome: 'all', recordType: 'executed' };
+  var el = document.getElementById('dt-tab-content');
+  if (recordTypeChanged) {
+    if (el) el.innerHTML = _dtHistLoadingHTML();
+    dtLoadHistory(true).then(function() {
+      if (el) el.innerHTML = renderDtHistoryTab();
+    });
+    return;
+  }
+  if (el) el.innerHTML = renderDtHistoryTab();
 }
 
 function _dtHistLoadingHTML() {
@@ -407,20 +513,71 @@ function _dtStatCard(label, value, color) {
 }
 
 function _dtHistRow(item) {
+  var isShadow = item.record_type === 'shadow';
   var outcome = item.outcome || 'open';
   var outcomeColor = outcome === 'win' ? '#059669' : outcome === 'loss' ? '#dc2626' : outcome === 'open' ? '#6366f1' : '#94a3b8';
+  var typeLabel = item.trade_type === 'intraday' ? '⚡' : '◈';
+
+  if (isShadow) {
+    // Shadow rows are ML bias-correction training data (routes/day_trade_training.py
+    // _resolve_shadow_outcomes) — never executed, never manually closed. They resolve
+    // via r_multiple ~8 days after entry, not exit_price/exit_date/pnl_pct, so the
+    // Exit/P&L%/P&L $/Hold columns would otherwise show misleading "—" placeholders
+    // that look like broken real trades.
+    var resolved = item.r_multiple != null;
+    var rStr = resolved
+      ? (item.r_multiple >= 0 ? '+' : '') + Number(item.r_multiple).toFixed(2) + 'R'
+      : 'Pending (~8d)';
+    var rColor = resolved ? (item.r_multiple >= 0 ? '#059669' : '#dc2626') : 'var(--text-muted)';
+    var shadowReasonLabel = item.shadow_reason ? String(item.shadow_reason).replace(/_/g, ' ') : '—';
+
+    return `<tr style="border-bottom:1px solid var(--border-subtle);opacity:0.85">
+      <td data-label="Ticker" style="padding:5px 4px;font-weight:600">${item.ticker}</td>
+      <td data-label="Type" style="padding:5px 4px;color:var(--text-muted)">${typeLabel} ${item.trade_type || 'swing'}</td>
+      <td data-label="Entry" style="padding:5px 4px">${item.entry_date || '—'}<br><span style="color:var(--text-muted)">$${item.entry_price != null ? Number(item.entry_price).toFixed(3) : '—'}</span></td>
+      <td data-label="Exit" style="padding:5px 4px;text-align:right;color:var(--text-muted);font-size:11px">N/A<br><span title="${shadowReasonLabel}">(${shadowReasonLabel})</span></td>
+      <td data-label="P&L%" colspan="2" style="padding:5px 4px;text-align:right;font-weight:600;color:${rColor}">${rStr}</td>
+      <td data-label="Hold" style="padding:5px 4px;text-align:center;color:var(--text-muted)">—</td>
+      <td data-label="Outcome" style="padding:5px 4px">
+        <span style="background:#a855f722;color:#a855f7;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600" title="ML training data — confidence was below the action threshold, never an executed trade">🔬 SHADOW</span>
+      </td>
+      <td data-label="Regime" style="padding:5px 4px;color:var(--text-muted);font-size:11px">${item.regime || '—'}</td>
+      <td style="padding:5px 4px;text-align:right">
+        <button class="btn btn-sm" style="font-size:10px;padding:2px 6px;color:#dc2626" onclick="dtDeleteSnapshot(${item.id})">✕</button>
+      </td>
+    </tr>`;
+  }
+
   var pnlStr = item.pnl_pct != null ? (item.pnl_pct >= 0 ? '+' : '') + item.pnl_pct.toFixed(2) + '%' : '—';
   var pnlColor = item.pnl_pct >= 0 ? '#059669' : '#dc2626';
-  var typeLabel = item.trade_type === 'intraday' ? '⚡' : '◈';
+
+  // $ P&L is not persisted server-side (only pnl_pct / r_multiple are) — compute it
+  // client-side from entry_price/exit_price/qty. Direction-aware: day-trade
+  // strategies in this codebase (js/intraday-strategy.js) are long-only ('BUY'),
+  // but SELL/TRIM-style short exits are handled defensively in case that changes.
+  var pnlDollar = null;
+  if (item.entry_price != null && item.exit_price != null && item.qty != null) {
+    var isShort = item.action === 'SELL' || item.action === 'TRIM';
+    var diff = isShort
+      ? (Number(item.entry_price) - Number(item.exit_price))
+      : (Number(item.exit_price) - Number(item.entry_price));
+    pnlDollar = diff * Number(item.qty);
+  }
+  var pnlDollarStr = pnlDollar != null
+    ? (pnlDollar >= 0 ? '+$' : '-$') + Math.abs(pnlDollar).toFixed(2)
+    : '—';
+  var pnlDollarColor = pnlDollar != null ? (pnlDollar >= 0 ? '#059669' : '#dc2626') : 'var(--text-muted)';
+
   return `<tr style="border-bottom:1px solid var(--border-subtle)">
-    <td style="padding:5px 4px;font-weight:600">${item.ticker}</td>
-    <td style="padding:5px 4px;color:var(--text-muted)">${typeLabel} ${item.trade_type || 'swing'}</td>
-    <td style="padding:5px 4px">${item.entry_date || '—'}<br><span style="color:var(--text-muted)">$${item.entry_price != null ? Number(item.entry_price).toFixed(3) : '—'}</span></td>
-    <td style="padding:5px 4px;text-align:right">${item.exit_date || '—'}<br><span style="color:var(--text-muted)">${item.exit_price != null ? '$' + Number(item.exit_price).toFixed(3) : '—'}</span></td>
-    <td style="padding:5px 4px;text-align:right;font-weight:600;color:${pnlColor}">${pnlStr}</td>
-    <td style="padding:5px 4px;text-align:center;color:var(--text-muted)">${item.actual_hold_days != null ? item.actual_hold_days + 'd' : '—'}</td>
-    <td style="padding:5px 4px"><span style="background:${outcomeColor}22;color:${outcomeColor};padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600">${outcome.toUpperCase()}</span></td>
-    <td style="padding:5px 4px;color:var(--text-muted);font-size:11px">${item.regime || '—'}</td>
+    <td data-label="Ticker" style="padding:5px 4px;font-weight:600">${item.ticker}</td>
+    <td data-label="Type" style="padding:5px 4px;color:var(--text-muted)">${typeLabel} ${item.trade_type || 'swing'}</td>
+    <td data-label="Entry" style="padding:5px 4px">${item.entry_date || '—'}<br><span style="color:var(--text-muted)">$${item.entry_price != null ? Number(item.entry_price).toFixed(3) : '—'}</span></td>
+    <td data-label="Exit" style="padding:5px 4px;text-align:right">${item.exit_date || '—'}<br><span style="color:var(--text-muted)">${item.exit_price != null ? '$' + Number(item.exit_price).toFixed(3) : '—'}</span></td>
+    <td data-label="P&L%" style="padding:5px 4px;text-align:right;font-weight:600;color:${pnlColor}">${pnlStr}</td>
+    <td data-label="P&L $" style="padding:5px 4px;text-align:right;font-weight:600;color:${pnlDollarColor}">${pnlDollarStr}</td>
+    <td data-label="Hold" style="padding:5px 4px;text-align:center;color:var(--text-muted)">${item.actual_hold_days != null ? item.actual_hold_days + 'd' : '—'}</td>
+    <td data-label="Outcome" style="padding:5px 4px"><span style="background:${outcomeColor}22;color:${outcomeColor};padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600">${outcome.toUpperCase()}</span></td>
+    <td data-label="Regime" style="padding:5px 4px;color:var(--text-muted);font-size:11px">${item.regime || '—'}</td>
     <td style="padding:5px 4px;text-align:right">
       <button class="btn btn-sm" style="font-size:10px;padding:2px 6px;color:#dc2626" onclick="dtDeleteSnapshot(${item.id})">✕</button>
     </td>

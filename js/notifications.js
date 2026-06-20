@@ -28,9 +28,10 @@ var _CATEGORY_ICONS = {
 };
 
 // Categories that deep-link to a page when the notification is clicked.
-// Used by the outcome-proposal notifications (stop/target hit → record the close)
-// and the ML retrain nudge.
-var _NOTIF_NAV = { outcome: 'recommendations', outcome_dt: 'day-trading', retrain: 'day-trading' };
+// Used by the outcome-proposal notifications (stop/target hit → record the close),
+// the ML retrain nudge, and scan-complete notifications (Market Scanner only —
+// alertScanComplete() is called solely from pages/scanner.js's background poll).
+var _NOTIF_NAV = { outcome: 'recommendations', outcome_dt: 'day-trading', retrain: 'day-trading', scan: 'scanner' };
 
 function _notifNavigate(category) {
   var page = _NOTIF_NAV[category];

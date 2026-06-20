@@ -2,7 +2,7 @@
 1. In Learning Loop, manual tagging makes the web page refresh everytime.
 I want to keep dynamically update the tag on every click and don't get the page reloaded
 
-2. Removed/Ignored
+
 
 3. Check the calculations for BB%B as it shows 101% in some cases
 

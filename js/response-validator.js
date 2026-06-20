@@ -41,6 +41,29 @@ const SELL_SECONDARY_FACTORS = new Set([
 
 const SELL_URGENCY = new Set(['immediate', 'routine', 'monitor']);
 
+// ── Reject/defer contradiction phrases ────────────────────────────────────
+// Strong, specific language that means "this rec should not be actionable" —
+// kept narrow to avoid false positives on legitimate cautionary reasoning
+// (e.g. "risk of X" or "watch for Y" do NOT trigger; only explicit
+// reject/defer/fail-rule/do-not-execute language does).
+const _REJECT_DEFER_PHRASES = [
+  'reject this',
+  'reject —',
+  'reject:',
+  'fails rule',
+  'anti-churn block applies',
+  'do not execute',
+  "don't execute",
+  'should be omitted',
+  'should not be executed',
+  'deferring to',
+  'defer to',
+  'defer this',
+];
+
+// Matches "reject <TICKER>" (e.g. "REJECT GMG") without hardcoding any ticker.
+const _REJECT_TICKER_RE = /\breject\s+[A-Z0-9]{2,5}\b/i;
+
 // Forbidden combinations — logical contradictions that indicate confused reasoning.
 const SELL_FORBIDDEN_COMBOS = [
   ['target_reached', 'stop_triggered'],   // can't hit both simultaneously
@@ -280,6 +303,29 @@ const _REC_BUSINESS_RULES = [
       return `scenarios p-values sum to ${total} — must sum to 1.0 (±0.01)`;
     },
   },
+  // Reject/defer contradiction: reasoning concludes "reject this rec" or "defer to a later
+  // date" but the rec still carries an actionable (non-HOLD) action. Claude sometimes talks
+  // itself out of a trade in the reasoning text yet still emits the rec object — AI Call #20
+  // 2026-06-17 found this twice (GMG "REJECT", SHL "anti-churn block applies... deferring").
+  // A contradiction here means the rec should never have been actionable in the first place.
+  {
+    id: 'reject-defer-contradiction',
+    check: r => {
+      if (r.action === 'HOLD' || !r.reasoning) return true;
+      const text = r.reasoning.toLowerCase();
+      const phraseHit = _REJECT_DEFER_PHRASES.some(p => text.includes(p));
+      const tickerHit = _REJECT_TICKER_RE.test(r.reasoning);
+      return !phraseHit && !tickerHit;
+    },
+    message: r => {
+      const text = (r.reasoning || '').toLowerCase();
+      const hit = _REJECT_DEFER_PHRASES.find(p => text.includes(p))
+        || (_REJECT_TICKER_RE.exec(r.reasoning) || [])[0]
+        || 'reject/defer language';
+      return `reasoning says "${hit}" but action="${r.action}" — contradiction: ` +
+        `either the rec should be omitted/deferred or the reasoning corrected`;
+    },
+  },
   // Anti-churn: SELL/TRIM within 7 days of a BUY/TOP_UP requires a catastrophe flag in factorsUsed[]
   {
     id: 'anti-churn-flip',
@@ -307,11 +353,33 @@ const _REC_BUSINESS_RULES = [
   },
 ];
 
+// AI-Call-#20 (2026-06-17, WES TRIM netProfit=-12.77 vs real unrealisedPnl=-$2.77):
+// per CLAUDE.md Rule 4, Claude is told NOT to compute these — qty stays 0 and the
+// quant engine (computeTradeParams() for BUY/TOP_UP; analysis.js's deterministic
+// SELL/TRIM sizing) is the sole source of truth for sizing-derived P&L fields.
+// Strip any AI-supplied values here so a raw, unrecomputed rec can never leak
+// fabricated numbers to the UI/learning log if this validator is used outside the
+// analysis.js pipeline (which currently overwrites these fields itself downstream).
+const _AI_UNTRUSTED_NUMERIC_FIELDS = ['netProfit', 'expectedProfit', 'riskAUD', 'rewardAUD'];
+
+function _stripUntrustedAiFields(rec) {
+  let out = rec;
+  let stripped = false;
+  for (const f of _AI_UNTRUSTED_NUMERIC_FIELDS) {
+    if (out[f] != null) {
+      if (!stripped) { out = { ...out }; stripped = true; }
+      delete out[f];
+    }
+  }
+  if (stripped) out._aiNumericFieldsStripped = true;
+  return out;
+}
+
 // validateRec — returns { valid, errors[], fixed }
 // fixed is the auto-repaired rec if all fixable errors were repaired; null otherwise.
 function validateRec(rec) {
   const errors = [];
-  let fixed = { ...rec };
+  let fixed = { ..._stripUntrustedAiFields(rec) };
   let allFixed = true;
 
   // Schema checks

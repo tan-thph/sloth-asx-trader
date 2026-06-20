@@ -1039,12 +1039,24 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     if (typeof validateRec === 'function') {
       const validatorFlagged = [];
       const validatorDropped = [];
+      const validatorDemoted = [];
       recs = recs.flatMap(r => {
         const { valid, errors, fixed } = validateRec(r);
         if (valid) return [fixed || r];   // fixed carries error-free repairs (e.g. [driver: X] suffix)
         if (fixed) {
           console.warn(`[validator] repaired ${r.action} ${r.ticker}:`, errors);
           return [{ ...fixed, _validatorFixed: errors }];
+        }
+        // §AI-call-20: a rec whose own reasoning concludes "reject"/"defer"/"fails rule"
+        // etc. is self-contradicting — the AI already decided this shouldn't be
+        // actionable, so flag-and-keep would surface a rec the model itself rejected.
+        // Auto-demote out of recs[] (mirrors the dataGaps[] convention) rather than
+        // showing it as an executable card.
+        const contradictionHit = errors.find(e => /^reasoning says ".*" but action=/.test(e));
+        if (contradictionHit) {
+          console.warn(`[validator] demoted self-contradicting ${r.action} ${r.ticker}:`, errors);
+          validatorDemoted.push(`${r.ticker}: ${contradictionHit}`);
+          return [];
         }
         // Flag-don't-drop (user decision 2026-06-11): unfixable recs stay
         // visible with a highlighted warning panel listing every failed rule —
@@ -1063,6 +1075,10 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         validatorFlagged.push(`${r.action} ${r.ticker}`);
         return [{ ...r, _ruleWarnings: errors }];
       });
+      if (validatorDemoted.length > 0) {
+        const note = ` [Omitted ${validatorDemoted.length} self-contradicting rec(s) (reasoning rejected/deferred the trade): ${validatorDemoted.join('; ')}]`;
+        summary = (summary ? summary + ' ' : '') + note.trim();
+      }
       if (validatorFlagged.length > 0) {
         const note = ` [⚠ ${validatorFlagged.length} rec(s) failed validation — shown highlighted for your review: ${validatorFlagged.join(', ')}]`;
         summary = (summary ? summary + ' ' : '') + note.trim();

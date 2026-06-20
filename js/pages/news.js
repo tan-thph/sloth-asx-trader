@@ -407,7 +407,7 @@ function _newsPageHTML(status, sentiment) {
         ${provider === 'groq' ? `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             ${groqStatusHtml}
-            <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent)">Settings</a></span>
+            <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent-primary)">Settings</a></span>
           </div>
           <div class="form-row" style="margin-bottom:8px">
             <div class="form-label" style="font-size:11px">Groq Model</div>
@@ -419,7 +419,7 @@ function _newsPageHTML(status, sentiment) {
         ` : provider === 'google' ? `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             ${googleStatusHtml}
-            <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent)">Settings</a></span>
+            <span style="font-size:11px;color:var(--text-muted)">&#8594; Manage key in <a href="#" onclick="showPage('settings');return false" style="color:var(--accent-primary)">Settings</a></span>
           </div>
           <div class="form-row" style="margin-bottom:8px">
             <div class="form-label" style="font-size:11px">Gemini Model</div>
@@ -605,7 +605,7 @@ function _newsCard(item, portfolioTickers, watchlistTickers = []) {
           ${contentHtml}
           ${tickerBadges || tagBadges ? `<div style="display:flex;gap:4px;flex-wrap:wrap">${tickerBadges}${tagBadges}</div>` : ''}
         </div>
-        ${item.url ? `<a href="${item.url}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);white-space:nowrap;flex-shrink:0" title="Open article">↗</a>` : ''}
+        ${item.url ? `<a href="${item.url}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent-primary);white-space:nowrap;flex-shrink:0" title="Open article">↗</a>` : ''}
       </div>
     </div>`;
 }

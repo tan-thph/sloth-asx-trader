@@ -425,7 +425,7 @@ function _renderDtRec(r, compact = false) {
 
   const borderColor = isClosed ? '#059669' : isExecuted ? '#6366f1' : isPending ? '#f59e0b' : '#6b7280';
   return `
-    <div class="card" style="border-left:3px solid ${borderColor};padding:12px 14px${isStale ? ';opacity:.75' : ''}">
+    <div class="card" style="border-left:3px solid ${borderColor};padding:12px 14px${(isStale || r._stale) ? ';opacity:.75' : ''}">
       <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">
 
         <!-- Left: ticker + signals -->
@@ -436,6 +436,7 @@ function _renderDtRec(r, compact = false) {
             ${isExecuted ? `<span style="background:#6366f1;color:#fff;font-size:10px;padding:2px 7px;border-radius:4px">EXECUTED</span>` : ''}
             ${isClosed   ? `<span style="background:#059669;color:#fff;font-size:10px;padding:2px 7px;border-radius:4px">CLOSED</span>` : ''}
             ${isStale    ? `<span style="background:#ef444422;color:#ef4444;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Setup is ${recAgeDays}d old — signals may no longer be valid">⚠ STALE ${recAgeDays}d</span>` : ''}
+            ${r._stale   ? `<span style="background:#f59e0b22;color:#f59e0b;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Did not reappear in the latest universe scan (missed ${r._staleScans || 1}/${3} scan(s)) — kept until it reappears or expires">⚠ NOT IN LATEST SCAN</span>` : ''}
             ${r.holdDays ? `<span style="font-size:11px;color:var(--text-muted)">${r.holdDays}d hold est.</span>` : ''}
             ${isPending && typeof dtWinProbLabel === 'function' ? dtWinProbLabel(r) : ''}
             ${isExecuted ? _dtTimeStopBadge(r) : ''}

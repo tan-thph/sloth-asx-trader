@@ -126,8 +126,8 @@ async function renderSignalsPage(gen) {
         <div class="mb-2" style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:12px">
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
             <div style="display:flex;gap:2px;background:var(--bg-primary);border-radius:var(--radius-md);padding:2px">
-              <button class="btn btn-sm" style="padding:3px 9px;font-size:11px;${(_sigChartOpts[t]||{}).mode!=='line'?'background:var(--accent);color:#fff;border-color:var(--accent)':''}" onclick="_sigChartSet('${t}','mode','candle')">Candle</button>
-              <button class="btn btn-sm" style="padding:3px 9px;font-size:11px;${(_sigChartOpts[t]||{}).mode==='line'?'background:var(--accent);color:#fff;border-color:var(--accent)':''}" onclick="_sigChartSet('${t}','mode','line')">Line</button>
+              <button class="btn btn-sm" style="padding:3px 9px;font-size:11px;${(_sigChartOpts[t]||{}).mode!=='line'?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="_sigChartSet('${t}','mode','candle')">Candle</button>
+              <button class="btn btn-sm" style="padding:3px 9px;font-size:11px;${(_sigChartOpts[t]||{}).mode==='line'?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="_sigChartSet('${t}','mode','line')">Line</button>
             </div>
             <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">
               <input type="checkbox" ${(_sigChartOpts[t]||{}).showBB!==false?'checked':''} onchange="_sigChartSet('${t}','showBB',this.checked)"> BB
@@ -344,7 +344,7 @@ function _renderSeasonality(ticker, d) {
     const isCurrent=i===now;
     const winRate=m.count>0?Math.round(m.positive/m.count*100):0;
     const col=isPos?'#16a34a':'#dc2626';
-    const border=isCurrent?'2px solid var(--accent)':'1px solid transparent';
+    const border=isCurrent?'2px solid var(--accent-primary)':'1px solid transparent';
     return `<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0;cursor:default;border:${border};border-radius:4px;padding:2px 1px"
               title="${m.month}: avg ${m.avg>=0?'+':''}${m.avg}% | win rate ${winRate}% | range ${m.min}% to ${m.max}% (${m.count} years)">
       <div style="font-size:10px;font-weight:600;color:${col};margin-bottom:2px">${m.avg>=0?'+':''}${m.avg}%</div>

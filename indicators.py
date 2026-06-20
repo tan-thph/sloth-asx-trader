@@ -518,6 +518,32 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     volume = hist["Volume"]
     open_  = hist["Open"]
 
+    # ── Secondary fetch: unadjusted (nominal) history for high_60d/low_60d ────
+    # auto_adjust=True retroactively shifts the WHOLE series down for dividends/
+    # splits paid since each historical bar — correct for return-based indicators
+    # (RSI, MACD, SMA, Bollinger all stay on the adjusted series above) but wrong
+    # for "what price did this stock actually trade at" levels like the Fibonacci
+    # day-trade zone, which a trader reads straight off a nominal chart. yfinance
+    # has no single call that returns both bases, so this is a second network
+    # call — routed through the same Stooq fallback (which is nominal-only by
+    # construction) and the same forming-bar/sanity guards as the primary fetch.
+    try:
+        hist_raw = stk.history(period=period, auto_adjust=False)
+    except Exception:
+        hist_raw = pd.DataFrame()
+    if hist_raw.empty or len(hist_raw) < 30:
+        hist_raw = _fetch_stooq_history(ticker, period)
+    if not hist_raw.empty:
+        hist_raw = _drop_forming_bar(hist_raw)
+        hist_raw = _sanity_check(hist_raw, ticker)
+    if hist_raw.empty or len(hist_raw) < 30:
+        # Fall back to the adjusted series rather than losing the fields outright.
+        high_raw = high
+        low_raw  = low
+    else:
+        high_raw = hist_raw["High"]
+        low_raw  = hist_raw["Low"]
+
     # ── Trend ─────────────────────────────────────────────────────────────────
     sma_20  = close.rolling(20).mean()
     sma_50  = close.rolling(50).mean()
@@ -572,8 +598,8 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "macd_hist_positive": macd_hist.iloc[-1] > 0,
         "macd_hist_rising":  macd_hist.iloc[-1] > macd_hist.iloc[-2],
     }
-    bullish_count = sum(1 for v in trend_signals.values() if v is True)
-    bearish_count = sum(1 for v in trend_signals.values() if v is False)
+    bullish_count = sum(1 for v in trend_signals.values() if v is not None and bool(v) is True)
+    bearish_count = sum(1 for v in trend_signals.values() if v is not None and bool(v) is False)
     trend_score   = (bullish_count - bearish_count) / len(trend_signals)
 
     # ── ADX ───────────────────────────────────────────────────────────────────
@@ -828,8 +854,8 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "return_20d": pct_return(20),
         "return_60d": pct_return(60),
         "return_90d": pct_return(90),
-        "high_60d":   safe_float(high.tail(60).max())  if len(high) >= 60 else None,
-        "low_60d":    safe_float(low.tail(60).min())   if len(low)  >= 60 else None,
+        "high_60d":   safe_float(high_raw.tail(60).max()) if len(high_raw) >= 60 else None,
+        "low_60d":    safe_float(low_raw.tail(60).min())  if len(low_raw)  >= 60 else None,
 
         # Signal
         "composite_signal": composite,
