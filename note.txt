@@ -168,6 +168,7 @@ netProfit: -12.77 for WES TRIM — but the holding shows unrealisedPnl: -$2.77 o
 How the Claude API call will handle those day trading setups? 
 
 25. Check where ORG and GMG in Day Trading history - Swing - on 17 Jun came from. Can't see any info regarding close those trades
+Is any trade from Intraday being converted to Swing?
 
 26. I want to keep Active Setups in Day Trading and dispaly live prices with P&L. Check why EVT.AX disappeared in Active Setups after
 I ran the Day Trade Scan again. 
@@ -197,3 +198,10 @@ Also, how is the Market Scanner different from Day Trading tab in term of setups
 31. Acccount tags in Portfolio are hilighted in white when selected, so they are not visible in light theme
 
 32. How News and Announcements are fetched to the API call?
+
+33. Considering moving to llama.cpp for performance improvement.?? Groq free API working fine now
+
+34. Day Trading history easily get corrupted and lost all data. The issue happened after I opened asx_trading.html instead of the ngrok website link. How to fix it?
+New lodged trades also don't get saved.
+
+35. check AI Call #24 2026-06-19 13:36:12 • portfolio • claude-sonnet-4-6, Response was {}
