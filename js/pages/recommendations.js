@@ -994,6 +994,24 @@ function _showPreTradeChecklist(recId, onConfirm) {
   const rec = state.recommendations.find(r => r.id === recId);
   const isReducing = rec && (rec.action === 'SELL' || rec.action === 'TRIM');
 
+  // ── Confidence-floor breach: dedicated hard gate, not just one of six items ──
+  // Matches the exact warning string built in analysis.js (~line 1210-1211).
+  const lowConfWarning = (rec && Array.isArray(rec._ruleWarnings))
+    ? rec._ruleWarnings.find(w => /below the \d+% floor/.test(w))
+    : null;
+  let lowConfBanner = '';
+  if (lowConfWarning) {
+    const floorPct = (100 * (state.analysisConfig.rules?.minConfidence ?? 0.62)).toFixed(0);
+    const confPct  = (100 * (rec.confidence || 0)).toFixed(0);
+    lowConfBanner = `<div style="background:#fee2e2;border:2px solid #dc2626;border-radius:6px;padding:10px 12px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:#991b1b;text-transform:uppercase;letter-spacing:0.3px">⚠ Below Confidence Floor</div>
+      <div style="font-size:12px;color:#991b1b;margin-top:4px;line-height:1.5">
+        This rec's calibration-adjusted confidence is <strong>${confPct}%</strong>, below the system's <strong>${floorPct}%</strong> floor.
+        Recs in this range have historically underperformed — executing means overriding that empirical signal on your own judgment.
+      </div>
+    </div>`;
+  }
+
   // CGT warning: check if any parcel for this ticker is within 45 days of 12-month mark
   let cgtWarning = '';
   if (isReducing && rec) {
@@ -1035,13 +1053,22 @@ function _showPreTradeChecklist(recId, onConfirm) {
         : 'This entry fits a planned strategy — not FOMO or impulse buying' },
   ];
 
+  const lowConfItemId = 'chk-low-conf-ack';
+  const lowConfItemHtml = lowConfWarning ? `
+    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;background:#fee2e2;border:1px solid #dc2626;border-radius:6px;padding:8px 10px">
+      <input type="checkbox" id="${lowConfItemId}" onchange="_updateChecklistBtn()" style="margin-top:2px;width:16px;height:16px;flex-shrink:0">
+      <span style="font-weight:600;color:#991b1b">I understand this recommendation's confidence is below the system floor and am executing on my own judgment, not the AI's.</span>
+    </label>` : '';
+
   const dialog = document.createElement('dialog');
   dialog.id = 'pre-trade-dialog';
+  dialog.dataset.lowConf = lowConfWarning ? '1' : '0';
   dialog.style.cssText = 'padding:0;border:none;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.35);background:var(--bg-primary);color:var(--text-primary);max-width:440px;width:90vw';
   dialog.innerHTML = `
     <div style="padding:20px 22px">
       <div style="font-size:15px;font-weight:700;margin-bottom:4px">Pre-Trade Checklist</div>
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">${rec ? rec.action + ' ' + rec.ticker : ''} — tick at least 4 to proceed</div>
+      ${lowConfBanner}
       ${cgtWarning}
       <div id="checklist-items" style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
         ${items.map(it => `
@@ -1049,10 +1076,11 @@ function _showPreTradeChecklist(recId, onConfirm) {
             <input type="checkbox" id="${it.id}" onchange="_updateChecklistBtn()" style="margin-top:2px;width:16px;height:16px;flex-shrink:0">
             <span>${it.label}</span>
           </label>`).join('')}
+        ${lowConfItemHtml}
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button onclick="document.getElementById('pre-trade-dialog').close()" class="btn btn-sm">Cancel</button>
-        <button id="checklist-override-btn" onclick="_checklistProceed('override')" class="btn btn-sm" style="color:var(--text-muted)">Proceed anyway</button>
+        ${lowConfWarning ? '' : '<button id="checklist-override-btn" onclick="_checklistProceed(\'override\')" class="btn btn-sm" style="color:var(--text-muted)">Proceed anyway</button>'}
         <button id="checklist-confirm-btn" onclick="_checklistProceed('confirm')" class="btn btn-sm btn-success" disabled>✓ Execute Trade</button>
       </div>
     </div>`;
@@ -1061,6 +1089,7 @@ function _showPreTradeChecklist(recId, onConfirm) {
   // Store callback so the close handlers can call it
   dialog._onConfirm = onConfirm;
   dialog.showModal();
+  _updateChecklistBtn();
 }
 
 // ── §9.4: "Why did I get this rec?" traceability modal ────────────────────────
@@ -1143,15 +1172,32 @@ function showRecTraceability(recId) {
 
 function _updateChecklistBtn() {
   const dialog = document.getElementById('pre-trade-dialog');
+  if (!dialog) return;
   const checked = dialog.querySelectorAll('input[type=checkbox]:checked').length;
-  const total   = dialog.querySelectorAll('input[type=checkbox]').length;
   const btn = document.getElementById('checklist-confirm-btn');
-  btn.disabled = checked < 4;
-  btn.style.opacity = checked < 4 ? '0.5' : '1';
+  const isLowConf = dialog.dataset.lowConf === '1';
+  let ok = checked >= 4;
+  if (isLowConf) {
+    const lowConfChecked = !!document.getElementById('chk-low-conf-ack')?.checked;
+    ok = ok && lowConfChecked;
+  }
+  btn.disabled = !ok;
+  btn.style.opacity = ok ? '1' : '0.5';
 }
 
 function _checklistProceed(mode) {
   const dialog = document.getElementById('pre-trade-dialog');
+  // Confidence-floor breach: the dedicated acknowledgment checkbox is a
+  // non-negotiable gate — there is no override path that skips it (the
+  // "Proceed anyway" button is not even rendered in this case, but guard
+  // here too in case mode==='override' is ever reachable for this rec).
+  if (dialog?.dataset.lowConf === '1') {
+    const ackChecked = !!document.getElementById('chk-low-conf-ack')?.checked;
+    if (!ackChecked) {
+      toast('You must tick the confidence-floor acknowledgment before executing this trade', 'error');
+      return;
+    }
+  }
   const cb = dialog?._onConfirm;
   dialog?.close();
   dialog?.remove();

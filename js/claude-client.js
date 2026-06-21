@@ -81,6 +81,7 @@ const _PORTFOLIO_TOOL = {
             signals:               { type: 'array', items: { type: 'string' } },
             invalidationCondition: { type: 'string' },
             bearCase:              { type: 'string' },
+            bullCase:              { type: 'string' },
             weightGuidance:        { type: 'string' },
             expectedProfit:        { type: 'number' },
             netProfit:             { type: 'number' },

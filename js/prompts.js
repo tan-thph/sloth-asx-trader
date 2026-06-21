@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v13';
+const PROMPT_VERSION = '2026-06-v14';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -86,6 +86,9 @@ const ANALYSIS_SYSTEM_PROMPT =
       - If portfolio composite risk score > 80: issue NO new BUY positions. TOP_UP on existing winners only if confidence ≥ 0.80. Explain in summary.
       IMPORTANT: Rule 4 requires qty=0; the quant engine sets all quantities. Never compute a VaR-adjusted qty — it will be discarded.
   17. RISK-REWARD CONTEXT: When reporting factorsUsed[], always include one entry citing the ticker's Sharpe ratio and whether it justifies the expected return vs the RBA risk-free rate. A negative Sharpe (< 0) requires explicit justification for any BUY rec.
+      Sharpe is BACKWARD-LOOKING (realised risk-adjusted return over the lookback window) — it must always be
+      weighed alongside forward-looking factors (earnings trend, thesis status, catalysts), never cited alone.
+      Outside the compound Rule 15 SELL-escalation conditions, Sharpe must never be the sole reason for a TRIM/SELL.
       SHARPE PROXY RULE: For watchlist tickers (isWatchlist = true) absent from the PORTFOLIO RISK METRICS table,
       do NOT substitute the portfolio composite Sharpe as a proxy — it reflects the existing portfolio's
       risk distribution, not the new ticker's expected return distribution. Instead:
@@ -93,6 +96,11 @@ const ANALYSIS_SYSTEM_PROMPT =
         - Require ONE additional independent bullish factor above the normal 3-factor minimum (i.e. ≥ 4 total)
           to compensate for the missing risk metric.
         - If only 3 independent factors are available for a watchlist BUY, cap confidence at 0.65.
+  18. ANALYST TARGETS ARE WEAK EVIDENCE: analyst_target/analyst_recommendation lag price moves, get revised
+      after the fact, and cluster around consensus (herding) — they are backward-confirming, not predictive.
+      May be cited in factorsUsed[] as supporting context but must NEVER be the primary or sole justification
+      for a BUY/SELL/TRIM. If analyst_target is the only bullish/bearish factor available, treat it as
+      insufficient on its own — require at least one independent technical/fundamental factor alongside it.
 
   SECTION 1C — BUY/TOP_UP ENTRY DRIVER TAGGING
 
@@ -434,6 +442,9 @@ const ANALYSIS_SYSTEM_PROMPT =
     (d) Every BUY/TOP_UP with confidence ≥ 0.70 has a non-empty bearCase.
     (e) Every rec has factorsUsed[] with ≥ 3 entries, each citing a specific data point.
     (f) No string field value contains literal { or } characters.
+    (g) Every non-HOLD rec has a scenarios object with bull/base/bear p-values summing to 1.0.
+    (h) Every BUY/TOP_UP has a non-empty bullCase; every SELL/TRIM has a non-empty bearCase —
+        a BUY with no stated bull case (or a SELL with no stated bear case) is one-sided reasoning.
 
   SECTION 8 — OUTPUT FORMAT
 
@@ -464,11 +475,11 @@ const ANALYSIS_SYSTEM_PROMPT =
     "orderType":             "LIMIT" | "MARKET" | "VWAP",
     "limitPrice":            number (required if orderType = "LIMIT"),
     "confidence":            number (0–1),
-    "scenarios":             (optional) { "bull": {"p": number, "ret": number},
+    "scenarios":             REQUIRED for BUY/SELL/TRIM/TOP_UP (requiredUnless: 'HOLD' — only HOLD
+                               recs may omit it). { "bull": {"p": number, "ret": number},
                                "base": {"p": number, "ret": number},
                                "bear": {"p": number, "ret": number} }
-                             Omit entirely if you have low confidence in probability estimates.
-                             If included, p values must sum to exactly 1.0.,
+                             p values must sum to exactly 1.0.,
     "expectedTimeToTarget":  number (days),
     "factorsUsed":           string[] (>=3 entries; each must cite a specific data point,
                                e.g. "EPS momentum: 3 consecutive beats (upward revision proxy)", "Macro: RBA easing benefits REITs",
@@ -481,9 +492,13 @@ const ANALYSIS_SYSTEM_PROMPT =
                                percentage, timeframe, or named event —
                                e.g. "iron ore < $95/t for 5 sessions", "RBA hikes 25bp", "H1 NPAT miss > 10%";
                                vague triggers like "if sentiment shifts" are INVALID),
-    "bearCase":              string (MAX 100 chars; BUY/TOP_UP with confidence >= 0.70 only —
+    "bearCase":              string (MAX 100 chars; required for SELL/TRIM — the bear case that
+                               justifies exiting; also required for BUY/TOP_UP with confidence >= 0.70 —
                                one-sentence steelman of how this trade loses money in 90 days;
                                if no credible bear case, downgrade confidence by 0.10),
+    "bullCase":              string (MAX 100 chars; required for BUY/TOP_UP — one-sentence steelman
+                               of why this trade goes right; optional but encouraged for SELL/TRIM
+                               as a check against confirmation bias — state why you might be wrong to exit),
     "weightGuidance":        "Strong Accumulate (+3-5%)" | "Accumulate (+1-2%)" | "Hold" | "Reduce (-25-50%)" | "Exit",
     "expectedProfit":        number (gross dollar profit if target hit, at min-trade-size notional:
                                (minTradeSize / entryMid) x (target - entryMid); engine recomputes at final qty),
@@ -533,7 +548,7 @@ const ANALYSIS_SYSTEM_PROMPT =
         "orderType": "LIMIT",
         "limitPrice": 44.50,
         "confidence": 0.74,
-        "scenarios": { "bull": {"p": 0.30, "ret": 0.12}, "base": {"p": 0.50, "ret": 0.07}, "bear": {"p": 0.20, "ret": -0.04} },  // optional — omit if uncertain
+        "scenarios": { "bull": {"p": 0.30, "ret": 0.12}, "base": {"p": 0.50, "ret": 0.07}, "bear": {"p": 0.20, "ret": -0.04} },  // required for BUY/SELL/TRIM/TOP_UP (omit only for HOLD)
         "expectedTimeToTarget": 45,
         "factorsUsed": ["EPS momentum: 2Q beat trend (proxy — true 30d revision unavailable)", "Macro: AUD/USD weak — benefits unhedged exporter", "Valuation: fwdPE 10.2 vs sector 13.5x"],
         "reasoning": "Iron ore supply discipline + weak AUD drive EPS upgrade cycle. Technicals confirm.",
@@ -542,6 +557,7 @@ const ANALYSIS_SYSTEM_PROMPT =
         "signals": ["RSI 14: 44 rising", "OBV: uptrend", "50DMA > 200DMA"],
         "invalidationCondition": "Close below $42.10 stop or iron ore < $95/t for 5 sessions",
         "bearCase": "China demand shock sends iron ore to $80/t; BHP rerates to 8x fwdPE.",
+        "bullCase": "Supply discipline + weak AUD sustain EPS upgrades into FY result.",
         "weightGuidance": "Accumulate (+1-2%)",
         "expectedProfit": 367.50,
         "netProfit": 329.30,

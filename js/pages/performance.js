@@ -745,7 +745,14 @@ async function syncClosedTradesToLearningLoop() {
   // Reconcile outcomes from trade journal (same logic as renderPerformance)
   const reconciled = history.map(r => {
     if (!r.executed || r.outcome === 'skipped') return r;
+    // Manual journal entries (addManualTrade) always carry recId:null. Only a
+    // journal entry created by executing SOME AI rec (markExecuted sets
+    // recId:rec.id) may resolve an AI rec's calibration outcome — a manual
+    // close must never grade an AI recommendation. The ticker+date fallback
+    // exists only to backfill legacy AI-executed entries that predate recId
+    // tracking; it must not be allowed to match a manual close.
     const jMatch = state.tradeJournal.find(t =>
+      t.recId != null &&
       (t.recId === r.id || (t.ticker === r.ticker && t.date === r.date)) &&
       t.status === 'closed' && t.pnl != null
     );
@@ -884,8 +891,11 @@ function computeReconciledRecHistory() {
       const outcome = journalMatch.pnl > 0 ? 'win' : journalMatch.pnl < 0 ? 'loss' : 'breakeven';
       return { ...r, outcome, actualProfit: journalMatch.pnl };
     }
+    // Same recId:null guard as syncClosedTradesToLearningLoop() — a manual
+    // close (addManualTrade) must never resolve an AI rec's displayed outcome.
     const sameDayTrade = state.tradeJournal.find(t =>
-      t.ticker === r.ticker && t.date === r.date && t.status === 'closed' && t.pnl != null
+      t.recId != null && t.ticker === r.ticker && t.date === r.date &&
+      t.status === 'closed' && t.pnl != null
     );
     if (sameDayTrade) {
       const outcome = sameDayTrade.pnl > 0 ? 'win' : sameDayTrade.pnl < 0 ? 'loss' : 'breakeven';

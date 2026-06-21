@@ -134,7 +134,14 @@
       "Bash(powershell *)",
       "Bash(env/Scripts/python.exe -m unittest test_app.TestInfraImprovements -v)",
       "Bash(env/Scripts/python.exe -c \"import json; json.load\\(open\\('portfolio_tool.json'\\)\\)\")",
-      "Bash(file portfolio_tool.json)"
+      "Bash(file portfolio_tool.json)",
+      "PowerShell(Invoke-RestMethod -Uri \"http://127.0.0.1:5000/api/learning/calibration?deep=1\" -Method Get)",
+      "Bash(rm -f _tmp_check.py)",
+      "Bash(ls _tmp_check.py)",
+      "PowerShell(node --check \"js\\\\pages\\\\recommendations.js\" 2>&1; \"EXIT:$LASTEXITCODE\")",
+      "PowerShell(node --version 2>&1)",
+      "PowerShell(node --check js/prompts.js; node --check js/claude-client.js; node --check js/response-validator.js)",
+      "PowerShell(npm *)"
     ]
   }
 }
