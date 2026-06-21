@@ -177,7 +177,7 @@ function dtSaveSnapshot(rec, tradeType, signals, macroData, entryPrice, execQty,
     setup_score:  s.score || null,
   }, features);
 
-  return fetch('/api/daytrading/snapshot', {
+  return fetch(`${API}/api/daytrading/snapshot`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify(body),
@@ -210,7 +210,7 @@ function dtCloseSnapshot(snapshotId, exitData) {
     body.pnl_pct = (body.exit_price - body.entry_price) / body.entry_price * 100;
   }
 
-  return fetch('/api/daytrading/snapshot/' + snapshotId + '/close', {
+  return fetch(`${API}/api/daytrading/snapshot/` + snapshotId + '/close', {
     method:  'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify(body),
@@ -239,7 +239,7 @@ function dtInferExitReason(closePrice, entryPrice, target, stopLoss, action) {
 
 /* ── Load model into _dtModel ────────────────────────────────────────────── */
 function dtLoadModel() {
-  return fetch('/api/daytrading/model')
+  return fetch(`${API}/api/daytrading/model`)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok && d.available) {
@@ -262,7 +262,7 @@ function dtLoadHistory(reset) {
   if (reset) { _dtHistItems = null; _dtHistOffset = 0; _dtHistMore = false; }
   var limit = 20;
   var recordType = (_dtHistFilter && _dtHistFilter.recordType) || 'executed';
-  return fetch('/api/daytrading/history?limit=' + limit + '&offset=' + _dtHistOffset + '&record_type=' + recordType)
+  return fetch(`${API}/api/daytrading/history?limit=` + limit + '&offset=' + _dtHistOffset + '&record_type=' + recordType)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
@@ -283,7 +283,7 @@ function dtLoadHistory(reset) {
 
 /* ── Load stats ───────────────────────────────────────────────────────────── */
 function dtLoadStats() {
-  return fetch('/api/daytrading/stats')
+  return fetch(`${API}/api/daytrading/stats`)
     .then(function(r) { return r.json(); })
     .then(function(d) { if (d.ok) _dtStats = d; return d; })
     .catch(function() { return null; });
@@ -294,7 +294,7 @@ function dtTrain() {
   var btn = document.getElementById('dt-train-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Training…'; }
 
-  fetch('/api/daytrading/train', { method: 'POST' })
+  fetch(`${API}/api/daytrading/train`, { method: 'POST' })
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
@@ -593,7 +593,7 @@ function dtLoadMoreHistory() {
 
 function dtDeleteSnapshot(id) {
   if (!confirm('Delete this trade record?')) return;
-  fetch('/api/daytrading/snapshot/' + id, { method: 'DELETE' })
+  fetch(`${API}/api/daytrading/snapshot/` + id, { method: 'DELETE' })
     .then(function() {
       _dtHistItems = _dtHistItems.filter(function(x) { return x.id !== id; });
       if (_dtStats && _dtStats.total) _dtStats.total--;
@@ -607,7 +607,7 @@ function dtDeleteAllHistory() {
   // Delete each one (small dataset, fine for now)
   var ids = _dtHistItems.map(function(x) { return x.id; });
   Promise.all(ids.map(function(id) {
-    return fetch('/api/daytrading/snapshot/' + id, { method: 'DELETE' });
+    return fetch(`${API}/api/daytrading/snapshot/` + id, { method: 'DELETE' });
   })).then(function() {
     _dtHistItems = [];
     _dtHistOffset = 0;

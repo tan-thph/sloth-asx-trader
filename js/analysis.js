@@ -832,7 +832,6 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   try {
     const { text, usage: _usage } = await callClaude('portfolio', fullUserMessage, {
       systemArray: _systemArray,
-      maxTokens: 8000,
     });
 
     console.log(`[Token audit] recHistory sent: ${recentRecs.length} entries (last5=${last5.length} withPnl=${withPnl.length} withFeedback=${withFeedback.length})`);
