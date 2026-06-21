@@ -125,7 +125,16 @@
       "Bash(cat asx_trader.lock)",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"ProcessId=14220\\\\\" | Select-Object CommandLine\")",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"ProcessId=4424\\\\\" | Select-Object CommandLine\")",
-      "Bash(powershell -Command \"Stop-Process -Id 14220,4424 -Force -ErrorAction SilentlyContinue\")"
+      "Bash(powershell -Command \"Stop-Process -Id 14220,4424 -Force -ErrorAction SilentlyContinue\")",
+      "Bash(env/Scripts/python.exe -m py_compile routes/claude.py)",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/api/db/save -o /dev/null -w \"\")",
+      "Bash(powershell -Command 'Stop-Process -Id __TRACKED_VAR__ -Force -ErrorAction SilentlyContinue')",
+      "Bash(ls asx_trader.lock)",
+      "Bash(ls claude-api.txt)",
+      "Bash(powershell *)",
+      "Bash(env/Scripts/python.exe -m unittest test_app.TestInfraImprovements -v)",
+      "Bash(env/Scripts/python.exe -c \"import json; json.load\\(open\\('portfolio_tool.json'\\)\\)\")",
+      "Bash(file portfolio_tool.json)"
     ]
   }
 }
