@@ -1119,6 +1119,10 @@ class GoogleLLM:
                     )
         context_block = context_block.replace('{', '(').replace('}', ')')
 
+        if stop_event is not None and stop_event.is_set():
+            log.info("GoogleLLM classify: stop_event set — skipping HTTP call")
+            return None
+
         prompt = self.CLASSIFY_PROMPT.format(
             title=title[:200],
             content=_strip_urls((content or ""))[:700],
@@ -1138,6 +1142,9 @@ class GoogleLLM:
                 },
                 timeout=30,
             )
+            if stop_event is not None and stop_event.is_set():
+                log.info("GoogleLLM classify: stop_event set after HTTP — discarding result")
+                return None
             if resp.status_code != 200:
                 log.debug("GoogleLLM HTTP %s: %s", resp.status_code, resp.text[:200])
                 return None
@@ -1205,6 +1212,10 @@ class GroqLLM:
                     )
         context_block = context_block.replace('{', '(').replace('}', ')')
 
+        if stop_event is not None and stop_event.is_set():
+            log.info("GroqLLM classify: stop_event set — skipping HTTP call")
+            return None
+
         prompt = self.CLASSIFY_PROMPT.format(
             title=title[:200],
             content=_strip_urls((content or ""))[:700],
@@ -1226,6 +1237,9 @@ class GroqLLM:
                 },
                 timeout=30,
             )
+            if stop_event is not None and stop_event.is_set():
+                log.info("GroqLLM classify: stop_event set after HTTP — discarding result")
+                return None
             if resp.status_code != 200:
                 log.debug("GroqLLM HTTP %s: %s", resp.status_code, resp.text[:200])
                 return None
@@ -1449,6 +1463,12 @@ class NewsPipeline:
                     )
                     art_elapsed = time.monotonic() - art_t0
                     art_times.append(art_elapsed)
+
+                    # Stop may have been set during the classify call (cloud LLM)
+                    if stop_event is not None and stop_event.is_set():
+                        log.info("Scan stopped by user after classify returned (%d/%d)", idx + 1, total)
+                        _scan_status["phase"] = "stopped"
+                        break
 
                     # Reject degenerate output (model repetition loop). Store a
                     # clean headline-based entry instead of looping garbage with

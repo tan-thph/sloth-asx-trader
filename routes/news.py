@@ -593,7 +593,12 @@ def _run_reclassify(model: str, days: int):
             _reclassify_status["current_article"] = (row["title"] or "")[:80]
             art_t0 = time.monotonic()
             result = llm.classify(row["title"], row["content"] or "", all_tick,
-                                  status_ref=_reclassify_status)
+                                  status_ref=_reclassify_status,
+                                  stop_event=_reclassify_stop_event)
+            # Stop may have been set during the cloud API call
+            if _reclassify_stop_event.is_set():
+                _reclassify_status["error"] = f"Stopped by user after {idx + 1}/{total} articles"
+                break
             art_elapsed = time.monotonic() - art_t0
             art_times.append(art_elapsed)
             avg = sum(art_times) / len(art_times)

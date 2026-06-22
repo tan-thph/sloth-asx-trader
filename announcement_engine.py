@@ -2297,6 +2297,14 @@ def reclassify_all(
             logger.warning("reclassify_all: failed for %s — %s", ann_id, exc)
             continue
 
+        # Stop may have been set during the cloud API call
+        with _reclassify_lock:
+            should_stop = _reclassify_stop_flag
+        if should_stop:
+            logger.info("reclassify_all: stopped by user after classify returned at %d/%d", i + 1, len(rows))
+            _update_reclassify_status(stopped=True)
+            break
+
         try:
             with get_db(db_path) as conn:
                 conn.execute(
@@ -2463,6 +2471,11 @@ def run_sync(
                         settings=settings,
                         price_sensitive=is_ps,
                     )
+                    # Stop may have been set during the cloud API call
+                    if _sync_stop_event.is_set():
+                        logger.info("run_sync: stopped by user after classify returned for %s", ticker)
+                        _update_status(running=False, last_error=None)
+                        return total_saved
                     # Prefer Markit-derived type over keyword heuristic when LLM
                     # falls back to keyword_fallback and we have a Markit type
                     if (pre_type and pre_type != "Other"

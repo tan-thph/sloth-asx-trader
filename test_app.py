@@ -9097,7 +9097,9 @@ class TestCriticsAddressing(unittest.TestCase):
     def test_intraday_atr_used_in_frontend(self):
         src = self._read('js/intraday-strategy.js')
         self.assertIn('atr_5m', src)
-        self.assertIn('1.5 *', src)
+        # Sprint 73b: stop is now ip.stopAtrMult * atr_5m (user-configurable, not hardcoded 1.5)
+        self.assertIn('stopAtrMult', src)
+        self.assertIn('ip.stopAtrMult * d.atr_5m', src)
 
     # ── Priority 5: Debate engine in collapsible section ───────────────────
 

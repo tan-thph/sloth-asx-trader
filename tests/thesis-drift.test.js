@@ -99,13 +99,15 @@ describe('computeThesisDrift — mean_reversion', () => {
     expect(result.verdict).toBe('invalidated');
   });
 
-  it('irrelevant: small move — neither condition met', () => {
+  it('invalidated: small move — entry conditions not met, signals not holding', () => {
+    // eRsi=40 not <35 and eBB=0.40 not <0.25 — entry conditions not met.
+    // nRsi=42 not >45 → no hold; nBB=0.41 not >0.45 → no hold; n_hold=0 → invalidated.
     const result = computeThesisDrift(
       'mean_reversion',
       entrySnap({ rsi_14: 40, bb_pct_b: 0.40 }),
       liveSnap({ rsi_14: 42, bb_pct_b: 0.41 })
     );
-    expect(result.verdict).toBe('irrelevant');
+    expect(result.verdict).toBe('invalidated');
   });
 
   it('still returns a result when only RSI is available (bb_pct_b missing)', () => {
@@ -151,14 +153,15 @@ describe('computeThesisDrift — momentum_breakout', () => {
     expect(result.verdict).toBe('invalidated');
   });
 
-  it('invalidated: nBB<0.45 (momentum faded)', () => {
+  it('partially_validated: ret5d still positive but nBB<0.45 (momentum faded)', () => {
     const result = computeThesisDrift(
       'momentum_breakout',
       entrySnap({ return_5d: 2.0, bb_pct_b: 0.65 }),
       liveSnap({ return_5d: 0.5, bb_pct_b: 0.40 })
     );
-    // nBB != null && nBB < 0.45 → invalidated
-    expect(result.verdict).toBe('invalidated');
+    // nRet5=0.5>0 → n_hold=1; nBB=0.40<0.45 → n_inverted=1; n_total=2
+    // n_hold/n_total=0.5 ≥ 0.33 → partially_validated (one signal intact, one inverted)
+    expect(result.verdict).toBe('partially_validated');
   });
 });
 
@@ -203,16 +206,15 @@ describe('computeThesisDrift — trend_pullback', () => {
     expect(result.verdict).toBe('invalidated');
   });
 
-  it('irrelevant: small positive move below ADX threshold', () => {
-    // nRet5 = 0.5, nAdx = 22 → resumed → validated (no irrelevant path)
-    // Let's test truly irrelevant: nRet5=0, nAdx=22
+  it('partially_validated: nRet5=0 neutral but nAdx=22>20 still holding', () => {
     const result = computeThesisDrift(
       'trend_pullback',
       entrySnap({ return_5d: 0, adx_14: 22 }),
       liveSnap({ return_5d: 0, adx_14: 22 })
     );
-    // nRet5=0 is not >0 → not resumed. nAdx=22 ≥ 20 → not broke. nRet5=0 ≥ -3 → not broke. → irrelevant
-    expect(result.verdict).toBe('irrelevant');
+    // nRet5=0 not >0 → no hold; not <-3 → no invert. nAdx=22>20 → n_hold=1; not <15 → no invert.
+    // n_total=2, n_hold=1, n_inverted=0 → n_hold/n_total=0.5≥0.33 → partially_validated
+    expect(result.verdict).toBe('partially_validated');
   });
 });
 
@@ -256,7 +258,7 @@ describe('computeThesisDrift — result shape', () => {
         liveSnap({ rsi_14: 50, bb_pct_b: 0.5, adx_14: 25, return_5d: 1 })
       );
       expect(result).not.toBeNull();
-      expect(['validated','invalidated','irrelevant']).toContain(result.verdict);
+      expect(['validated','partially_validated','invalidated','reversed','irrelevant']).toContain(result.verdict);
       expect(typeof result.reason).toBe('string');
       expect(typeof result.deltas).toBe('object');
     }
@@ -268,6 +270,6 @@ describe('computeThesisDrift — result shape', () => {
       entrySnap({ rsi_14: 28 }),
       liveSnap({ rsi_14: 50 })
     );
-    expect(['validated','invalidated','irrelevant']).toContain(result.verdict);
+    expect(['validated','partially_validated','invalidated','reversed','irrelevant']).toContain(result.verdict);
   });
 });

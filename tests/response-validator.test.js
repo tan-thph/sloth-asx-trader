@@ -19,8 +19,10 @@ function makeRec(overrides = {}) {
     confidence: 0.72,
     rrRatio:    2.4,
     factorsUsed: ['RSI oversold', 'BB lower touch', 'strong ADX'],
-    reasoning:  ['Fundamental support', 'Technical breakout'],
+    reasoning:  'Fundamental support with technical breakout signal.',
     risks:      ['Macro slowdown'],
+    scenarios: { bull: { p: 0.4, ret: 15 }, base: { p: 0.4, ret: 5 }, bear: { p: 0.2, ret: -8 } },
+    invalidationCondition: 'Price closes below $42.50 stop for two consecutive sessions.',
     ...overrides,
   };
 }
