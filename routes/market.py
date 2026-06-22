@@ -785,7 +785,7 @@ def portfolio_nav_history():
 
     # ── 5-min cache (excludes cash so market data is reused across reload) ────
     cache_key = _nav_cache_key(portfolio, period)
-    now = time.time()
+    now = _time.time()
     cached = _NAV_CACHE.get(cache_key)
     if cached and cached[1] > now:
         payload = dict(cached[0])           # shallow copy
