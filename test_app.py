@@ -1820,13 +1820,17 @@ class TestSprint7(unittest.TestCase):
             src = f.read()
         self.assertIn("function _buildEconomicCalendarCard()", src)
 
-    def test_rba_meeting_dates_hardcoded(self):
-        """dashboard.js must hard-code RBA meeting dates for 2026 and 2027."""
+    def test_rba_meeting_dates_dynamic(self):
+        """dashboard.js must fetch RBA meeting dates live via /api/rba-meetings with a fallback list."""
         with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("_RBA_MEETINGS_2026", src)
-        self.assertIn("_RBA_MEETINGS_2027", src)
+        # Live fetch function and backend endpoint reference
+        self.assertIn("_fetchRbaMeetings", src)
+        self.assertIn("/api/rba-meetings", src)
+        # Fallback array with real dates must still be present
+        self.assertIn("_rbaMeetings", src)
         self.assertIn("2026-", src)
+        self.assertIn("2027-", src)
 
     def test_economic_calendar_includes_exdiv(self):
         """Economic calendar must include ex-dividend dates from dividendData."""

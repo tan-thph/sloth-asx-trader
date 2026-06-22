@@ -4,15 +4,28 @@
 
 const _STALE_DAYS = 14;
 
-// RBA Board meeting dates — updated annually. Source: rba.gov.au/monetary-policy/rba-board-meetings/
-const _RBA_MEETINGS_2026 = [
-  '2026-02-18', '2026-04-01', '2026-05-20', '2026-07-08',
+// RBA meeting dates — fetched live from rba.gov.au via /api/rba-meetings (24h cache).
+// This fallback is used only when the backend is unreachable.
+let _rbaMeetings = [
+  '2026-02-03', '2026-03-17', '2026-05-05', '2026-06-16',
   '2026-08-11', '2026-09-29', '2026-11-03', '2026-12-08',
+  '2027-02-09', '2027-03-23', '2027-05-04', '2027-06-22',
+  '2027-08-10', '2027-09-28', '2027-11-02', '2027-12-14',
 ];
-const _RBA_MEETINGS_2027 = [
-  '2027-02-03', '2027-03-31', '2027-05-05', '2027-07-07',
-  '2027-08-18', '2027-09-29', '2027-11-03', '2027-12-08',
-];
+let _rbaMeetingsFetched = false;
+
+async function _fetchRbaMeetings() {
+  if (_rbaMeetingsFetched) return;
+  try {
+    const res = await fetch(`${API}/api/rba-meetings`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.meetings && data.meetings.length) {
+      _rbaMeetings = data.meetings;
+      _rbaMeetingsFetched = true;
+    }
+  } catch (_) {}
+}
 
 function _buildEconomicCalendarCard() {
   const today = new Date();
@@ -22,7 +35,7 @@ function _buildEconomicCalendarCard() {
   const events = [];
 
   // RBA meetings
-  for (const d of [..._RBA_MEETINGS_2026, ..._RBA_MEETINGS_2027]) {
+  for (const d of _rbaMeetings) {
     const dt = new Date(d);
     if (dt >= today && dt <= horizon) {
       const diffDays = Math.round((dt - today) / 86400000);
@@ -74,7 +87,7 @@ function _buildEconomicCalendarCard() {
   });
 
   return `
-    <div class="card section-gap">
+    <div class="card section-gap" id="econ-calendar-card">
       <div class="card-title">Upcoming Catalysts (45 days)</div>
       ${rows.join('')}
     </div>`;
@@ -220,6 +233,12 @@ async function removeTD(index) {
 }
 
 function renderDashboard() {
+  // Kick off RBA meetings fetch in background; re-render calendar card when it arrives
+  _fetchRbaMeetings().then(() => {
+    const cal = document.getElementById('econ-calendar-card');
+    if (cal) cal.outerHTML = _buildEconomicCalendarCard() || '';
+  });
+
   const pv=portfolioValue(), nw=totalNetWorth(), gain=totalGain(), gainPct=(gain/totalCost())*100;
   const pending=state.recommendations.filter(r=>r.status==='pending').length;
   const execRate=state.recHistory.length ? state.recHistory.filter(r=>r.executed).length/state.recHistory.length : 0;

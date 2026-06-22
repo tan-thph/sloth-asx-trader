@@ -8,6 +8,7 @@ Endpoints:
   /api/quote/<ticker>              GET     — fast price + sector (45 s cache)
   /api/macro                       GET     — ASX200 + global indices (5 min cache)
   /api/rba-rate                    GET     — live scrape → 6h in-memory cache → DB cache (7d) → user fallback → 4.35
+  /api/rba-meetings                GET     — scrape rba.gov.au/schedules-events/board-meeting-schedules.html → 24h cache
   /api/polymarket                  GET     — Manifold market probabilities (30 min cache)
   /api/risk                        GET     — beta, Sharpe, VaR, CVaR per ticker
   /api/portfolio/nav-history       POST    — reconstruct NAV curve vs VAS
@@ -474,6 +475,97 @@ def rba_rate():
             pass
 
     return jsonify({"rate": 4.35, "source": "fallback", "date": today})
+
+
+# ── RBA board meeting schedule ───────────────────────────────────────────────
+
+_RBA_MTG_MONTHS = {
+    'January': 1, 'February': 2, 'March': 3, 'April': 4,
+    'May': 5, 'June': 6, 'July': 7, 'August': 8,
+    'September': 9, 'October': 10, 'November': 11, 'December': 12,
+}
+
+def _parse_mpb_cell(cell: str, year: int) -> str | None:
+    """Parse an MPB meeting cell like '2–3 February' → ISO date of decision day (2nd day).
+    Also handles single-day format '5 March'. Returns None for empty cells."""
+    cell = cell.replace('&ndash;', '-').replace('–', '-').strip()
+    if not cell:
+        return None
+    m = re.match(r'(\d+)-(\d+)\s+([A-Za-z]+)', cell)
+    if m:
+        day = int(m.group(2))
+        month_name = m.group(3)
+    else:
+        m2 = re.match(r'(\d+)\s+([A-Za-z]+)', cell)
+        if not m2:
+            return None
+        day = int(m2.group(1))
+        month_name = m2.group(2)
+    month_num = _RBA_MTG_MONTHS.get(month_name)
+    if not month_num:
+        return None
+    return f"{year}-{month_num:02d}-{day:02d}"
+
+
+@ttl_cache(seconds=86400)  # 24 h — meeting schedule changes are announced months in advance
+def _rba_meetings_cached() -> list:
+    """Scrape rba.gov.au board-meeting-schedules for Monetary Policy Board dates.
+    Returns sorted list of ISO date strings. Raises RuntimeError on failure."""
+    url = "https://www.rba.gov.au/schedules-events/board-meeting-schedules.html"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        html = resp.read().decode("utf-8", errors="ignore")
+
+    dates = []
+    # Each year block: find caption like "Board meeting schedules 2026"
+    for year_match in re.finditer(r'Board meeting schedules\s+(\d{4})', html, re.IGNORECASE):
+        year = int(year_match.group(1))
+        # Grab the <tbody>…</tbody> that follows this caption
+        pos = year_match.end()
+        tbody_start = html.find('<tbody>', pos)
+        tbody_end = html.find('</tbody>', tbody_start)
+        if tbody_start < 0 or tbody_end < 0:
+            continue
+        tbody = html[tbody_start:tbody_end]
+
+        # Each row: <tr><th scope="row">Month</th><td>MPB date</td><td>PSB date</td></tr>
+        # Rows with no meeting month use <th colspan="3"> — skip those
+        for row in re.finditer(r'<tr>(.*?)</tr>', tbody, re.DOTALL):
+            row_html = row.group(1)
+            # Skip rows that are "no meeting" month headers (colspan=3)
+            if 'colspan' in row_html:
+                continue
+            th = re.search(r'<th[^>]*scope=["\']row["\'][^>]*>(.*?)</th>', row_html, re.DOTALL)
+            # First <td> is the MPB column
+            tds = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL)
+            if not th or not tds:
+                continue
+            cell_text = re.sub(r'<[^>]+>', '', tds[0]).strip()
+            iso = _parse_mpb_cell(cell_text, year)
+            if iso:
+                dates.append(iso)
+
+    if not dates:
+        raise RuntimeError("no RBA meeting dates parsed from page")
+    return sorted(set(dates))
+
+
+@bp.route("/api/rba-meetings")
+def rba_meetings():
+    """Live RBA board meeting schedule (Monetary Policy Board only). 24 h cache."""
+    try:
+        meetings = _rba_meetings_cached()
+        return jsonify({"ok": True, "meetings": meetings, "source": "live"})
+    except Exception as exc:
+        log.warning("rba-meetings scrape failed: %s", exc)
+        # Fall back to a hardcoded list so the UI never breaks
+        fallback = [
+            '2026-02-03', '2026-03-17', '2026-05-05', '2026-06-16',
+            '2026-08-11', '2026-09-29', '2026-11-03', '2026-12-08',
+            '2027-02-09', '2027-03-23', '2027-05-04', '2027-06-22',
+            '2027-08-10', '2027-09-28', '2027-11-02', '2027-12-14',
+        ]
+        return jsonify({"ok": False, "meetings": fallback, "source": "fallback", "error": str(exc)})
 
 
 # ── Prediction markets (Manifold) ────────────────────────────────────────────
