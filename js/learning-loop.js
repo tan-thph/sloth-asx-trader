@@ -413,23 +413,50 @@ function computeThesisDrift(entryDriver, entrySignals, liveSnapshot) {
   let reason  = '';
   let deltas  = {};
 
+  // ── Shared verdict helper ───────────────────────────────────────────────────
+  // Computes a verdict from hold/invert/total signal counts.
+  // n_inverted >= 2           → 'reversed'    (signals clearly flipped)
+  // n_hold == n_total         → 'validated'   (all signals still intact)
+  // n_hold == 0               → 'invalidated' (no signals intact)
+  // n_hold / n_total >= 0.33  → 'partially_validated' (some intact, some not)
+  // else                      → 'invalidated'
+  function _resolveVerdict(n_hold, n_inverted, n_total) {
+    if (n_total === 0) return 'irrelevant';
+    if (n_inverted >= 2) return 'reversed';
+    if (n_hold === n_total) return 'validated';
+    if (n_hold === 0) return 'invalidated';
+    if (n_hold / n_total >= 0.33) return 'partially_validated';
+    return 'invalidated';
+  }
+
   if (entryDriver === 'mean_reversion') {
     deltas = {};
     if (eRsi != null && nRsi != null) deltas.rsi_14    = { entry: eRsi, now: nRsi };
     if (eBB  != null && nBB  != null) deltas.bb_pct_b  = { entry: eBB,  now: nBB  };
 
-    const reverted = (eBB != null && nBB != null && eBB < 0.25 && nBB > 0.45)
-                  || (eRsi != null && nRsi != null && eRsi < 35 && nRsi > 45);
-    const worsened = (eBB != null && nBB != null && nBB < eBB - 0.05)
-                  || (eRsi != null && nRsi != null && nRsi < eRsi - 3);
+    // mean_reversion: entry signal = RSI oversold (<35) or BB at lower band (<0.25)
+    // validated: reverted toward mid (RSI >45, BB >0.45)
+    // inverted:  RSI was <35, now >65; or BB was <0.15, now >0.85
+    let n_hold = 0, n_inverted = 0, n_total = 0;
 
-    if (reverted) {
-      verdict = 'validated';
-    } else if (worsened) {
-      verdict = 'invalidated';
-    } else {
-      verdict = 'irrelevant';
+    if (eRsi != null && nRsi != null) {
+      n_total++;
+      const entryOversold = eRsi < 35;
+      const nowReverted   = nRsi > 45;
+      const nowInverted   = entryOversold && nRsi > 65;   // oversold → overbought
+      if (nowInverted)        n_inverted++;
+      else if (nowReverted)   n_hold++;
     }
+    if (eBB != null && nBB != null) {
+      n_total++;
+      const entryLow    = eBB < 0.25;
+      const nowReverted = nBB > 0.45;
+      const nowInverted = entryLow && nBB > 0.85;         // lower band → upper band
+      if (nowInverted)        n_inverted++;
+      else if (nowReverted)   n_hold++;
+    }
+
+    verdict = (n_total > 0) ? _resolveVerdict(n_hold, n_inverted, n_total) : 'irrelevant';
     const rsiStr = (eRsi != null && nRsi != null) ? `RSI ${eRsi}→${nRsi}` : '';
     const bbStr  = (eBB  != null && nBB  != null) ? `%b ${eBB.toFixed(2)}→${nBB.toFixed(2)}` : '';
     reason = [rsiStr, bbStr].filter(Boolean).join(', ');
@@ -439,16 +466,23 @@ function computeThesisDrift(entryDriver, entrySignals, liveSnapshot) {
     if (nRet5 != null) deltas.return_5d = { entry: eRet5, now: nRet5 };
     if (nBB   != null) deltas.bb_pct_b  = { entry: eBB,   now: nBB   };
 
-    const sustained   = nRet5 != null && nRet5 > 0 && (nBB == null || nBB > 0.55);
-    const invalidated = nRet5 != null && (nRet5 < 0 || (nBB != null && nBB < 0.45));
+    // momentum_breakout: entry signal = positive return_5d and high BB%B (>0.55)
+    // validated: momentum sustained (ret5d >0, bb >0.55)
+    // inverted:  both signals flipped (ret5d <0 AND bb <0.45)
+    let n_hold = 0, n_inverted = 0, n_total = 0;
 
-    if (sustained) {
-      verdict = 'validated';
-    } else if (invalidated) {
-      verdict = 'invalidated';
-    } else {
-      verdict = 'irrelevant';
+    if (nRet5 != null) {
+      n_total++;
+      if (nRet5 > 0)  n_hold++;
+      if (nRet5 < 0)  n_inverted++;
     }
+    if (nBB != null) {
+      n_total++;
+      if (nBB > 0.55) n_hold++;
+      if (nBB < 0.45) n_inverted++;
+    }
+
+    verdict = (n_total > 0) ? _resolveVerdict(n_hold, n_inverted, n_total) : 'irrelevant';
     const ret5Str = nRet5 != null ? `return_5d=${nRet5.toFixed(1)}%` : '';
     const bbStr2  = nBB   != null ? `%b=${nBB.toFixed(2)}` : '';
     reason = [ret5Str, bbStr2].filter(Boolean).join(', ');
@@ -458,16 +492,23 @@ function computeThesisDrift(entryDriver, entrySignals, liveSnapshot) {
     if (nRet5 != null) deltas.return_5d = { entry: eRet5, now: nRet5 };
     if (nAdx  != null) deltas.adx_14    = { entry: eAdx,  now: nAdx  };
 
-    const resumed    = nRet5 != null && nRet5 > 0 && (nAdx == null || nAdx > 20);
-    const broke      = (nAdx != null && nAdx < 20) || (nRet5 != null && nRet5 < -3);
+    // trend_pullback: entry signal = positive return_20d + ADX >25; buying a dip
+    // validated: trend resumed (ret5d >0, ADX still strong)
+    // inverted:  trend reversed (ret5d <-3, ADX collapsed <15)
+    let n_hold = 0, n_inverted = 0, n_total = 0;
 
-    if (resumed) {
-      verdict = 'validated';
-    } else if (broke) {
-      verdict = 'invalidated';
-    } else {
-      verdict = 'irrelevant';
+    if (nRet5 != null) {
+      n_total++;
+      if (nRet5 > 0)   n_hold++;
+      if (nRet5 < -3)  n_inverted++;
     }
+    if (nAdx != null) {
+      n_total++;
+      if (nAdx > 20)  n_hold++;
+      if (nAdx < 15)  n_inverted++;   // ADX collapsed — trend gone
+    }
+
+    verdict = (n_total > 0) ? _resolveVerdict(n_hold, n_inverted, n_total) : 'irrelevant';
     const ret5Str2 = nRet5 != null ? `return_5d=${nRet5.toFixed(1)}%` : '';
     const adxStr   = nAdx  != null ? `ADX=${nAdx.toFixed(0)}` : '';
     reason = [ret5Str2, adxStr].filter(Boolean).join(', ');

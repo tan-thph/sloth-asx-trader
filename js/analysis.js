@@ -1207,7 +1207,9 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
             _sigs.current_price || (Array.isArray(r.priceRange) ? r.priceRange[0] : 0), 0,
             { record_type: 'shadow', shadow_reason: 'conf_floor' });
         }
-        return { ...r, _ruleWarnings: [...(r._ruleWarnings || []),
+        return { ...r,
+          _confidenceHeld: true,
+          _ruleWarnings: [...(r._ruleWarnings || []),
           `Confidence ${(100 * (r.confidence || 0)).toFixed(0)}% is below the ${(MIN_CONFIDENCE * 100).toFixed(0)}% floor`] };
       }
       return r;

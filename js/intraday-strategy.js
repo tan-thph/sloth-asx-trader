@@ -39,9 +39,17 @@ function _buildIntradayRecs(scanData) {
     if (d.score < ip.minScore) continue;
     if (openCount + recs.length >= ip.maxPositions) break;
 
-    const entry  = d.current_price;
-    const target = +(entry * (1 + ip.targetPct / 100)).toFixed(3);
-    const stop   = +(entry * (1 - ip.stopPct   / 100)).toFixed(3);
+    const entry = d.current_price;
+    // Use 5m ATR when available; fall back to fixed-pct
+    let stopLoss, target;
+    if (d.atr_5m && d.atr_5m > 0) {
+      stopLoss = Math.round((entry - 1.5 * d.atr_5m) * 1000) / 1000;
+      target   = d.intraday_target || Math.round(entry * (1 + ip.targetPct / 100) * 1000) / 1000;
+    } else {
+      stopLoss = Math.round(entry * (1 - ip.stopPct  / 100) * 1000) / 1000;
+      target   = Math.round(entry * (1 + ip.targetPct / 100) * 1000) / 1000;
+    }
+    const stop = stopLoss;
 
     // Try quant engine sizing first (requires daily signals for this ticker)
     let qty = null;

@@ -51,6 +51,39 @@ Rising rates environment: flag debt coverage ratios and loan-to-value. Favour lo
 Defensive income play: only recommend BUY if dividend yield > 5% AND distribution growth is positive.
 `.trim(),
 
+  FINANCIALS_SECTOR: `
+=== FINANCIALS / BANKING SECTOR RULES ===
+For Australian banks and diversified financials (CBA, WBC, ANZ, NAB, MQG, QBE, SUN, IAG, etc.):
+
+PRIMARY DRIVERS (must be evaluated; cite at least 2 that are directly relevant):
+  • RBA rate path — current cash rate and market-implied trajectory directly drive Net Interest Margin (NIM).
+    Rising rates expand NIM for deposit-funded banks; cuts compress it. State the RBA rate from the user message
+    and the implied direction. This is the DOMINANT macro factor for Australian banks.
+  • Net Interest Margin (NIM) — the spread between lending rates and deposit costs.
+    NIM compression is a SELL/TRIM signal; expansion is a BUY/TOP_UP support.
+    If NIM data is unavailable, state "NIM: not in data" and weight this factor as unknown.
+  • Loan book growth — mortgage growth, business lending growth, and deposit growth
+    indicate top-line revenue trajectory. Slowing loan growth + margin compression = double headwind.
+  • Credit quality — bad debt provisions, arrears rates, and loan impairment charges.
+    A rising impairment cycle is a fundamental SELL trigger; a benign cycle is a BUY support.
+  • Capital adequacy — CET1 ratio relative to APRA's minimum (11.25% for major banks).
+    CET1 > 13% supports dividend sustainability; CET1 decline toward 11.5% is a risk flag.
+  • Dividend sustainability — payout ratio and franking credits.
+    Australian banks are high-yield income stocks; dividend cut risk is the #1 retail concern.
+    Gross yield (after franking) should be cited alongside cash yield.
+
+TECHNICAL SIGNALS ARE CONFIRMING ONLY (Rule 20 applies):
+  Do NOT recommend SELL/TRIM on a major bank solely due to RSI, death cross, or BB breakdown.
+  Require at least one fundamental deterioration (NIM compression, rising bad debts, capital breach,
+  dividend at risk) alongside any technical signal. Moving-average crossovers on banks reflect
+  short-term sentiment, not business-value changes.
+
+MACRO INTEGRATION (cite in factorsUsed[]):
+  • Housing market — mortgage stress and house price trajectory directly affect loan book quality.
+  • Employment — rising unemployment increases default risk and dampens loan demand.
+  • AUD/USD — minimal direct impact on domestic banks; matters more for insurers with offshore operations.
+`.trim(),
+
   HIGH_VOL_REGIME: `
 === HIGH VOLATILITY REGIME ACTIVE ===
 Raise minimum confidence to 0.75 for all BUY and TOP_UP recommendations (from default 0.62).
@@ -105,10 +138,21 @@ function assembleOptionalModules(context = {}) {
     modules.push(RULE_MODULES.CGT_DISCOUNT_WINDOW);
   }
 
-  // Sector modules
-  const sectors = new Set((portfolio).map(h => (h.sector || '').toLowerCase()));
-  if (sectors.has('mining') || sectors.has('resources')) modules.push(RULE_MODULES.MINING_SECTOR);
-  if (sectors.has('reits') || sectors.has('reit'))       modules.push(RULE_MODULES.REIT_SECTOR);
+  // Sector modules — combine portfolio sectors + liveSignals sectors for candidate tickers
+  const _liveSectors = typeof state !== 'undefined' && state.liveSignals
+    ? Object.values(state.liveSignals).map(s => (s.sector || '').toLowerCase())
+    : [];
+  const sectors = new Set([
+    ...(portfolio).map(h => (h.sector || '').toLowerCase()),
+    ..._liveSectors,
+    ...((context.sectors || []).map(s => (s || '').toLowerCase())),
+  ]);
+  if (sectors.has('mining') || sectors.has('resources') || sectors.has('materials'))
+    modules.push(RULE_MODULES.MINING_SECTOR);
+  if (sectors.has('reits') || sectors.has('reit') || sectors.has('real estate'))
+    modules.push(RULE_MODULES.REIT_SECTOR);
+  if (sectors.has('financials') || sectors.has('financial services') || sectors.has('banks'))
+    modules.push(RULE_MODULES.FINANCIALS_SECTOR);
 
   // Regime modules
   const regime = context.regime || state.currentRegime?.regime || 'unknown';

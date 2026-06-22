@@ -192,6 +192,23 @@ def _analyse_intraday(ticker: str, interval: str = "5m") -> dict:
     else:
         vol_rising = False
 
+    # 5-minute ATR (14-period True Range) — requires ≥15 confirmed bars
+    atr_5m = None
+    intraday_target = None
+    if len(confirmed) >= 15:
+        high5 = confirmed["High"]
+        low5  = confirmed["Low"]
+        prev_close5 = confirmed["Close"].shift(1)
+        tr5 = pd.concat([
+            high5 - low5,
+            (high5 - prev_close5).abs(),
+            (low5  - prev_close5).abs(),
+        ], axis=1).max(axis=1)
+        _atr_raw = tr5.rolling(14).mean().iloc[-1]
+        if not math.isnan(_atr_raw):
+            atr_5m = float(_atr_raw)
+            intraday_target = round(current_vwap + 2.0 * atr_5m, 3)
+
     score      = _score_setup(pct_from_vwap, intraday_rsi, vol_rising,
                               current_price, day_low, day_open)
     in_window  = _in_entry_window()
@@ -217,9 +234,11 @@ def _analyse_intraday(ticker: str, interval: str = "5m") -> dict:
         "score":          score,
         "in_entry_window": in_window,
         "passes":         passes,
-        "bars_today":     len(today_bars),
-        "interval":       interval,
-        "fetched_at":     datetime.now(timezone.utc).isoformat(),
+        "bars_today":       len(today_bars),
+        "interval":         interval,
+        "fetched_at":       datetime.now(timezone.utc).isoformat(),
+        "atr_5m":           round(atr_5m, 4) if atr_5m is not None and not math.isnan(atr_5m) else None,
+        "intraday_target":  intraday_target if atr_5m is not None else None,
     }
 
 

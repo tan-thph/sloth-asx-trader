@@ -353,6 +353,36 @@ def compute_support_resistance(high, low, close, lookback=50):
     }
 
 
+# ASX sector ETFs for relative-strength computation.
+# Used by analyse_ticker() to compute sector_rs_5d (ticker 5d return vs sector ETF 5d return).
+# Stooq fallback is NOT used for ETFs — yfinance is reliable enough for these liquid instruments.
+# Note: ASX_SECTOR_MAP uses granular labels (Banking, Mining, Retail, etc.); map them all.
+SECTOR_ETF_MAP = {
+    'Financials':               'XFJ.AX',
+    'Banking':                  'XFJ.AX',  # Banks sit within the broad Financials ETF
+    'Materials':                'XMJ.AX',
+    'Mining':                   'XMJ.AX',  # Mining maps to Materials ETF
+    'Energy':                   'XEJ.AX',
+    'Real Estate':              'XPJ.AX',
+    'REITs':                    'XPJ.AX',
+    'Health Care':              'XHJ.AX',
+    'Healthcare':               'XHJ.AX',
+    'Communication Services':   'XTJ.AX',
+    'Telcos':                   'XTJ.AX',
+    'Consumer Staples':         'XSJ.AX',
+    'Consumer Discretionary':   'XDJ.AX',
+    'Retail':                   'XDJ.AX',
+    'Travel':                   'XDJ.AX',
+    'Gaming':                   'XDJ.AX',
+    'Utilities':                'XNJ.AX',
+    'Industrials':              'XIJ.AX',
+    'Infrastructure':           'XIJ.AX',
+    'Transport':                'XIJ.AX',
+    'Information Technology':   'XIJ.AX',  # IT maps to Industrials ETF (closest ASX proxy)
+    'Technology':               'XIJ.AX',
+}
+
+
 # ── Market scanner scoring (lightweight, numpy-only) ──────────────────────────
 # Used by _run_market_scan in asx_server.py. Edit scoring weights here.
 # After running POST /api/scanner/factor-stability, update FACTOR_WEIGHTS with
@@ -777,6 +807,25 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     except Exception:
         pass
 
+    # ── Sector ETF relative strength (5-day) ─────────────────────────────────
+    # How does this ticker perform vs its own sector ETF over the last 5 days?
+    # Positive = outperforming sector; negative = underperforming.
+    # Best-effort only: any fetch failure silently returns None.
+    # Stooq is NOT used here — ETFs are liquid enough that yfinance is reliable.
+    sector_rs_5d = None
+    try:
+        ticker_sector = get_sector_for_ticker(ticker)
+        etf_sym = SECTOR_ETF_MAP.get(ticker_sector)
+        if etf_sym and len(close) >= 5:
+            etf_stk = yf.Ticker(etf_sym)
+            etf_hist = etf_stk.history(period='1mo', auto_adjust=True)
+            if etf_hist is not None and len(etf_hist) >= 5:
+                etf_ret5 = float(etf_hist['Close'].iloc[-1] / etf_hist['Close'].iloc[-5] - 1) * 100
+                ticker_ret5 = float(close.iloc[-1] / close.iloc[-5] - 1) * 100
+                sector_rs_5d = round(ticker_ret5 - etf_ret5, 2)
+    except Exception:
+        pass  # non-fatal; ETF data may be unavailable
+
     # Compute the setup score once and reuse it for score + rs_score + rs_5d_alpha
     # (Sprint 71 Phase 2 — avoids a double call to _score_ticker).
     _score_data = _score_ticker(close.values, volume.values) or {}
@@ -849,13 +898,16 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         "support_resistance": sr,
 
         # Returns
-        "return_1d":  pct_return(1),
-        "return_5d":  pct_return(5),
-        "return_20d": pct_return(20),
-        "return_60d": pct_return(60),
-        "return_90d": pct_return(90),
-        "high_60d":   safe_float(high_raw.tail(60).max()) if len(high_raw) >= 60 else None,
-        "low_60d":    safe_float(low_raw.tail(60).min())  if len(low_raw)  >= 60 else None,
+        "return_1d":    pct_return(1),
+        "return_5d":    pct_return(5),
+        "return_20d":   pct_return(20),
+        "return_60d":   pct_return(60),
+        "return_90d":   pct_return(90),
+        "high_60d":     safe_float(high_raw.tail(60).max()) if len(high_raw) >= 60 else None,
+        "low_60d":      safe_float(low_raw.tail(60).min())  if len(low_raw)  >= 60 else None,
+        # Sector ETF relative strength: ticker 5d return minus sector ETF 5d return (pp).
+        # Positive = outperforming sector over last 5 days; None when sector or ETF data unavailable.
+        "sector_rs_5d": sector_rs_5d,
 
         # Signal
         "composite_signal": composite,

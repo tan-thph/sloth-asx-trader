@@ -54,9 +54,8 @@ function _renderDayTrading() {
   const activeTab = dt.activeTab || 'setups';
   return `
     <div class="tabs" style="margin-bottom:14px">
-      <button class="tab ${activeTab === 'setups'   ? 'active' : ''}" id="dt-tab-setups"   onclick="switchDtTab('setups')">Setups</button>
+      <button class="tab ${activeTab === 'setups'   ? 'active' : ''}" id="dt-tab-setups"   onclick="switchDtTab('setups')">Swing day-trading</button>
       <button class="tab ${activeTab === 'intraday' ? 'active' : ''}" id="dt-tab-intraday" onclick="switchDtTab('intraday')">⚡ Intraday</button>
-      <button class="tab ${activeTab === 'rules'    ? 'active' : ''}" id="dt-tab-rules"    onclick="switchDtTab('rules')">⚙ Rules</button>
       <button class="tab ${activeTab === 'history'  ? 'active' : ''}" id="dt-tab-history"  onclick="switchDtTab('history')">📋 History</button>
       <button class="tab ${activeTab === 'model'    ? 'active' : ''}" id="dt-tab-model"    onclick="switchDtTab('model')">🧠 Model</button>
     </div>
@@ -64,15 +63,16 @@ function _renderDayTrading() {
       ${activeTab === 'setups'   ? _renderDtSetupsTab()
         : activeTab === 'intraday' ? _renderDtIntradayTab()
         : activeTab === 'history'  ? renderDtHistoryTab()
-        : activeTab === 'model'    ? renderDtModelTab()
-        : _renderDtRulesTab()}
+        : renderDtModelTab()}
     </div>
   `;
 }
 
 function switchDtTab(tab) {
+  // 'rules' was a top-level tab — redirect to swing setups rules sub-tab
+  if (tab === 'rules') { switchDtTab('setups'); switchSwingSubTab('rules'); return; }
   state.dayTrading.activeTab = tab;
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('#main-content > div > .tabs > .tab').forEach(t => t.classList.remove('active'));
   const tabEl = document.getElementById('dt-tab-' + tab);
   if (tabEl) tabEl.classList.add('active');
   const el = document.getElementById('dt-tab-content');
@@ -83,11 +83,10 @@ function switchDtTab(tab) {
   } else if (tab === 'intraday') {
     el.innerHTML = _renderDtIntradayTab();
   } else if (tab === 'history') {
-    // Reset so fresh data loads on next render; clear loading flag so the fetch can start.
     _dtHistItems = null; _dtHistOffset = 0; _dtHistMore = false; _dtStats = null; _dtHistLoading = false;
     el.innerHTML = renderDtHistoryTab();
-  } else if (tab === 'model') {
-    _dtModel = undefined;  // force re-fetch with importances
+  } else {
+    _dtModel = undefined;
     _dtStats = null;
     Promise.all([dtLoadModelWithImportances(), dtLoadStats()]).then(function() {
       if ((state.dayTrading && state.dayTrading.activeTab) === 'model') {
@@ -95,12 +94,37 @@ function switchDtTab(tab) {
       }
     });
     el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted)">Loading model…</div>';
-  } else {
-    el.innerHTML = _renderDtRulesTab();
   }
 }
 
+function switchSwingSubTab(subTab) {
+  if (!state.dayTrading) return;
+  state.dayTrading._swingSubTab = subTab;
+  const el = document.getElementById('dt-tab-content');
+  if (el) { el.innerHTML = _renderDtSetupsTab(); if (subTab === 'setups') _renderDtExtraChips(); }
+}
+
+function switchIntradaySubTab(subTab) {
+  if (!state.intraday) return;
+  state.intraday._subTab = subTab;
+  const el = document.getElementById('dt-tab-content');
+  if (el) el.innerHTML = _renderDtIntradayTab();
+}
+
 function _renderDtSetupsTab() {
+  const subTab = (state.dayTrading && state.dayTrading._swingSubTab) || 'setups';
+  const subTabs = `
+    <div class="tabs tabs-sm" style="margin-bottom:14px;border-bottom:0.5px solid var(--border-light);padding-bottom:0">
+      <button class="tab ${subTab === 'setups' ? 'active' : ''}" style="font-size:12px;padding:5px 14px"
+        onclick="switchSwingSubTab('setups')">Setups</button>
+      <button class="tab ${subTab === 'rules' ? 'active' : ''}" style="font-size:12px;padding:5px 14px"
+        onclick="switchSwingSubTab('rules')">⚙ Rules</button>
+    </div>`;
+  if (subTab === 'rules') return subTabs + _renderDtRulesTab();
+  return subTabs + _renderDtSwingMain();
+}
+
+function _renderDtSwingMain() {
   const dt = state.dayTrading;
   const allocated = dt.allocatedCash != null ? dt.allocatedCash : Math.round(state.cash * 0.20);
   const riskPct = dt.riskPct || 1.5;
@@ -202,7 +226,7 @@ function _renderDtSetupsTab() {
         <span><b>#3:</b> Vol Z-Score &gt;${ap.volZScore}σ</span>
         <span><b>#4:</b> Fib zone (60d return ${ap.fibReturnMin}% to ${ap.fibReturnMax}%)</span>
         <span><b>#5:</b> OBV div. (bonus)</span>
-        <span style="margin-left:auto;color:var(--text-tertiary)"><button class="btn btn-sm" style="font-size:10px;padding:2px 7px" onclick="switchDtTab('rules')">⚙ Edit rules</button></span>
+        <span style="margin-left:auto;color:var(--text-tertiary)"><button class="btn btn-sm" style="font-size:10px;padding:2px 7px" onclick="switchSwingSubTab('rules')">⚙ Edit rules</button></span>
       </div>
       <div style="font-size:10px;color:var(--text-tertiary);margin-top:6px;border-top:0.5px solid var(--border-light);padding-top:6px">Active: ${paramsLine}</div>
     </div>
@@ -346,7 +370,7 @@ function _renderDtRulesTab() {
         </div>
         <div class="flex-row">
           <button class="btn btn-sm" onclick="resetDtRules()">↺ Reset to defaults</button>
-          <button class="btn btn-primary btn-sm" onclick="switchDtTab('setups');setTimeout(runDayTradeAnalysis,50)">▶ Run Scan Now</button>
+          <button class="btn btn-primary btn-sm" onclick="switchSwingSubTab('setups');setTimeout(runDayTradeAnalysis,50)">▶ Run Scan Now</button>
         </div>
       </div>
 
@@ -361,8 +385,8 @@ function setDtParam(group, key, rawValue) {
   scheduleSave();
   // Refresh the active-params summary line on the setups tab if visible
   const el = document.getElementById('dt-tab-content');
-  if (el && (state.dayTrading.activeTab || 'setups') === 'rules') {
-    // Re-render just the active-filter badge inside the rules panel
+  if (el && (state.dayTrading.activeTab || 'setups') === 'setups' &&
+      (state.dayTrading._swingSubTab || 'setups') === 'rules') {
     const badge = el.querySelector('[data-dt-active-params]');
     if (badge) {
       const fp = { ..._DT_FILTER_DEFAULTS, ...(state.dayTrading.filterParams || {}) };
@@ -376,8 +400,8 @@ function resetDtRules() {
   state.dayTrading.aiParams     = { ..._DT_AI_DEFAULTS };
   scheduleSave();
   const el = document.getElementById('dt-tab-content');
-  if (el) el.innerHTML = _renderDtRulesTab();
-  toast('Day trade scanner rules reset to defaults', 'success');
+  if (el) el.innerHTML = _renderDtSetupsTab();
+  toast('Swing scanner rules reset to defaults', 'success');
 }
 
 function _renderDtRec(r, compact = false) {
@@ -619,6 +643,130 @@ function _renderDtIntradayTab() {
     allocatedCash: null,
     params: { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100' },
   };
+  const subTab = (state.intraday._subTab) || 'setups';
+  const subTabs = `
+    <div class="tabs tabs-sm" style="margin-bottom:14px;border-bottom:0.5px solid var(--border-light);padding-bottom:0">
+      <button class="tab ${subTab === 'setups' ? 'active' : ''}" style="font-size:12px;padding:5px 14px"
+        onclick="switchIntradaySubTab('setups')">Setups</button>
+      <button class="tab ${subTab === 'rules' ? 'active' : ''}" style="font-size:12px;padding:5px 14px"
+        onclick="switchIntradaySubTab('rules')">⚙ Rules</button>
+    </div>`;
+  if (subTab === 'rules') return subTabs + _renderIntradayRulesContent();
+  return subTabs + _renderIntradaySetupsContent();
+}
+
+function _renderIntradayRulesContent() {
+  const id = state.intraday;
+  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100', extremeMode: false,
+               ...(id.params || {}) };
+  const allocated = id.allocatedCash != null ? id.allocatedCash : Math.round(state.cash * ip.allocPct / 100);
+
+  const INTRADAY_DEFAULTS_LOCAL = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20 };
+  const anyModified = Object.keys(INTRADAY_DEFAULTS_LOCAL).some(k => ip[k] !== INTRADAY_DEFAULTS_LOCAL[k]) || ip.extremeMode;
+
+  const nf = (label, key, value, min, max, step, hint, parser) => `
+    <div>
+      <div class="form-label">${label}</div>
+      <input type="number" value="${value}" min="${min}" max="${max}" step="${step}" style="width:120px" title="${hint}"
+        onchange="updateIntradayParam('${key}', ${parser || 'parseFloat'}(this.value))">
+      <div class="text-xs text-muted mt-1" style="max-width:210px">${hint}</div>
+    </div>`;
+
+  return `
+    <div style="display:flex;flex-direction:column;gap:14px">
+
+      ${anyModified ? `
+      <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:#92400e;display:flex;align-items:center;justify-content:space-between">
+        <span>Custom intraday rules active — applied on next scan.</span>
+        <button class="btn btn-sm" onclick="resetIntradayRules()" style="white-space:nowrap">↺ Reset all</button>
+      </div>` : `
+      <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--text-muted)">
+        Using default intraday rules. Edit any value below — changes apply on next scan.
+      </div>`}
+
+      <!-- Trade Parameters -->
+      <div class="card">
+        <div class="card-title">
+          Trade Parameters
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">target, stop, sizing — apply on next scan</span>
+        </div>
+        <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
+          Active: Target <b>+${ip.targetPct}%</b> · Stop <b>−${ip.stopPct}%</b> · Max <b>${ip.maxPositions}</b> positions · Alloc <b>${ip.allocPct}%</b> (= $${fmt(allocated, 0)})
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px">
+          ${nf('Target exit (%)', 'targetPct', ip.targetPct, 1, 10, 0.5, 'Exit when price rises this % above entry')}
+          ${nf('Stop loss (%)', 'stopPct', ip.stopPct, 0.5, 5, 0.5, 'Exit if price falls this % below entry (fallback when ATR unavailable)')}
+          ${nf('Max positions', 'maxPositions', ip.maxPositions, 1, 5, 1, 'Maximum concurrent intraday trades', 'parseInt')}
+          ${nf('Capital allocation (%)', 'allocPct', ip.allocPct, 5, 50, 5, 'Percentage of available cash allocated to intraday')}
+        </div>
+      </div>
+
+      <!-- Entry Filters -->
+      <div class="card">
+        <div class="card-title">
+          Entry Filters
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">determine which tickers generate setups</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          ${nf('Min setup score (0–100)', 'minScore', ip.minScore, 20, 90, 5, 'Setup quality threshold — tickers below this are not shown', 'parseInt')}
+        </div>
+        <div style="margin-top:14px">
+          <div class="form-label" style="margin-bottom:7px">Scan universe</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            ${['asx20','asx50','asx100','asx200'].map(k => {
+              const meta = (typeof ASX_UNIVERSE_META !== 'undefined' && ASX_UNIVERSE_META[k]) || { label: k.toUpperCase() };
+              const count = (typeof getUniverseTickers !== 'undefined') ? getUniverseTickers(k).length : '?';
+              const active = ip.universeKey === k;
+              return `<button class="btn btn-sm"
+                onclick="updateIntradayParam('universeKey','${k}')"
+                style="font-size:11px;font-weight:${active ? '700' : '400'};background:${active ? '#10b981' : 'var(--bg-secondary)'};color:${active ? '#fff' : 'var(--text-secondary)'};border-color:${active ? '#10b981' : 'var(--border-medium)'}">
+                ${meta.label} <span style="opacity:.7">(${count})</span>
+              </button>`;
+            }).join('')}
+          </div>
+          <div class="text-xs text-muted mt-1">Larger universes find more setups but take longer to scan</div>
+        </div>
+        <div style="margin-top:14px;padding:8px 10px;background:${ip.extremeMode ? 'rgba(239,68,68,.08)' : 'var(--bg-secondary)'};border:0.5px solid ${ip.extremeMode ? 'rgba(239,68,68,.4)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div>
+            <div style="font-size:12px;font-weight:600;color:${ip.extremeMode ? '#ef4444' : 'var(--text-secondary)'}">⚠️ Extreme Mode</div>
+            <div class="text-xs text-muted">Bypasses entry window, VWAP and RSI gates — shows all setups above min score. For testing only.</div>
+          </div>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap">
+            <input type="checkbox" ${ip.extremeMode ? 'checked' : ''}
+              onchange="updateIntradayParam('extremeMode', this.checked)">
+            ${ip.extremeMode ? '<span style="color:#ef4444;font-weight:600">On</span>' : 'Off'}
+          </label>
+        </div>
+      </div>
+
+      <!-- Info -->
+      <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:13px;font-weight:600">Intraday rules applied</div>
+          <div class="text-xs text-muted">⏰ Entry window: 10:45–15:00 AEST · Stops use 5m ATR when ≥15 bars available; falls back to Stop loss % · yfinance 5m data has ~5–15 min latency</div>
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-sm" onclick="resetIntradayRules()">↺ Reset to defaults</button>
+          <button class="btn btn-primary btn-sm" onclick="switchIntradaySubTab('setups');setTimeout(runIntradayScan,50)"
+            style="background:#10b981;border-color:#10b981">⚡ Scan Now</button>
+        </div>
+      </div>
+
+    </div>
+  `;
+}
+
+function resetIntradayRules() {
+  if (!state.intraday) return;
+  state.intraday.params = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
+    universeKey: state.intraday.params?.universeKey || 'asx100', extremeMode: false };
+  scheduleSave();
+  const el = document.getElementById('dt-tab-content');
+  if (el) el.innerHTML = _renderDtIntradayTab();
+  toast('Intraday rules reset to defaults', 'success');
+}
+
+function _renderIntradaySetupsContent() {
   const id = state.intraday;
   const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100', extremeMode: false,
                ...(id.params || {}) };
@@ -641,83 +789,6 @@ function _renderDtIntradayTab() {
        </div>`
     : '';
 
-  // ── Config card ──────────────────────────────────────────────────────────
-  const configCard = `
-    <div class="card" style="margin-bottom:14px">
-      <div class="card-title" style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-        <span style="background:#10b981;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;letter-spacing:.5px">INTRADAY</span>
-        Configuration
-        ${ip.extremeMode ? '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px">⚠️ EXTREME MODE</span>' : ''}
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px">
-        <div>
-          <div class="form-label">Target exit (%)</div>
-          <input type="number" min="1" max="10" step="0.5" value="${ip.targetPct}"
-            style="width:100%" onchange="updateIntradayParam('targetPct', parseFloat(this.value))">
-          <div class="text-xs text-muted mt-1">Sell when price rises this %</div>
-        </div>
-        <div>
-          <div class="form-label">Stop loss (%)</div>
-          <input type="number" min="0.5" max="5" step="0.5" value="${ip.stopPct}"
-            style="width:100%" onchange="updateIntradayParam('stopPct', parseFloat(this.value))">
-          <div class="text-xs text-muted mt-1">Exit if price falls this %</div>
-        </div>
-        <div>
-          <div class="form-label">Max positions</div>
-          <input type="number" min="1" max="5" step="1" value="${ip.maxPositions}"
-            style="width:100%" onchange="updateIntradayParam('maxPositions', parseInt(this.value))">
-          <div class="text-xs text-muted mt-1">Concurrent intraday trades</div>
-        </div>
-        <div>
-          <div class="form-label">Min score (0–100)</div>
-          <input type="number" min="20" max="90" step="5" value="${ip.minScore}"
-            style="width:100%" onchange="updateIntradayParam('minScore', parseInt(this.value))">
-          <div class="text-xs text-muted mt-1">Setup quality threshold</div>
-        </div>
-        <div>
-          <div class="form-label">Capital allocation (%)</div>
-          <input type="number" min="5" max="50" step="5" value="${ip.allocPct}"
-            style="width:100%" onchange="updateIntradayParam('allocPct', parseFloat(this.value))">
-          <div class="text-xs text-muted mt-1">= $${fmt(allocated, 0)} of $${fmt(state.cash, 0)}</div>
-        </div>
-      </div>
-
-      <!-- Universe selector -->
-      <div style="margin-top:12px;padding-top:10px;border-top:0.5px solid var(--border-light)">
-        <div class="form-label" style="margin-bottom:7px">Scan universe</div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          ${['asx20','asx50','asx100','asx200'].map(k => {
-            const meta = (typeof ASX_UNIVERSE_META !== 'undefined' && ASX_UNIVERSE_META[k]) || { label: k.toUpperCase() };
-            const count = (typeof getUniverseTickers !== 'undefined') ? getUniverseTickers(k).length : '?';
-            const active = ip.universeKey === k;
-            return `<button class="btn btn-sm"
-              onclick="updateIntradayParam('universeKey','${k}')"
-              style="font-size:11px;font-weight:${active ? '700' : '400'};background:${active ? '#10b981' : 'var(--bg-secondary)'};color:${active ? '#fff' : 'var(--text-secondary)'};border-color:${active ? '#10b981' : 'var(--border-medium)'}">
-              ${meta.label} <span style="opacity:.7">(${count})</span>
-            </button>`;
-          }).join('')}
-        </div>
-        <div class="text-xs text-muted mt-1">Larger universes find more setups but take longer to scan</div>
-      </div>
-
-      <!-- Extreme mode toggle -->
-      <div style="margin-top:10px;padding:8px 10px;background:${ip.extremeMode ? 'rgba(239,68,68,.08)' : 'var(--bg-secondary)'};border:0.5px solid ${ip.extremeMode ? 'rgba(239,68,68,.4)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
-        <div>
-          <div style="font-size:12px;font-weight:600;color:${ip.extremeMode ? '#ef4444' : 'var(--text-secondary)'}">⚠️ Extreme Mode</div>
-          <div class="text-xs text-muted">Bypasses entry window, VWAP and RSI gates — shows all setups above min score. For testing only.</div>
-        </div>
-        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap">
-          <input type="checkbox" ${ip.extremeMode ? 'checked' : ''}
-            onchange="updateIntradayParam('extremeMode', this.checked)">
-          ${ip.extremeMode ? '<span style="color:#ef4444;font-weight:600">On</span>' : 'Off'}
-        </label>
-      </div>
-
-      <div style="margin-top:10px;padding-top:8px;border-top:0.5px solid var(--border-light);font-size:11px;color:var(--text-muted)">
-        ⏰ Entry window: 10:45–15:00 AEST only · ⚠️ yfinance 5m data has ~5–15 min latency — prices are indicative
-      </div>
-    </div>`;
-
   // ── Action bar ────────────────────────────────────────────────────────────
   const universeLabel = scanInfo && scanInfo.universeLabel
     ? scanInfo.universeLabel
@@ -726,24 +797,44 @@ function _renderDtIntradayTab() {
     ? `Last scan: ${scanInfo.date} ${scanInfo.time} · ${scanInfo.universeLabel || universeLabel} · ${scanInfo.passed}/${scanInfo.total} passed · ${scanInfo.count} setup${scanInfo.count !== 1 ? 's' : ''}`
     : 'No scan run yet.';
   const actionBar = `
-    <div class="card" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-      <div>
-        <div style="font-size:13px;font-weight:600">ASX Intraday Scanner</div>
-        <div class="text-xs text-muted">${scanStatus}</div>
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:13px;font-weight:600">ASX Intraday Scanner
+            ${ip.extremeMode ? '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:6px">⚠️ EXTREME</span>' : ''}
+          </div>
+          <div class="text-xs text-muted">${scanStatus}</div>
+        </div>
+        <div class="flex-row" style="gap:8px;flex-wrap:wrap;align-items:center">
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
+            <input type="checkbox" ${id.autoRefresh ? 'checked' : ''}
+              onchange="updateIntradayParam('autoRefresh', this.checked)">
+            Auto-refresh (2 min)
+          </label>
+          <button class="btn btn-primary btn-sm" ${id.scanRunning ? 'disabled' : ''}
+            onclick="runIntradayScan()"
+            style="background:#10b981;border-color:#10b981;display:flex;align-items:center;gap:6px">
+            ${id.scanRunning
+              ? '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Scanning…'
+              : '⚡ Scan ASX'}
+          </button>
+        </div>
       </div>
-      <div class="flex-row" style="gap:8px;flex-wrap:wrap;align-items:center">
-        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
-          <input type="checkbox" ${id.autoRefresh ? 'checked' : ''}
-            onchange="updateIntradayParam('autoRefresh', this.checked)">
-          Auto-refresh (2 min)
-        </label>
-        <button class="btn btn-primary btn-sm" ${id.scanRunning ? 'disabled' : ''}
-          onclick="runIntradayScan()"
-          style="background:#10b981;border-color:#10b981;display:flex;align-items:center;gap:6px">
-          ${id.scanRunning
-            ? '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Scanning…'
-            : '⚡ Scan ASX'}
-        </button>
+      <div style="margin-top:10px;padding-top:8px;border-top:0.5px solid var(--border-light);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div style="display:flex;gap:5px;flex-wrap:wrap">
+          ${['asx20','asx50','asx100','asx200'].map(k => {
+            const meta = (typeof ASX_UNIVERSE_META !== 'undefined' && ASX_UNIVERSE_META[k]) || { label: k.toUpperCase() };
+            const active = ip.universeKey === k;
+            return `<button class="btn btn-sm" onclick="updateIntradayParam('universeKey','${k}')"
+              style="font-size:11px;padding:2px 8px;font-weight:${active ? '700' : '400'};background:${active ? '#10b981' : 'var(--bg-secondary)'};color:${active ? '#fff' : 'var(--text-secondary)'};border-color:${active ? '#10b981' : 'var(--border-medium)'}">
+              ${meta.label}
+            </button>`;
+          }).join('')}
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:10px">
+          <span>Target <b>+${ip.targetPct}%</b> · Stop <b>−${ip.stopPct}%</b> · Score ≥ <b>${ip.minScore}</b></span>
+          <button class="btn btn-sm" style="font-size:10px;padding:2px 7px" onclick="switchIntradaySubTab('rules')">⚙ Rules</button>
+        </div>
       </div>
     </div>`;
 
@@ -868,7 +959,6 @@ function _renderDtIntradayTab() {
 
   return `
     ${spiWarningBanner}
-    ${configCard}
     ${actionBar}
     ${positionsCard}
     <div style="margin-bottom:6px;font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">

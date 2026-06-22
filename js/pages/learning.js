@@ -930,11 +930,30 @@ function _renderLearningContent(d, brier) {
   // ── Thesis Accuracy Matrix card (async — filled by renderThesisMatrixCard()) ──
   const thesisMatrixPlaceholder = `<div id="ll-thesis-matrix-card" class="section-gap"></div>`;
 
-  return summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
+  const introNote = `
+    <p style="font-size:11.5px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5">
+      The calibration cards below are derived from your actual trade history and are the primary learning signal.
+      The Debate Engine (collapsed below) is supplementary and optional.
+    </p>`;
+
+  const debateCollapsible = `
+    <details style="margin-top:16px" ontoggle="this.querySelector('.ll-details-arrow').textContent=this.open?'▼':'▶'">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);font-weight:600;letter-spacing:0.4px;user-select:none;list-style:none;display:flex;align-items:center;gap:6px">
+        <span class="ll-details-arrow" style="font-size:10px">▶</span>
+        ADVANCED / EXPERIMENTAL — Debate Engine
+        <span style="font-size:10px;font-weight:400;color:var(--text-muted);margin-left:4px">(optional; data-driven calibration above is the primary learning tool)</span>
+      </summary>
+      <div style="margin-top:8px">
+        ${debateStatsPlaceholder}
+        ${debateCardPlaceholder}
+      </div>
+    </details>`;
+
+  return introNote + summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard + recentCard + failedCard + debateInsightsCard +
     digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder +
-    thesisMatrixPlaceholder + execAlphaPlaceholder + debateStatsPlaceholder + debateCardPlaceholder;
+    thesisMatrixPlaceholder + execAlphaPlaceholder + debateCollapsible;
 }
 
 // ── Postmortem digest — AI summary of recent failure patterns ─────────────────

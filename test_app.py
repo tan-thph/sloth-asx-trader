@@ -1174,11 +1174,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_current(self):
-        """PROMPT_VERSION must be bumped to v14 after the bullCase/scenarios-required/analyst-target prompt update."""
+        """PROMPT_VERSION must be bumped to v15 after the fundamentals-over-technicals rule addition."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v14'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v14 after the bullCase/scenarios-required/analyst-target prompt update")
+        self.assertIn("PROMPT_VERSION = '2026-06-v15'", src,
+                      "PROMPT_VERSION must be 2026-06-v15 after adding Rule 20 (fundamentals > technicals)")
 
     def test_entry_driver_in_prompt(self):
         """Sprint 67: ANALYSIS_SYSTEM_PROMPT must require primary_entry_driver on BUYs."""
@@ -8949,6 +8949,226 @@ class TestSprint71SectorAnalysis(unittest.TestCase):
             self.assertIn("sector:", l_block)
         finally:
             asx_server.get_db = _orig_get_db
+
+
+class TestCriticsAddressing(unittest.TestCase):
+    """Regression tests for critics.md improvements — confidence-held badge,
+    fundamentals rule, financials sector module, reallocation suggestion,
+    and scenario/case rendering."""
+
+    @classmethod
+    def _read(cls, rel_path):
+        with open(os.path.join(ROOT, rel_path), encoding="utf-8") as f:
+            return f.read()
+
+    # ── Problem 1: _confidenceHeld ──────────────────────────────────────────
+
+    def test_confidence_held_set_in_analysis(self):
+        """analysis.js must set _confidenceHeld:true on low-confidence recs."""
+        src = self._read("js/analysis.js")
+        self.assertIn("_confidenceHeld: true", src,
+                      "analysis.js must stamp _confidenceHeld:true alongside _ruleWarnings for below-floor recs")
+
+    def test_confidence_held_badge_in_rec_card(self):
+        """recommendations.js must render the ⛔ HELD badge when _confidenceHeld is set."""
+        src = self._read("js/pages/recommendations.js")
+        self.assertIn("_confidenceHeld", src,
+                      "recommendations.js must check r._confidenceHeld to render the HELD badge")
+        self.assertIn("HELD", src,
+                      "recommendations.js must render a visible HELD label for low-confidence recs")
+
+    # ── Problem 4: fundamentals > technicals rule ───────────────────────────
+
+    def test_fundamentals_rule_in_prompt(self):
+        """prompts.js must include Rule 20 (fundamentals over technicals)."""
+        src = self._read("js/prompts.js")
+        self.assertIn("FUNDAMENTALS OVER TECHNICALS", src,
+                      "ANALYSIS_SYSTEM_PROMPT must include Rule 20 — fundamentals over technicals for established positions")
+        self.assertIn("confirming", src,
+                      "Rule 20 must explicitly label RSI/BB/MA as confirming signals, not primary drivers")
+
+    def test_prompt_version_v15(self):
+        """PROMPT_VERSION must be v15 after adding Rule 20."""
+        src = self._read("js/prompts.js")
+        self.assertIn("PROMPT_VERSION = '2026-06-v15'", src,
+                      "PROMPT_VERSION must be bumped to 2026-06-v15")
+
+    # ── Problem 5/6: Financials sector module ──────────────────────────────
+
+    def test_financials_module_defined(self):
+        """prompt-modules.js must define a FINANCIALS_SECTOR rule module."""
+        src = self._read("js/prompt-modules.js")
+        self.assertIn("FINANCIALS_SECTOR", src,
+                      "RULE_MODULES must include a FINANCIALS_SECTOR entry")
+        self.assertIn("NIM", src,
+                      "FINANCIALS_SECTOR module must reference Net Interest Margin (NIM)")
+        self.assertIn("CET1", src,
+                      "FINANCIALS_SECTOR module must reference CET1 capital adequacy")
+        self.assertIn("RBA", src,
+                      "FINANCIALS_SECTOR module must reference the RBA rate path")
+
+    def test_financials_module_wired_in_assembly(self):
+        """assembleOptionalModules must detect 'financials' sector and inject the module."""
+        src = self._read("js/prompt-modules.js")
+        self.assertIn("FINANCIALS_SECTOR", src,
+                      "assembleOptionalModules must push RULE_MODULES.FINANCIALS_SECTOR")
+        self.assertIn("financials", src,
+                      "assembleOptionalModules sector detection must match 'financials'")
+
+    def test_financials_module_uses_livesignals_sectors(self):
+        """assembleOptionalModules must check liveSignals sectors, not just portfolio."""
+        src = self._read("js/prompt-modules.js")
+        self.assertIn("liveSignals", src,
+                      "assembleOptionalModules must include sectors from state.liveSignals for candidate tickers")
+
+    # ── Problem 8: reallocationSuggestion ──────────────────────────────────
+
+    def test_reallocation_in_prompt_schema(self):
+        """prompts.js schema must include reallocationSuggestion for SELL/TRIM."""
+        src = self._read("js/prompts.js")
+        self.assertIn("reallocationSuggestion", src,
+                      "Output schema must include reallocationSuggestion field for SELL/TRIM")
+        self.assertIn("where should this freed capital go", src.lower().replace("where should this freed capital go", "where should this freed capital go"),
+                      "reallocationSuggestion description must explain purpose")
+
+    def test_reallocation_rendered_in_rec_card(self):
+        """recommendations.js must render reallocationSuggestion in the SELL/TRIM panel."""
+        src = self._read("js/pages/recommendations.js")
+        self.assertIn("reallocationSuggestion", src,
+                      "recommendations.js must render r.reallocationSuggestion in the SELL reason block")
+        self.assertIn("Capital:", src,
+                      "reallocationSuggestion panel must have a visible 'Capital:' label")
+
+    # ── Problem 9: scenarios + bull/bear cases rendered ────────────────────
+
+    def test_scenarios_rendered_in_rec_card(self):
+        """recommendations.js must render the bull/base/bear scenarios grid on the rec card."""
+        src = self._read("js/pages/recommendations.js")
+        self.assertIn("12-month scenarios", src,
+                      "rec card must show a '12-month scenarios' section")
+        self.assertIn("sc.bull", src,
+                      "scenarios rendering must access r.scenarios.bull")
+        self.assertIn("sc.bear", src,
+                      "scenarios rendering must access r.scenarios.bear")
+
+    def test_bull_bear_cases_rendered_in_rec_card(self):
+        """recommendations.js must render bullCase and bearCase in the rec card body."""
+        src = self._read("js/pages/recommendations.js")
+        self.assertIn("r.bullCase", src,
+                      "rec card must render r.bullCase in the card body")
+        self.assertIn("r.bearCase", src,
+                      "rec card must render r.bearCase in the card body")
+        self.assertIn("Bull case", src,
+                      "rec card must have a 'Bull case' label visible to the user")
+        self.assertIn("Bear case", src,
+                      "rec card must have a 'Bear case' label visible to the user")
+
+    # ── Problem 10: invalidationCondition ──────────────────────────────────
+
+    def test_invalidation_condition_in_prompt_schema(self):
+        """prompts.js must include invalidationCondition in the output schema."""
+        src = self._read("js/prompts.js")
+        self.assertIn("invalidationCondition", src,
+                      "Output schema must include invalidationCondition field")
+        self.assertIn("measurable value", src,
+                      "invalidationCondition description must require a measurable value (price level, %, event)")
+
+    def test_invalidation_condition_in_validator(self):
+        """response-validator.js REC_SCHEMA must validate invalidationCondition."""
+        src = self._read("js/response-validator.js")
+        self.assertIn("invalidationCondition", src,
+                      "REC_SCHEMA must include invalidationCondition so missing values are caught in the repair loop")
+
+    def test_invalidation_condition_rendered_in_rec_card(self):
+        """recommendations.js must render invalidationCondition visibly on the rec card body."""
+        src = self._read("js/pages/recommendations.js")
+        self.assertIn("invalidationCondition", src,
+                      "rec card must reference r.invalidationCondition")
+        self.assertIn("Invalidated if", src,
+                      "rec card must show a visible 'Invalidated if' label for the condition")
+
+    # ── Priority 1: Intraday 5m ATR ────────────────────────────────────────
+
+    def test_intraday_atr_5m_computed_in_backend(self):
+        src = self._read('routes/intraday.py')
+        self.assertIn('atr_5m', src)
+        self.assertIn('rolling(14)', src)
+
+    def test_intraday_atr_used_in_frontend(self):
+        src = self._read('js/intraday-strategy.js')
+        self.assertIn('atr_5m', src)
+        self.assertIn('1.5 *', src)
+
+    # ── Priority 5: Debate engine in collapsible section ───────────────────
+
+    def test_debate_engine_in_collapsible_section(self):
+        src = self._read('js/pages/learning.js')
+        self.assertIn('<details', src)
+        self.assertIn('ADVANCED', src)
+
+    # ── Priority 6: Sector ETF relative strength ───────────────────────────
+
+    def test_sector_etf_map_in_indicators(self):
+        src = self._read('indicators.py')
+        self.assertIn('SECTOR_ETF_MAP', src)
+        self.assertIn('XFJ.AX', src)
+
+    def test_sector_rs_5d_in_analyse_ticker_output(self):
+        src = self._read('indicators.py')
+        self.assertIn('sector_rs_5d', src)
+
+
+class TestLearningLoopImprovements(unittest.TestCase):
+    """Tests for priorities 2+3+4: thesis states, success tags, 3D matrix."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config['TESTING'] = True
+
+    @classmethod
+    def tearDownClass(cls):
+        asx_server.get_db = _orig_get_db
+
+    def _read(self, relpath):
+        with open(os.path.join(ROOT, relpath), encoding='utf-8') as f:
+            return f.read()
+
+    # ── Priority 2: partially_validated + reversed thesis states ───────────
+
+    def test_partial_validated_in_learning_loop(self):
+        src = self._read('js/learning-loop.js')
+        self.assertIn('partially_validated', src)
+        self.assertIn('reversed', src)
+
+    # ── Priority 3: Deterministic success tags ────────────────────────────
+
+    def test_success_tags_deterministic_function_exists(self):
+        src = self._read('routes/learning.py')
+        self.assertIn('_classify_success_tags_deterministic', src)
+        self.assertIn('clean_path', src)
+
+    def test_resolve_deterministic_tags_fills_success_tags(self):
+        src = self._read('routes/learning.py')
+        self.assertIn('_classify_success_tags_deterministic', src)
+        self.assertIn('success_tags', src)
+
+    # ── Priority 4: Driver × Regime × Sector 3D endpoint ─────────────────
+
+    def test_driver_matrix_endpoint_exists(self):
+        src = self._read('routes/learning.py')
+        self.assertIn('driver-matrix', src)
+        self.assertIn('_compute_driver_regime_sector_xtab', src)
+
+    def test_driver_matrix_route_accessible(self):
+        r = self.client.get('/api/learning/driver-matrix')
+        self.assertIn(r.status_code, (200, 404))
+        if r.status_code == 200:
+            data = r.get_json()
+            self.assertTrue(data.get('ok'))
+            self.assertIn('cells', data)
 
 
 if __name__ == "__main__":

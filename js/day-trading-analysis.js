@@ -320,11 +320,25 @@ function executeDayTrade(recId) {
     action: 'BUY',
     qty:    rec.qty,
     defaultPrice,
-  }, (entryPrice, brokerage, actualQty) => {
+  }, async (entryPrice, brokerage, actualQty) => {
     // Use user-entered qty; fall back to AI qty if dialog didn't return one
     const qty  = (actualQty && actualQty > 0) ? actualQty : rec.qty;
     const cost = qty * entryPrice + brokerage;
     if (cost > state.cash) { toast('Insufficient cash', 'error'); return; }
+
+    // Ensure live signals are available — fetch fresh if the scan cache is stale
+    // or this ticker wasn't in the last scan. This is the main gap: without a
+    // fallback fetch, entrySignals would be all nulls for tickers not in liveSignals.
+    if (!state.liveSignals?.[rec.ticker]?.rsi_14) {
+      try {
+        const _r = await fetch(`${API}/api/analyse/${encodeURIComponent(rec.ticker)}`);
+        if (_r.ok) {
+          const _d = await _r.json();
+          if (!state.liveSignals) state.liveSignals = {};
+          state.liveSignals[rec.ticker] = { ...(_d || {}), ...state.liveSignals[rec.ticker] };
+        }
+      } catch { /* offline — proceed without signals */ }
+    }
 
     // Sector concentration warning — fire a toast if another executed DT rec
     // shares the same sector. Non-blocking; trader decides to proceed or not.
@@ -366,15 +380,20 @@ function executeDayTrade(recId) {
       recId:       rec.id,
       recExecuted: true,
       notes:       `SwingTrade | Target:$${rec.target} | Stop:$${rec.stopLoss} | R:R ${rec.rrRatio?.toFixed(1)}x | Hold:${rec.holdDays}d`,
-      entrySignals: {
-        rsi_14:    _swingSig.rsi_14    ?? null,
-        bb_pct_b:  _swingSig.bb_pct_b  ?? null,
-        adx_14:    _swingSig.adx ?? _swingSig.adx_14 ?? null,
-        atr_pct:   _swingSig.atr_pct   ?? null,
-        return_5d: _swingSig.return_5d ?? null,
-        return_20d:_swingSig.return_20d ?? null,
-        price:     parseFloat(entryPrice.toFixed(3)),
-      },
+      entrySignals: _swingSig.rsi_14 != null ? {
+        rsi_14:      _swingSig.rsi_14     ?? null,
+        bb_pct_b:    _swingSig.bb_pct_b   ?? null,
+        adx_14:      _swingSig.adx        ?? _swingSig.adx_14 ?? null,
+        atr_pct:     _swingSig.atr_pct    ?? null,
+        return_5d:   _swingSig.return_5d  ?? null,
+        return_20d:  _swingSig.return_20d ?? null,
+        return_60d:  _swingSig.return_60d ?? null,
+        macd_hist:   _swingSig.macd_hist  ?? null,
+        setup_score: _swingSig.score      ?? null,
+        sector_rs_5d:_swingSig.sector_rs_5d ?? null,
+        adv_20:      _swingSig.adv_20     ?? null,
+        price:       parseFloat(entryPrice.toFixed(3)),
+      } : null,
     };
     state.tradeJournal.unshift(entry);
     state.cash -= cost;   // applyBuyToPortfolio does not update cash; deduct manually
@@ -385,10 +404,9 @@ function executeDayTrade(recId) {
     const qtyNote = (qty !== rec.qty) ? ` (AI suggested ${rec.qty})` : '';
     toast(`Executed ${rec.ticker} swing trade — ${qty} shares @ $${entryPrice.toFixed(3)} (fee $${brokerage})${qtyNote}`, 'success');
 
-    // Record ML training snapshot (fire-and-forget — failure never blocks execution)
+    // Record ML training snapshot — signals are now guaranteed fresh from the fetch above
     if (typeof dtSaveSnapshot === 'function') {
-      const signals = (state.liveSignals && state.liveSignals[rec.ticker]) || {};
-      dtSaveSnapshot(rec, 'swing', signals, state.macroData || {}, entryPrice, qty)
+      dtSaveSnapshot(rec, 'swing', _swingSig, state.macroData || {}, entryPrice, qty)
         .then(function(snapId) { if (snapId) rec._snapshotId = snapId; scheduleSave(); });
     }
 

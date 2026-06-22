@@ -445,11 +445,12 @@ function setJournalFilter(type, value) {
 function setJournalStatusFilter(status) { setJournalFilterKey('status', status); }
 function setJournalActionFilter(action) { setJournalFilterKey('action', action); }
 
-// Capture a technical snapshot for a ticker in the same shape as entry_signals_json
-// (rsi_14, bb_pct_b, adx_14, atr_pct, return_5d, return_20d) so manual trades carry
-// the same data as AI recs. Prefers in-memory live signals; falls back to a fresh
-// /api/analyse fetch. Returns null if signals are unavailable (offline / new ticker).
-async function _fetchSignalSnapshot(ticker) {
+// Capture a technical snapshot for a ticker at the time of a same-day manual trade.
+// Prefers in-memory live signals; falls back to a fresh /api/analyse fetch.
+// Returns null when signals are unavailable (offline, new ticker, or backdated trade).
+// tradeDate must equal todayStr() — we never attach today's technicals to a past fill.
+async function _fetchSignalSnapshot(ticker, tradeDate) {
+  if (tradeDate && tradeDate !== todayStr()) return null;
   let s = state.liveSignals?.[ticker];
   if (!s) {
     try {
@@ -457,15 +458,26 @@ async function _fetchSignalSnapshot(ticker) {
       if (r.ok) s = await r.json();
     } catch { /* offline — leave null */ }
   }
-  if (!s) return null;
+  if (!s || s.rsi_14 == null) return null;
   return {
-    rsi_14:    s.rsi_14    ?? null,
-    bb_pct_b:  s.bb_pct_b  ?? null,
-    adx_14:    s.adx ?? s.adx_14 ?? null,
-    atr_pct:   s.atr_pct   ?? null,
-    return_5d: s.return_5d ?? null,
-    return_20d:s.return_20d ?? null,
-    price:     s.current_price ?? null,
+    // Core oscillators
+    rsi_14:     s.rsi_14     ?? null,
+    bb_pct_b:   s.bb_pct_b   ?? null,
+    adx_14:     s.adx        ?? s.adx_14 ?? null,
+    atr_pct:    s.atr_pct    ?? null,
+    // Returns
+    return_5d:  s.return_5d  ?? null,
+    return_20d: s.return_20d ?? null,
+    return_60d: s.return_60d ?? null,
+    // Momentum
+    macd_hist:  s.macd_hist  ?? null,
+    setup_score:s.score      ?? null,
+    // Sector relative strength
+    sector_rs_5d: s.sector_rs_5d ?? null,
+    // Volume context
+    adv_20:     s.adv_20     ?? null,
+    // Price at entry
+    price:      s.current_price ?? null,
   };
 }
 
@@ -479,8 +491,8 @@ async function addManualTrade() {
   const thesisInput = (prompt('Thesis / why (optional — recorded for review):') || '').trim();
   const fees = state.settings.brokerage;
   const symbol = ticker.toUpperCase();
-  // Snapshot current technicals so this manual trade can be reviewed later like an AI rec.
-  const entrySignals = await _fetchSignalSnapshot(symbol);
+  // Snapshot live technicals — only when trade is today; backdated fills get null.
+  const entrySignals = await _fetchSignalSnapshot(symbol, tradeDate);
   const thesis = thesisInput || null;
   let tradeEntry;
 

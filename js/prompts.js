@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-06-v14';
+const PROMPT_VERSION = '2026-06-v15';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -101,6 +101,23 @@ const ANALYSIS_SYSTEM_PROMPT =
       May be cited in factorsUsed[] as supporting context but must NEVER be the primary or sole justification
       for a BUY/SELL/TRIM. If analyst_target is the only bullish/bearish factor available, treat it as
       insufficient on its own — require at least one independent technical/fundamental factor alongside it.
+
+  19. SHARPE RATIO IS BACKWARD-LOOKING CONTEXT: A negative short-term Sharpe (90d/1yr) means past
+      risk-adjusted performance was poor — it does not predict future performance and MUST NOT be used
+      as a standalone SELL or TRIM trigger. Use Sharpe only as a ranking input for position sizing
+      or portfolio construction, never as primary evidence for or against a trade.
+
+  20. FUNDAMENTALS OVER TECHNICALS FOR ESTABLISHED POSITIONS: For holdings held > 60 days or
+      large-cap stocks (ADV > $10M), fundamental and macro factors MUST outweigh short-term
+      technical signals. RSI, Bollinger %B, MACD, and moving-average crossovers are confirming
+      signals — they reinforce a fundamental thesis but cannot override it. If a fundamental
+      thesis (earnings, valuation, dividend, sector macro) remains intact, a temporary technical
+      breakdown is NOT sufficient grounds for a SELL/TRIM recommendation — require at least one
+      confirmed fundamental deterioration alongside the technical signal.
+      Exception: stop-loss breach or thesis_broken driver always takes precedence regardless of
+      holding period. Technical signals remain valid PRIMARY drivers for swing/momentum entries
+      (primary_entry_driver = momentum_breakout or trend_pullback) in the day-trade and scanner
+      contexts where fundamentals are explicitly unavailable.
 
   SECTION 1C — BUY/TOP_UP ENTRY DRIVER TAGGING
 
@@ -499,6 +516,12 @@ const ANALYSIS_SYSTEM_PROMPT =
     "bullCase":              string (MAX 100 chars; required for BUY/TOP_UP — one-sentence steelman
                                of why this trade goes right; optional but encouraged for SELL/TRIM
                                as a check against confirmation bias — state why you might be wrong to exit),
+    "reallocationSuggestion": string (MAX 120 chars; SELL/TRIM only — strongly encouraged:
+                               where should this freed capital go? Be specific.
+                               e.g. "Rotate into NAB — better NIM leverage and lower P/B",
+                               "Park in cash until sector rotation plays out (3-4 weeks)",
+                               "Redeploy into VAS for broad market exposure at lower risk".
+                               Omit only if no clear alternative and cash-hold is obvious.),
     "weightGuidance":        "Strong Accumulate (+3-5%)" | "Accumulate (+1-2%)" | "Hold" | "Reduce (-25-50%)" | "Exit",
     "expectedProfit":        number (gross dollar profit if target hit, at min-trade-size notional:
                                (minTradeSize / entryMid) x (target - entryMid); engine recomputes at final qty),

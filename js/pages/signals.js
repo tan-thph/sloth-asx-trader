@@ -241,6 +241,7 @@ async function renderSignalsPage(gen) {
             <div class="card-title">Returns</div>
             ${[['1 Day',s.return_1d],['5 Day',s.return_5d],['20 Day (1M)',s.return_20d],['60 Day (3M)',s.return_60d],['90 Day',s.return_90d]].map(([l,v])=>`
               <div class="signal-row"><span class="text-sm">${l}</span><span class="${v!=null?(v>=0?'text-success':'text-danger'):'text-muted'}">${v!=null?fmtp(v,2):'—'}</span></div>`).join('')}
+            ${s.sector_rs_5d != null ? `<div class="signal-row"><span class="text-sm">Sector RS (5d)</span><span class="${s.sector_rs_5d >= 0 ? 'text-success' : 'text-danger'}">${s.sector_rs_5d > 0 ? '+' : ''}${s.sector_rs_5d.toFixed(1)}%</span></div>` : ''}
           </div>
         </div>
 

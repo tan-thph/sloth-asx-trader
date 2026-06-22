@@ -180,7 +180,8 @@ const REC_SCHEMA = {
   qty:        { type: 'number',  requiredUnless: 'HOLD', min: 1, integer: true },
   confidence: { type: 'number',  required: true,  min: 0, max: 1 },
   rrRatio:    { type: 'number',  required: false, min: 0 },
-  scenarios:  { requiredUnless: 'HOLD' },  // required for BUY/SELL/TRIM/TOP_UP; p-sum validated below when present
+  scenarios:            { requiredUnless: 'HOLD' },  // required for BUY/SELL/TRIM/TOP_UP; p-sum validated below when present
+  invalidationCondition:{ type: 'string', requiredUnless: 'HOLD' },
 };
 
 // _validateField — returns an error string or null.

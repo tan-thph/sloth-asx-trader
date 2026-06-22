@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from core import adv_slippage
 from db import get_db
@@ -204,7 +204,9 @@ def classify_error_type_deterministic(row) -> str:
 
     # 1. thesis_broken — the entry technical thesis demonstrably reversed.
     #    DATA-BACKED (the entry-vs-exit comparison) rather than guessed.
-    if verdict == "invalidated":
+    #    'reversed' is treated as a stronger form of invalidation (signals flipped
+    #    rather than just deteriorated), so it also earns the thesis_broken tag.
+    if verdict in ("invalidated", "reversed"):
         _add("thesis_broken")
 
     # 2. stop_too_tight.
@@ -215,7 +217,7 @@ def classify_error_type_deterministic(row) -> str:
     #    shows price subsequently climbed back toward where the target sat). The
     #    target-distance proxy: MFE recovered to ≥50% of the planned target move.
     #    Falls back to the ATR-distance heuristic when MAE/MFE are null.
-    if exit_r == "stop_hit" and verdict in ("validated", "irrelevant", ""):
+    if exit_r == "stop_hit" and verdict in ("validated", "partially_validated", "irrelevant", ""):
         atr_pct = _sig_get(esj, "atr_pct")
         empirical_done = False
         if mae_pct is not None and mfe_pct is not None and entry_px:
@@ -329,7 +331,8 @@ def compute_skill_score_deterministic(row):
             return row.get(key) if hasattr(row, "get") else None
 
     verdict = (_g("thesis_verdict") or "")
-    if verdict not in ("validated", "invalidated", "irrelevant"):
+    if verdict not in ("validated", "invalidated", "irrelevant",
+                       "partially_validated", "reversed"):
         return None
 
     status = (_g("outcome_status") or "").lower()
@@ -337,9 +340,15 @@ def compute_skill_score_deterministic(row):
     win    = status == "win" or (status not in ("loss", "breakeven") and pnl is not None and float(pnl) > 0)
 
     base = {
-        ("validated",   True):  8.0, ("validated",   False): 6.0,
-        ("irrelevant",  True):  5.5, ("irrelevant",  False): 4.0,
-        ("invalidated", True):  3.0, ("invalidated", False): 2.0,
+        # Original quadrant scores
+        ("validated",           True):  8.0, ("validated",           False): 6.0,
+        ("irrelevant",          True):  5.5, ("irrelevant",          False): 4.0,
+        ("invalidated",         True):  3.0, ("invalidated",         False): 2.0,
+        # New states (Improvement A)
+        # partially_validated: thesis partially held — slightly below validated
+        ("partially_validated", True):  7.0, ("partially_validated", False): 5.0,
+        # reversed: signals flipped compared to entry — worse than invalidated
+        ("reversed",            True):  2.0, ("reversed",            False): 1.0,
     }[(verdict, win)]
 
     exit_r = (_g("exit_reason") or "")
@@ -451,6 +460,71 @@ def compute_skill_score_fallback(row):
     return round(max(0.0, min(10.0, base)), 1)
 
 
+def _classify_success_tags_deterministic(row) -> str:
+    """Pure function. Returns comma-separated success tags for closed wins.
+
+    Improvement B: deterministic success-tag tagger that runs alongside the
+    error-type tagger in _resolve_deterministic_tags. Never overwrites existing
+    manual/Ollama tags (caller guards this).
+
+    Tags emitted (any combination):
+      regime_aligned  — won in a pro-risk regime AND hit the target (not a lucky exit)
+      disciplined_hold — held for ≥5 days and reached target (no premature exit)
+      clean_path      — shallow drawdown (MAE) relative to peak gain (MFE); |MAE| < 30% MFE
+      thesis_confirmed — thesis verdict was validated or partially_validated
+      strong_process   — skill_score ≥ 7 (deterministic or Ollama)
+
+    Returns '' (empty) when no tag fires, so callers can skip the UPDATE.
+    """
+    def _g(key):
+        try:
+            return row[key]
+        except (KeyError, IndexError, TypeError):
+            return row.get(key) if hasattr(row, "get") else None
+
+    tags: list = []
+
+    verdict  = (_g("thesis_verdict") or "").lower()
+    exit_r   = (_g("exit_reason")    or "").lower()
+    hold_d   = _g("holding_period_days") or 0
+    mfe      = _g("mfe_pct")    # float or None (≥0 for longs)
+    mae      = _g("mae_pct")    # float or None (≤0 for longs)
+    skill    = _g("skill_score")  # float or None
+    regime   = (_g("regime") or "")
+
+    # regime_aligned: won in a favourable regime AND hit target (not just a lucky exit)
+    if regime in ("riskOn", "trend") and exit_r == "target_hit":
+        tags.append("regime_aligned")
+
+    # disciplined_hold: held for enough time AND hit target (no premature exit)
+    if exit_r == "target_hit" and hold_d >= 5:
+        tags.append("disciplined_hold")
+
+    # clean_path: MFE high relative to MAE (shallow drawdown, high upside captured)
+    try:
+        mfe_f = float(mfe) if mfe is not None else None
+        mae_f = float(mae) if mae is not None else None
+    except (TypeError, ValueError):
+        mfe_f, mae_f = None, None
+    if mfe_f is not None and mae_f is not None and mfe_f > 0 and mae_f < 0:
+        if abs(mae_f) < 0.3 * mfe_f:   # drawdown was less than 30% of peak gain
+            tags.append("clean_path")
+
+    # thesis_confirmed: thesis validated or partially_validated → analysis was correct
+    if verdict in ("validated", "partially_validated"):
+        tags.append("thesis_confirmed")
+
+    # strong_process: high skill score (deterministic or Ollama)
+    try:
+        skill_f = float(skill) if skill is not None else None
+    except (TypeError, ValueError):
+        skill_f = None
+    if skill_f is not None and skill_f >= 7.0:
+        tags.append("strong_process")
+
+    return ",".join(tags)
+
+
 def _resolve_deterministic_tags(conn, cap: int = 50) -> int:
     """Lazily fill error_type + skill_score for closed, executed events that lack
     them, using the deterministic functions above. Idempotent, capped per call,
@@ -473,28 +547,44 @@ def _resolve_deterministic_tags(conn, cap: int = 50) -> int:
                suggested_target, actual_entry_price, entry_signals_json,
                primary_entry_driver, mae_pct, mfe_pct, exec_mech_pnl_pct,
                checklist_bypasses, holding_period_days,
-               error_type, error_type_source, skill_score
+               error_type, error_type_source, skill_score, success_tags
           FROM ai_learning_events
          WHERE was_executed = 1
            AND recommendation IN ('BUY','TOP_UP')
            AND outcome_status IN ('win','loss','breakeven')
            AND (skill_score IS NULL
                 OR (outcome_status IN ('loss','breakeven')
-                    AND (error_type IS NULL OR error_type = '')))
+                    AND (error_type IS NULL OR error_type = ''))
+                OR (outcome_status = 'win'
+                    AND (success_tags IS NULL OR success_tags = '')))
          ORDER BY timestamp DESC
          LIMIT ?
     """, (cap,)).fetchall()
 
     resolved = 0
     for r in rows:
+        row_dict = dict(r)
         sets, vals = [], []
         if r["outcome_status"] in ("loss", "breakeven") and not (r["error_type"] or ""):
-            sets.append("error_type=?");        vals.append(classify_error_type_deterministic(r))
+            sets.append("error_type=?");        vals.append(classify_error_type_deterministic(row_dict))
             sets.append("error_type_source=?"); vals.append("deterministic")
         if r["skill_score"] is None:
-            sk = compute_skill_score_deterministic(r)
+            sk = compute_skill_score_deterministic(row_dict)
             if sk is not None:
                 sets.append("skill_score=?"); vals.append(sk)
+        # Improvement B: fill success_tags for wins that don't already have them.
+        # Runs AFTER skill_score is computed so _classify_success_tags_deterministic
+        # can read the freshly-computed skill_score value. We pass a merged dict so
+        # the new skill_score is visible even if it was set in this same iteration.
+        if r["outcome_status"] == "win" and not (r["success_tags"] or ""):
+            merged = dict(row_dict)
+            # If skill_score was just computed above, merge it so the tag can fire.
+            for i, s in enumerate(sets):
+                if s == "skill_score=?":
+                    merged["skill_score"] = vals[i]
+            stags = _classify_success_tags_deterministic(merged)
+            if stags:
+                sets.append("success_tags=?"); vals.append(stags)
         if sets:
             vals.append(r["id"])
             conn.execute(f"UPDATE ai_learning_events SET {', '.join(sets)} WHERE id=?", vals)
@@ -957,7 +1047,7 @@ def trade_detail():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-_VERDICT_LIST = ("validated", "invalidated", "irrelevant")
+_VERDICT_LIST = ("validated", "invalidated", "irrelevant", "partially_validated", "reversed")
 
 
 def _compute_thesis_matrix(conn) -> dict:
@@ -2177,6 +2267,69 @@ def _compute_driver_regime_xtab(conn, regime: str, wilson_excludes,
     flag = "✓" if iwr > owr else "⚠"
     return (f"{flag}{drv}×{regime}:{iwr*100:.0f}%WR(n={in_}) vs "
             f"{owr*100:.0f}% other-regimes(n={on_})")
+
+
+def _compute_driver_regime_sector_xtab(conn) -> list:
+    """3D cross-tab: entry driver × regime × sector.
+
+    Improvement C: returns a list of {driver, regime, sector, n, win_rate,
+    avg_pnl_pct} cells for closed executed BUY/TOP_UP events that have all
+    three dimensions populated. Cells with n < 3 are excluded (too noisy).
+
+    win_rate is expressed as a fraction 0–1; avg_pnl_pct as a float.
+    All values are Python-native floats/ints (numpy scalars cast at query time
+    via CAST so SQLite returns plain Python types).
+    """
+    rows = conn.execute("""
+        SELECT primary_entry_driver AS driver,
+               regime,
+               sector,
+               COUNT(*) AS n,
+               AVG(CASE WHEN outcome_status IN ('win','virtual_win') THEN 1.0 ELSE 0.0 END) AS win_rate,
+               AVG(realized_pnl_pct) AS avg_pnl_pct
+          FROM ai_learning_events
+         WHERE was_executed = 1
+           AND outcome_status IN ('win','loss','virtual_win','virtual_loss')
+           AND recommendation IN ('BUY','TOP_UP')
+           AND primary_entry_driver IS NOT NULL
+           AND regime IS NOT NULL
+           AND sector IS NOT NULL AND sector != ''
+         GROUP BY primary_entry_driver, regime, sector
+        HAVING COUNT(*) >= 3
+         ORDER BY win_rate DESC
+    """).fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            "driver":      r["driver"],
+            "regime":      r["regime"],
+            "sector":      r["sector"],
+            "n":           int(r["n"]),
+            "win_rate":    round(float(r["win_rate"]), 3) if r["win_rate"] is not None else None,
+            "avg_pnl_pct": round(float(r["avg_pnl_pct"]), 2) if r["avg_pnl_pct"] is not None else None,
+        })
+    return result
+
+
+@bp.route("/api/learning/driver-matrix")
+def driver_matrix():
+    """3D entry-driver × regime × sector performance cross-tab.
+
+    GET /api/learning/driver-matrix
+
+    Returns cells where all three dimensions (primary_entry_driver, regime,
+    sector) are populated AND n >= 3. Each cell: {driver, regime, sector, n,
+    win_rate (0-1), avg_pnl_pct}. Useful for surfacing which driver works best
+    in which regime for which sector — a more granular view than the 2D
+    driver×regime tab already in the Learning page.
+    """
+    try:
+        with get_db() as conn:
+            cells = _compute_driver_regime_sector_xtab(conn)
+        return jsonify({"ok": True, "cells": cells, "n": len(cells)})
+    except Exception as e:
+        current_app.logger.error("driver-matrix error: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 def _compute_sell_negative_confirmation(conn, cap: int = 3) -> str:
