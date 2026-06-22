@@ -11,7 +11,7 @@ Endpoints:
   /api/rba-meetings                GET     — scrape rba.gov.au/schedules-events/board-meeting-schedules.html → 24h cache
   /api/polymarket                  GET     — Manifold market probabilities (30 min cache)
   /api/risk                        GET     — beta, Sharpe, VaR, CVaR per ticker
-  /api/portfolio/nav-history       POST    — reconstruct NAV curve vs VAS
+  /api/portfolio/nav-history       POST    — reconstruct NAV curve vs ^AXJO (5-min cache)
   /api/earnings-calendar           GET     — next earnings + EPS per ticker (ETFs skipped)
   /api/seasonality/<ticker>        GET     — 12-month avg return pattern (10yr, 24 h cache)
   /api/log/ai_response             POST/GET — store + retrieve raw Claude output (legacy)
@@ -758,9 +758,23 @@ def portfolio_risk():
 
 # ── Portfolio NAV history ────────────────────────────────────────────────────
 
+_NAV_CACHE: dict = {}   # key → (payload_dict, expires_at)
+_NAV_CACHE_TTL = 300    # 5 minutes — stabilises chart across rapid reloads
+
+
+def _nav_cache_key(portfolio: list, period: str) -> str:
+    """Stable hash over sorted (ticker, shares) pairs + period. Cash excluded so
+    the same market data is reused even if the user's cash changes."""
+    import hashlib, json
+    items = sorted((h["ticker"].upper(), float(h["shares"])) for h in portfolio)
+    return hashlib.md5(json.dumps([items, period]).encode()).hexdigest()
+
+
 @bp.route("/api/portfolio/nav-history", methods=["POST"])
 def portfolio_nav_history():
-    """Reconstruct portfolio NAV over time using current share quantities."""
+    """Reconstruct portfolio NAV over time using current share quantities.
+    Benchmark: ^AXJO (ASX 200 index). 5-min server-side cache per (portfolio, period)
+    stabilises the chart across rapid page reloads during market hours."""
     data      = request.get_json() or {}
     portfolio = data.get("portfolio", [])
     period    = data.get("period", "1y")
@@ -769,7 +783,25 @@ def portfolio_nav_history():
     if not portfolio:
         return jsonify({"error": "portfolio required"}), 400
 
-    benchmark   = "VAS.AX"
+    # ── 5-min cache (excludes cash so market data is reused across reload) ────
+    cache_key = _nav_cache_key(portfolio, period)
+    now = time.time()
+    cached = _NAV_CACHE.get(cache_key)
+    if cached and cached[1] > now:
+        payload = dict(cached[0])           # shallow copy
+        payload["values"] = [v + cash for v in cached[0]["_nav_only"]]
+        payload.pop("_nav_only", None)
+        # Rescale benchmark to match the (possibly different) cash-adjusted start
+        if cached[0].get("_bench_raw"):
+            first_b = cached[0]["_bench_raw"][0]
+            first_nav = payload["values"][0]
+            payload["benchmark"] = [round(v / first_b * first_nav, 2) for v in cached[0]["_bench_raw"]]
+            payload["bench_return"] = round(
+                (cached[0]["_bench_raw"][-1] - first_b) / first_b * 100, 2
+            ) if first_b else None
+        return jsonify(payload)
+
+    benchmark   = "^AXJO"
     tickers     = [h["ticker"].upper() for h in portfolio]
     shares_map  = {h["ticker"].upper(): float(h["shares"]) for h in portfolio}
     asx_tickers = [f"{t}.AX" for t in tickers]
@@ -780,11 +812,7 @@ def portfolio_nav_history():
         if raw.empty:
             return jsonify({"error": "No data returned"}), 502
 
-        if isinstance(raw.columns, pd.MultiIndex):
-            closes = raw["Close"]
-        else:
-            closes = raw[["Close"]]
-
+        closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw[["Close"]]
         closes = closes.ffill().dropna(how="all")
 
         nav = pd.Series(0.0, index=closes.index)
@@ -796,16 +824,8 @@ def portfolio_nav_history():
             return jsonify({"error": "No valid price data"}), 502
 
         nav_with_cash = nav + cash
-
-        bench_values = None
-        if benchmark in closes.columns:
-            bench_ser  = closes[benchmark].reindex(nav.index).ffill()
-            first_b    = bench_ser.iloc[0]
-            first_nav  = nav_with_cash.iloc[0]
-            bench_norm = (bench_ser / first_b) * first_nav
-            bench_values = [round(float(v), 2) for v in bench_norm.values]
-
         values = [round(float(v), 2) for v in nav_with_cash.values]
+        nav_only = [round(float(v), 2) for v in nav.values]  # without cash, for cache
         dates  = [d.strftime("%Y-%m-%d") for d in nav_with_cash.index]
 
         total_return = (values[-1] - values[0]) / values[0] * 100 if values[0] else 0.0
@@ -818,19 +838,31 @@ def portfolio_nav_history():
             if dd > max_dd:
                 max_dd = dd
 
+        bench_raw = None
+        bench_values = None
         bench_return = None
-        if bench_values and bench_values[0]:
-            bench_return = round((bench_values[-1] - bench_values[0]) / bench_values[0] * 100, 2)
+        if benchmark in closes.columns:
+            bench_ser = closes[benchmark].reindex(nav.index).ffill()
+            bench_raw = [round(float(v), 4) for v in bench_ser.values]
+            first_b   = bench_raw[0]
+            first_nav = values[0]
+            if first_b:
+                bench_values = [round(v / first_b * first_nav, 2) for v in bench_raw]
+                bench_return = round((bench_raw[-1] - first_b) / first_b * 100, 2)
 
-        return jsonify({
-            "dates":         dates,
-            "values":        values,
-            "benchmark":     bench_values,
-            "total_return":  round(total_return, 2),
-            "max_drawdown":  round(max_dd, 2),
-            "bench_return":  bench_return,
-            "period":        period,
-        })
+        payload = {
+            "dates":        dates,
+            "values":       values,
+            "benchmark":    bench_values,
+            "total_return": round(total_return, 2),
+            "max_drawdown": round(max_dd, 2),
+            "bench_return": bench_return,
+            "period":       period,
+        }
+        # Store raw (cash-free) nav + raw bench index for cache reuse
+        _NAV_CACHE[cache_key] = ({**payload, "_nav_only": nav_only, "_bench_raw": bench_raw}, now + _NAV_CACHE_TTL)
+        return jsonify(payload)
+
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 

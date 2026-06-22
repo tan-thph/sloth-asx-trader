@@ -516,7 +516,7 @@ function _buildEquityCurveCard(d) {
   const isUp = d.total_return >= 0;
   const retColor = isUp ? '#16a34a' : '#dc2626';
   const benchLabel = d.bench_return != null
-    ? `<span class="text-xs text-muted" style="margin-left:12px">VAS benchmark: <span style="color:${d.bench_return>=0?'#16a34a':'#dc2626'};font-weight:600">${d.bench_return>=0?'+':''}${d.bench_return.toFixed(2)}%</span></span>`
+    ? `<span class="text-xs text-muted" style="margin-left:12px">XJO benchmark: <span style="color:${d.bench_return>=0?'#16a34a':'#dc2626'};font-weight:600">${d.bench_return>=0?'+':''}${d.bench_return.toFixed(2)}%</span></span>`
     : '';
   return `
     <div class="card" style="margin-bottom:14px">
@@ -532,7 +532,7 @@ function _buildEquityCurveCard(d) {
         </div>
         <div style="display:flex;gap:12px;font-size:11px;color:var(--text-muted)">
           <span><span style="display:inline-block;width:18px;height:2px;background:#3b82f6;vertical-align:middle;margin-right:4px"></span>Portfolio</span>
-          ${d.benchmark ? `<span><span style="display:inline-block;width:18px;height:2px;border-top:2px dashed #f59e0b;vertical-align:middle;margin-right:4px"></span>VAS</span>` : ''}
+          ${d.benchmark ? `<span><span style="display:inline-block;width:18px;height:2px;border-top:2px dashed #f59e0b;vertical-align:middle;margin-right:4px"></span>ASX 200 (XJO)</span>` : ''}
         </div>
       </div>
       <div style="overflow-x:auto">
