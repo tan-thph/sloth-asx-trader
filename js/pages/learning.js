@@ -357,7 +357,7 @@ function _renderLearningContent(d, brier) {
     <div class="card section-gap">
       <div class="card-title">Confidence Calibration</div>
       ${insufficientData ? `
-      <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start">
+      <div style="background:var(--warn-bg,#fef3c7);border:1px solid var(--warn,#d97706);border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start;color:var(--text-primary)">
         <span style="font-size:16px;line-height:1">⚠️</span>
         <div>
           <strong>Not enough data yet (${closed} closed trade${closed !== 1 ? 's' : ''})</strong> — calibration signals are unreliable below 10 closed trades.
@@ -1156,7 +1156,7 @@ async function renderLearningDebateCard() {
     </div>
 
     ${pulledRec.length === 0 ? `
-      <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+      <div style="background:var(--warn-bg,#fef3c7);border:1px solid var(--warn,#d97706);border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px;color:var(--text-primary)">
         ⚠ No recommended model found. Pull one:
         <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3.5:9b</code>
         (best) · <code style="background:rgba(0,0,0,.08);padding:1px 4px;border-radius:2px">ollama pull qwen3:0.6b</code> (fast)
