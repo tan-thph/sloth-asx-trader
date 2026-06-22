@@ -190,7 +190,7 @@ function renderMacro() {
         const spread = fwdYield - state.rbaRate;
         if (!annualIncome) return '';
         return `<div style="border-left:1px solid var(--border-light);padding-left:16px">
-          <span class="text-xs text-muted" title="Annual dividend income ÷ CURRENT market value (not cost basis) — see Portfolio page 'yield on cost' for the cost-basis figure, which differs when price has moved since purchase">Portfolio Forward Yield <span style="font-size:9px">(on market value)</span></span>
+          <span class="text-xs text-muted" title="Annual dividend income ÷ current market value. Lower than 'yield on cost' (Performance tab) when the portfolio has risen since purchase — same income, larger denominator.">Portfolio Forward Yield <span style="font-size:9px">(on market value)</span></span>
           <span style="font-size:18px;font-weight:700;margin-left:8px;color:${fwdYield > state.rbaRate ? '#16a34a' : '#dc2626'}">${fmt(fwdYield)}%</span>
           <span class="text-xs" style="margin-left:6px;color:${spread >= 0 ? '#16a34a' : '#dc2626'}">${spread >= 0 ? '+' : ''}${fmt(spread)}% vs RBA</span>
         </div>`;

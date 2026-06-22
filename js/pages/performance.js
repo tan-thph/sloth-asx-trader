@@ -374,9 +374,9 @@ function renderPerformance() {
           <div class="text-xs text-muted">${fmt(divYieldOnCost)}% yield on cost · vs RBA ${state.rbaRate.toFixed(2)}%</div>
         </div>
         <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
-          <div class="text-xs">Total Return (Capital + Yield)</div>
+          <div class="text-xs">Total Return (Capital + Yield on Cost)</div>
           <div style="font-size:18px;font-weight:600;color:${totalReturnWithDivPct>=0?'#16a34a':'#dc2626'}">${sign(totalReturnWithDivPct)}${fmt(Math.abs(totalReturnWithDivPct))}%</div>
-          <div class="text-xs text-muted">${fmt(totalReturnPct)}% capital + ${fmt(divYieldOnCost)}% yield</div>
+          <div class="text-xs text-muted">${fmt(totalReturnPct)}% capital + ${fmt(divYieldOnCost)}% yield on cost</div>
         </div>` : `
         <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md)">
           <div class="text-xs">Total Return (Capital)</div>
