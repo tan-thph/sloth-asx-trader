@@ -72,7 +72,7 @@ function switchDtTab(tab) {
   // 'rules' was a top-level tab — redirect to swing setups rules sub-tab
   if (tab === 'rules') { switchDtTab('setups'); switchSwingSubTab('rules'); return; }
   state.dayTrading.activeTab = tab;
-  document.querySelectorAll('#main-content > div > .tabs > .tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   const tabEl = document.getElementById('dt-tab-' + tab);
   if (tabEl) tabEl.classList.add('active');
   const el = document.getElementById('dt-tab-content');
@@ -657,19 +657,21 @@ function _renderDtIntradayTab() {
 
 function _renderIntradayRulesContent() {
   const id = state.intraday;
-  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100', extremeMode: false,
-               ...(id.params || {}) };
+  const IDEFS = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
+                  universeKey: 'asx100', extremeMode: false,
+                  vwapThreshold: -0.3, rsiThreshold: 40, requireVolRising: false,
+                  stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5 };
+  const ip = { ...IDEFS, ...(id.params || {}) };
   const allocated = id.allocatedCash != null ? id.allocatedCash : Math.round(state.cash * ip.allocPct / 100);
 
-  const INTRADAY_DEFAULTS_LOCAL = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20 };
-  const anyModified = Object.keys(INTRADAY_DEFAULTS_LOCAL).some(k => ip[k] !== INTRADAY_DEFAULTS_LOCAL[k]) || ip.extremeMode;
+  const anyModified = Object.keys(IDEFS).some(k => ip[k] !== IDEFS[k]);
 
   const nf = (label, key, value, min, max, step, hint, parser) => `
     <div>
       <div class="form-label">${label}</div>
-      <input type="number" value="${value}" min="${min}" max="${max}" step="${step}" style="width:120px" title="${hint}"
+      <input type="number" value="${value}" min="${min}" max="${max}" step="${step}" style="width:110px" title="${hint}"
         onchange="updateIntradayParam('${key}', ${parser || 'parseFloat'}(this.value))">
-      <div class="text-xs text-muted mt-1" style="max-width:210px">${hint}</div>
+      <div class="text-xs text-muted mt-1" style="max-width:220px">${hint}</div>
     </div>`;
 
   return `
@@ -688,16 +690,23 @@ function _renderIntradayRulesContent() {
       <div class="card">
         <div class="card-title">
           Trade Parameters
-          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">target, stop, sizing — apply on next scan</span>
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">sizing, stops &amp; targets — apply on next scan</span>
         </div>
         <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
-          Active: Target <b>+${ip.targetPct}%</b> · Stop <b>−${ip.stopPct}%</b> · Max <b>${ip.maxPositions}</b> positions · Alloc <b>${ip.allocPct}%</b> (= $${fmt(allocated, 0)})
+          Active: ATR stop ×<b>${ip.stopAtrMult}</b> · ATR target ×<b>${ip.targetAtrMult}</b> · Min R:R <b>${ip.minRrRatio}</b> · Max <b>${ip.maxPositions}</b> positions · Alloc <b>${ip.allocPct}%</b> (=$${fmt(allocated, 0)})
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px">
-          ${nf('Target exit (%)', 'targetPct', ip.targetPct, 1, 10, 0.5, 'Exit when price rises this % above entry')}
-          ${nf('Stop loss (%)', 'stopPct', ip.stopPct, 0.5, 5, 0.5, 'Exit if price falls this % below entry (fallback when ATR unavailable)')}
+          ${nf('ATR stop multiplier', 'stopAtrMult', ip.stopAtrMult, 0.5, 4, 0.25, 'Stop = entry − N × 5m ATR (when ≥15 bars). Higher = wider stop.')}
+          ${nf('ATR target multiplier', 'targetAtrMult', ip.targetAtrMult, 0.5, 5, 0.25, 'Target = VWAP + N × 5m ATR. Higher = more ambitious exit.')}
+          ${nf('Min R:R ratio', 'minRrRatio', ip.minRrRatio, 0.5, 5, 0.25, 'Skip setups where (target−entry) / (entry−stop) is below this.')}
           ${nf('Max positions', 'maxPositions', ip.maxPositions, 1, 5, 1, 'Maximum concurrent intraday trades', 'parseInt')}
           ${nf('Capital allocation (%)', 'allocPct', ip.allocPct, 5, 50, 5, 'Percentage of available cash allocated to intraday')}
+        </div>
+        <div style="margin-top:12px;padding:8px 10px;background:var(--bg-inset);border-radius:6px;font-size:11px;color:var(--text-muted)">
+          Fallback (ATR unavailable): Target <b>+${ip.targetPct}%</b> · Stop <b>−${ip.stopPct}%</b>
+          &nbsp;<span style="opacity:.6">|</span>&nbsp;
+          ${nf('', 'targetPct', ip.targetPct, 1, 10, 0.5, 'Fallback target when ATR unavailable').replace('<div class="form-label"></div>','')}
+          ${nf('', 'stopPct', ip.stopPct, 0.5, 5, 0.5, 'Fallback stop when ATR unavailable').replace('<div class="form-label"></div>','')}
         </div>
       </div>
 
@@ -705,12 +714,29 @@ function _renderIntradayRulesContent() {
       <div class="card">
         <div class="card-title">
           Entry Filters
-          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">determine which tickers generate setups</span>
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">technical indicator gates — client-side, instant</span>
+        </div>
+        <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
+          Active: VWAP ≤ <b>${ip.vwapThreshold}%</b> · RSI ≤ <b>${ip.rsiThreshold}</b> · Vol rising: <b>${ip.requireVolRising ? 'required' : 'optional'}</b> · Min score: <b>${ip.minScore}</b>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
-          ${nf('Min setup score (0–100)', 'minScore', ip.minScore, 20, 90, 5, 'Setup quality threshold — tickers below this are not shown', 'parseInt')}
+          ${nf('VWAP threshold (%)', 'vwapThreshold', ip.vwapThreshold, -5, 0, 0.1, 'Price must be ≤ this % from VWAP (negative = below). −0.3 = price is 0.3% below VWAP.')}
+          ${nf('RSI ceiling', 'rsiThreshold', ip.rsiThreshold, 20, 70, 1, 'Intraday 5m RSI must be at or below this value to qualify as oversold.', 'parseInt')}
+          ${nf('Min setup score (0–100)', 'minScore', ip.minScore, 20, 90, 5, 'Setup quality composite score — tickers below this are excluded.', 'parseInt')}
         </div>
-        <div style="margin-top:14px">
+        <div style="margin-top:12px;padding:8px 10px;background:${ip.requireVolRising ? 'rgba(16,185,129,.07)' : 'var(--bg-inset)'};border:0.5px solid ${ip.requireVolRising ? 'rgba(16,185,129,.3)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div>
+            <div style="font-size:12px;font-weight:600">Require volume rising</div>
+            <div class="text-xs text-muted">Require last-3-bar avg volume &gt; 20-bar baseline (volume acceleration). Stricter filter; fewer setups.</div>
+          </div>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap">
+            <input type="checkbox" ${ip.requireVolRising ? 'checked' : ''}
+              onchange="updateIntradayParam('requireVolRising', this.checked)">
+            ${ip.requireVolRising ? '<span style="color:#10b981;font-weight:600">On</span>' : 'Off'}
+          </label>
+        </div>
+
+        <div style="margin-top:12px">
           <div class="form-label" style="margin-bottom:7px">Scan universe</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             ${['asx20','asx50','asx100','asx200'].map(k => {
@@ -726,10 +752,11 @@ function _renderIntradayRulesContent() {
           </div>
           <div class="text-xs text-muted mt-1">Larger universes find more setups but take longer to scan</div>
         </div>
-        <div style="margin-top:14px;padding:8px 10px;background:${ip.extremeMode ? 'rgba(239,68,68,.08)' : 'var(--bg-secondary)'};border:0.5px solid ${ip.extremeMode ? 'rgba(239,68,68,.4)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+
+        <div style="margin-top:12px;padding:8px 10px;background:${ip.extremeMode ? 'rgba(239,68,68,.08)' : 'var(--bg-secondary)'};border:0.5px solid ${ip.extremeMode ? 'rgba(239,68,68,.4)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
           <div>
             <div style="font-size:12px;font-weight:600;color:${ip.extremeMode ? '#ef4444' : 'var(--text-secondary)'}">⚠️ Extreme Mode</div>
-            <div class="text-xs text-muted">Bypasses entry window, VWAP and RSI gates — shows all setups above min score. For testing only.</div>
+            <div class="text-xs text-muted">Bypasses all entry filters (window, VWAP, RSI, volume, R:R) — shows every ticker above min score. Testing only.</div>
           </div>
           <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap">
             <input type="checkbox" ${ip.extremeMode ? 'checked' : ''}
@@ -742,8 +769,8 @@ function _renderIntradayRulesContent() {
       <!-- Info -->
       <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
         <div>
-          <div style="font-size:13px;font-weight:600">Intraday rules applied</div>
-          <div class="text-xs text-muted">⏰ Entry window: 10:45–15:00 AEST · Stops use 5m ATR when ≥15 bars available; falls back to Stop loss % · yfinance 5m data has ~5–15 min latency</div>
+          <div style="font-size:13px;font-weight:600">How it works</div>
+          <div class="text-xs text-muted">⏰ Entry window 10:45–15:00 AEST · ATR-based stops/targets use 5m bars (≥15 required); fixed-% fallback otherwise · VWAP &amp; RSI gates computed client-side from raw scan data · yfinance 5m data has ~5–15 min latency</div>
         </div>
         <div class="flex-row">
           <button class="btn btn-sm" onclick="resetIntradayRules()">↺ Reset to defaults</button>
@@ -758,8 +785,12 @@ function _renderIntradayRulesContent() {
 
 function resetIntradayRules() {
   if (!state.intraday) return;
-  state.intraday.params = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
-    universeKey: state.intraday.params?.universeKey || 'asx100', extremeMode: false };
+  state.intraday.params = {
+    targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
+    universeKey: state.intraday.params?.universeKey || 'asx100', extremeMode: false,
+    vwapThreshold: -0.3, rsiThreshold: 40, requireVolRising: false,
+    stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5,
+  };
   scheduleSave();
   const el = document.getElementById('dt-tab-content');
   if (el) el.innerHTML = _renderDtIntradayTab();
@@ -769,6 +800,8 @@ function resetIntradayRules() {
 function _renderIntradaySetupsContent() {
   const id = state.intraday;
   const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100', extremeMode: false,
+               vwapThreshold: -0.3, rsiThreshold: 40, requireVolRising: false,
+               stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5,
                ...(id.params || {}) };
   const allocated = id.allocatedCash != null
     ? id.allocatedCash

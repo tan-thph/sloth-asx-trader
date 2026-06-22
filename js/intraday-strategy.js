@@ -10,12 +10,19 @@
 //   getUniverseTickers, computeTradeParams, scheduleSave
 
 const INTRADAY_DEFAULTS = {
-  targetPct:    3.5,   // exit target %
-  stopPct:      1.5,   // stop loss %
-  maxPositions: 2,     // max concurrent intraday trades
-  minScore:     40,    // minimum setup score (0–100)
-  allocPct:     20,    // % of state.cash allocated to intraday
-  extremeMode:  false, // bypass entry-window, VWAP and RSI gates when true
+  targetPct:       3.5,   // exit target % (fallback when ATR unavailable)
+  stopPct:         1.5,   // stop loss % (fallback when ATR unavailable)
+  maxPositions:    2,     // max concurrent intraday trades
+  minScore:        40,    // minimum setup score (0–100)
+  allocPct:        20,    // % of state.cash allocated to intraday
+  extremeMode:     false, // bypass entry-window, VWAP and RSI gates when true
+  // ── Technical indicator thresholds ──────────────────────────────────────────
+  vwapThreshold:   -0.3,  // price must be ≤ VWAP + this % (e.g. -0.3 = 0.3% below VWAP)
+  rsiThreshold:    40,    // intraday RSI must be ≤ this value to qualify
+  requireVolRising: false, // require last-3-bar volume > 20-bar rolling mean
+  stopAtrMult:     1.5,   // stop = entry − N × ATR5m (when ATR available)
+  targetAtrMult:   2.0,   // target = VWAP + N × ATR5m (overrides fixed % when ATR available)
+  minRrRatio:      1.5,   // reject setups with R:R below this after computing stop/target
 };
 
 // ── Build recs from scan results ──────────────────────────────────────────────
@@ -35,21 +42,37 @@ function _buildIntradayRecs(scanData) {
 
   for (const [ticker, d] of entries) {
     if (d.error) continue;
-    if (!ip.extremeMode && !d.passes) continue;
     if (d.score < ip.minScore) continue;
     if (openCount + recs.length >= ip.maxPositions) break;
 
+    // Client-side effective-pass gate (uses raw backend metrics, ignores backend's hardcoded thresholds)
+    if (!ip.extremeMode) {
+      if (!d.in_entry_window) continue;
+      if (d.pct_from_vwap == null || d.pct_from_vwap > ip.vwapThreshold) continue;
+      if (d.intraday_rsi == null || d.intraday_rsi > ip.rsiThreshold) continue;
+      if (ip.requireVolRising && !d.vol_rising) continue;
+    }
+
     const entry = d.current_price;
-    // Use 5m ATR when available; fall back to fixed-pct
+    // Use 5m ATR when available with user-configured multipliers; fall back to fixed-pct
     let stopLoss, target;
     if (d.atr_5m && d.atr_5m > 0) {
-      stopLoss = Math.round((entry - 1.5 * d.atr_5m) * 1000) / 1000;
-      target   = d.intraday_target || Math.round(entry * (1 + ip.targetPct / 100) * 1000) / 1000;
+      stopLoss = Math.round((entry - ip.stopAtrMult * d.atr_5m) * 1000) / 1000;
+      // Use user-configured target multiplier off VWAP; fall back to backend target or fixed-pct
+      if (d.vwap && d.vwap > 0) {
+        target = Math.round((d.vwap + ip.targetAtrMult * d.atr_5m) * 1000) / 1000;
+      } else {
+        target = d.intraday_target || Math.round(entry * (1 + ip.targetPct / 100) * 1000) / 1000;
+      }
     } else {
       stopLoss = Math.round(entry * (1 - ip.stopPct  / 100) * 1000) / 1000;
       target   = Math.round(entry * (1 + ip.targetPct / 100) * 1000) / 1000;
     }
     const stop = stopLoss;
+
+    // R:R gate — reject before sizing
+    const rrRatio = +((target - entry) / Math.max(entry - stop, 0.0001)).toFixed(1);
+    if (!ip.extremeMode && rrRatio < ip.minRrRatio) continue;
 
     // Try quant engine sizing first (requires daily signals for this ticker)
     let qty = null;
@@ -72,14 +95,14 @@ function _buildIntradayRecs(scanData) {
     // Fallback: risk 2% of allocated capital divided by the per-share stop distance
     if (!qty) {
       const riskPerTrade = allocated * 0.02;
-      const stopDist = entry * ip.stopPct / 100;
+      const stopDist = entry - stop;
       qty = stopDist > 0 ? Math.max(1, Math.floor(riskPerTrade / stopDist)) : 1;
     }
 
     const signals = [];
-    if (d.pct_from_vwap != null && d.pct_from_vwap <= -0.3)
+    if (d.pct_from_vwap != null && d.pct_from_vwap <= ip.vwapThreshold)
       signals.push(`VWAP −${Math.abs(d.pct_from_vwap).toFixed(1)}%`);
-    if (d.intraday_rsi != null && d.intraday_rsi <= 40)
+    if (d.intraday_rsi != null && d.intraday_rsi <= ip.rsiThreshold)
       signals.push(`RSI ${d.intraday_rsi}`);
     if (d.vol_rising)
       signals.push('Volume↑');
@@ -97,8 +120,7 @@ function _buildIntradayRecs(scanData) {
       priceRange:    [entry, +(entry * 1.002).toFixed(3)],
       target,
       stopLoss:      stop,
-      // R:R from actual price levels, not fixed parameter ratio
-      rrRatio:       +((target - entry) / Math.max(entry - stop, 0.0001)).toFixed(1),
+      rrRatio,
       confidence:    +(Math.min(0.85, d.score / 100 * 0.85)).toFixed(2),
       intradayScore: d.score,
       qty,
