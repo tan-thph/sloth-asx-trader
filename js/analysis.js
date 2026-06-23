@@ -1438,9 +1438,12 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 
     state.recommendations = [...cappedDedupedRecs, ...survivingPending];
 
-    // Build structured summary from actual recs — never rely on AI free-text for this
+    // Build structured summary from actual recs — never rely on AI free-text for this.
+    // smartTruncate (utils.js) cuts at the last word boundary + ellipsis instead of
+    // a blunt mid-word slice — the budget was also bumped 70→110 since 70 was too
+    // tight to ever land on a clean sentence end.
     const recLines = cappedDedupedRecs.map(r => {
-      const reason = (r.reasoning || '').replace(/\n/g, ' ').trim().slice(0, 70);
+      const reason = smartTruncate((r.reasoning || '').replace(/\n/g, ' ').trim(), 110);
       return `${r.ticker}: ${r.action}${reason ? ' — ' + reason : ''}`;
     });
 
@@ -1468,7 +1471,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         .trim();
       // Skip if remaining content looks like a JSON fragment
       if (stripped && !/^\s*[{\[]/.test(stripped)) {
-        contextLine = stripped.slice(0, 180).trim();
+        contextLine = smartTruncate(stripped, 220);
       }
     }
     // Suppress contradictory "no actionable" note when recs were actually generated

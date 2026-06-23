@@ -133,6 +133,11 @@ function _buildIntradayRecs(scanData) {
       barsToday:     d.bars_today,
       signals,
       _isIntraday:   true,
+      // Mirrors the swing-trade builder (_dtBuildRecs in day-trading-analysis.js,
+      // `regime: regime || 'unknown'`) — without this, dtSaveSnapshot()'s
+      // rec.regime fallback always misses and trade_snapshots.regime stays NULL
+      // for every intraday trade.
+      regime:        state.currentRegime?.regime || 'unknown',
     });
   }
 

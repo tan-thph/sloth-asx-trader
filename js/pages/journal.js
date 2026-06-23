@@ -309,7 +309,15 @@ async function toggleJournalDetail(realIdx) {
   const cell = row.querySelector('td');
   const t = state.tradeJournal[realIdx];
   if (!t) { cell.innerHTML = '<span class="text-xs text-muted">Trade not found.</span>'; return; }
-  const matchedRec = t.recId ? state.recHistory.find(r => r.id === t.recId) : null;
+  // Mirror the table row's lookup (line ~258) — recId can resolve against the
+  // regular AI Recommendations history OR a Day Trading / Intraday rec, which
+  // live in separate arrays. Searching recHistory alone left the drawer's
+  // thesis/entry-driver/regime context blank for every day-trade-sourced row.
+  const matchedRec = t.recId
+    ? (state.recHistory.find(r => r.id === t.recId)
+       || (state.dayTrading?.recommendations || []).find(r => r.id === t.recId)
+       || (state.intraday?.recommendations   || []).find(r => r.id === t.recId))
+    : null;
   const lid = matchedRec?._learningId || null;
   // AI-linked trade: ensure rich backend detail is fetched (entry technicals live server-side).
   if (lid && (_journalDetailCache[lid] === undefined)) {

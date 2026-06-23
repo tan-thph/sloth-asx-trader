@@ -70,6 +70,16 @@ const nowSydney      = () => new Date().toLocaleTimeString('en-AU',{timeZone:'Au
 const todayStr       = () => { const d=new Date(); return d.toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'}).split('/').map((p,i)=>i===2?p:(p.length===1?'0'+p:p)).join('-'); };
 const getApiKey      = () => state.settings.apiKey || localStorage.getItem('asx_api_key') || '';
 
+// Truncate at the last word boundary before maxLen and append an ellipsis,
+// instead of a blunt slice(0, n) mid-word/mid-sentence cut. Returns the
+// original string unchanged if it already fits.
+function smartTruncate(text, maxLen) {
+  if (!text || text.length <= maxLen) return text || '';
+  const cut = text.slice(0, maxLen);
+  const lastSpace = cut.lastIndexOf(' ');
+  return (lastSpace > maxLen * 0.6 ? cut.slice(0, lastSpace) : cut).trim() + '…';
+}
+
 // Single canonical copy — previously duplicated in recommendations.js and performance.js.
 // SELL/TRIM recs frame stop ABOVE and target BELOW entry (inverse of BUY/TOP_UP),
 // so a profitable trim must not read as 'stop_hit'. Prefer the action; fall back

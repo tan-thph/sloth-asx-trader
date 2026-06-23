@@ -1122,11 +1122,29 @@ function executeIntradayTrade(recId) {
     action: 'BUY',
     qty:    rec.qty,
     defaultPrice: rec.priceRange[0],
-  }, (entryPrice, brokerage, actualQty) => {
+  }, async (entryPrice, brokerage, actualQty) => {
     // actualQty is the user-entered value (may differ from AI-suggested rec.qty)
     const qty  = actualQty || rec.qty;
     const cost = qty * entryPrice + brokerage;
     if (cost > state.cash) { toast('Insufficient cash for this trade', 'error'); return; }
+
+    // Ensure daily-timeframe live signals are available — intraday scan candidates
+    // are rarely in state.liveSignals (that cache is populated by the Live Signals
+    // page's daily /api/analyse fetch, not the 5-min intraday scanner), so without
+    // this fallback dtBuildFeatures()/entrySignals would record null RSI/BB%b/ADX/
+    // ATR%/MACD for every intraday trade. Mirrors the same fix already in
+    // executeDayTrade() (day-trading-analysis.js) for swing trades.
+    if (!state.liveSignals?.[rec.ticker]?.rsi_14) {
+      toast(`⟳ Fetching live signals for ${rec.ticker}…`, 'info');
+      try {
+        const _r = await fetch(`${API}/api/analyse/${encodeURIComponent(rec.ticker)}`);
+        if (_r.ok) {
+          const _d = await _r.json();
+          if (!state.liveSignals) state.liveSignals = {};
+          state.liveSignals[rec.ticker] = { ...(_d || {}), ...state.liveSignals[rec.ticker] };
+        }
+      } catch { /* offline — proceed without daily signals; intraday_rsi/vwap still capture */ }
+    }
 
     if (!state.intraday.openPositions) state.intraday.openPositions = [];
     const newPos = {
@@ -1235,7 +1253,7 @@ function _showCloseIntradayDialog(posId, suggestedPrice) {
   });
 }
 
-function closeIntradayPosition(posId, closePrice, brokerage) {
+async function closeIntradayPosition(posId, closePrice, brokerage) {
   if (!state.intraday || !closePrice || isNaN(closePrice)) return;
   const pos = (state.intraday.openPositions || []).find(p => p.id === posId);
   if (!pos) return;
@@ -1258,6 +1276,23 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
   // Fallback cash credit for positions opened before the portfolio fix was deployed.
   if (!soldOk) state.cash += pos.qty * closePrice - sellFee;
 
+  // Exit-signals capture: same fallback-fetch pattern as the entry side
+  // (executeIntradayTrade) — without this, _snapshotLiveTechnicals() silently
+  // returns null whenever state.liveSignals[ticker] is stale at close time,
+  // which is the common case for an intraday-only ticker.
+  if (!state.liveSignals?.[pos.ticker]?.rsi_14) {
+    try {
+      const _r = await fetch(`${API}/api/analyse/${encodeURIComponent(pos.ticker)}`);
+      if (_r.ok) {
+        const _d = await _r.json();
+        if (!state.liveSignals) state.liveSignals = {};
+        state.liveSignals[pos.ticker] = { ...(_d || {}), ...state.liveSignals[pos.ticker] };
+      }
+    } catch { /* offline — proceed without exit technicals */ }
+  }
+  const exitSignals = typeof _snapshotLiveTechnicals === 'function'
+    ? _snapshotLiveTechnicals(pos.ticker, closePrice) : null;
+
   // Patch the open BUY journal entry written at entry time, or create a fallback
   // combined entry for positions opened before this fix was deployed.
   const sector = (state.liveSignals?.[pos.ticker] || {}).sector || 'Other';
@@ -1272,6 +1307,7 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
     pairedBuyEntry.status     = 'closed';
     pairedBuyEntry.closeDate  = todayStr();
     pairedBuyEntry.sector     = pairedBuyEntry.sector || sector;
+    pairedBuyEntry.exitSignals = exitSignals;
   } else {
     state.tradeJournal.unshift({
       id:          Date.now(),
@@ -1288,6 +1324,7 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
       account:     'trading',
       notes:       'Intraday same-day close',
       closeDate:   todayStr(),
+      exitSignals,
     });
   }
 
@@ -1306,8 +1343,7 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
       exit_reason: exitReason,
       actual_hold_days: 0,
       pnl_pct: pnlPct,
-      exitSignals: typeof _snapshotLiveTechnicals === 'function'
-        ? _snapshotLiveTechnicals(pos.ticker, closePrice) : null,
+      exitSignals,
     });
   }
 
@@ -1342,7 +1378,7 @@ function _closeDayTrade(recId) {
     qty:    execQty,
     defaultPrice: suggestedClose,
     readOnlyQty: true,   // closing the full (executed) position; qty is not editable here
-  }, (closePrice, sellFee) => {
+  }, async (closePrice, sellFee) => {
     // Use the canonical helper so the CGT page sees the disposal and portfolio
     // holding is removed.  applySellToPortfolio also credits cash internally.
     const prevDisposalLen = (state.cgtDisposals || []).length;
@@ -1350,6 +1386,22 @@ function _closeDayTrade(recId) {
       rec.ticker, execQty, closePrice, sellFee, todayStr(),
       state.cgtMethod || 'FIFO', 'trading'
     );
+
+    // Exit-signals capture: same fallback-fetch pattern as the entry side and
+    // as closeIntradayPosition() — without it, _snapshotLiveTechnicals()
+    // returns null whenever state.liveSignals[ticker] is stale at close time.
+    if (!state.liveSignals?.[rec.ticker]?.rsi_14) {
+      try {
+        const _r = await fetch(`${API}/api/analyse/${encodeURIComponent(rec.ticker)}`);
+        if (_r.ok) {
+          const _d = await _r.json();
+          if (!state.liveSignals) state.liveSignals = {};
+          state.liveSignals[rec.ticker] = { ...(_d || {}), ...state.liveSignals[rec.ticker] };
+        }
+      } catch { /* offline — proceed without exit technicals */ }
+    }
+    const exitSignals = typeof _snapshotLiveTechnicals === 'function'
+      ? _snapshotLiveTechnicals(rec.ticker, closePrice) : null;
 
     let net;
     if (soldOk && disposals.length) {
@@ -1372,6 +1424,7 @@ function _closeDayTrade(recId) {
       journalEntry.pnl         = net;
       journalEntry.status      = 'closed';
       journalEntry.closeDate   = todayStr();
+      journalEntry.exitSignals = exitSignals;
       if (soldOk && disposals.length) {
         journalEntry.disposalIds = disposals.map((_, i) => prevDisposalLen + i);
       }
@@ -1394,6 +1447,7 @@ function _closeDayTrade(recId) {
           ? disposals.map((_, i) => prevDisposalLen + i)
           : undefined,
         notes:       `SwingTrade close | Stop $${rec.stopLoss} | Target $${rec.target}`,
+        exitSignals,
       });
     }
 
@@ -1417,8 +1471,7 @@ function _closeDayTrade(recId) {
         exit_reason: exitReason,
         actual_hold_days: holdDays,
         pnl_pct: pnlPct,
-        exitSignals: typeof _snapshotLiveTechnicals === 'function'
-          ? _snapshotLiveTechnicals(rec.ticker, closePrice) : null,
+        exitSignals,
       });
     }
 

@@ -876,7 +876,7 @@ function _cycleHoldingAccount(ticker, fromAccount) {
   renderPage();
 }
 
-function addHolding() {
+async function addHolding() {
   const ticker = prompt('Ticker (e.g. NAB):'); if (!ticker) return;
   const dateRaw = prompt('Buy date (DD-MM-YYYY):');
   if (!dateRaw || !/^\d{2}-\d{2}-\d{4}$/.test(dateRaw)) { toast('Invalid date — use DD-MM-YYYY format', 'error'); return; }
@@ -903,6 +903,16 @@ function addHolding() {
   addParcel(symbol, dateRaw, shares, avg, fees, sector);
   const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
 
+  // Snapshot live technicals when the buy is dated today — same helper and
+  // same-day-only guard as addManualTrade() (journal.js). Shows a loading toast
+  // only when a live fetch is actually required (not already cached).
+  let entrySignals = null;
+  if (dateRaw === todayStr()) {
+    const needsFetch = !state.liveSignals?.[symbol]?.rsi_14;
+    if (needsFetch) toast(`⟳ Fetching live signals for ${symbol}…`, 'info');
+    entrySignals = await _fetchSignalSnapshot(symbol, dateRaw);
+  }
+
   // Create journal entry
   state.tradeJournal.unshift({
     id: state.tradeJournal.length + 1,
@@ -919,6 +929,9 @@ function addHolding() {
     recId: null,
     recExecuted: false,
     timestamp: `${dateRaw} (manual)`,
+    account,
+    sector,
+    entrySignals,
   });
 
   toast(`Added ${symbol} — click Refresh Prices to get live price`, 'success');
