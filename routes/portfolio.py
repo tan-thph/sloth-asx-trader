@@ -76,19 +76,39 @@ def db_save():
                 )
 
         # --- trade journal ---
+        # The `id` MUST be passed explicitly. trade_journal.id is INTEGER PRIMARY
+        # KEY AUTOINCREMENT; omitting it here used to let SQLite assign a brand-new
+        # id to every row on every single save (this DELETE+INSERT runs on every
+        # scheduleSave()), silently invalidating any reference to a journal entry's
+        # id held elsewhere in client state — e.g. state.intraday.openPositions[]
+        # ._journalId, used by closeIntradayPosition() to patch the paired BUY leg
+        # on exit. When that lookup failed, the close fell through to a fallback
+        # path that created an orphaned new SELL row with no recId (mislabeled
+        # "Manual" in the Journal) while the original BUY row stayed status='open'
+        # forever (2026-06-23 PAR incident). Also previously dropped account,
+        # sector, parcelId, disposalIds, notes, thesis, entrySignals, exitSignals —
+        # none were in the column list, so every save↔reload cycle erased them.
         if "tradeJournal" in data:
             conn.execute("DELETE FROM trade_journal")
             for t in data["tradeJournal"]:
                 conn.execute("""
                     INSERT INTO trade_journal
-                        (date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status, rec_id, rec_executed, close_date)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        (id, date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status,
+                         rec_id, rec_executed, close_date, account, sector, parcel_id, disposal_ids, notes, thesis,
+                         entry_signals_json, exit_signals_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
+                    t.get("id"),
                     t.get("date"), t.get("timestamp"), t["ticker"], t["action"],
                     t["qty"], t["entryPrice"], t.get("exitPrice"),
                     t.get("fees", 10), t.get("pnl"), t.get("status","open"),
                     t.get("recId"), 1 if t.get("recExecuted") else 0,
                     t.get("closeDate"),
+                    t.get("account", "personal"), t.get("sector"), t.get("parcelId"),
+                    json.dumps(t["disposalIds"]) if t.get("disposalIds") is not None else None,
+                    t.get("notes"), t.get("thesis"),
+                    json.dumps(t["entrySignals"]) if t.get("entrySignals") is not None else None,
+                    json.dumps(t["exitSignals"])  if t.get("exitSignals")  is not None else None,
                 ))
 
         # --- rec history ---
@@ -175,6 +195,14 @@ def db_load():
                 "recId": row["rec_id"],
                 "recExecuted": bool(row["rec_executed"]),
                 "closeDate": row["close_date"],
+                "account": row["account"] or "personal",
+                "sector": row["sector"],
+                "parcelId": row["parcel_id"],
+                "disposalIds": json.loads(row["disposal_ids"]) if row["disposal_ids"] else None,
+                "notes": row["notes"],
+                "thesis": row["thesis"],
+                "entrySignals": json.loads(row["entry_signals_json"]) if row["entry_signals_json"] else None,
+                "exitSignals":  json.loads(row["exit_signals_json"])  if row["exit_signals_json"]  else None,
             })
 
         rec_history = []

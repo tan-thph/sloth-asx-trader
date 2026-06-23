@@ -24,6 +24,7 @@ var _dtHistOffset = 0;
 var _dtHistMore   = false;
 var _dtStats      = null;  // summary stats
 var _dtHistFilter = { ticker: '', outcome: 'all', recordType: 'executed' }; // client-side history filter state
+var _dtExpandedIds = {}; // { [snapshotId]: true } — which History rows have the entry/exit technicals drawer open
 // recordType: 'executed' (default — real trades only) | 'all' (executed + shadow ML training rows)
 // Shadow rows (record_type='shadow') are written by the ML bias-correction pipeline for
 // below-threshold setups (see routes/day_trade_training.py _resolve_shadow_outcomes) — they
@@ -191,7 +192,11 @@ function dtSaveSnapshot(rec, tradeType, signals, macroData, entryPrice, execQty,
 /**
  * PATCH exit data onto an existing snapshot.
  * snapshotId — integer id returned by dtSaveSnapshot
- * exitData   — { exit_price, entry_price, exit_date, exit_reason, actual_hold_days }
+ * exitData   — { exit_price, entry_price, exit_date, exit_reason, actual_hold_days,
+ *                exitSignals? } — exitSignals is the object returned by
+ *                _snapshotLiveTechnicals() (recommendations.js), diagnostic-only —
+ *                never a model training input (exit-time indicators don't exist
+ *                yet at the entry decision, so they'd be data leakage as a feature).
  */
 function dtCloseSnapshot(snapshotId, exitData) {
   if (!snapshotId || !exitData) return Promise.resolve(null);
@@ -203,6 +208,7 @@ function dtCloseSnapshot(snapshotId, exitData) {
     exit_reason:      exitData.exit_reason       || 'manual',
     actual_hold_days: exitData.actual_hold_days  || null,
     pnl_pct:          exitData.pnl_pct           || null,
+    exit_signals_json: exitData.exitSignals ? JSON.stringify(exitData.exitSignals) : null,
   };
 
   // Compute pnl_pct if not supplied
@@ -512,6 +518,56 @@ function _dtStatCard(label, value, color) {
   </div>`;
 }
 
+/* ── Entry/exit technicals detail drawer (History tab) ───────────────────── */
+// Entry technicals are columns on the snapshot row itself (rsi_14, bb_pct_b,
+// adx, atr_pct, macd_hist, setup_score — captured by dtSaveSnapshot() at
+// execution time). Exit technicals live in exit_signals_json (captured by
+// _snapshotLiveTechnicals() at close time) — diagnostic-only, mirrors the
+// equivalent Journal-page drawer for swing/SELL trades.
+var DT_EXIT_QUALITY_STYLE = {
+  exit_into_strength:            { color: '#d97706', label: '⚠ Exit into strength' },
+  exit_after_reversal_confirmed: { color: '#059669', label: '✓ Reversal confirmed' },
+  exit_into_weakness:            { color: '#dc2626', label: '▼ Exit into weakness' },
+  exit_neutral:                  { color: 'var(--text-tertiary)', label: 'Neutral exit' },
+};
+
+function _dtToggleDetail(id) {
+  _dtExpandedIds[id] = !_dtExpandedIds[id];
+  var el = document.getElementById('dt-tab-content');
+  if (el) el.innerHTML = renderDtHistoryTab();
+}
+
+function _dtBuildDetailRow(item) {
+  var exitSig = null;
+  if (item.exit_signals_json) {
+    try { exitSig = JSON.parse(item.exit_signals_json); } catch (e) { exitSig = null; }
+  }
+  var eq = item.exit_quality_tag ? DT_EXIT_QUALITY_STYLE[item.exit_quality_tag] : null;
+
+  var pair = (typeof _journalSigPair === 'function') ? _journalSigPair : function() { return ''; };
+  var rowsHtml = [
+    pair('RSI(14)',     item.rsi_14,      exitSig && exitSig.rsi_14,    function(v) { return Number(v).toFixed(1); }),
+    pair('BB %b',       item.bb_pct_b,    exitSig && exitSig.bb_pct_b,  function(v) { return Number(v).toFixed(2); }),
+    pair('ADX',         item.adx,         exitSig && exitSig.adx_14,    function(v) { return Number(v).toFixed(1); }),
+    pair('ATR %',       item.atr_pct,     exitSig && exitSig.atr_pct,   function(v) { return Number(v).toFixed(2) + '%'; }),
+    pair('MACD Hist',   item.macd_hist,   exitSig && exitSig.macd_hist, function(v) { return Number(v).toFixed(3); }),
+    pair('Setup Score', item.setup_score, exitSig && exitSig.setup_score, function(v) { return Number(v).toFixed(0); }),
+  ].join('');
+  if (!rowsHtml) {
+    rowsHtml = '<div class="text-xs text-muted" style="font-style:italic">No technicals captured for this trade.</div>';
+  }
+
+  return `<tr style="border-bottom:1px solid var(--border-subtle)">
+    <td colspan="10" style="padding:8px 10px 12px;background:var(--bg-surface)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div class="text-xs text-muted" style="text-transform:uppercase;letter-spacing:.04em">Technicals: entry${exitSig ? ' → exit' : ''}</div>
+        ${eq ? `<span style="font-size:10px;padding:1px 6px;border-radius:8px;border:1px solid ${eq.color};color:${eq.color}">${eq.label}</span>` : ''}
+      </div>
+      <div style="font-size:12px;max-width:340px">${rowsHtml}</div>
+    </td>
+  </tr>`;
+}
+
 function _dtHistRow(item) {
   var isShadow = item.record_type === 'shadow';
   var outcome = item.outcome || 'open';
@@ -568,8 +624,12 @@ function _dtHistRow(item) {
     : '—';
   var pnlDollarColor = pnlDollar != null ? (pnlDollar >= 0 ? '#059669' : '#dc2626') : 'var(--text-muted)';
 
-  return `<tr style="border-bottom:1px solid var(--border-subtle)">
-    <td data-label="Ticker" style="padding:5px 4px;font-weight:600">${item.ticker}</td>
+  var isExpanded = !!_dtExpandedIds[item.id];
+  var mainRow = `<tr style="border-bottom:${isExpanded ? 'none' : '1px solid var(--border-subtle)'}">
+    <td data-label="Ticker" style="padding:5px 4px;font-weight:600">
+      <button class="btn btn-sm" style="font-size:10px;padding:0 4px;margin-right:3px;border:none;background:none" onclick="_dtToggleDetail(${item.id})" title="Show technicals at entry/exit">${isExpanded ? '▾' : '▸'}</button>
+      ${item.ticker}
+    </td>
     <td data-label="Type" style="padding:5px 4px;color:var(--text-muted)">${typeLabel} ${item.trade_type || 'swing'}</td>
     <td data-label="Entry" style="padding:5px 4px">${item.entry_date || '—'}<br><span style="color:var(--text-muted)">$${item.entry_price != null ? Number(item.entry_price).toFixed(3) : '—'}</span></td>
     <td data-label="Exit" style="padding:5px 4px;text-align:right">${item.exit_date || '—'}<br><span style="color:var(--text-muted)">${item.exit_price != null ? '$' + Number(item.exit_price).toFixed(3) : '—'}</span></td>
@@ -582,6 +642,7 @@ function _dtHistRow(item) {
       <button class="btn btn-sm" style="font-size:10px;padding:2px 6px;color:#dc2626" onclick="dtDeleteSnapshot(${item.id})">✕</button>
     </td>
   </tr>`;
+  return mainRow + (isExpanded ? _dtBuildDetailRow(item) : '');
 }
 
 function dtLoadMoreHistory() {

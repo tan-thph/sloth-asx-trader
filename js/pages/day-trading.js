@@ -1306,6 +1306,8 @@ function closeIntradayPosition(posId, closePrice, brokerage) {
       exit_reason: exitReason,
       actual_hold_days: 0,
       pnl_pct: pnlPct,
+      exitSignals: typeof _snapshotLiveTechnicals === 'function'
+        ? _snapshotLiveTechnicals(pos.ticker, closePrice) : null,
     });
   }
 
@@ -1415,6 +1417,8 @@ function _closeDayTrade(recId) {
         exit_reason: exitReason,
         actual_hold_days: holdDays,
         pnl_pct: pnlPct,
+        exitSignals: typeof _snapshotLiveTechnicals === 'function'
+          ? _snapshotLiveTechnicals(rec.ticker, closePrice) : null,
       });
     }
 

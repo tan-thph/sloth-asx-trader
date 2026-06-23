@@ -244,6 +244,20 @@ def dt_snapshot_close(snap_id):
     exit_reason     = d.get("exit_reason")
     exit_date       = d.get("exit_date")
     actual_hold_days = d.get("actual_hold_days")
+    exit_signals_json = d.get("exit_signals_json")  # JSON string, opaque here
+
+    # Exit-signals capture: diagnostic-only technical classification of the exit
+    # timing, reused from the same pure function the main Learning Loop uses for
+    # SELL/TRIM events (routes/learning.py). Never fed into FEATURES/training —
+    # exit-time indicators don't exist yet at the entry decision, so using them
+    # as a predictive input would be data leakage.
+    exit_quality_tag = None
+    if exit_signals_json:
+        try:
+            from routes.learning import classify_exit_quality_deterministic
+            exit_quality_tag = classify_exit_quality_deterministic(exit_signals_json)
+        except Exception:
+            pass
 
     # Compute outcome from pnl_pct
     if pnl_pct is not None:
@@ -289,10 +303,11 @@ def dt_snapshot_close(snap_id):
             UPDATE trade_snapshots
                SET exit_date=?, exit_price=?, exit_reason=?,
                    actual_hold_days=?, pnl_pct=?, outcome=?, r_multiple=?,
+                   exit_signals_json=?, exit_quality_tag=?,
                    updated_at=datetime('now')
              WHERE id=?
         """, (exit_date, exit_price, exit_reason, actual_hold_days,
-              pnl_pct, outcome, r_multiple, snap_id))
+              pnl_pct, outcome, r_multiple, exit_signals_json, exit_quality_tag, snap_id))
 
     return jsonify({"ok": True, "id": snap_id, "outcome": outcome})
 
@@ -370,6 +385,17 @@ def dt_stats():
             GROUP BY trade_type
         """).fetchall()
 
+        by_exit_quality = conn.execute("""
+            SELECT exit_quality_tag,
+                   COUNT(*) AS n,
+                   SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins,
+                   AVG(pnl_pct) AS avg_pnl_pct
+            FROM trade_snapshots
+            WHERE outcome IN ('win','loss','breakeven') AND exit_quality_tag IS NOT NULL
+            GROUP BY exit_quality_tag
+            ORDER BY n DESC
+        """).fetchall()
+
         model_row = conn.execute(
             "SELECT trained_at, n_samples, accuracy, f1_w FROM model_state ORDER BY trained_at DESC LIMIT 1"
         ).fetchone()
@@ -410,6 +436,15 @@ def dt_stats():
             {"type": r["trade_type"], "n": r["n"],
              "win_rate": round(r["wins"] / r["n"] * 100, 1) if r["n"] else 0}
             for r in by_type
+        ],
+        # Exit-signals capture: diagnostic-only breakdown of how well-timed exits
+        # were, by exit_quality_tag (classify_exit_quality_deterministic in
+        # routes/learning.py). NOT a training feature — see dt_snapshot_close().
+        "by_exit_quality": [
+            {"tag": r["exit_quality_tag"], "n": r["n"],
+             "win_rate": round(r["wins"] / r["n"] * 100, 1) if r["n"] else 0,
+             "avg_pnl_pct": round(r["avg_pnl_pct"], 2) if r["avg_pnl_pct"] is not None else None}
+            for r in by_exit_quality
         ],
         "model": _row_to_dict(model_row) if model_row else None,
         "min_train_samples": MIN_TRAIN_SAMPLES,

@@ -22,7 +22,7 @@ const _AGENT_MAX_TOKENS = {
   pm:        3000,
   dayTrade:  4000,
   universe:  4000,
-  macro:     1000,
+  macro:     1800,
   assistant: 2000,
   briefing:  600,
 };

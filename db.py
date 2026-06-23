@@ -303,6 +303,18 @@ _LE_MIGRATIONS = [
     # NULL = not yet resolved / inconclusive. Feeds the tag-precision self-suppression
     # gate in _calib_compute() (⚠STOP_TAG_UNRELIABLE).
     ("stop_cf_saved",       "INTEGER"),
+    # Exit-signals capture: mirrors entry_signals_json but snapshotted at SELL/TRIM
+    # fill time (markExecuted() in recommendations.js), not at rec generation time.
+    # Same shape (rsi_14, bb_pct_b, adx_14, atr_pct, return_5d, return_20d,
+    # setup_score, macd_hist, sector_rs_5d, price). Propagated onto the parent
+    # BUY/TOP_UP event when a SELL fully closes a position (alongside thesis_verdict)
+    # so a closed trade's learning event carries both sides of the trade.
+    ("exit_signals_json",   "TEXT"),
+    # Deterministic exit-timing classification computed from exit_signals_json by
+    # classify_exit_quality_deterministic() — exit_into_strength | exit_after_
+    # reversal_confirmed | exit_into_weakness | exit_neutral | NULL (no data).
+    # Lazily resolved by _resolve_exit_quality_tags() inside _calib_compute().
+    ("exit_quality_tag",    "TEXT"),
 ]
 
 
@@ -353,6 +365,28 @@ def init_db():
         tj_cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_journal)").fetchall()}
         if "close_date" not in tj_cols:
             conn.execute("ALTER TABLE trade_journal ADD COLUMN close_date TEXT")
+
+        # trade_journal: previously-missing columns. db_save() does a full
+        # DELETE+INSERT of trade_journal on every save and the INSERT never
+        # listed these — so account/sector/parcelId/disposalIds/notes/thesis/
+        # entrySignals/exitSignals were silently dropped on every save↔reload
+        # round trip (only the columns below survived). Fixed alongside the
+        # id-preservation fix in routes/portfolio.py db_save() (explicit id=?
+        # instead of relying on AUTOINCREMENT, which reassigned a new id to
+        # every row on every save and broke any _journalId-style reference
+        # held elsewhere in state, e.g. state.intraday.openPositions[]._journalId).
+        for col, defn in (
+            ("account",            "TEXT DEFAULT 'personal'"),
+            ("sector",             "TEXT"),
+            ("parcel_id",          "INTEGER"),
+            ("disposal_ids",       "TEXT"),   # JSON array
+            ("notes",              "TEXT"),
+            ("thesis",             "TEXT"),
+            ("entry_signals_json", "TEXT"),
+            ("exit_signals_json",  "TEXT"),
+        ):
+            if col not in tj_cols:
+                conn.execute(f"ALTER TABLE trade_journal ADD COLUMN {col} {defn}")
 
         # trading_lessons: breadth_scope column (Sprint 44)
         # Valid: adl_below_0.3 | adl_above_0.7 | high_vol | low_vol | NULL (always inject)

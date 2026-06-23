@@ -83,7 +83,18 @@ CREATE TABLE IF NOT EXISTS trade_snapshots (
     updated_at       TEXT    DEFAULT (datetime('now')),
     record_type      TEXT    NOT NULL DEFAULT 'executed',   -- 'executed' | 'shadow'
     shadow_reason    TEXT,   -- 'heat_blocked' | 'regime_blocked' | 'manual_skip'
-    r_multiple       REAL    -- (exit_price - entry_price) / (entry_price - stop_loss)
+    r_multiple       REAL,   -- (exit_price - entry_price) / (entry_price - stop_loss)
+
+    -- Exit-signals capture: technical snapshot at close time, mirroring the
+    -- entry-side columns above but kept as a single JSON blob (not flattened
+    -- into columns) since it is diagnostic-only, never a model training input —
+    -- exit-time indicators are by definition unknown at the entry decision, so
+    -- using them as predictive features would be data leakage. classify_exit_
+    -- quality_deterministic() (routes/learning.py, reused here) derives
+    -- exit_quality_tag from this blob: exit_into_strength | exit_after_
+    -- reversal_confirmed | exit_into_weakness | exit_neutral | NULL.
+    exit_signals_json TEXT,
+    exit_quality_tag  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_dts_ticker  ON trade_snapshots(ticker);
@@ -159,6 +170,9 @@ def init_dt_db():
             "ALTER TABLE model_state ADD COLUMN mae_oos REAL",
             "ALTER TABLE model_state ADD COLUMN n_test INTEGER",
             "ALTER TABLE model_state ADD COLUMN cv_method TEXT",
+            # Exit-signals capture
+            "ALTER TABLE trade_snapshots ADD COLUMN exit_signals_json TEXT",
+            "ALTER TABLE trade_snapshots ADD COLUMN exit_quality_tag TEXT",
         ]
         for _sql in _migrations:
             try:

@@ -1346,6 +1346,27 @@ function trailStop(recId) {
   toast(`Stop trailed to $${newStop.toFixed(3)} for ${rec.ticker}`);
 }
 
+// Snapshot live technicals at fill time — shared shape for both the BUY/TOP_UP
+// entry capture and the SELL/TRIM exit capture, so the Journal drawer can show
+// an entry→exit delta on the same fields. Returns null when no live signal
+// data is available for the ticker (e.g. manual import, signals never fetched).
+function _snapshotLiveTechnicals(ticker, tradePrice) {
+  const s = state.liveSignals?.[ticker] || {};
+  if (s.rsi_14 == null) return null;
+  return {
+    rsi_14:       s.rsi_14       ?? null,
+    bb_pct_b:     s.bb_pct_b     ?? null,
+    adx_14:       s.adx          ?? s.adx_14 ?? null,
+    atr_pct:      s.atr_pct      ?? null,
+    return_5d:    s.return_5d    ?? null,
+    return_20d:   s.return_20d   ?? null,
+    setup_score:  s.score        ?? null,
+    macd_hist:    s.macd_hist    ?? null,
+    sector_rs_5d: s.sector_rs_5d ?? null,
+    price:        parseFloat(tradePrice.toFixed(3)),
+  };
+}
+
 function markExecuted(id, execPrice, execFee, execQty) {
   const rec = state.recommendations.find(r => r.id === id); if(!rec) return;
 
@@ -1408,12 +1429,18 @@ function markExecuted(id, execPrice, execFee, execQty) {
       const prevDisposalLen = state.cgtDisposals.length;
       const { disposals } = applySellToPortfolio(rec.ticker, qty, tradePrice, fees, today, undefined, sellAccount);
       realizedPnl = disposalsToPnl(disposals);
+      // Snapshot live technicals at exit fill time (mirrors entrySignals on the
+      // BUY/TOP_UP branch below) so the Journal drawer can show what the chart
+      // looked like when the position was actually closed, not just when Claude
+      // generated the SELL/TRIM rec.
+      const execExitSignals = _snapshotLiveTechnicals(rec.ticker, tradePrice);
       tradeEntry = {
         id: state.tradeJournal.length + 1, date: openDate || today, ticker: rec.ticker, action: rec.action,
         qty, entryPrice: holding.avgPrice, exitPrice: tradePrice, fees,
         status: 'closed', pnl: realizedPnl, closeDate: today,
         disposalIds: disposals.map((_, i) => prevDisposalLen + i),
-        recId: rec.id, recExecuted: true, timestamp: time, account: sellAccount
+        recId: rec.id, recExecuted: true, timestamp: time, account: sellAccount,
+        exitSignals: execExitSignals,
       };
     } else {
       tradeEntry = {
@@ -1431,19 +1458,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
     // Snapshot live technicals at execution time so the journal drawer can show
     // what the chart looked like when the trade was filled (not just when Claude
     // generated the rec, which may have been hours earlier).
-    const _execSig = state.liveSignals?.[rec.ticker] || {};
-    const execEntrySignals = _execSig.rsi_14 != null ? {
-      rsi_14:     _execSig.rsi_14     ?? null,
-      bb_pct_b:   _execSig.bb_pct_b   ?? null,
-      adx_14:     _execSig.adx        ?? _execSig.adx_14 ?? null,
-      atr_pct:    _execSig.atr_pct    ?? null,
-      return_5d:  _execSig.return_5d  ?? null,
-      return_20d: _execSig.return_20d ?? null,
-      setup_score:_execSig.score      ?? null,
-      macd_hist:  _execSig.macd_hist  ?? null,
-      sector_rs_5d: _execSig.sector_rs_5d ?? null,
-      price:      parseFloat(tradePrice.toFixed(3)),
-    } : null;
+    const execEntrySignals = _snapshotLiveTechnicals(rec.ticker, tradePrice);
     tradeEntry = {
       id: state.tradeJournal.length + 1, date: today, ticker: rec.ticker, action: rec.action,
       qty, entryPrice: tradePrice, exitPrice: null, fees,
@@ -1507,13 +1522,22 @@ function markExecuted(id, execPrice, execFee, execQty) {
   }
 
   // Save to recHistory — include all execution details so backtest can use them
+  // SELL/TRIM that fully disposed a holding already know their P&L (realizedPnl,
+  // set above) — outcome must reflect win/loss/breakeven immediately, not stay
+  // 'open' forever. BUY/TOP_UP have no exit yet, so they correctly stay 'open'
+  // until a later SELL/TRIM closes them. Previously this was hardcoded to
+  // 'open' for every action, which is why the History tab showed every
+  // executed SELL/TRIM as "open" even though it had already closed.
+  const _immediateOutcome = realizedPnl != null
+    ? (realizedPnl > 0 ? 'win' : realizedPnl < 0 ? 'loss' : 'breakeven')
+    : 'open';
   const histEntry = {
     id: rec.id, date: today, ticker: rec.ticker, action: rec.action,
     confidence: rec.confidence, priceRange: rec.priceRange, target: rec.target,
     stopLoss: rec.stopLoss, expectedProfit: rec.expectedProfit, netProfit: rec.netProfit,
     qty, executedPrice: tradePrice, executedFee: fees,
     executed: true, executedAt: time,
-    outcome: 'open',
+    outcome: _immediateOutcome,
     actualProfit: realizedPnl,
     reasoning: rec.reasoning || null,
     feedback: rec.feedback || null,
@@ -1531,8 +1555,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
     const exitP  = tradeEntry.exitPrice  ?? null;
     const pnlPct = realizedPnl != null && entryP > 0
       ? +((realizedPnl / (entryP * qty)) * 100).toFixed(2) : null;
-    const outcome = realizedPnl != null
-      ? (realizedPnl > 0 ? 'win' : realizedPnl < 0 ? 'loss' : 'breakeven') : null;
+    const outcome = _immediateOutcome !== 'open' ? _immediateOutcome : null;
     const holdDays = (tradeEntry.date && today && typeof parseDate === 'function')
       ? Math.max(0, Math.round((parseDate(today).getTime() - parseDate(tradeEntry.date).getTime()) / 86400000))
       : null;
@@ -1557,6 +1580,9 @@ function markExecuted(id, execPrice, execFee, execQty) {
         outcomePayload.realized_pnl_pct    = pnlPct;
         outcomePayload.holding_period_days = holdDays;
         outcomePayload.exit_reason         = exitReason;
+      }
+      if (isReducing && tradeEntry.exitSignals) {
+        outcomePayload.exit_signals_json = JSON.stringify(tradeEntry.exitSignals);
       }
       fetch(`${API}/api/learning/outcome`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1600,6 +1626,11 @@ function markExecuted(id, execPrice, execFee, execQty) {
                 holding_period_days: holdDays,
                 // Phase 2+3: propagate thesis verdict from the SELL/TRIM rec to parent BUY events
                 thesis_verdict:      rec._thesisCheck?.verdict ?? null,
+                // Exit-signals capture: propagate the same exit snapshot onto the
+                // parent BUY/TOP_UP event too, so its closed learning event carries
+                // both sides of the trade (entry_signals_json was set at its own
+                // execution; this is what the market looked like when it was closed).
+                ...(tradeEntry.exitSignals ? { exit_signals_json: JSON.stringify(tradeEntry.exitSignals) } : {}),
                 ...(prPnlPct != null ? { realized_pnl_pct: prPnlPct } : {}),
                 ...(prPnlAud != null ? { realized_pnl_aud: prPnlAud } : {}),
               }),
@@ -1648,6 +1679,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
           sector,
           tags:                rec._tags   || null,
           trade_thesis:        rec._thesis || null,
+          ...(tradeEntry.exitSignals ? { exit_signals_json: JSON.stringify(tradeEntry.exitSignals) } : {}),
           notes:               'Manually imported position — no prior BUY event logged',
         }),
       }).then(r => r.json()).then(res => {

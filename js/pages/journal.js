@@ -330,6 +330,26 @@ function _journalSig(label, val, fmtFn) {
     <span class="text-muted">${label}</span><strong>${fmtFn ? fmtFn(val) : val}</strong></div>`;
 }
 
+// Entry→exit comparison row — shows both values plus a colour-coded delta
+// arrow when both sides are present. Falls back to a single-value row when
+// only one side has data (e.g. a still-open BUY with no exit yet).
+function _journalSigPair(label, entryVal, exitVal, fmtFn) {
+  const hasEntry = entryVal != null && !Number.isNaN(Number(entryVal));
+  const hasExit  = exitVal  != null && !Number.isNaN(Number(exitVal));
+  if (!hasEntry && !hasExit) return '';
+  const f = fmtFn || (v => v);
+  if (hasEntry && hasExit) {
+    const d = Number(exitVal) - Number(entryVal);
+    const color = d > 0 ? 'var(--up)' : d < 0 ? 'var(--down)' : 'var(--text-tertiary)';
+    return `<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0">
+      <span class="text-muted">${label}</span>
+      <strong>${f(entryVal)} → ${f(exitVal)} <span style="color:${color};font-size:11px">${d>=0?'▲':'▼'}${Math.abs(d).toFixed(2)}</span></strong>
+    </div>`;
+  }
+  return `<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0">
+    <span class="text-muted">${label}</span><strong>${hasEntry ? f(entryVal) : f(exitVal)}</strong></div>`;
+}
+
 function _buildJournalDetailHTML(t, matchedRec, lid) {
   const det = lid ? _journalDetailCache[lid] : null;
   const detObj = (det && typeof det === 'object') ? det : null;
@@ -347,23 +367,49 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
   const exitDriver  = detObj?.sell_primary_driver || null;
   const verdict     = detObj?.thesis_verdict || matchedRec?.thesis_verdict || null;
   const sig         = detObj?.entry_signals || t.entrySignals || null;
+  // Exit signals: snapshotted at fill time by _snapshotLiveTechnicals() in
+  // recommendations.js (same shape as entry). Only present for closed SELL/TRIM
+  // trades — a still-open BUY/TOP_UP has no exit yet.
+  const exitSig     = detObj?.exit_signals || t.exitSignals || null;
+  const exitQuality = detObj?.exit_quality_tag || null;
   const source      = lid ? 'AI recommendation' : 'Manual entry';
+  const hasEntrySig = sig && Object.values(sig).some(v => v != null);
+  const hasExitSig  = exitSig && Object.values(exitSig).some(v => v != null);
 
-  // Entry technicals block
+  const EXIT_QUALITY_STYLE = {
+    exit_into_strength:            { color: 'var(--warn)', label: '⚠ Exit into strength' },
+    exit_after_reversal_confirmed: { color: 'var(--up)',   label: '✓ Reversal confirmed' },
+    exit_into_weakness:            { color: 'var(--down)', label: '▼ Exit into weakness' },
+    exit_neutral:                  { color: 'var(--text-tertiary)', label: 'Neutral exit' },
+  };
+  const EXIT_QUALITY_TOOLTIP = {
+    exit_into_strength: 'Sold while RSI/BB%b were still in bullish territory — the technical setup had not actually broken down. May have cut a winner early.',
+    exit_after_reversal_confirmed: 'Momentum had genuinely turned (RSI cooled and MACD histogram negative) before the exit — a well-timed technical exit.',
+    exit_into_weakness: 'Sold near an oversold extreme (RSI/BB%b deeply negative) — check whether this was a panic exit rather than a planned one.',
+    exit_neutral: 'No strong technical signal either way at the moment of exit.',
+  };
+
+  // Technicals block — entry-only for open positions, entry→exit comparison
+  // (with colour-coded delta) once a SELL/TRIM has captured the exit snapshot.
   let sigHtml;
-  if (sig && Object.values(sig).some(v => v != null)) {
-    sigHtml = `<div style="min-width:200px">
-      <div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Technicals at entry</div>
+  if (hasEntrySig || hasExitSig) {
+    const eqStyle = exitQuality ? EXIT_QUALITY_STYLE[exitQuality] : null;
+    sigHtml = `<div style="min-width:240px">
+      <div class="flex-between" style="margin-bottom:4px">
+        <div class="text-xs text-muted" style="text-transform:uppercase;letter-spacing:.04em">${hasExitSig ? 'Technicals: entry → exit' : 'Technicals at entry'}</div>
+        ${eqStyle ? `<span style="font-size:10px;padding:1px 6px;border-radius:8px;border:1px solid ${eqStyle.color};color:${eqStyle.color};cursor:help" title="${escapeHTML(EXIT_QUALITY_TOOLTIP[exitQuality] || '')}">${eqStyle.label}</span>` : ''}
+      </div>
       <div style="font-size:12px">
-        ${_journalSig('RSI(14)', sig.rsi_14, v => Number(v).toFixed(1))}
-        ${_journalSig('BB %b', sig.bb_pct_b, v => Number(v).toFixed(2))}
-        ${_journalSig('ADX(14)', sig.adx_14, v => Number(v).toFixed(1))}
-        ${_journalSig('ATR %', sig.atr_pct, v => Number(v).toFixed(2) + '%')}
-        ${_journalSig('Return 5d', sig.return_5d, v => (v>=0?'+':'') + Number(v).toFixed(1) + '%')}
-        ${_journalSig('Return 20d', sig.return_20d, v => (v>=0?'+':'') + Number(v).toFixed(1) + '%')}
+        ${_journalSigPair('RSI(14)', sig?.rsi_14, exitSig?.rsi_14, v => Number(v).toFixed(1))}
+        ${_journalSigPair('BB %b', sig?.bb_pct_b, exitSig?.bb_pct_b, v => Number(v).toFixed(2))}
+        ${_journalSigPair('ADX(14)', sig?.adx_14, exitSig?.adx_14, v => Number(v).toFixed(1))}
+        ${_journalSigPair('ATR %', sig?.atr_pct, exitSig?.atr_pct, v => Number(v).toFixed(2) + '%')}
+        ${_journalSigPair('Return 5d', sig?.return_5d, exitSig?.return_5d, v => (v>=0?'+':'') + Number(v).toFixed(1) + '%')}
+        ${_journalSigPair('Return 20d', sig?.return_20d, exitSig?.return_20d, v => (v>=0?'+':'') + Number(v).toFixed(1) + '%')}
+        ${_journalSigPair('MACD Hist', sig?.macd_hist, exitSig?.macd_hist, v => Number(v).toFixed(3))}
       </div></div>`;
   } else {
-    sigHtml = `<div style="min-width:200px"><div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Technicals at entry</div>
+    sigHtml = `<div style="min-width:240px"><div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Technicals at entry</div>
       <div class="text-xs text-muted" style="font-style:italic">Not captured at trade time.</div></div>`;
   }
 

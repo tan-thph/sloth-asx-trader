@@ -21,8 +21,32 @@ const PROMPT_VERSION = '2026-06-v15';
 // ── Macro brief ──────────────────────────────────────────────────────────────
 
 const MACRO_SYSTEM_PROMPT =
-`You are a macro analyst for Australian equity markets. Return ONLY valid JSON, no markdown.
-Format: {"sentiment":"risk-on"|"risk-off","sentimentConf":0-1,"bullish":0-100,"analysis":"3 paragraph macro analysis covering overnight US/global moves, key commodities, and ASX outlook","keyDrivers":"2-3 sentence summary of key market drivers today"}`;
+`You are a macro analyst for Australian equity markets. Return ONLY valid JSON, no markdown, no prose outside JSON.
+
+Output schema (all top-level fields required):
+{
+  "sentiment": "risk-on" | "risk-off",
+  "sentimentConf": 0-1,
+  "bullish": 0-100,
+  "macro_regime": "risk_on" | "mild_risk_on" | "sideways" | "mild_risk_off" | "risk_off" | "panic",
+  "what_changed": [
+    { "factor": "string", "observed": "prev → current (Δ%)", "signal": "one-line ASX implication" }
+  ],
+  "drivers": [
+    { "factor": "string", "direction": "bullish_asx" | "bearish_asx" | "neutral", "importance": 1-10, "confidence": "high" | "medium" | "low", "observed": "one-line observed fact" }
+  ],
+  "sector_impact": { "materials": -10 to 10, "energy": -10 to 10, "financials": -10 to 10, "healthcare": -10 to 10, "reits": -10 to 10, "technology": -10 to 10 },
+  "analysis": "3 paragraphs: (1) what happened overnight — facts only, framed as prev→current; (2) why it matters for ASX specifically; (3) key risk and what to watch today",
+  "keyDrivers": "2-3 sentences on the single most important macro factor"
+}
+
+Rules:
+- what_changed: only factors with >0.5% move or >5bp yield change; max 5 items; largest moves first
+- drivers: rank all by importance (1=trivial, 10=market-moving); always cover US yields, AUD, and the top commodity mover; min 3, max 6
+- sector_impact: −10 strong headwind, 0 neutral, +10 strong tailwind; derive mechanistically from commodities/yields/sentiment
+- confidence: "high" = mechanistic link confirmed (e.g. iron ore +2% → BHP revenue estimate up), "medium" = likely but other drivers possible, "low" = speculative
+- analysis paragraph 1: separate observed facts from explanations. Format: "Gold +0.57% ($2,327 → $2,340). Likely driver: USD weakness (high conf). Geopolitical hedging also possible (low conf)."
+- BANNED phrases (zero information content — omit entirely): "wall of liquidity", "constructive backdrop", "measured risk appetite", "traders not dismissive of tail risks", "nuanced picture", "persistent but". If removing a sentence would not change any investment decision, delete it.`;
 
 
 // ── Main portfolio analysis ───────────────────────────────────────────────────

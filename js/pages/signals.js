@@ -3,9 +3,25 @@
 // ============================================================
 let _sigRefreshing = false; // true while a background refresh is in flight
 
+// Portfolio tickers + watchlist tickers (deduped, portfolio first) — Live
+// Signals now pulls technicals for both so candidates not yet held still show
+// up here; _isWatchlistOnlyTicker() tags the ones that aren't actual holdings.
+function _signalsPageTickers() {
+  const portfolioTickers = state.portfolio.map(h => h.ticker);
+  const portfolioSet = new Set(portfolioTickers);
+  const watchlistTickers = (state.watchlist || [])
+    .map(w => w.ticker)
+    .filter(t => t && !portfolioSet.has(t));
+  return [...portfolioTickers, ...new Set(watchlistTickers)];
+}
+
+function _isWatchlistOnlyTicker(t) {
+  return !state.portfolio.some(h => h.ticker === t) && (state.watchlist || []).some(w => w.ticker === t);
+}
+
 async function renderSignalsPage(gen) {
   const el = document.getElementById('main-content');
-  const tickers = state.portfolio.map(h => h.ticker);
+  const tickers = _signalsPageTickers();
 
   if(!state.serverOk) {
     if(state._renderGen !== gen) return;
@@ -63,8 +79,8 @@ async function renderSignalsPage(gen) {
       <button class="btn btn-primary btn-sm" onclick="refreshSignals()">⟳ Refresh Signals</button>
     </div>
 
-    <!-- SIGNAL CONDITION RULES -->
-    ${_buildSignalRulesCard(tickers, signals)}
+    <!-- SIGNAL DASHBOARD -->
+    ${_buildSignalDashboard(tickers, signals)}
 
     <!-- SUMMARY TABLE -->
     <div class="card section-gap">
@@ -80,8 +96,10 @@ async function renderSignalsPage(gen) {
             const macdStr=s.macd_hist!=null?`<span class="${s.macd_hist>0?'text-success':'text-danger'}">${s.macd_hist>0?'▲':'▼'} ${fmt(Math.abs(s.macd_hist),3)}</span>`:'—';
             const confPct=Math.round(s.confidence*100);
             const bbPct=s.bb_pct_b!=null?Math.round(s.bb_pct_b*100):null;
+            const watchlistBadge = _isWatchlistOnlyTicker(t)
+              ? '<span class="badge" style="background:#ede9fe;color:#6d28d9;border:none;margin-left:5px">★ Watchlist</span>' : '';
             return `<tr>
-              <td><strong>${t}</strong><br><span class="text-xs text-muted">${s.fundamentals?.sector||''}</span></td>
+              <td><strong>${t}</strong>${watchlistBadge}<br><span class="text-xs text-muted">${s.fundamentals?.sector||''}</span></td>
               <td>$${fmt(s.current_price,3)}</td>
               <td class="${(s.return_1d||0)>=0?'text-success':'text-danger'}">${fmtp(s.return_1d,1)}</td>
               <td class="${(s.return_5d||0)>=0?'text-success':'text-danger'}">${fmtp(s.return_5d,1)}</td>
@@ -116,6 +134,7 @@ async function renderSignalsPage(gen) {
         <div class="flex-between mb-2">
           <div class="flex-row">
             <strong style="font-size:16px">${t}</strong>
+            ${_isWatchlistOnlyTicker(t) ? '<span class="badge" style="background:#ede9fe;color:#6d28d9;border:none">★ Watchlist</span>' : ''}
             ${actionBadge(s.composite_signal)}
             <span class="text-xs text-muted">${f.short_name||''} · ${s.fetched_at||''}</span>
           </div>
@@ -460,7 +479,7 @@ function showTickerDetail(ticker) {
 }
 
 async function refreshSignals() {
-  const tickers=state.portfolio.map(h=>h.ticker);
+  const tickers=_signalsPageTickers();
   toast('Refreshing all signals...','info');
   await fetchSignals(tickers, true);
   renderPage();
@@ -563,47 +582,179 @@ const SIGNAL_RULES = [
   },
 ];
 
-function _buildSignalRulesCard(tickers, signals) {
-  // Evaluate each rule against each ticker
-  const triggered = []; // {rule, ticker, s}
+// ── Signal Clustering — deterministic verdict engine (no LLM) ───────────────
+// Replaces the old flat "Signal Condition Alerts" list (77+ rows = noise) with
+// a per-ticker verdict derived purely from how many SIGNAL_RULES fire bullish
+// vs bearish. Pure function of state.liveSignals — never calls an AI model.
+function _computeSignalClusters(tickers, signals) {
+  const clusters = [];
   for (const t of tickers) {
     const s = signals[t];
     if (!s || s.error) continue;
+    const buy = [], sell = [], info = [];
     for (const rule of SIGNAL_RULES) {
       try {
-        if (rule.eval(s)) triggered.push({ rule, ticker: t, s });
+        if (rule.eval(s)) {
+          const item = { rule, detail: rule.detail(s) };
+          if (rule.type === 'buy') buy.push(item);
+          else if (rule.type === 'sell') sell.push(item);
+          else info.push(item);
+        }
       } catch {}
     }
+    const net = buy.length - sell.length;
+    let verdict;
+    if (buy.length === 0 && sell.length === 0) verdict = 'Neutral';
+    else if (buy.length > 0 && sell.length > 0 && Math.abs(net) <= 1) verdict = 'Mixed';
+    else if (net >= 3) verdict = 'Strong Bull';
+    else if (net >= 1) verdict = 'Mild Bull';
+    else if (net <= -3) verdict = 'Strong Bear';
+    else if (net <= -1) verdict = 'Mild Bear';
+    else verdict = 'Mixed';
+    clusters.push({ ticker: t, sector: s.fundamentals?.sector || 'Other', buy, sell, info, netScore: net, verdict });
   }
+  return clusters;
+}
 
-  if (!triggered.length) {
-    return `<div class="card" style="margin-bottom:14px">
-      <div class="card-title">Signal Condition Alerts</div>
-      <div class="text-xs text-muted" style="padding:8px 0">No conditions triggered across your holdings right now.</div>
-    </div>`;
-  }
+const _VERDICT_STYLE = {
+  'Strong Bull': { color: '#16a34a', bg: 'rgba(22,163,74,0.15)',  icon: '▲▲' },
+  'Mild Bull':   { color: '#16a34a', bg: 'rgba(22,163,74,0.08)',  icon: '▲'  },
+  'Neutral':     { color: 'var(--text-muted)', bg: 'rgba(128,128,128,0.06)', icon: '·' },
+  'Mixed':       { color: '#d97706', bg: 'rgba(217,119,6,0.10)',  icon: '◆' },
+  'Mild Bear':   { color: '#dc2626', bg: 'rgba(220,38,38,0.08)',  icon: '▼'  },
+  'Strong Bear': { color: '#dc2626', bg: 'rgba(220,38,38,0.15)',  icon: '▼▼' },
+};
 
-  const byType = { buy: [], sell: [], info: [] };
-  for (const item of triggered) byType[item.rule.type].push(item);
-
-  const renderGroup = (items, icon, headerColor) => items.map(({rule, ticker, s}) =>
-    `<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:0.5px solid var(--border-light)">
-      <span style="min-width:80px;font-weight:600;font-size:12px;color:${rule.color}">${icon} ${ticker}</span>
-      <div style="flex:1">
-        <div style="font-size:12px;font-weight:600">${rule.label}</div>
-        <div style="font-size:11px;color:var(--text-muted)">${rule.desc} · <span style="color:${rule.color}">${rule.detail(s)}</span></div>
+// Chart 1 — Market Breadth Gauge: bull/bear balance across the whole portfolio
+function _renderBreadthGauge(clusters) {
+  const total = clusters.length;
+  if (!total) return '';
+  const bullish = clusters.filter(c => c.verdict === 'Strong Bull' || c.verdict === 'Mild Bull').length;
+  const bearish = clusters.filter(c => c.verdict === 'Strong Bear' || c.verdict === 'Mild Bear').length;
+  const neutral = total - bullish - bearish;
+  const bullPct = Math.round(bullish / total * 100), bearPct = Math.round(bearish / total * 100);
+  const neutPct = 100 - bullPct - bearPct;
+  const breadthScore = Math.round((bullish - bearish) / total * 100); // -100..100
+  const scoreColor = breadthScore > 15 ? '#16a34a' : breadthScore < -15 ? '#dc2626' : '#d97706';
+  const scoreLabel = breadthScore > 30 ? 'Strongly Bullish' : breadthScore > 15 ? 'Bullish'
+    : breadthScore < -30 ? 'Strongly Bearish' : breadthScore < -15 ? 'Bearish' : 'Balanced';
+  return `
+  <div class="card mb-2">
+    <div class="card-title">Market Breadth Gauge <span class="text-xs text-muted" style="font-weight:400">— bull/bear balance across your holdings</span></div>
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+      <div style="font-size:28px;font-weight:800;color:${scoreColor}">${breadthScore > 0 ? '+' : ''}${breadthScore}</div>
+      <div>
+        <div style="font-weight:700;color:${scoreColor}">${scoreLabel}</div>
+        <div class="text-xs text-muted">${bullish} bullish · ${neutral} neutral/mixed · ${bearish} bearish (of ${total} holdings)</div>
       </div>
-    </div>`
-  ).join('');
-
-  return `<div class="card" style="margin-bottom:14px">
-    <div class="flex-between" style="margin-bottom:10px">
-      <div class="card-title" style="margin:0">Signal Condition Alerts <span style="font-size:12px;font-weight:400;color:var(--text-muted)">(${triggered.length} triggered)</span></div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:0 24px">
-      ${byType.buy.length  ? `<div><div style="font-size:11px;font-weight:700;color:#16a34a;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">▲ Bullish (${byType.buy.length})</div>${renderGroup(byType.buy,'↑','#16a34a')}</div>` : ''}
-      ${byType.sell.length ? `<div><div style="font-size:11px;font-weight:700;color:#dc2626;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">▼ Bearish (${byType.sell.length})</div>${renderGroup(byType.sell,'↓','#dc2626')}</div>` : ''}
-      ${byType.info.length ? `<div><div style="font-size:11px;font-weight:700;color:#3b82f6;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">◆ Notable (${byType.info.length})</div>${renderGroup(byType.info,'·','#3b82f6')}</div>` : ''}
+    <div style="display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--bg-inset)">
+      ${bullPct ? `<div style="width:${bullPct}%;background:#16a34a" title="Bullish ${bullPct}%"></div>` : ''}
+      ${neutPct ? `<div style="width:${neutPct}%;background:#9ca3af" title="Neutral/Mixed ${neutPct}%"></div>` : ''}
+      ${bearPct ? `<div style="width:${bearPct}%;background:#dc2626" title="Bearish ${bearPct}%"></div>` : ''}
+    </div>
+    <div class="flex-between text-xs text-muted mt-1">
+      <span>▲ Bullish ${bullPct}%</span><span>· Neutral ${neutPct}%</span><span>▼ Bearish ${bearPct}%</span>
     </div>
   </div>`;
+}
+
+// Chart 2 — Sector Strength Heatmap: average net signal score per sector
+function _renderSectorHeatmap(clusters) {
+  const bySector = {};
+  for (const c of clusters) {
+    if (!bySector[c.sector]) bySector[c.sector] = { sum: 0, n: 0, tickers: [] };
+    bySector[c.sector].sum += c.netScore;
+    bySector[c.sector].n += 1;
+    bySector[c.sector].tickers.push(c.ticker);
+  }
+  const entries = Object.entries(bySector);
+  if (!entries.length) return '';
+  return `
+  <div class="card mb-2">
+    <div class="card-title">Sector Strength Heatmap <span class="text-xs text-muted" style="font-weight:400">— avg net signal score by sector</span></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
+      ${entries.map(([sector, v]) => {
+        const avg = v.sum / v.n;
+        const col = avg > 1 ? '#16a34a' : avg < -1 ? '#dc2626' : avg !== 0 ? '#d97706' : 'var(--text-muted)';
+        const pct = Math.min(100, Math.abs(avg) * 25);
+        return `<div style="background:var(--bg-surface);border-radius:6px;padding:10px" title="${escapeHTML(v.tickers.join(', '))}">
+          <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:4px">${escapeHTML(sector)} <span class="text-xs text-muted">(${v.n})</span></div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="flex:1;height:5px;background:var(--bg-inset);border-radius:3px">
+              <div style="width:${pct}%;height:100%;background:${col};border-radius:3px"></div>
+            </div>
+            <span style="font-weight:700;color:${col};font-size:13px">${avg > 0 ? '+' : ''}${avg.toFixed(1)}</span>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
+// Chart 3 — Signal Cluster Table: one row per ticker with verdict + chips
+// (replaces the old flat 77-row alert list)
+function _renderSignalClusterTable(clusters) {
+  if (!clusters.length) return '';
+  const sorted = [...clusters].sort((a, b) => b.netScore - a.netScore);
+  return `
+  <div class="card mb-2">
+    <div class="card-title">Signal Cluster Table <span class="text-xs text-muted" style="font-weight:400">— per-ticker verdict from ${SIGNAL_RULES.length} deterministic rules</span></div>
+    <div class="table-wrap">
+      <table class="tbl-stack">
+        <thead><tr><th>Ticker</th><th>Verdict</th><th>Net</th><th>Bullish signals</th><th>Bearish signals</th></tr></thead>
+        <tbody>
+        ${sorted.map(c => {
+          const vs = _VERDICT_STYLE[c.verdict];
+          return `<tr>
+            <td data-label="Ticker"><strong>${c.ticker}</strong>${_isWatchlistOnlyTicker(c.ticker) ? ' <span class="badge" style="background:#ede9fe;color:#6d28d9;border:none;font-size:9px">★ WL</span>' : ''}<br><span class="text-xs text-muted">${escapeHTML(c.sector)}</span></td>
+            <td data-label="Verdict"><span class="badge" style="background:${vs.bg};color:${vs.color};border:none">${vs.icon} ${c.verdict}</span></td>
+            <td data-label="Net" style="font-weight:700;color:${vs.color}">${c.netScore > 0 ? '+' : ''}${c.netScore}</td>
+            <td data-label="Bullish">${c.buy.length ? c.buy.map(b => `<span class="signal-chip chip-buy" title="${escapeHTML(b.detail)}">${escapeHTML(b.rule.label)}</span>`).join('') : '<span class="text-xs text-muted">—</span>'}</td>
+            <td data-label="Bearish">${c.sell.length ? c.sell.map(b => `<span class="signal-chip chip-sell" title="${escapeHTML(b.detail)}">${escapeHTML(b.rule.label)}</span>`).join('') : '<span class="text-xs text-muted">—</span>'}</td>
+          </tr>`;
+        }).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+// Chart 4 — Top Opportunities: best bullish and worst bearish clusters, ranked
+function _renderTopOpportunities(clusters) {
+  const bullish = clusters.filter(c => c.netScore > 0).sort((a, b) => b.netScore - a.netScore).slice(0, 5);
+  const bearish = clusters.filter(c => c.netScore < 0).sort((a, b) => a.netScore - b.netScore).slice(0, 5);
+  if (!bullish.length && !bearish.length) {
+    return `<div class="card mb-2"><div class="card-title">Top Opportunities</div><div class="text-xs text-muted" style="padding:8px 0">No directional clusters right now — portfolio is signal-neutral.</div></div>`;
+  }
+  const renderList = (items, label, color) => !items.length ? '' : `
+    <div>
+      <div style="font-size:11px;font-weight:700;color:${color};margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">${label}</div>
+      ${items.map(c => {
+        const topSignals = (c.netScore > 0 ? c.buy : c.sell).slice(0, 2).map(x => x.rule.label).join(', ');
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:0.5px solid var(--border-light)">
+          <div><strong>${c.ticker}</strong><span class="text-xs text-muted" style="margin-left:6px">${escapeHTML(topSignals)}</span></div>
+          <span style="font-weight:700;color:${color}">${c.netScore > 0 ? '+' : ''}${c.netScore}</span>
+        </div>`;
+      }).join('')}
+    </div>`;
+  return `
+  <div class="card mb-2">
+    <div class="card-title">Top Opportunities <span class="text-xs text-muted" style="font-weight:400">— ranked by net signal score</span></div>
+    <div class="grid-2">
+      ${renderList(bullish, '▲ Top Bullish Setups', '#16a34a')}
+      ${renderList(bearish, '▼ Top Bearish / Risk Setups', '#dc2626')}
+    </div>
+  </div>`;
+}
+
+function _buildSignalDashboard(tickers, signals) {
+  const clusters = _computeSignalClusters(tickers, signals);
+  if (!clusters.length) {
+    return `<div class="card mb-2"><div class="card-title">Signal Dashboard</div><div class="text-xs text-muted" style="padding:8px 0">No live signal data yet.</div></div>`;
+  }
+  return _renderBreadthGauge(clusters)
+    + _renderSectorHeatmap(clusters)
+    + _renderSignalClusterTable(clusters)
+    + _renderTopOpportunities(clusters);
 }

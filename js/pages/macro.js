@@ -244,6 +244,62 @@ function renderMacro() {
       <p class="text-sm" style="line-height:1.75;white-space:pre-wrap">${m.analysis}</p>
       ${m.keyDrivers?`<div class="mt-2"><div class="card-title">Key Drivers</div><p class="text-sm" style="line-height:1.75">${m.keyDrivers}</p></div>`:''}
     </div>`:''}
+
+    ${m.what_changed?.length ? `
+    <div class="card mb-2">
+      <div class="card-title">What Changed (24h)</div>
+      ${m.what_changed.map(w => `
+        <div style="display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:0.5px solid var(--border-light);font-size:13px">
+          <span style="font-weight:600;min-width:80px">${escapeHTML(w.factor||'')}</span>
+          <span class="text-xs" style="color:var(--text-secondary)">${escapeHTML(w.observed||'')}</span>
+          ${w.signal?`<span class="text-xs text-muted">${escapeHTML(w.signal)}</span>`:''}
+        </div>`).join('')}
+    </div>` : ''}
+
+    ${m.drivers?.length ? `
+    <div class="card mb-2">
+      <div class="card-title">Key Drivers (Ranked)</div>
+      <div class="table-wrap">
+        <table class="tbl-stack">
+          <thead><tr><th>Factor</th><th>Signal</th><th>Imp</th><th>Conf</th><th>Observed</th></tr></thead>
+          <tbody>
+          ${m.drivers.map(dr => {
+            const dirColor = dr.direction==='bullish_asx' ? 'var(--up,#16a34a)' : dr.direction==='bearish_asx' ? 'var(--down,#dc2626)' : 'var(--text-secondary)';
+            const dirLabel = dr.direction==='bullish_asx' ? '▲ Bullish' : dr.direction==='bearish_asx' ? '▼ Bearish' : '→ Neutral';
+            const confColor = dr.confidence==='high' ? 'var(--up,#16a34a)' : dr.confidence==='medium' ? 'var(--warn,#d97706)' : 'var(--text-tertiary)';
+            return `<tr>
+              <td data-label="Factor"><strong>${escapeHTML(dr.factor||'')}</strong></td>
+              <td data-label="Signal"><span style="color:${dirColor};font-weight:700">${dirLabel}</span></td>
+              <td data-label="Importance">${dr.importance!=null?dr.importance+'/10':'—'}</td>
+              <td data-label="Confidence"><span style="color:${confColor};font-size:11px">${escapeHTML(dr.confidence||'')}</span></td>
+              <td data-label="Observed" class="text-xs text-muted">${escapeHTML(dr.observed||'')}</td>
+            </tr>`;
+          }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ''}
+
+    ${m.sector_impact ? `
+    <div class="card mb-2">
+      <div class="card-title">ASX Sector Impact</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px">
+        ${Object.entries(m.sector_impact).map(([sector, score]) => {
+          const s = Number(score) || 0;
+          const pct = Math.min(100, Math.abs(s) * 10);
+          const col = s > 2 ? 'var(--up,#16a34a)' : s < -2 ? 'var(--down,#dc2626)' : s !== 0 ? 'var(--warn,#d97706)' : 'var(--text-muted)';
+          return `<div style="background:var(--bg-surface);border-radius:6px;padding:8px 10px">
+            <div style="font-size:11px;color:var(--text-tertiary);text-transform:capitalize;margin-bottom:4px">${escapeHTML(sector)}</div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="flex:1;height:4px;background:var(--bg-inset);border-radius:2px">
+                <div style="width:${pct}%;height:100%;background:${col};border-radius:2px"></div>
+              </div>
+              <span style="font-weight:700;color:${col};font-size:13px">${s>0?'+':''}${s}</span>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>` : ''}
     ` : ''}
 
     ${renderPolymarketSection()}
@@ -361,12 +417,34 @@ async function runMacroAnalysis(force=false) {
       if(r.ok) {
         const d=await r.json();
         mergeLiveMacro(d);   // preserves the AI brief if the Claude call below fails
+        const fmtPC = (o, dp=2) => {
+          if (!o) return null;
+          const curr = fmt(o.value, dp);
+          const chg = fmtp(o.change_pct);
+          return o.prev_close != null ? `${fmt(o.prev_close, dp)} → ${curr} (${chg})` : `${curr} (${chg})`;
+        };
         const lines=[];
-        if(d.sp500) lines.push(`S&P500: ${fmt(d.sp500.value)} (${fmtp(d.sp500.change_pct)})`);
-        if(d.asx200) lines.push(`ASX200: ${fmt(d.asx200.value)} (${fmtp(d.asx200.change_pct)})`);
-        if(d.gold) lines.push(`Gold: ${fmt(d.gold.value)} (${fmtp(d.gold.change_pct)})`);
-        if(d.aud_usd) lines.push(`AUD/USD: ${fmt(d.aud_usd.value,4)} (${fmtp(d.aud_usd.change_pct)})`);
-        if(d.vix) lines.push(`VIX: ${fmt(d.vix.value)}`);
+        if(d.sp500)    lines.push(`S&P500: ${fmtPC(d.sp500, 0)}`);
+        if(d.nasdaq)   lines.push(`Nasdaq: ${fmtPC(d.nasdaq, 0)}`);
+        if(d.dow)      lines.push(`Dow: ${fmtPC(d.dow, 0)}`);
+        if(d.vix)      lines.push(`VIX: ${fmtPC(d.vix)}`);
+        if(d.us10y)    lines.push(`US 10Y Yield: ${fmtPC(d.us10y)}%`);
+        if(d.gold)     lines.push(`Gold: ${fmtPC(d.gold, 0)}`);
+        if(d.oil)      lines.push(`Oil WTI: ${fmtPC(d.oil, 1)}`);
+        if(d.iron_ore) lines.push(`Iron Ore: ${fmtPC(d.iron_ore, 1)}` + (d.iron_ore_change_5d != null ? ` (5d: ${fmtp(d.iron_ore_change_5d)})` : ''));
+        if(d.copper)   lines.push(`Copper: ${fmtPC(d.copper, 3)}`);
+        if(d.aud_usd)  lines.push(`AUD/USD: ${fmtPC(d.aud_usd, 4)}` + (d.aud_usd_change_5d != null ? ` (5d: ${fmtp(d.aud_usd_change_5d)})` : ''));
+        if(d.asx200)   lines.push(`ASX200: ${fmtPC(d.asx200, 0)}`
+          + (d.asx200_5d_return != null ? ` (5d: ${fmtp(d.asx200_5d_return)}` : '')
+          + (d.asx200_20d_return != null ? `, 20d: ${fmtp(d.asx200_20d_return)})` : (d.asx200_5d_return != null ? ')' : '')));
+        if(d.asx_vol_20d != null) lines.push(`ASX 20d Realised Vol: ${d.asx_vol_20d.toFixed(1)}%`);
+        if(d.spi200_futures_chg != null) lines.push(`SPI200 Futures vs ASX200 spot: ${fmtp(d.spi200_futures_chg)}`);
+        if(d.advance_decline_ratio != null) lines.push(`ASX Breadth (% above 20d SMA): ${d.advance_decline_ratio.toFixed(1)}%`);
+        if(d.sectors) {
+          const sLines = Object.values(d.sectors).filter(Boolean)
+            .map(s => `${s.label} ${fmtp(s.change_1d)}${s.return_5d != null ? ` (5d ${fmtp(s.return_5d)})` : ''}`);
+          if(sLines.length) lines.push('Sector ETFs: ' + sLines.join(', '));
+        }
         liveCtx = lines.join(' | ');
       }
     } catch {}

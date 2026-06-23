@@ -29,7 +29,7 @@ _ALLOWED_OUTCOME_COLS = (
     "skill_score", "debate_summary", "prompt_hash",
     "tags", "trade_thesis", "rr_ratio",
     "success_tags", "checklist_bypasses",
-    "thesis_verdict",
+    "thesis_verdict", "exit_signals_json",
 )
 
 # ── Calibration TTL cache (L4) ────────────────────────────────────────────────
@@ -97,6 +97,41 @@ def classify_entry_driver(sig: dict | None) -> str:
             or (r20 is not None and r20 > 8):
         return "momentum_breakout"
     return "unknown"
+
+
+def classify_exit_quality_deterministic(exit_signals_json) -> str | None:
+    """Deterministic exit-timing classification for SELL/TRIM events, computed
+    purely from the exit-time technical snapshot (exit_signals_json) — no LLM.
+
+    Answers: was this exit well-timed technically, or did it leave a strong
+    setup early / get sold into an oversold extreme?
+
+      exit_into_strength            — RSI>60 or BB%B>0.65 at exit: sold while
+                                       the technical setup was still bullish —
+                                       likely cut a winner early.
+      exit_after_reversal_confirmed — momentum had genuinely turned (RSI<55 and
+                                       MACD histogram negative) — a well-timed
+                                       technical exit.
+      exit_into_weakness            — RSI<35 or BB%B<0.25 at exit: sold near an
+                                       oversold extreme — possible panic exit.
+      exit_neutral                  — none of the above clearly fires.
+      None                          — insufficient data (RSI and BB%B both null).
+
+    Mirrors classify_entry_driver()'s pure-function style: same row in → same
+    tag out, reproducible for calibration.
+    """
+    rsi  = _sig_get(exit_signals_json, "rsi_14")
+    bb   = _sig_get(exit_signals_json, "bb_pct_b")
+    macd = _sig_get(exit_signals_json, "macd_hist")
+    if rsi is None and bb is None:
+        return None
+    if (rsi is not None and rsi > 60) or (bb is not None and bb > 0.65):
+        return "exit_into_strength"
+    if (rsi is not None and rsi < 35) or (bb is not None and bb < 0.25):
+        return "exit_into_weakness"
+    if macd is not None and macd < 0 and (rsi is None or rsi < 55):
+        return "exit_after_reversal_confirmed"
+    return "exit_neutral"
 
 
 # ── Deterministic post-mortem tagging (Sprint 70) ─────────────────────────────
@@ -592,6 +627,80 @@ def _resolve_deterministic_tags(conn, cap: int = 50) -> int:
     return resolved
 
 
+def _resolve_exit_quality_tags(conn, cap: int = 50) -> int:
+    """Lazily fill exit_quality_tag for SELL/TRIM events that have an
+    exit_signals_json snapshot but no tag yet. Idempotent, capped per call,
+    runs alongside the other _resolve_* helpers inside _calib_compute().
+
+    Scoped to SELL/TRIM only — exit timing quality is a property of the exit
+    decision, distinct from classify_error_type_deterministic() (entry-centric,
+    BUY/TOP_UP only).
+    """
+    rows = conn.execute("""
+        SELECT id, exit_signals_json
+          FROM ai_learning_events
+         WHERE recommendation IN ('SELL','TRIM')
+           AND exit_signals_json IS NOT NULL
+           AND exit_signals_json != ''
+           AND exit_quality_tag IS NULL
+         ORDER BY timestamp DESC
+         LIMIT ?
+    """, (cap,)).fetchall()
+
+    resolved = 0
+    for r in rows:
+        tag = classify_exit_quality_deterministic(r["exit_signals_json"])
+        if tag is not None:
+            conn.execute("UPDATE ai_learning_events SET exit_quality_tag=? WHERE id=?", (tag, r["id"]))
+            resolved += 1
+    return resolved
+
+
+def _compute_exit_quality_nudge(conn, min_n: int = 5) -> str:
+    """Behavioural nudge: do exit_into_strength exits actually leave money on
+    the table? Joins exit_quality_tag against sell_verify_sold_chg (the
+    already-resolved post-sell price change from _resolve_sell_outcomes()) so
+    no new price-fetch logic is needed — reuses the existing 25-day-later
+    verification pass.
+
+    Gated on min_n per bucket (continuous-metric n-gate, mirroring
+    _compute_thesis_drift's pattern — Wilson CI doesn't apply to an averaged
+    percentage). Returns "" when ungated or no signal.
+    """
+    rows = conn.execute("""
+        SELECT exit_quality_tag, sell_verify_sold_chg
+          FROM ai_learning_events
+         WHERE recommendation IN ('SELL','TRIM')
+           AND exit_quality_tag IS NOT NULL
+           AND sell_verify_sold_chg IS NOT NULL
+    """).fetchall()
+    if not rows:
+        return ""
+    by_tag: dict = {}
+    for r in rows:
+        by_tag.setdefault(r["exit_quality_tag"], []).append(r["sell_verify_sold_chg"])
+
+    strength = by_tag.get("exit_into_strength", [])
+    reversal = by_tag.get("exit_after_reversal_confirmed", [])
+    if len(strength) < min_n:
+        return ""
+    avg_strength = sum(strength) / len(strength)
+    # Only worth flagging if the ticker kept running materially after the exit.
+    if avg_strength < 3.0:
+        return ""
+    if len(reversal) >= min_n:
+        avg_reversal = sum(reversal) / len(reversal)
+        return (
+            f"⚠EXIT_INTO_STRENGTH: avg+{avg_strength:.1f}% post-exit (n={len(strength)}) "
+            f"vs reversal-confirmed exits avg{avg_reversal:+.1f}% (n={len(reversal)}) "
+            f"→ hold winners until momentum genuinely turns"
+        )
+    return (
+        f"⚠EXIT_INTO_STRENGTH: sold while still bullish, stock kept running "
+        f"+{avg_strength:.1f}% avg afterwards (n={len(strength)}) → don't cut winners early"
+    )
+
+
 def _resolve_missing_sectors(conn, cap: int = 50) -> int:
     """Backfill `sector` on executed events that logged it null/empty, using the
     static `core.SECTOR_MAP` (no network). Idempotent, capped per call, runs
@@ -852,11 +961,11 @@ def learning_log():
                      outcome_status, realized_pnl_aud, realized_pnl_pct, holding_period_days, exit_reason,
                      actual_entry_price, actual_exit_price, sector,
                      skill_score, debate_summary, prompt_hash, error_type_source,
-                     entry_signals_json, debate_synthesis_winner,
+                     entry_signals_json, exit_signals_json, debate_synthesis_winner,
                      tags, trade_thesis,
                      sell_primary_driver, sell_secondary_factors, sell_urgency,
                      alternative_ticker, primary_entry_driver, thesis_verdict)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -886,6 +995,7 @@ def learning_log():
                 data.get("prompt_hash"),
                 data.get("error_type_source"),
                 data.get("entry_signals_json"),
+                data.get("exit_signals_json"),
                 data.get("debate_synthesis_winner"),
                 data.get("tags"),
                 data.get("trade_thesis"),
@@ -1025,22 +1135,23 @@ def trade_detail():
                        regime, prompt_version, suggested_stop, suggested_target,
                        rr_ratio, outcome_status, realized_pnl_pct, realized_pnl_aud,
                        holding_period_days, exit_reason, rationale_summary,
-                       entry_signals_json, trade_thesis, primary_entry_driver,
+                       entry_signals_json, exit_signals_json, exit_quality_tag,
+                       trade_thesis, primary_entry_driver,
                        thesis_verdict, sell_primary_driver, sell_secondary_factors,
                        success_tags, error_type
                   FROM ai_learning_events
                  WHERE id IN ({placeholders})
             """, ids).fetchall()
-            for row in rows:
+            def _parse_sig(blob):
                 try:
-                    sig = json.loads(row["entry_signals_json"] or "{}")
-                    if not isinstance(sig, dict):
-                        sig = {}
+                    parsed = json.loads(blob or "{}")
+                    return parsed if isinstance(parsed, dict) else {}
                 except (ValueError, TypeError):
-                    sig = {}
+                    return {}
+            for row in rows:
                 d = dict(row)
-                d.pop("entry_signals_json", None)
-                d["entry_signals"] = sig
+                d["entry_signals"] = _parse_sig(d.pop("entry_signals_json", None))
+                d["exit_signals"]  = _parse_sig(d.pop("exit_signals_json", None))
                 details[str(row["id"])] = d
         return jsonify({"ok": True, "details": details})
     except Exception as e:
@@ -2492,6 +2603,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             # Sprint 70: lazily assign deterministic error_type + skill_score to
             # closed trades from the entry/exit capture (replaces the LLM tagger).
             _resolve_deterministic_tags(conn)
+            # Exit-signals capture: lazily classify SELL/TRIM exit timing quality
+            # from the captured exit_signals_json snapshot — capped at 50, idempotent.
+            _resolve_exit_quality_tags(conn)
             # Sprint 71 Phase 1B: lazily capture MAE/MFE path stats for closed
             # executed BUY/TOP_UP trades — capped at 5, idempotent, degrades
             # gracefully on yfinance failure (row left unresolved).
@@ -3040,6 +3154,12 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 _neg = _compute_sell_negative_confirmation(conn)
                 if _neg:
                     parts.append(_neg)
+            except Exception:
+                pass
+            try:
+                _exq = _compute_exit_quality_nudge(conn)
+                if _exq:
+                    parts.append(_exq)
             except Exception:
                 pass
             # Exemplars ride a separate field (not the char-budgeted `parts`) so the
