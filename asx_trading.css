@@ -143,32 +143,46 @@
 }
 
 /* ── Terminal theme — Forven-inspired Bloomberg-style monochrome dark ──────
-   Forven_UIUX_Adoption.md §1. A SELECTABLE theme value (gotcha #40: applied
-   via data-theme attribute + _applyTheme(), never a body class), additive —
-   does not replace or modify the light/dark blocks above. */
+   Forven_UIUX_Adoption.md §1/§1.5. A SELECTABLE theme value (gotcha #40:
+   applied via data-theme attribute + _applyTheme(), never a body class),
+   additive — does not replace or modify the light/dark blocks above.
+   §1.5 superseded the values below: the original §1 pass was built from the
+   GitHub repo's app.css (approximate/inferred colors, no real font). These
+   are verified against the live production site's served CSS instead —
+   warmer near-black (not pure #000), 2px corners (not 0px), and a real
+   self-hosted JetBrains Mono webfont (static/fonts/, SIL OFL 1.1). */
 :root[data-theme="terminal"] {
-  --bg-base:      #000000;
-  --bg-surface:   #0a0a0a;
-  --bg-inset:     #111111;
-  --bg-hover:     #1a1a1a;
+  --bg-base:      #0a0b0d;
+  --bg-surface:   #101214;
+  --bg-inset:     #0d0f11;
+  --bg-hover:     #1c1e20;
 
-  --text-primary:   #ffffff;
-  --text-secondary: #888888;
-  --text-tertiary:  #555555;
+  --text-primary:   #fafafa;
+  --text-secondary: #9a9793;
+  --text-tertiary:  #737373;
 
-  --border-light:  #222222;
-  --border-medium: #333333;
+  --border-light:  #171717;
+  --border-medium: #262626;
 
-  --accent-primary:    #f97316;
-  --accent-primary-bg: rgba(249, 115, 22, 0.10);
-  --accent-ring:       rgba(249, 115, 22, 0.35);
+  /* Brand accent (orange) — the live site's actual brand color, used
+     sparingly: sidebar logo dot, the active-nav-item indicator bar
+     (.nav-item.active::before already reads --accent-primary), and primary
+     CTA buttons (.btn-primary already reads --accent-primary). Aliased onto
+     --accent-primary rather than introduced as a separate one-off color, so
+     every existing --accent-primary consumer picks it up automatically —
+     never used as a background fill. */
+  --accent-brand:       #ff6b1a;
+  --accent-brand-hover: #ff8a3d;
+  --accent-primary:    var(--accent-brand);
+  --accent-primary-bg: rgba(255, 107, 26, 0.10);
+  --accent-ring:       rgba(255, 107, 26, 0.35);
   --accent-contrast:   #000000;
 
-  --up:      #22c55e;
-  --down:    #ef4444;
+  --up:      #46d08a;
+  --down:    #f5736f;
   --warn:    #eab308;
-  --up-bg:   rgba(34, 197, 94, 0.12);
-  --down-bg: rgba(239, 68, 68, 0.12);
+  --up-bg:   rgba(70, 208, 138, 0.12);
+  --down-bg: rgba(245, 115, 111, 0.12);
   --warn-bg: rgba(234, 179, 8, 0.13);
 
   /* Reuse the dark-theme hairline-shadow approach (no third shadow system) */
@@ -176,33 +190,35 @@
   --shadow-pop:   0 0 0 0.5px var(--border-medium), 0 16px 40px rgba(0,0,0,.6);
   --shadow-hover: 0 0 0 0.5px var(--border-medium);
 
-  --chart-1: #f97316;
+  --chart-1: #ff6b1a;
   --chart-2: #eab308;
-  --chart-3: #22c55e;
-  --chart-4: #ef4444;
+  --chart-3: #46d08a;
+  --chart-4: #f5736f;
   --chart-5: #a78bfa;
-  --chart-6: #888888;
+  --chart-6: #9a9793;
   --chart-grid: rgba(255, 255, 255, 0.08);
 
-  /* Sharp corners everywhere — overriding the radius TOKENS (rather than every
-     individual selector) means every existing var(--radius-*) consumer goes
-     flush automatically. Hardcoded circular elements (toggle switch knobs,
-     .badge's 50% dot) are untouched since they don't read these tokens. */
-  --radius-sm: 0px;
-  --radius-md: 0px;
-  --radius-lg: 0px;
+  /* §1.5: 2px (not 0px) — the live site is NOT uniformly rounded-none; 2px is
+     its most common button/input radius. Overriding the radius TOKENS (not
+     every individual selector) means every existing var(--radius-*) consumer
+     picks this up automatically. Pill/circular elements (.badge, status dots,
+     toggle knobs) are unaffected either way — verified they all use hardcoded
+     border-radius:99px/50% throughout this file, never these tokens, so no
+     separate pill-radius token was needed. */
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 2px;
 
-  /* JetBrains Mono first; falls back to the existing --font-mono system stack
-     if the (optional, self-hosted) font file below isn't present — see the
-     @font-face block. A missing font file must never break rendering. */
-  --font-mono-terminal: "JetBrains Mono", var(--font-mono);
+  /* Real font first, then the metric-matched fallback (prevents layout
+     reflow on swap — see @font-face below), then the existing system stack. */
+  --font-mono-terminal: "JetBrains Mono", "JetBrains Mono Fallback", var(--font-mono);
 }
 
-/* Self-hosted only (file:// / offline-safe — no CDN). This @font-face is a
-   best-effort enhancement: if static/fonts/JetBrainsMono-Regular.woff2 isn't
-   present, the browser silently skips it and --font-mono-terminal's fallback
-   chain (ui-monospace/SF Mono/Cascadia Code/Consolas) takes over — no broken
-   rendering either way. Drop the .woff2 file in place to enable the exact font. */
+/* §1.5: real, self-hosted JetBrains Mono v2.304 (official GitHub release,
+   github.com/JetBrains/JetBrainsMono, SIL OFL 1.1 — license copy alongside
+   at static/fonts/JetBrainsMono-OFL.txt). file:// / offline-safe, no CDN.
+   If these files are ever removed, --font-mono-terminal's fallback chain
+   still resolves cleanly — never a broken-rendering failure mode. */
 @font-face {
   font-family: "JetBrains Mono";
   src: url("static/fonts/JetBrainsMono-Regular.woff2") format("woff2");
@@ -217,6 +233,19 @@
   font-style: normal;
   font-display: swap;
 }
+/* Metric-matched fallback (mirrors the live site's own technique exactly) —
+   sized/spaced to occupy the same line-height/character-width as JetBrains
+   Mono, so text doesn't reflow when the real webfont swaps in after
+   font-display:swap. Bridges the gap between "system mono renders
+   immediately" and "real font arrives a moment later". */
+@font-face {
+  font-family: "JetBrains Mono Fallback";
+  src: local("Arial");
+  ascent-override: 75.79%;
+  descent-override: 22.29%;
+  line-gap-override: 0%;
+  size-adjust: 134.59%;
+}
 
 [data-theme="terminal"] body {
   font-family: var(--font-mono-terminal);
@@ -226,7 +255,9 @@
 [data-theme="terminal"] .btn {
   font-family: var(--font-mono-terminal);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  /* §1.5: live-site uppercase micro-labels use .12em-.18em positive tracking;
+     0.05em was tighter than verified — bumped into range. */
+  letter-spacing: 0.14em;
   font-weight: 700;
   background: transparent;
   transition: background-color .1s ease, color .1s ease, border-color .1s ease;
@@ -252,7 +283,16 @@
 }
 [data-theme="terminal"] .nav-label {
   font-family: var(--font-mono-terminal);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.14em;
+}
+/* §1.5: extend the same .12em-.18em uppercase-micro-label tracking to the
+   other uppercase micro-labels (.card-title, table headers) — these only had
+   a px-based default (0.6-0.7px, designed for the light/dark sans-serif
+   themes) with no terminal-specific override before. */
+[data-theme="terminal"] .card-title,
+[data-theme="terminal"] th {
+  font-family: var(--font-mono-terminal);
+  letter-spacing: 0.14em;
 }
 
 /* Sidebar logo: small accent square + lowercase wordmark, restyling the
