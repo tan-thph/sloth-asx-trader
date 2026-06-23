@@ -2374,17 +2374,21 @@ class TestSprint10FormingBarAndStooq(unittest.TestCase):
         self.assertIn("def _drop_forming_bar(", src)
 
     def test_drop_forming_bar_removes_todays_bar_before_settlement(self):
-        """_drop_forming_bar must remove the last row when now_utc.hour < 7 and last bar is today."""
-        import importlib, datetime
+        """_drop_forming_bar must remove the last row when Sydney-local hour < 17 and last bar is today.
+
+        Audit fix #8: cutoff is now checked in Sydney local time (zoneinfo,
+        DST-aware) instead of a flat UTC hour — mock indicators._dt_mod.datetime.now
+        directly rather than the old utcnow()-based time source.
+        """
+        import datetime
         import pandas as pd
         import indicators as ind
 
-        # Build a 3-row DataFrame whose last row is 'today' (AEST = UTC+10)
-        today_aest = (datetime.datetime.utcnow() + datetime.timedelta(hours=10)).date()
+        today_sydney = datetime.datetime.now(ind._SYDNEY_TZ).date()
         idx = pd.to_datetime([
-            str(today_aest - datetime.timedelta(days=2)),
-            str(today_aest - datetime.timedelta(days=1)),
-            str(today_aest),
+            str(today_sydney - datetime.timedelta(days=2)),
+            str(today_sydney - datetime.timedelta(days=1)),
+            str(today_sydney),
         ])
         df = pd.DataFrame(
             {"Open": [1, 2, 3], "High": [1, 2, 3], "Low": [1, 2, 3],
@@ -2392,24 +2396,29 @@ class TestSprint10FormingBarAndStooq(unittest.TestCase):
             index=idx,
         )
         import unittest.mock as _mock
-        # Patch utcnow to 06:00 UTC (before 07:00 settlement cutoff)
-        fake_now = datetime.datetime(today_aest.year, today_aest.month, today_aest.day, 6, 0, 0)
+        # Patch now() to 06:00 Sydney local (before the 17:00 settlement cutoff).
+        # Patch indicators._dt_mod itself (the name binding inside indicators.py's
+        # own namespace from `import datetime as _dt_mod`) — NOT a nested attribute
+        # path like "indicators._dt_mod.datetime", which would replace the real
+        # global stdlib datetime.datetime class and break pandas' own isinstance
+        # checks against it for the duration of the patch.
+        fake_now = datetime.datetime(today_sydney.year, today_sydney.month, today_sydney.day,
+                                      6, 0, 0, tzinfo=ind._SYDNEY_TZ)
         with _mock.patch("indicators._dt_mod") as mock_dt:
-            mock_dt.datetime.utcnow.return_value = fake_now
-            mock_dt.timedelta.side_effect = lambda **kw: datetime.timedelta(**kw)
+            mock_dt.datetime.now.return_value = fake_now
             result = ind._drop_forming_bar(df)
-        self.assertEqual(len(result), 2, "Forming bar should be dropped before 07:00 UTC")
+        self.assertEqual(len(result), 2, "Forming bar should be dropped before 17:00 Sydney local")
 
     def test_drop_forming_bar_keeps_bar_after_settlement(self):
-        """_drop_forming_bar must NOT remove the last row after 07:00 UTC."""
-        import importlib, datetime
+        """_drop_forming_bar must NOT remove the last row after 17:00 Sydney local."""
+        import datetime
         import pandas as pd
         import indicators as ind
 
-        today_aest = (datetime.datetime.utcnow() + datetime.timedelta(hours=10)).date()
+        today_sydney = datetime.datetime.now(ind._SYDNEY_TZ).date()
         idx = pd.to_datetime([
-            str(today_aest - datetime.timedelta(days=1)),
-            str(today_aest),
+            str(today_sydney - datetime.timedelta(days=1)),
+            str(today_sydney),
         ])
         df = pd.DataFrame(
             {"Open": [1, 2], "High": [1, 2], "Low": [1, 2],
@@ -2417,19 +2426,21 @@ class TestSprint10FormingBarAndStooq(unittest.TestCase):
             index=idx,
         )
         import unittest.mock as _mock
-        fake_now = datetime.datetime(today_aest.year, today_aest.month, today_aest.day, 8, 0, 0)
+        fake_now = datetime.datetime(today_sydney.year, today_sydney.month, today_sydney.day,
+                                      18, 0, 0, tzinfo=ind._SYDNEY_TZ)
         with _mock.patch("indicators._dt_mod") as mock_dt:
-            mock_dt.datetime.utcnow.return_value = fake_now
+            mock_dt.datetime.now.return_value = fake_now
             result = ind._drop_forming_bar(df)
         self.assertEqual(len(result), 2, "Bar must NOT be dropped after settlement window")
 
     def test_drop_forming_bar_keeps_old_bars_before_settlement(self):
-        """_drop_forming_bar must not drop a bar from 2+ days ago even before 07:00 UTC."""
+        """_drop_forming_bar must not drop a bar from 2+ days ago even before 17:00 Sydney local."""
         import datetime
         import pandas as pd
         import indicators as ind
 
-        yesterday = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).date()
+        today_sydney = datetime.datetime.now(ind._SYDNEY_TZ).date()
+        yesterday = today_sydney - datetime.timedelta(days=1)
         idx = pd.to_datetime([
             str(yesterday - datetime.timedelta(days=1)),
             str(yesterday),
@@ -2440,12 +2451,21 @@ class TestSprint10FormingBarAndStooq(unittest.TestCase):
             index=idx,
         )
         import unittest.mock as _mock
-        fake_now = datetime.datetime.utcnow().replace(hour=3)
+        fake_now = datetime.datetime(today_sydney.year, today_sydney.month, today_sydney.day,
+                                      3, 0, 0, tzinfo=ind._SYDNEY_TZ)
         with _mock.patch("indicators._dt_mod") as mock_dt:
-            mock_dt.datetime.utcnow.return_value = fake_now
-            mock_dt.timedelta.side_effect = lambda **kw: datetime.timedelta(**kw)
+            mock_dt.datetime.now.return_value = fake_now
             result = ind._drop_forming_bar(df)
         self.assertEqual(len(result), 2, "Old bars must never be dropped")
+
+    def test_drop_forming_bar_uses_sydney_timezone(self):
+        """Audit fix #8: the cutoff must be computed in Australia/Sydney local
+        time (DST-aware via zoneinfo), not a flat hardcoded UTC hour."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_SYDNEY_TZ", src)
+        self.assertIn('ZoneInfo("Australia/Sydney")', src)
+        self.assertNotIn("now_utc.hour >= 7", src)
 
     def test_fetch_stooq_history_function_exists(self):
         """indicators.py must define _fetch_stooq_history."""
@@ -5800,10 +5820,15 @@ class TestSprint72UnadjustedFibZones(unittest.TestCase):
             mock_tk.return_value.history.side_effect = _fake_history
             mock_tk.return_value.info = {}
             # Force the forming-bar guard to no-op regardless of wall-clock time.
+            # Audit fix #8: guard now checks Sydney-local time (zoneinfo), not utcnow().
+            # Patch indicators._dt_mod itself (the name binding inside indicators.py's
+            # namespace), not a nested "indicators._dt_mod.datetime" attribute path —
+            # the latter would replace the real global stdlib datetime.datetime class
+            # and break pandas' own isinstance checks against it.
+            import datetime as _real_dt
+            fake_now = _real_dt.datetime.now(ind._SYDNEY_TZ).replace(hour=18)
             with _mock.patch("indicators._dt_mod") as mock_dt:
-                import datetime as _real_dt
-                mock_dt.datetime.utcnow.return_value = _real_dt.datetime.utcnow().replace(hour=12)
-                mock_dt.timedelta.side_effect = lambda **kw: _real_dt.timedelta(**kw)
+                mock_dt.datetime.now.return_value = fake_now
                 result = ind.analyse_ticker("FAKE", period="6mo")
 
         self.assertNotIn("error", result)

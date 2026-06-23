@@ -1261,6 +1261,27 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
                      r.riskAUD > 0)
         .reduce((s, r) => s + r.riskAUD, 0);
 
+      // Audit fix #2: also sum $-at-risk on the LIVE book — executed BUY/TOP_UP
+      // recHistory entries still open (i.e. the position is still held), using
+      // each parcel's own qty/entryPrice/stopLoss (mirrors checkStopProximityAlerts'
+      // open-rec filter in alerts.js). Without this, a portfolio already at or
+      // beyond maxRiskBudgetPct shows consumed=0 the moment its recs clear
+      // "pending" on execution — the gate only ever throttled same-batch new
+      // recs against each other, never against risk already on the book.
+      const heldTickers = new Set((state.portfolio || []).map(h => h.ticker));
+      consumed += (state.recHistory || [])
+        .filter(r =>
+          r.executed && r.stopLoss > 0 && r.qty > 0 &&
+          (r.action === 'BUY' || r.action === 'TOP_UP') &&
+          (r.outcome === 'open' || !r.outcome) &&
+          heldTickers.has(r.ticker)
+        )
+        .reduce((s, r) => {
+          const entry = r.executedPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
+          if (!entry) return s;
+          return s + r.qty * Math.abs(entry - r.stopLoss);
+        }, 0);
+
       const _budgetResult = _applyHeatBudget(recs, budgetAUD, consumed, _heatLimitSource);
       recs = _budgetResult.recs;
       const budgetScaledCount  = _budgetResult.scaled;

@@ -571,20 +571,28 @@ function handleCSV(e) {
     // Sort chronologically so FIFO parcel order is correct
     parsedRows.sort((a, b) => a.date.localeCompare(b.date));
 
+    // Audit fix #3: scope every lookup/write by account, mirroring applyBuyToPortfolio.
+    // Without this, an import lands on whichever holding object for that ticker
+    // happens to be first in state.portfolio — corrupting a different account's
+    // avgPrice/share-count when the same ticker is held in more than one account.
+    const importAccount = (state.activeAccount && state.activeAccount !== 'all')
+      ? state.activeAccount : 'personal';
+
     let added = 0, updated = 0, parcelsCreated = 0;
 
     for (const row of parsedRows) {
       const { ticker, shares, price, date, sector, fees } = row;
 
-      // Check for exact duplicate parcel (same ticker + date + qty + price) — skip
+      // Check for exact duplicate parcel (same ticker + date + qty + price + account) — skip
       const dupParcel = state.cgtParcels.find(p =>
         p.ticker === ticker && p.date === date &&
-        p.qty === shares && Math.abs(p.costPerShare - price) < 0.005
+        p.qty === shares && Math.abs(p.costPerShare - price) < 0.005 &&
+        (p.account || 'personal') === importAccount
       );
       if (dupParcel) continue;
 
-      // Update portfolio holding (weighted avg across all lots)
-      const existing = state.portfolio.find(h => h.ticker === ticker);
+      // Update portfolio holding (weighted avg across all lots), scoped to this account
+      const existing = state.portfolio.find(h => h.ticker === ticker && (h.account || 'personal') === importAccount);
       if (existing) {
         const totalCostVal = existing.shares * existing.avgPrice + shares * price;
         existing.shares += shares;
@@ -592,12 +600,12 @@ function handleCSV(e) {
         if (sector !== 'Other') existing.sector = sector;
         updated++;
       } else {
-        state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector });
+        state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector, account: importAccount });
         added++;
       }
 
       // Create CGT parcel
-      addParcel(ticker, date, shares, price, fees, sector);
+      addParcel(ticker, date, shares, price, fees, sector, importAccount);
       const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
       parcelsCreated++;
 
@@ -618,6 +626,7 @@ function handleCSV(e) {
         recExecuted: false,
         timestamp: `${date} (imported)`,
         imported: true,
+        account: importAccount,
       });
     }
 
@@ -666,26 +675,31 @@ async function handleBrokerCSV(e) {
   // Sort chronologically — backend already sorts but ensure it
   rows.sort((a, b) => a.date.localeCompare(b.date));
 
+  // Audit fix #3: see handleCSV's importAccount comment — same scoping applies here.
+  const importAccount = (state.activeAccount && state.activeAccount !== 'all')
+    ? state.activeAccount : 'personal';
+
   let added = 0, updated = 0, parcelsCreated = 0;
   for (const row of rows) {
     const { ticker, shares, price, date, brokerage } = row;
     const dupParcel = state.cgtParcels.find(p =>
       p.ticker === ticker && p.date === date &&
-      p.qty === shares && Math.abs(p.costPerShare - price) < 0.005
+      p.qty === shares && Math.abs(p.costPerShare - price) < 0.005 &&
+      (p.account || 'personal') === importAccount
     );
     if (dupParcel) continue;
 
-    const existing = state.portfolio.find(h => h.ticker === ticker);
+    const existing = state.portfolio.find(h => h.ticker === ticker && (h.account || 'personal') === importAccount);
     if (existing) {
       const totalCostVal = existing.shares * existing.avgPrice + shares * price;
       existing.shares += shares;
       existing.avgPrice = totalCostVal / existing.shares;
       updated++;
     } else {
-      state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector: 'Other' });
+      state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector: 'Other', account: importAccount });
       added++;
     }
-    addParcel(ticker, date, shares, price, brokerage || 0, 'Other');
+    addParcel(ticker, date, shares, price, brokerage || 0, 'Other', importAccount);
     const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
     parcelsCreated++;
     state.tradeJournal.push({
@@ -694,6 +708,7 @@ async function handleBrokerCSV(e) {
       exitPrice: null, fees: brokerage || 0, status: 'open', pnl: null,
       parcelId: newParcel.id, recId: null, recExecuted: false,
       timestamp: `${date} (broker import)`, imported: true,
+      account: importAccount,
     });
   }
   state.tradeJournal.sort((a, b) => (a.date||'').localeCompare(b.date||''));
@@ -709,16 +724,17 @@ async function handleBrokerCSV(e) {
   if (sells.length > 0) {
     scheduleSave();
     renderPage();
-    _showSellImportConfirmation(sells, result.broker);
+    _showSellImportConfirmation(sells, result.broker, importAccount);
     return;
   }
   scheduleSave();
   renderPage();
 }
 
-function _computeSellPreview(ticker, shares, price, date, brokerage) {
+function _computeSellPreview(ticker, shares, price, date, brokerage, importAccount) {
+  const acct = importAccount || 'personal';
   const openParcels = (state.cgtParcels || [])
-    .filter(p => p.ticker === ticker && p.remainingQty > 0)
+    .filter(p => p.ticker === ticker && p.remainingQty > 0 && (p.account || 'personal') === acct)
     .slice()
     .sort((a, b) => {
       // Parse DD-MM-YYYY for correct chronological ordering
@@ -751,11 +767,11 @@ function _computeSellPreview(ticker, shares, price, date, brokerage) {
   return { totalCost, gain, cgtDiscount, cgtWarning, unmatched: remaining };
 }
 
-function _showSellImportConfirmation(sells, broker) {
+function _showSellImportConfirmation(sells, broker, importAccount) {
   document.getElementById('sell-import-dialog')?.remove();
 
   const rows = sells.map(s => {
-    const preview = _computeSellPreview(s.ticker, s.shares, s.price, s.date, s.brokerage);
+    const preview = _computeSellPreview(s.ticker, s.shares, s.price, s.date, s.brokerage, importAccount);
     const noParcel = !preview;
     const gainClass = !preview ? '' : preview.gain >= 0 ? 'color:#16a34a' : 'color:#dc2626';
     const gainStr   = !preview ? '—' : `${preview.gain >= 0 ? '+' : ''}$${Math.abs(preview.gain).toFixed(2)}`;
@@ -804,7 +820,7 @@ function _showSellImportConfirmation(sells, broker) {
       </div>
       <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">
         <button class="btn btn-sm" onclick="document.getElementById('sell-import-dialog')?.remove()">Cancel</button>
-        <button class="btn btn-primary btn-sm" onclick="_applyImportedSells(${JSON.stringify(sells).replace(/"/g, '&quot;')});document.getElementById('sell-import-dialog')?.remove()">Apply SELL imports</button>
+        <button class="btn btn-primary btn-sm" onclick="_applyImportedSells(${JSON.stringify(sells).replace(/"/g, '&quot;')}, ${JSON.stringify(importAccount || 'personal').replace(/"/g, '&quot;')});document.getElementById('sell-import-dialog')?.remove()">Apply SELL imports</button>
       </div>
     </div>`;
   document.body.appendChild(dialog);
@@ -812,27 +828,34 @@ function _showSellImportConfirmation(sells, broker) {
   dialog.showModal();
 }
 
-function _applyImportedSells(sells) {
+function _applyImportedSells(sells, importAccount) {
+  // Audit fix #3: scope every lookup by account — matchSaleAgainstParcels already
+  // accepts an account param (via getParcelsForTicker), it just wasn't being passed.
+  const acct = importAccount || 'personal';
   let applied = 0, skipped = 0;
   for (const s of sells) {
     const { ticker, shares, price, date, brokerage } = s;
-    const openParcels = (state.cgtParcels || []).filter(p => p.ticker === ticker && p.remainingQty > 0);
+    const openParcels = (state.cgtParcels || []).filter(p =>
+      p.ticker === ticker && p.remainingQty > 0 && (p.account || 'personal') === acct
+    );
     if (!openParcels.length) {
-      console.warn(`[SellImport] No open parcels for ${ticker} — skipped`);
+      console.warn(`[SellImport] No open parcels for ${ticker} in account ${acct} — skipped`);
       skipped++;
       continue;
     }
 
     // FIFO parcel matching via existing helper (mutates parcel.remainingQty, pushes to cgtDisposals)
-    const disposals = matchSaleAgainstParcels(ticker, shares, price, date, brokerage, state.cgtMethod || 'fifo');
+    const disposals = matchSaleAgainstParcels(ticker, shares, price, date, brokerage, state.cgtMethod || 'fifo', acct);
     state.cgtDisposals.push(...disposals);
 
-    // Update portfolio holding
-    const holding = state.portfolio.find(h => h.ticker === ticker);
+    // Update portfolio holding. Audit fix #11: round to 4dp + epsilon zero-check
+    // (mirrors applySellToPortfolio in portfolio-helpers.js) so a phantom near-zero
+    // residual from floating-point drift doesn't survive as a leftover holding.
+    const holding = state.portfolio.find(h => h.ticker === ticker && (h.account || 'personal') === acct);
     if (holding) {
-      holding.shares -= shares;
-      if (holding.shares <= 0) {
-        state.portfolio = state.portfolio.filter(h => h.ticker !== ticker);
+      holding.shares = Math.round((holding.shares - shares) * 10000) / 10000;
+      if (Math.abs(holding.shares) < _SHARE_EPSILON) {
+        state.portfolio = state.portfolio.filter(h => !(h.ticker === ticker && (h.account || 'personal') === acct));
       }
     }
 
@@ -852,6 +875,7 @@ function _applyImportedSells(sells) {
       recExecuted: false,
       closeDate: date,
       imported: true,
+      account: acct,
     });
     applied++;
   }
@@ -1007,15 +1031,19 @@ function _buildSectorSidebar(merged, totalValue) {
 function applySplitAdjustment(ticker, ratio, date) {
   if (!confirm(`Apply ${ratio}:1 split for ${ticker} on ${date}?\n\nThis will:\n• Multiply shares by ${ratio}\n• Divide avg price by ${ratio}\n• Multiply all open CGT parcel quantities by ${ratio}\n• Divide CGT parcel cost-per-share by ${ratio}\n\nMake sure this split has not already been applied.`)) return;
 
-  // Adjust portfolio holding
-  const holding = state.portfolio.find(h => h.ticker === ticker);
-  if (holding) {
+  // Adjust portfolio holding. Audit fix #3: a corporate split applies to EVERY
+  // account that holds this ticker, not just the first array match — the CGT
+  // parcel loop below already (correctly) adjusts parcels across all accounts,
+  // so adjusting only one holding object left other accounts' holdings silently
+  // out of sync with their own (now-adjusted) parcels.
+  const holdings = state.portfolio.filter(h => h.ticker === ticker);
+  holdings.forEach(holding => {
     holding.shares       = Math.round(holding.shares * ratio * 10000) / 10000;
     holding.avgPrice     = Math.round(holding.avgPrice / ratio * 10000) / 10000;
     holding.currentPrice = Math.round(holding.currentPrice / ratio * 10000) / 10000;
-  }
+  });
 
-  // Adjust open CGT parcels for this ticker
+  // Adjust open CGT parcels for this ticker (correctly account-agnostic — a split affects all lots)
   let parcelCount = 0;
   (state.cgtParcels || []).forEach(p => {
     if (p.ticker === ticker && (p.remainingQty || 0) > 0) {
@@ -1031,7 +1059,7 @@ function applySplitAdjustment(ticker, ratio, date) {
 
   saveStateToDb();
   renderPage();
-  toast(`Split applied: ${ticker} ${ratio}:1 — ${holding ? 'holding' : 'no holding'} updated, ${parcelCount} parcel(s) adjusted`, 'success');
+  toast(`Split applied: ${ticker} ${ratio}:1 — ${holdings.length} holding(s) updated, ${parcelCount} parcel(s) adjusted`, 'success');
 }
 
 async function checkPortfolioSplits() {
@@ -1126,17 +1154,22 @@ function applyDrpEvent(ticker) {
   holding.shares   = Math.round(newShares   * 10000) / 10000;
   holding.avgPrice = newAvgPrice;
 
+  // Audit fix #3: the holding lookup above is correctly account-scoped, but this
+  // parcel previously had no account field at all — it would silently default to
+  // 'personal' everywhere parcels are read (p.account || 'personal'), even when
+  // the actual holding being reinvested into is 'trading'/'super'.
   const parcelId = Date.now();
   (state.cgtParcels = state.cgtParcels || []).push({
     id: parcelId, ticker, action: 'DRP', qty: drpShares, costPerShare: drpPrice,
     date, remainingQty: drpShares, notes: 'DRP — dividend reinvestment',
+    account: holding.account || 'personal',
   });
 
   state.tradeJournal.push({
     id: parcelId + 1, date, ticker, action: 'DRP', qty: drpShares,
     entryPrice: drpPrice, exitPrice: null, fees: 0, pnl: 0,
     status: 'open', recId: null, recExecuted: false, closeDate: null,
-    parcelId,
+    parcelId, account: holding.account || 'personal',
   });
 
   scheduleSave();

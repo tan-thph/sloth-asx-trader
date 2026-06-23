@@ -1421,14 +1421,29 @@ function markExecuted(id, execPrice, execFee, execQty) {
   if (isReducing) {
     const holding = getPortfolioHolding(rec.ticker, _distinctAccts.length === 1 ? sellAccount : undefined);
     if (holding && holding.shares >= qty) {
-      // Derive open date from earliest live parcel so Performance hold-duration is accurate
-      const liveParcels = (state.cgtParcels || []).filter(p => p.ticker === rec.ticker && (p.shares || 0) > 0);
+      // Derive open date from earliest live parcel so Performance hold-duration is accurate.
+      // Audit fix #4: CGT parcels never have a `.shares` field (they use
+      // `.remainingQty`, used correctly 350 lines earlier in this same file) —
+      // this filter was always empty, so openDate always fell back to today's
+      // date, corrupting hold-duration math downstream in performance.js.
+      const liveParcels = (state.cgtParcels || []).filter(p => p.ticker === rec.ticker && (p.remainingQty || 0) > 0);
       const openDate = liveParcels.length
         ? liveParcels.reduce((earliest, p) => (p.date && p.date < earliest ? p.date : earliest), liveParcels[0].date || today)
         : null;
       const prevDisposalLen = state.cgtDisposals.length;
       const { disposals } = applySellToPortfolio(rec.ticker, qty, tradePrice, fees, today, undefined, sellAccount);
       realizedPnl = disposalsToPnl(disposals);
+      // Audit fix #6: realized $ P&L (above) is correct — computed per-parcel
+      // against each parcel's true cost via disposalsToPnl. But the journal
+      // entry's entryPrice must NOT be holding.avgPrice, the blended weighted
+      // average across ALL parcels for this ticker — it skews pnlPct, R:R
+      // backfill, and any analytics keyed off entryPrice whenever the position
+      // was built from parcels bought at different prices. Use the qty-weighted
+      // cost of the SPECIFIC parcels actually matched against this sale instead.
+      const _soldQty = disposals.reduce((s, d) => s + d.saleQty, 0);
+      const effectiveEntryPrice = _soldQty > 0
+        ? disposals.reduce((s, d) => s + d.saleQty * d.parcelCostPerShare, 0) / _soldQty
+        : holding.avgPrice;
       // Snapshot live technicals at exit fill time (mirrors entrySignals on the
       // BUY/TOP_UP branch below) so the Journal drawer can show what the chart
       // looked like when the position was actually closed, not just when Claude
@@ -1436,7 +1451,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
       const execExitSignals = _snapshotLiveTechnicals(rec.ticker, tradePrice);
       tradeEntry = {
         id: state.tradeJournal.length + 1, date: openDate || today, ticker: rec.ticker, action: rec.action,
-        qty, entryPrice: holding.avgPrice, exitPrice: tradePrice, fees,
+        qty, entryPrice: effectiveEntryPrice, exitPrice: tradePrice, fees,
         status: 'closed', pnl: realizedPnl, closeDate: today,
         disposalIds: disposals.map((_, i) => prevDisposalLen + i),
         recId: rec.id, recExecuted: true, timestamp: time, account: sellAccount,

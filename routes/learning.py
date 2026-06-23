@@ -1838,6 +1838,23 @@ def learning_calibration_stats():
         return jsonify({"error": str(e)}), 500
 
 
+# Improvements.md #5: shared retry window for the fetch_failed_at sentinel —
+# a permanently-delisted ticker still gets occasionally re-attempted (in case
+# the symbol comes back, e.g. a relisting) rather than either starving the
+# batch forever (the original bug) or being silently blacklisted forever.
+_FETCH_RETRY_DAYS = 7
+
+
+def _mark_fetch_failed(conn, row_id) -> None:
+    """Stamp fetch_failed_at so a row whose yfinance OHLC call raised drops out
+    of the WHERE...IS NULL capped-batch selection for _FETCH_RETRY_DAYS, instead
+    of permanently occupying a slot in every future lazy-resolver call."""
+    conn.execute(
+        "UPDATE ai_learning_events SET fetch_failed_at=? WHERE id=?",
+        (datetime.now().isoformat(timespec="seconds"), row_id),
+    )
+
+
 def _resolve_sell_outcomes(conn) -> int:
     """Check sell driver validity 25+ days post-generation by comparing price evolution.
 
@@ -1853,6 +1870,7 @@ def _resolve_sell_outcomes(conn) -> int:
       all others       — inconclusive (can't be price-validated)
     """
     cutoff = (datetime.now() - timedelta(days=25)).isoformat()
+    retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
     try:
         rows = conn.execute("""
             SELECT id, ticker, alternative_ticker, sell_primary_driver,
@@ -1863,8 +1881,9 @@ def _resolve_sell_outcomes(conn) -> int:
               AND sell_verify_date IS NULL
               AND outcome_status IN ('win', 'loss', 'breakeven')
               AND timestamp < ?
+              AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
             ORDER BY timestamp DESC LIMIT 5
-        """, (cutoff,)).fetchall()
+        """, (cutoff, retry_cutoff)).fetchall()
     except Exception:
         return 0
 
@@ -1906,6 +1925,7 @@ def _resolve_sell_outcomes(conn) -> int:
             current_px = float(hist["Close"].iloc[-1])
             sold_chg   = (current_px - ref_px) / ref_px * 100 if ref_px else 0
         except Exception:
+            _mark_fetch_failed(conn, row["id"])
             continue
 
         # Fetch alt ticker price change for better_opportunity
@@ -2001,6 +2021,7 @@ def _resolve_virtual_outcomes(conn) -> int:
     Returns the number of events resolved this call (for debug logging).
     """
     cutoff = (datetime.now() - timedelta(days=30)).isoformat()  # ≥30d old per spec
+    retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
     try:
         rows = conn.execute("""
             SELECT id, ticker, recommendation, suggested_stop, suggested_target, timestamp,
@@ -2011,8 +2032,9 @@ def _resolve_virtual_outcomes(conn) -> int:
               AND virtual_outcome IS NULL
               AND outcome_status IN ('open', 'skipped')
               AND timestamp < ?
+              AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
             ORDER BY timestamp DESC LIMIT 10
-        """, (cutoff,)).fetchall()
+        """, (cutoff, retry_cutoff)).fetchall()
     except Exception:
         return 0
 
@@ -2045,6 +2067,7 @@ def _resolve_virtual_outcomes(conn) -> int:
                 resolved += 1
                 continue
         except Exception:
+            _mark_fetch_failed(conn, row["id"])
             continue
 
         # §9.2 asymmetric slippage: a virtual WIN must clear the target by the
@@ -3462,6 +3485,7 @@ def _resolve_mae_mfe(conn, cap: int = 5) -> int:
     resolved). Capped per call to bound yfinance round-trips. On fetch failure for
     a row, that row is skipped (left unresolved) rather than crashing the batch.
     """
+    retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
     try:
         rows = conn.execute("""
             SELECT id, ticker, actual_entry_price, timestamp, holding_period_days
@@ -3472,8 +3496,9 @@ def _resolve_mae_mfe(conn, cap: int = 5) -> int:
               AND actual_entry_price IS NOT NULL
               AND timestamp IS NOT NULL
               AND mae_mfe_resolved_at IS NULL
+              AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
             ORDER BY timestamp DESC LIMIT ?
-        """, (cap,)).fetchall()
+        """, (retry_cutoff, cap)).fetchall()
     except Exception:
         return 0
     if not rows:
@@ -3484,7 +3509,6 @@ def _resolve_mae_mfe(conn, cap: int = 5) -> int:
     except ImportError:
         return 0
 
-    from datetime import datetime, timedelta
     now_iso = datetime.now().isoformat(timespec="seconds")
     resolved = 0
     for row in rows:
@@ -3519,8 +3543,12 @@ def _resolve_mae_mfe(conn, cap: int = 5) -> int:
             else:
                 hist = yf.Ticker(yf_sym).history(start=start_str, interval="1d")
         except Exception:
+            _mark_fetch_failed(conn, row["id"])
             continue
         if hist is None or hist.empty:
+            # A delisted/suspended/renamed ticker commonly returns empty rather
+            # than raising — same starvation risk as the except branch above.
+            _mark_fetch_failed(conn, row["id"])
             continue
 
         mae_pct, mfe_pct = _mae_mfe_from_ohlc(hist, entry)
@@ -3653,8 +3681,9 @@ def _resolve_stop_tag_counterfactual(conn, cap: int = 5) -> int:
               AND actual_entry_price IS NOT NULL
               AND suggested_target IS NOT NULL
               AND timestamp IS NOT NULL
+              AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
             ORDER BY timestamp DESC LIMIT ?
-        """, (cap,)).fetchall()
+        """, ((datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat(), cap)).fetchall()
     except Exception:
         return 0
     if not rows:
@@ -3665,7 +3694,6 @@ def _resolve_stop_tag_counterfactual(conn, cap: int = 5) -> int:
     except ImportError:
         return 0
 
-    from datetime import datetime, timedelta
     resolved = 0
     for row in rows:
         try:
@@ -3700,8 +3728,10 @@ def _resolve_stop_tag_counterfactual(conn, cap: int = 5) -> int:
             else:
                 hist = yf.Ticker(yf_sym).history(start=start_str, interval="1d")
         except Exception:
+            _mark_fetch_failed(conn, row["id"])
             continue
         if hist is None or hist.empty:
+            _mark_fetch_failed(conn, row["id"])
             continue
         saved = _wider_stop_would_have_saved(hist, entry, target, atr_pct, stop_mult)
         if saved is None:

@@ -315,6 +315,15 @@ _LE_MIGRATIONS = [
     # reversal_confirmed | exit_into_weakness | exit_neutral | NULL (no data).
     # Lazily resolved by _resolve_exit_quality_tags() inside _calib_compute().
     ("exit_quality_tag",    "TEXT"),
+    # Improvements.md #5: shared failed-fetch sentinel for the lazy OHLC resolvers
+    # (_resolve_virtual_outcomes, _resolve_sell_outcomes, _resolve_mae_mfe,
+    # _resolve_stop_tag_counterfactual). Each previously did `except: continue` on
+    # a yfinance fetch failure with NO marker written — a delisted/suspended/
+    # renamed ticker permanently occupied a slot in the capped batch on every
+    # calibration cache-miss, forever, starving the rest of the backlog. ISO
+    # timestamp of the last failed fetch attempt; each resolver's WHERE clause
+    # excludes rows with a recent failure (retry window, not a permanent block).
+    ("fetch_failed_at",     "TEXT"),
 ]
 
 

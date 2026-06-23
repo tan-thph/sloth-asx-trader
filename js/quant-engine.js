@@ -158,9 +158,17 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   // ── Final qty ──────────────────────────────────────────────────────────────
   const rawQtyBase = Math.min(qtyByRisk, qtyByPosition, qtyByLiquidity, qtyByKelly);
   const rawQty = varMult < 1.0 ? Math.floor(rawQtyBase * varMult) : rawQtyBase;
-  const qty = Math.max(QUANT_CONFIG.minQty, Math.floor(rawQty * volScalar));
 
-  if (qty <= 0) return { ok: false, reason: 'sizing constraints reject trade (qty=0)' };
+  // Audit fix #1: the zero-reject check MUST run on the pre-floor value. Any of
+  // qtyByRisk/qtyByPosition/qtyByLiquidity/qtyByKelly legitimately computing to 0
+  // (stop too tight for the risk budget, position too small relative to ADV, etc.)
+  // is a hard reject — Math.max(minQty, ...) below would otherwise silently force
+  // a 1-share trade through a constraint that was supposed to block it entirely.
+  // volScalar is always > 0 (Math.min(1, 0.02/Math.max(atrPct,0.001))), so it can
+  // only shrink a positive rawQty toward zero by rounding, never flip a genuine
+  // zero/negative rawQty into a false positive.
+  if (rawQty * volScalar <= 0) return { ok: false, reason: 'sizing constraints reject trade (qty=0)' };
+  const qty = Math.max(QUANT_CONFIG.minQty, Math.floor(rawQty * volScalar));
 
   // Which constraint is binding?
   const scaledByRisk     = Math.floor(qtyByRisk * volScalar);

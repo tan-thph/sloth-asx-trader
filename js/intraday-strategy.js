@@ -70,8 +70,14 @@ function _buildIntradayRecs(scanData) {
     }
     const stop = stopLoss;
 
+    // Audit fix #9: reject outright when the stop isn't actually below entry for
+    // a long (e.g. atr_5m anomalously 0/negative upstream) instead of flooring
+    // the R:R denominator — Math.max(entry-stop, 0.0001) let a degenerate setup
+    // (stop >= entry) produce a thousands-to-one R:R that trivially passed minRrRatio.
+    if (stop >= entry) continue;
+
     // R:R gate — reject before sizing
-    const rrRatio = +((target - entry) / Math.max(entry - stop, 0.0001)).toFixed(1);
+    const rrRatio = +((target - entry) / (entry - stop)).toFixed(1);
     if (!ip.extremeMode && rrRatio < ip.minRrRatio) continue;
 
     // Try quant engine sizing first (requires daily signals for this ticker)

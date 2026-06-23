@@ -14,7 +14,7 @@ function computeCriticalAlerts() {
     if (s.error || !s.chart_data || s.chart_data.length < 2) continue;
     // Only alert for current portfolio holdings (not watchlist)
     const holding = getPortfolioHolding(ticker);
-    if (!holding || holding.shares <= 0) continue;
+    if (!holding || holding.shares < _SHARE_EPSILON) continue;
 
     const closes = s.chart_data.map(d => d.close).filter(v => v > 0);
     if (closes.length < 2) continue;
@@ -335,6 +335,13 @@ function applyBuyToPortfolio(ticker, qty, price, date, fees, sector, account) {
   addParcel(symbol, date || todayStr(), qty, price, fees || 0, sector, acct);
 }
 
+// Audit fix #11: epsilon for share-count zero checks. Exact `<= 0` comparisons
+// risk a phantom near-zero holding surviving after many partial fills due to
+// floating-point drift (e.g. 0.00000000000003 left over instead of exactly 0).
+// DRP/split adjustment already round to 4dp; this extends that convention to
+// the sell path and applies a symmetric epsilon to read-side filters too.
+const _SHARE_EPSILON = 1e-6;
+
 // account param (optional) — must match the account used at BUY time.
 function applySellToPortfolio(ticker, qty, sellPrice, fees, date, method, account) {
   const symbol = ticker.toUpperCase();
@@ -342,8 +349,8 @@ function applySellToPortfolio(ticker, qty, sellPrice, fees, date, method, accoun
   const holding = state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === acct);
   if(!holding || holding.shares < qty) return { ok: false, disposals: [] };
   holding.currentPrice = sellPrice;
-  holding.shares -= qty;
-  if(holding.shares <= 0) {
+  holding.shares = Math.round((holding.shares - qty) * 10000) / 10000;
+  if(Math.abs(holding.shares) < _SHARE_EPSILON) {
     // Remove only the matching account holding, not all holdings for this ticker
     state.portfolio = state.portfolio.filter(
       h => !(h.ticker === symbol && (h.account || 'personal') === acct)
@@ -380,13 +387,13 @@ function rollbackTradeJournalEntry(t) {
     // totalCost_before = totalCost_after - (qty × entryPrice)
     const totalCostAfter  = holding.shares * holding.avgPrice;
     const topupCost       = t.qty * t.entryPrice;
-    const sharesAfter     = holding.shares - t.qty;
+    const sharesAfter     = Math.round((holding.shares - t.qty) * 10000) / 10000;
     holding.shares        = sharesAfter;
-    if (sharesAfter > 0) {
+    if (sharesAfter > _SHARE_EPSILON) {
       holding.avgPrice = (totalCostAfter - topupCost) / sharesAfter;
     }
     state.cash += t.qty * t.entryPrice + Number(t.fees || 0);
-    if(holding.shares <= 0) state.portfolio = state.portfolio.filter(h => !(h.ticker === holding.ticker && (h.account || 'personal') === (holding.account || 'personal')));
+    if(Math.abs(holding.shares) < _SHARE_EPSILON) state.portfolio = state.portfolio.filter(h => !(h.ticker === holding.ticker && (h.account || 'personal') === (holding.account || 'personal')));
     // Remove matching parcel (last added for this ticker matching qty+price)
     if(t.parcelId) {
       state.cgtParcels = state.cgtParcels.filter(p => p.id !== t.parcelId);

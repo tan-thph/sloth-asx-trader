@@ -227,7 +227,15 @@ async function fetchAndClassifyRegime() {
         _regimeCache._prevSizeMult    = null;
       } else if (prevRegime !== 'unknown') {
         _regimeCache._regimeFlippedAt = now;
-        _regimeCache._prevSizeMult    = getRegimeModifiers(prevRegime).sizeMult;
+        // Audit fix #10: if a previous blend was still in progress when this
+        // second flip arrived, seed the new blend from the ACTUAL currently-
+        // blended value, not prevRegime's full (completed) multiplier — using
+        // the full value discarded the in-progress interpolation and produced
+        // a discontinuity (cliff-edge) rather than a smooth hand-off between
+        // two fast successive flips. When no blend was in progress (the prior
+        // regime had been stable ≥30min, or this is the very first flip),
+        // _blendedSizeMult is null and the full multiplier is correct as-is.
+        _regimeCache._prevSizeMult = _regimeCache._blendedSizeMult ?? getRegimeModifiers(prevRegime).sizeMult;
       }
     }
 

@@ -14,6 +14,12 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo as _ZoneInfo  # Python 3.8
+_SYDNEY_TZ = _ZoneInfo("Australia/Sydney")
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -36,24 +42,38 @@ def safe_float(v, default=None):
 def _drop_forming_bar(hist: pd.DataFrame) -> pd.DataFrame:
     """Drop the current-day bar when ASX data may not yet be fully settled.
 
-    ASX closes at ~16:12 AEST = ~06:12 UTC.  yfinance may return an incomplete
-    candle during market hours or within the first ~45 min after close.  We
-    treat the bar as settled only after 07:00 UTC to prevent RSI/MACD spikes
-    from intraday partial data.  Requires at least 2 rows so callers always
-    get a usable result.
+    ASX closes at ~16:12 Sydney local time year-round (the local clock time
+    doesn't change — only its UTC offset does, AEST=+10 vs AEDT=+11 daylight
+    saving). We treat the bar as settled only after 17:00 Sydney local time
+    (~48 min post-close buffer) to prevent RSI/MACD spikes from intraday
+    partial data.
+
+    Audit fix #8: the previous flat 07:00 UTC cutoff was either overly
+    conservative (AEDT months, close ~05:12 UTC → ~108 min margin) or left a
+    thin <1hr margin against data-provider settlement delay (AEST months,
+    close ~06:12 UTC → 48 min margin). Comparing in Sydney local time via
+    zoneinfo (same pattern as routes/intraday.py's _in_entry_window) keeps the
+    buffer constant across both seasons — DST is handled by the tz database,
+    not a manual UTC offset.
+
+    Requires at least 2 rows so callers always get a usable result.
     """
     if len(hist) < 2:
         return hist
-    now_utc = _dt_mod.datetime.utcnow()
-    if now_utc.hour >= 7:
+    now_sydney = _dt_mod.datetime.now(_SYDNEY_TZ)
+    if now_sydney.hour >= 17:
         return hist   # well past settlement window — keep all bars
     try:
-        last_date = pd.Timestamp(hist.index[-1]).date()
+        last_ts = pd.Timestamp(hist.index[-1])
+        # yfinance daily history is tz-aware (Australia/Sydney already); the
+        # Stooq fallback's index is tz-naive (bare calendar dates) — handle both.
+        last_date_sydney = (
+            last_ts.tz_convert(_SYDNEY_TZ).date() if last_ts.tzinfo is not None
+            else last_ts.date()
+        )
     except Exception:
         return hist
-    today_utc  = now_utc.date()
-    today_aest = (now_utc + _dt_mod.timedelta(hours=10)).date()
-    if last_date in (today_utc, today_aest):
+    if last_date_sydney == now_sydney.date():
         return hist.iloc[:-1]
     return hist
 
@@ -63,11 +83,23 @@ def _drop_forming_bar(hist: pd.DataFrame) -> pd.DataFrame:
 def _sanity_check(hist: pd.DataFrame, ticker: str = "") -> pd.DataFrame:
     """Drop bars with a single-day close move >25% (data error or unadjusted split).
     Penny stocks (close < $0.50) are excluded — large % swings are normal there.
+
+    Audit fix #12: the penny-stock exemption previously checked only the
+    POST-move close, so a move that crosses the $0.50 boundary (e.g. $0.60 ->
+    $0.30, a genuine -50% move) was exempted going down (post-move close is
+    a penny stock) but flagged going up for the symmetric reverse move (post-
+    move close isn't), even though both cross the identical boundary. Now
+    requires BOTH the pre- and post-move close to be under the threshold —
+    i.e. the bar is only "normal penny-stock noise" if the ticker already was,
+    and remained, a penny stock through the move. A boundary-crossing move is
+    evaluated by the >25% filter like any other ticker, in both directions.
     """
     if len(hist) < 2:
         return hist
     pct_chg = hist["Close"].pct_change().abs()
-    mask = (pct_chg <= 0.25) | (hist["Close"] < 0.50) | pct_chg.isna()
+    prev_close = hist["Close"].shift(1)
+    is_penny_stock = (hist["Close"] < 0.50) & (prev_close < 0.50)
+    mask = (pct_chg <= 0.25) | is_penny_stock | pct_chg.isna()
     n_dropped = int((~mask).sum())
     if n_dropped > 0:
         from core import log
@@ -405,13 +437,19 @@ if _fw_total != 100:
     )
 
 def _simple_rsi(closes: np.ndarray, period: int = 14) -> float:
+    """Audit fix #7: delegate to compute_rsi() (Wilder smoothing via ewm(com=period-1)),
+    the same function analyse_ticker() uses for the primary rsi_14. The previous
+    implementation was a flat, non-recursive average recomputed from scratch each
+    call — the two RSI values could disagree materially for the same ticker/date,
+    producing inconsistent buy/sell framing between the scanner/score engine and
+    the detailed analysis view. Needs period+1 closes for compute_rsi's diff() to
+    produce `period` deltas; keep the old period+2 floor as a small safety margin."""
     if len(closes) < period + 2:
         return 50.0
-    delta = np.diff(closes[-(period + 2):])
-    gains  = np.where(delta > 0, delta, 0.0)
-    losses = np.where(delta < 0, -delta, 0.0)
-    avg_g, avg_l = gains.mean(), losses.mean()
-    return float(100 - 100 / (1 + avg_g / avg_l)) if avg_l > 0 else 100.0
+    series = pd.Series(closes)
+    rsi = compute_rsi(series, period)
+    val = rsi.iloc[-1]
+    return float(val) if pd.notna(val) else 50.0
 
 
 def _score_ticker(
