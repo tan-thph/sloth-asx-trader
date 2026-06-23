@@ -469,15 +469,102 @@ async function runMacroAnalysis(force=false) {
   try {
     const { text } = await callClaude('macro', userMsg, { noCache: true });
     const { ok: macroOk, data: ai } = parseClaudeJSON(text);
-    if (!macroOk) throw new Error('Failed to parse macro response: ' + text?.slice(0, 200));
-    state.macroData={...state.macroData, ...ai, _source:'ai'};
+    let macroAI = ai;
+    let recovered = false;
+    if (!macroOk) {
+      // 2026-06-24: a run hit the macro max_tokens cap mid-string in the
+      // trailing keyDrivers field, leaving unparseable JSON even though every
+      // structurally important field (sentiment/regime/what_changed/drivers/
+      // sector_impact) had already completed before the cutoff. Don't throw
+      // the whole brief away for a truncated prose tail — recover what's there.
+      console.warn('[macro] parseClaudeJSON failed, attempting truncation recovery:', text?.slice(0, 200));
+      macroAI = _recoverTruncatedMacroJSON(text);
+      recovered = !!macroAI;
+      if (!macroAI) throw new Error('Failed to parse macro response: ' + text?.slice(0, 200));
+    }
+    state.macroData={...state.macroData, ...macroAI, _source:'ai'};
     state.macroDate = today;
     scheduleSave();
-    toast('AI macro brief ready' + (pmCtx ? ' (with Polymarket)' : ''), 'success');
+    toast(
+      recovered
+        ? 'AI macro brief recovered from a truncated response — some detail may be missing'
+        : 'AI macro brief ready' + (pmCtx ? ' (with Polymarket)' : ''),
+      recovered ? 'warning' : 'success'
+    );
     renderPage();
   } catch(e) {
     toast('Macro error: '+e.message,'error');
   }
+}
+
+// Best-effort recovery when the macro response hits max_tokens mid-string.
+// The schema is ordered cheapest/most-important-first (sentiment/regime →
+// what_changed/drivers/sector_impact → verbose analysis/keyDrivers prose), so
+// a truncation almost always lands in the trailing prose fields while the
+// structured fields are already complete — recover those instead of
+// discarding the whole brief. Returns null if nothing usable was recovered
+// (caller falls back to a hard error in that case).
+function _recoverTruncatedMacroJSON(rawText) {
+  const cleaned = (rawText || '').replace(/```json|```/g, '').trim();
+  const out = {};
+  let m;
+
+  if ((m = cleaned.match(/"sentiment"\s*:\s*"([^"]+)"/)))     out.sentiment = m[1];
+  if ((m = cleaned.match(/"sentimentConf"\s*:\s*([\d.]+)/)))  out.sentimentConf = parseFloat(m[1]);
+  if ((m = cleaned.match(/"bullish"\s*:\s*([\d.]+)/)))        out.bullish = parseFloat(m[1]);
+  if ((m = cleaned.match(/"macro_regime"\s*:\s*"([^"]+)"/)))  out.macro_regime = m[1];
+
+  // Array fields — brace-depth extraction of COMPLETE {...} objects only; an
+  // in-progress object straddling the cutoff is dropped, never guessed at.
+  const extractArray = (key) => {
+    const arrMatch = cleaned.match(new RegExp(`"${key}"\\s*:\\s*\\[`));
+    if (!arrMatch) return [];
+    const start = cleaned.indexOf('[', arrMatch.index + arrMatch[0].length - 1);
+    const body = cleaned.slice(start + 1);
+    let depth = 0, objStart = -1;
+    const items = [];
+    for (let i = 0; i < body.length; i++) {
+      const ch = body[i];
+      if (ch === '{') { if (depth === 0) objStart = i; depth++; }
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0 && objStart >= 0) {
+          try { items.push(JSON.parse(body.slice(objStart, i + 1))); } catch {}
+          objStart = -1;
+        }
+      } else if (ch === ']' && depth === 0) {
+        break;
+      }
+    }
+    return items;
+  };
+  out.what_changed = extractArray('what_changed');
+  out.drivers       = extractArray('drivers');
+
+  // sector_impact — flat {string: number, ...} object, single regex pass.
+  const secMatch = cleaned.match(/"sector_impact"\s*:\s*\{([^}]*)\}/);
+  if (secMatch) {
+    out.sector_impact = {};
+    const pairRe = /"(\w+)"\s*:\s*(-?\d+)/g;
+    let pm;
+    while ((pm = pairRe.exec(secMatch[1]))) out.sector_impact[pm[1]] = parseInt(pm[2], 10);
+  }
+
+  // Trailing prose fields — may be complete or cut off mid-string. Recover
+  // whatever text exists rather than dropping it; mark partials explicitly.
+  const proseField = (key) => {
+    const closed = cleaned.match(new RegExp(`"${key}"\\s*:\\s*"([\\s\\S]*?)"\\s*[,}]`));
+    if (closed) return closed[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+    const partial = cleaned.match(new RegExp(`"${key}"\\s*:\\s*"([\\s\\S]*)$`));
+    if (partial) return partial[1].replace(/\\n/g, '\n').replace(/\\"/g, '"') + ' … [response truncated]';
+    return null;
+  };
+  out.analysis   = proseField('analysis');
+  out.keyDrivers = proseField('keyDrivers');
+
+  const recoveredSomething = out.sentiment || out.macro_regime
+    || out.what_changed.length || out.drivers.length;
+  return recoveredSomething ? out : null;
 }
 
 async function renderMacroPage(gen) {

@@ -438,6 +438,50 @@ function drawSparkline(canvasId, data, color='#3b82f6') {
 }
 
 // ============================================================
+// INLINE TREND SPARKLINE (Watchlist page only — bounded row count)
+// ============================================================
+//
+// _drawSparkline(canvas, values)
+//   Tiny single-line trend chart, no axes/gridlines/labels. Color follows
+//   trend direction (last >= first => 'up', else 'down') via chartColor()
+//   so it tracks the active theme. values: array of numbers (e.g. recent
+//   daily closes), oldest first.
+function _drawSparkline(canvas, values) {
+  if (!canvas) return;
+  const { ctx, w, h } = _fitCanvas(canvas, canvas.offsetHeight || 24, canvas.offsetWidth || 80);
+  ctx.clearRect(0, 0, w, h);
+  if (!values || values.length === 0) return;
+
+  if (values.length === 1) {
+    // Single point — draw a flat dot-less line at mid-height for visual presence.
+    const col = chartColor('--text-tertiary', '#94a3b8');
+    ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+    return;
+  }
+
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = max - min || 1; // avoid divide-by-zero on a flat series
+
+  const up = values[values.length - 1] >= values[0];
+  const col = up ? chartColor('--up', '#16a34a') : chartColor('--down', '#dc2626');
+
+  const pad = 2; // small inset so the line never clips at the canvas edge
+  const xAt = i => (i / (values.length - 1)) * (w - pad * 2) + pad;
+  const yAt = v => h - pad - ((v - min) / range) * (h - pad * 2);
+
+  ctx.beginPath();
+  values.forEach((v, i) => {
+    const x = xAt(i), y = yAt(v);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = col;
+  ctx.lineWidth = 1.25;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+}
+
+// ============================================================
 // CANDLESTICK / OHLCV CHART  (Technical Screener Sandbox)
 // ============================================================
 

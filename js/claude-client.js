@@ -22,7 +22,13 @@ const _AGENT_MAX_TOKENS = {
   pm:        3000,
   dayTrade:  4000,
   universe:  4000,
-  macro:     1800,
+  // 1800 → 3000 (2026-06-24): the 08:57 run hit output_tokens=1800 exactly —
+  // the cap — mid-string in keyDrivers, truncating the JSON unparseably.
+  // The what_changed/drivers/sector_impact schema (added the same day macro
+  // went from 1000→1800) reliably needs more than 1800 for a full 5-driver,
+  // 3-paragraph response. Once-daily call — the extra token ceiling has
+  // negligible cost impact even though most days won't need it.
+  macro:     3000,
   assistant: 2000,
   briefing:  600,
 };

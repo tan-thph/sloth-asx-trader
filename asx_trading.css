@@ -142,6 +142,141 @@
   --chart-grid: rgba(255, 255, 255, 0.06);
 }
 
+/* ── Terminal theme — Forven-inspired Bloomberg-style monochrome dark ──────
+   Forven_UIUX_Adoption.md §1. A SELECTABLE theme value (gotcha #40: applied
+   via data-theme attribute + _applyTheme(), never a body class), additive —
+   does not replace or modify the light/dark blocks above. */
+:root[data-theme="terminal"] {
+  --bg-base:      #000000;
+  --bg-surface:   #0a0a0a;
+  --bg-inset:     #111111;
+  --bg-hover:     #1a1a1a;
+
+  --text-primary:   #ffffff;
+  --text-secondary: #888888;
+  --text-tertiary:  #555555;
+
+  --border-light:  #222222;
+  --border-medium: #333333;
+
+  --accent-primary:    #f97316;
+  --accent-primary-bg: rgba(249, 115, 22, 0.10);
+  --accent-ring:       rgba(249, 115, 22, 0.35);
+  --accent-contrast:   #000000;
+
+  --up:      #22c55e;
+  --down:    #ef4444;
+  --warn:    #eab308;
+  --up-bg:   rgba(34, 197, 94, 0.12);
+  --down-bg: rgba(239, 68, 68, 0.12);
+  --warn-bg: rgba(234, 179, 8, 0.13);
+
+  /* Reuse the dark-theme hairline-shadow approach (no third shadow system) */
+  --shadow-card:  0 0 0 0.5px var(--border-light);
+  --shadow-pop:   0 0 0 0.5px var(--border-medium), 0 16px 40px rgba(0,0,0,.6);
+  --shadow-hover: 0 0 0 0.5px var(--border-medium);
+
+  --chart-1: #f97316;
+  --chart-2: #eab308;
+  --chart-3: #22c55e;
+  --chart-4: #ef4444;
+  --chart-5: #a78bfa;
+  --chart-6: #888888;
+  --chart-grid: rgba(255, 255, 255, 0.08);
+
+  /* Sharp corners everywhere — overriding the radius TOKENS (rather than every
+     individual selector) means every existing var(--radius-*) consumer goes
+     flush automatically. Hardcoded circular elements (toggle switch knobs,
+     .badge's 50% dot) are untouched since they don't read these tokens. */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+
+  /* JetBrains Mono first; falls back to the existing --font-mono system stack
+     if the (optional, self-hosted) font file below isn't present — see the
+     @font-face block. A missing font file must never break rendering. */
+  --font-mono-terminal: "JetBrains Mono", var(--font-mono);
+}
+
+/* Self-hosted only (file:// / offline-safe — no CDN). This @font-face is a
+   best-effort enhancement: if static/fonts/JetBrainsMono-Regular.woff2 isn't
+   present, the browser silently skips it and --font-mono-terminal's fallback
+   chain (ui-monospace/SF Mono/Cascadia Code/Consolas) takes over — no broken
+   rendering either way. Drop the .woff2 file in place to enable the exact font. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("static/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("static/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+[data-theme="terminal"] body {
+  font-family: var(--font-mono-terminal);
+  font-size: 14px;
+  line-height: 1.4;
+}
+[data-theme="terminal"] .btn {
+  font-family: var(--font-mono-terminal);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  background: transparent;
+  transition: background-color .1s ease, color .1s ease, border-color .1s ease;
+}
+/* Hover-invert (transparent border -> filled bg/contrasting text) instead of
+   color-tinting — Forven's terminal-button pattern. */
+[data-theme="terminal"] .btn:hover {
+  background: var(--text-primary);
+  color: var(--bg-base);
+  border-color: var(--text-primary);
+}
+[data-theme="terminal"] .btn-primary {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--accent-contrast);
+  box-shadow: none;
+}
+[data-theme="terminal"] .btn-primary:hover {
+  background: transparent;
+  color: var(--accent-primary);
+  border-color: var(--accent-primary);
+  filter: none;
+}
+[data-theme="terminal"] .nav-label {
+  font-family: var(--font-mono-terminal);
+  letter-spacing: 0.08em;
+}
+
+/* Sidebar logo: small accent square + lowercase wordmark, restyling the
+   existing element only — no DOM/structure changes. */
+[data-theme="terminal"] .sidebar-logo h1 {
+  font-family: var(--font-mono-terminal);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+[data-theme="terminal"] .sidebar-logo h1::before {
+  content: "■ ";
+  color: var(--accent-primary);
+}
+[data-theme="terminal"] .sidebar-logo p {
+  font-family: var(--font-mono-terminal);
+  text-transform: lowercase;
+}
+
+/* Minimal square scrollbars (6px, no rounding) */
+[data-theme="terminal"] ::-webkit-scrollbar { width: 6px; height: 6px; }
+[data-theme="terminal"] ::-webkit-scrollbar-track { background: var(--bg-base); }
+[data-theme="terminal"] ::-webkit-scrollbar-thumb { background: var(--border-medium); }
+[data-theme="terminal"] ::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+
 /* ── Motion guard — state changes only ──────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -764,3 +899,99 @@ details[open] .trace-arrow { transform: rotate(90deg); }
   color: var(--text-primary);
 }
 .btn-xs:hover { background: var(--bg-hover); filter: brightness(0.95); }
+
+/* ============================================================ */
+/* Page header block (title + one-line description)             */
+/* Rendered above page bodies by js/navigation.js's renderPage().*/
+/* Visually distinct from .card-title: larger, sits above all    */
+/* cards, not inside any card. Themes automatically via the      */
+/* existing --text-primary/--text-tertiary custom properties.    */
+/* ============================================================ */
+#page-header-block:empty { display: none; }
+.page-header {
+  /* Horizontal padding matches .content's 1.5rem so the title lines up with
+     the page body below it; negative margin offsets .content's own top
+     padding so the two blocks read as one continuous header+body unit. */
+  padding: 1.5rem 1.5rem 0.9rem 1.5rem;
+  margin-bottom: -0.9rem;
+}
+.page-header-title {
+  font-size: 19px;
+  font-weight: 650;
+  color: var(--text-primary);
+  letter-spacing: -0.2px;
+  line-height: 1.25;
+}
+.page-header-desc {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  margin-top: 3px;
+  line-height: 1.4;
+}
+@media (max-width: 768px) {
+  .page-header-title { font-size: 17px; }
+  .page-header-desc  { font-size: 12px; }
+}
+
+/* ============================================================
+   OPS HEADER STRIP — Dashboard-only always-on status line
+   (Forven_UIUX_Adoption.md §2.4). Inline styles handle layout/colour
+   directly in js/pages/dashboard.js (_buildOpsStrip); this block only
+   covers small-screen wrapping so the strip doesn't overflow on mobile.
+   New block — appended at end of file, does not edit any existing rule.
+   ============================================================ */
+@media (max-width: 480px) {
+  #ops-strip {
+    font-size: 10px;
+    gap: 8px;
+  }
+  #ops-strip-clock {
+    margin-left: 0 !important;
+    width: 100%;
+    text-align: left;
+  }
+}
+
+/* ============================================================
+   GLOBAL SYSTEM-CRITICAL BANNER (Forven_UIUX_Adoption.md §2.3)
+   Deliberately named/classed differently from .critical-alert-banner
+   (portfolio-helpers.js — a separate, portfolio-specific alert tier) to avoid
+   confusing the two. App-wide, rendered via navigation.js renderPage(); off
+   by default (no element when no condition is active).
+   New block — appended at end of file, does not edit any existing rule.
+   ============================================================ */
+.system-critical-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin-bottom: 10px;
+  border-radius: var(--radius-md, 6px);
+  font-size: 13px;
+  font-weight: 500;
+}
+.system-critical-banner-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  flex-shrink: 0;
+  animation: system-critical-pulse 1.6s ease-in-out infinite;
+}
+.system-critical-banner--critical {
+  background: var(--down-bg);
+  color: var(--down);
+  border: 0.5px solid var(--down);
+}
+.system-critical-banner--critical .system-critical-banner-dot { background: var(--down); }
+.system-critical-banner--warning {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border: 0.5px solid var(--warn);
+}
+.system-critical-banner--warning .system-critical-banner-dot { background: var(--warn); }
+@keyframes system-critical-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .system-critical-banner-dot { animation: none; }
+}

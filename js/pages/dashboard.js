@@ -232,6 +232,71 @@ async function removeTD(index) {
   renderPage();
 }
 
+// ============================================================
+// OPS HEADER STRIP — Dashboard-only always-on status line
+// ============================================================
+// Consolidates signals already tracked elsewhere (server reachability via the
+// sidebar's srv-dot/srv-label, DB status, current regime, /health last_backup)
+// into one compact line at the top of the Dashboard. Deliberately reuses the
+// existing 30s checkServer() heartbeat (scheduler.js) and the existing 5s
+// clock tick — no new setInterval is created here. checkServer() stashes the
+// raw /health JSON on state._health and calls _refreshOpsStrip() after every
+// poll; the 5s clock tick calls _updateOpsStripClock(). Both are no-ops when
+// the strip isn't mounted (i.e. any page other than Dashboard).
+
+// last_backup from /health is a bare "YYYYMMDD" date string (see
+// routes/market.py — backup_db() names files "<db>.bak-YYYYMMDD"). No time
+// component is available, so "age" is day-granularity: "today" / "Nd ago".
+function _opsBackupAge(lastBackup) {
+  if (!lastBackup || lastBackup.length < 8) return 'unknown';
+  const y = +lastBackup.slice(0, 4), m = +lastBackup.slice(4, 6), d = +lastBackup.slice(6, 8);
+  const bakDate = new Date(y, m - 1, d);
+  if (isNaN(bakDate.getTime())) return 'unknown';
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((today - bakDate) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return '1d ago';
+  return `${days}d ago`;
+}
+
+function _opsRegimeBadge() {
+  const regime = state.currentRegime?.regime;
+  if (!regime) return '<span style="color:var(--text-tertiary)">regime: —</span>';
+  const c = _REGIME_BADGE_COLORS[regime] || _REGIME_BADGE_COLORS.unknown;
+  return `<span style="background:${c.bg};color:${c.fg};border-radius:3px;padding:1px 6px;font-weight:600">regime: ${regime}</span>`;
+}
+
+function _buildOpsStrip() {
+  const ok = !!state.serverOk;
+  const health = state._health;
+  const dbOk = ok; // DB is reachable iff the server answered /health at all
+  const backupAge = ok ? _opsBackupAge(health?.last_backup) : '—';
+  return `
+    <div id="ops-strip" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-family:var(--font-mono);font-size:11px;color:var(--text-secondary);padding:6px 10px;margin-bottom:10px;border:0.5px solid var(--border-light);border-radius:var(--radius-md, 6px);background:var(--bg-inset)">
+      <span id="ops-strip-conn">${ok ? '<span style="color:#16a34a">●</span> connected' : '<span style="color:#dc2626">●</span> disconnected'}</span>
+      <span id="ops-strip-regime">${_opsRegimeBadge()}</span>
+      <span id="ops-strip-db">${dbOk ? '<span style="color:#16a34a">DB ok</span>' : '<span style="color:#dc2626">DB unreachable</span>'}</span>
+      <span id="ops-strip-backup">backup ${escapeHTML(backupAge)}</span>
+      <span id="ops-strip-clock" style="margin-left:auto;color:var(--text-tertiary)">${nowSydney()}</span>
+    </div>`;
+}
+
+// Patches the strip's DOM in place after checkServer()'s 30s poll — no
+// re-render of the whole Dashboard, so it's safe to call even if the user is
+// mid-interaction with another card. Pure no-op off the Dashboard page.
+function _refreshOpsStrip() {
+  const el = document.getElementById('ops-strip');
+  if (!el || state.page !== 'dashboard') return;
+  el.outerHTML = _buildOpsStrip();
+}
+
+// Patches just the clock span on the existing 5s tick (scheduler.js) — avoids
+// stacking a second timer purely to move a clock hand.
+function _updateOpsStripClock() {
+  const el = document.getElementById('ops-strip-clock');
+  if (el) el.textContent = nowSydney();
+}
+
 function renderDashboard() {
   // Kick off RBA meetings fetch in background; re-render calendar card when it arrives
   _fetchRbaMeetings().then(() => {
@@ -274,6 +339,7 @@ function renderDashboard() {
   const hasLive = Object.keys(state.liveSignals).length > 0;
 
   return `
+    ${_buildOpsStrip()}
     ${!state.serverOk ? `<div class="info-banner">⚠ Backend server not running. Start it with: <code>python3 asx_server.py</code> — then click "Refresh Prices" for live yfinance data.</div>` : ''}
     ${renderCriticalAlertBanners()}
     <div class="metrics-grid">

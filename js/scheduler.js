@@ -1,5 +1,10 @@
 // Clock
-setInterval(()=>{ const e=document.getElementById('market-time'); if(e) e.textContent='ASX: '+nowSydney()+' AEDT'; },5000);
+setInterval(()=>{
+  const e=document.getElementById('market-time');
+  if(e) e.textContent='ASX: '+nowSydney()+' AEDT';
+  // Dashboard ops strip clock — piggybacks on this same 5s tick (no new timer).
+  if (typeof _updateOpsStripClock === 'function') _updateOpsStripClock();
+},5000);
 
 // ============================================================
 // SERVER CHECK
@@ -14,6 +19,9 @@ async function checkServer() {
       state.serverOk=true;
       dot.className='server-dot ok';
       lbl.textContent='Server connected';
+      try {
+        state._health = await r.json();
+      } catch { state._health = null; }
       // Update DB row counts
       try {
         const dr = await fetch(`${API}/api/db/status`);
@@ -28,7 +36,16 @@ async function checkServer() {
     dot.className='server-dot err';
     lbl.textContent='Server offline';
     if(dbl) dbl.textContent='💾 DB: offline';
+    state._health = null;
   }
+  // Dashboard ops strip — patches its own DOM node on the existing heartbeat,
+  // no second poller. No-op if the strip isn't mounted (not on Dashboard page).
+  if (typeof _refreshOpsStrip === 'function') _refreshOpsStrip();
+  // Global system-critical banner (Forven_UIUX_Adoption.md §2.3) — its
+  // "backend unreachable" condition depends directly on state.serverOk, which
+  // this function just set; refresh on the same heartbeat rather than waiting
+  // for the next page navigation to notice a status flip.
+  if (typeof _renderSystemCriticalBanner === 'function') _renderSystemCriticalBanner();
 }
 setInterval(checkServer, 30000);
 checkServer();

@@ -292,9 +292,9 @@ python3 asx_server.py</pre>
           <div class="text-xs text-muted">Override the colour scheme or follow your OS setting</div>
         </div>
         <div style="display:flex;gap:4px">
-          ${['auto','light','dark'].map(t => {
+          ${['auto','light','dark','terminal'].map(t => {
             const active = (state.settings.theme || 'auto') === t;
-            const lbl = {auto:'Auto',light:'Light',dark:'Dark'}[t];
+            const lbl = {auto:'Auto',light:'Light',dark:'Dark',terminal:'Terminal'}[t];
             return `<button class="btn btn-sm${active ? ' btn-primary' : ''}" onclick="settingsSetTheme('${t}')">${lbl}</button>`;
           }).join('')}
         </div>
@@ -799,6 +799,10 @@ async function loadSettingsAppInfo() {
   } catch { /* silent */ }
 }
 
+// Forven_UIUX_Adoption.md §3: coverage/leaderboard-style restyle of the
+// universe-health card — UI-only, same GET /api/market/universe-health
+// response shape as before (ok_count/stale[]/excluded[]/checked_at), no new
+// endpoint and no fabricated per-sector breakdown (the API doesn't return one).
 async function checkUniverseHealth() {
   const btn    = document.getElementById('universe-check-btn');
   const date   = document.getElementById('settings-universe-date');
@@ -823,19 +827,7 @@ async function checkUniverseHealth() {
       exBadge.textContent = excluded.length > 0 ? `· ${excluded.length} excluded` : '';
     }
     if (results) {
-      const staleHtml = d.stale.length > 0 ? `
-        <div style="margin-top:6px">
-          <div style="font-size:11px;font-weight:600;color:#d97706;margin-bottom:4px">⚠ Stale / delisted:</div>
-          <div style="display:flex;flex-wrap:wrap;gap:4px">
-            ${d.stale.map(t => `
-              <span style="display:inline-flex;align-items:center;gap:4px;background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:1px 6px;font-size:11px;font-family:monospace">
-                ${t}
-                <button onclick="excludeFromUniverse('${t}')" title="Exclude ${t} from scans"
-                  style="background:#f59e0b;color:#fff;border:none;border-radius:2px;padding:0 4px;cursor:pointer;font-size:10px;line-height:1.4">Exclude</button>
-              </span>`).join('')}
-          </div>
-        </div>` : '';
-      _renderUniverseExclusionList(excluded, results, staleHtml);
+      results.innerHTML = _buildUniverseCoverageView(d);
     }
     if (d.stale.length > 0) {
       toast(`⚠ ${d.stale.length} stale/delisted tickers found`, 'warning');
@@ -850,22 +842,71 @@ async function checkUniverseHealth() {
   }
 }
 
-function _renderUniverseExclusionList(excluded, container, prefixHtml) {
+// Compact stat-tile strip (OK / Stale / Excluded counts) + leaderboard-style
+// tables (sortable-by-eye, ticker + action) instead of the old flex-wrap chip
+// lists — same data, denser/scannable layout. Pure function of the /health
+// response `d`; called both from the live check (full ok_count/stale/excluded
+// payload) and from the single-action exclude/unexclude re-render (only
+// `excluded` is known — those endpoints don't return ok_count/stale at all,
+// per CLAUDE.md). `hasFullStats` gates the stat-tile strip so a single
+// exclude/include action never shows a misleading "0 OK / 0 Stale" — it just
+// omits the strip in that path, same scope the pre-restyle code had.
+function _buildUniverseCoverageView(d, hasFullStats = true) {
+  const excluded = d.excluded || [];
+  const stale    = d.stale    || [];
+  const okCount  = d.ok_count || 0;
+
+  const tile = (label, value, color) => `
+    <div style="flex:1;min-width:64px;background:var(--bg-inset);border-radius:var(--radius-sm,4px);padding:6px 10px;text-align:center">
+      <div style="font-size:16px;font-weight:700;color:${color}">${value}</div>
+      <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em">${label}</div>
+    </div>`;
+  const statStrip = hasFullStats ? `
+    <div style="display:flex;gap:6px;margin-top:8px;margin-bottom:8px">
+      ${tile('OK', okCount, 'var(--up,#16a34a)')}
+      ${tile('Stale', stale.length, stale.length ? 'var(--warn,#d97706)' : 'var(--text-muted)')}
+      ${tile('Excluded', excluded.length, excluded.length ? 'var(--down,#dc2626)' : 'var(--text-muted)')}
+    </div>` : '';
+
+  const row = (ticker, statusLabel, statusColor, actionLabel, actionFn, actionBg) => `
+    <tr>
+      <td style="padding:3px 6px;font-family:monospace;font-size:11px">${ticker}</td>
+      <td style="padding:3px 6px;font-size:10px;color:${statusColor}">${statusLabel}</td>
+      <td style="padding:3px 6px;text-align:right">
+        <button onclick="${actionFn}('${ticker}')" title="${actionLabel} ${ticker}"
+          style="background:${actionBg};color:#fff;border:none;border-radius:2px;padding:1px 6px;cursor:pointer;font-size:10px;line-height:1.5">${actionLabel}</button>
+      </td>
+    </tr>`;
+
+  const staleTable = stale.length ? `
+    <div style="margin-top:4px">
+      <div style="font-size:11px;font-weight:600;color:#d97706;margin-bottom:3px">⚠ Stale / delisted (${stale.length})</div>
+      <table style="width:100%;border-collapse:collapse">
+        ${stale.slice().sort().map(t => row(t, 'stale', '#d97706', 'Exclude', 'excludeFromUniverse', '#f59e0b')).join('')}
+      </table>
+    </div>` : '';
+
+  const excludedTable = excluded.length ? `
+    <div style="margin-top:8px">
+      <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:3px">Excluded from scans (${excluded.length})</div>
+      <table style="width:100%;border-collapse:collapse">
+        ${excluded.slice().sort().map(t => row(t, 'excluded', 'var(--text-muted)', 'Re-include', 'unexcludeFromUniverse', '#64748b')).join('')}
+      </table>
+    </div>` : '';
+
+  return statStrip + staleTable + excludedTable;
+}
+
+// Kept for backward compatibility — _buildUniverseCoverageView now owns the
+// excluded-list rendering, but excludeFromUniverse()/unexcludeFromUniverse()
+// (below) re-render just the results pane after a single add/remove, so this
+// helper still needs to exist and accept the same (excluded, container) shape.
+// hasFullStats=false: those endpoints only return {ok, excluded}, no
+// ok_count/stale, so the stat-tile strip is omitted rather than faked as 0/0.
+function _renderUniverseExclusionList(excluded, container) {
   const el = container || document.getElementById('settings-universe-health-results');
   if (!el) return;
-  const exHtml = excluded.length > 0 ? `
-    <div style="margin-top:6px">
-      <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Excluded from scans:</div>
-      <div style="display:flex;flex-wrap:wrap;gap:4px">
-        ${excluded.map(t => `
-          <span style="display:inline-flex;align-items:center;gap:4px;background:#f1f5f9;border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:11px;font-family:monospace">
-            ${t}
-            <button onclick="unexcludeFromUniverse('${t}')" title="Re-include ${t} in scans"
-              style="background:#64748b;color:#fff;border:none;border-radius:2px;padding:0 4px;cursor:pointer;font-size:10px;line-height:1.4">Re-include</button>
-          </span>`).join('')}
-      </div>
-    </div>` : '';
-  el.innerHTML = (prefixHtml || '') + exHtml;
+  el.innerHTML = _buildUniverseCoverageView({ stale: [], excluded }, false);
 }
 
 async function excludeFromUniverse(ticker) {

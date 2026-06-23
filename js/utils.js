@@ -9,9 +9,12 @@ function _applyTheme(theme) {
   }
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) {
+    // Forven_UIUX_Adoption.md §1 bug fix: 'terminal' is a dark-styled theme
+    // but wasn't covered by this check — PWA/mobile chrome stayed light
+    // (#ffffff) under the new pure-black theme. Give it its own background.
     const isDark = theme === 'dark' ||
       (theme === 'auto' && window.matchMedia('(prefers-color-scheme:dark)').matches);
-    meta.content = isDark ? '#17181c' : '#ffffff';
+    meta.content = theme === 'terminal' ? '#000000' : (isDark ? '#17181c' : '#ffffff');
   }
 }
 

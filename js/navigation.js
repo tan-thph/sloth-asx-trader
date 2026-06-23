@@ -1,6 +1,166 @@
 // ============================================================
 // NAVIGATION
 // ============================================================
+// ── Page header metadata (title + one-line description) ──────────────────────
+// Keyed by the exact page-id strings used in showPage('...') calls.
+// Centralized here so no individual page file needs to render its own header.
+const PAGE_META = {
+  dashboard:       { title: 'Dashboard',              description: 'Portfolio snapshot, cash position, and today’s key signals at a glance.' },
+  portfolio:       { title: 'Portfolio',              description: 'Current holdings, cost basis, sector weights, and live valuations.' },
+  macro:           { title: 'Morning Macro',          description: 'Index levels, AUD/USD, commodities, and the AI morning briefing.' },
+  recommendations: { title: 'Trade Recommendations',  description: 'AI-generated buy/sell/hold recommendations with sizing and risk levels.' },
+  'day-trading':   { title: 'Day Trading',            description: 'Intraday setups, ATR-based stops/targets, and same-day strategy scans.' },
+  signals:         { title: 'Live Signals',           description: 'Real-time technical indicators (RSI, MACD, Bollinger Bands) via yfinance.' },
+  journal:         { title: 'Trade Journal',          description: 'Manual and AI-linked trade history with entry/exit detail.' },
+  performance:     { title: 'Performance Analytics',  description: 'Win rate, drawdown, and outcome reconciliation across closed trades.' },
+  history:         { title: 'Portfolio Value History', description: 'Net worth over time benchmarked against the ASX200.' },
+  cgt:             { title: 'CGT Parcel Tracker',     description: 'Capital-gains parcels, discount eligibility, and disposal history.' },
+  backtest:        { title: 'Backtesting',            description: 'Run historical strategy simulations and replay scoring of past recs.' },
+  risk:            { title: 'Portfolio Risk',         description: 'Beta, Sharpe, VaR/CVaR, correlation matrix, and risk-budget gauge.' },
+  assistant:       { title: 'AI Assistant',           description: 'Freeform chat with Claude about your portfolio and the market.' },
+  news:            { title: 'News Scanner',           description: 'Aggregated headlines with LLM-classified sentiment.' },
+  announcements:   { title: 'ASX Announcements',      description: 'Scraped company announcements with AI relevance scoring.' },
+  scanner:         { title: 'Market Scanner',         description: 'Scan the ASX universe for setups matching your screening criteria.' },
+  watchlist:       { title: 'Watchlist',              description: 'Tickers you’re monitoring but don’t yet hold.' },
+  compare:         { title: 'Market Scanner',         description: 'Side-by-side comparison of selected tickers.' },
+  learning:        { title: 'Learning Loop',          description: 'Calibration stats, error patterns, and trade-outcome feedback.' },
+  settings:        { title: 'Settings',               description: 'API keys, display preferences, alerts, and app configuration.' },
+};
+
+// ── Page header rendering ─────────────────────────────────────────────────────
+// Renders into a dedicated DOM node that lives OUTSIDE #main-content, so a
+// crash inside a page's own renderX() (which overwrites #main-content wholesale,
+// sometimes asynchronously) can never blank the header. Inserted lazily as a
+// sibling immediately before #main-content on first use.
+function _getPageHeaderEl() {
+  let headerEl = document.getElementById('page-header-block');
+  if (!headerEl) {
+    const mainContent = document.getElementById('main-content');
+    if (!mainContent || !mainContent.parentNode) return null;
+    headerEl = document.createElement('div');
+    headerEl.id = 'page-header-block';
+    mainContent.parentNode.insertBefore(headerEl, mainContent);
+  }
+  return headerEl;
+}
+
+function _renderPageHeader(page) {
+  const headerEl = _getPageHeaderEl();
+  if (!headerEl) return;
+  const meta = PAGE_META[page];
+  if (!meta) { headerEl.innerHTML = ''; return; }
+  headerEl.innerHTML = `
+    <div class="page-header">
+      <div class="page-header-title">${meta.title}</div>
+      <div class="page-header-desc">${meta.description}</div>
+    </div>`;
+}
+
+// ── Global system-critical banner (Forven_UIUX_Adoption.md §2.3) ─────────────
+// A FOURTH, distinct alert tier from: toast() (utils.js, transient), the
+// notification centre (notifications.js, historical/dismissible), and
+// renderCriticalAlertBanners() (portfolio-helpers.js — PORTFOLIO-specific:
+// price-decline alerts, triggered user price-alerts, rendered inside the
+// Dashboard page body using the .critical-alert-banner CSS class). This banner
+// is APP-WIDE (visible on every page, like the page header) and covers
+// system/process-level conditions, not per-ticker ones. Deliberately named and
+// classed differently (.system-critical-banner, not .critical-alert-banner) to
+// avoid confusing the two tiers. Off by default — renders nothing when no
+// condition is active, never a permanent empty bar.
+function _getSystemBannerEl() {
+  let bannerEl = document.getElementById('system-banner-block');
+  if (!bannerEl) {
+    const mainContent = document.getElementById('main-content');
+    if (!mainContent || !mainContent.parentNode) return null;
+    bannerEl = document.createElement('div');
+    bannerEl.id = 'system-banner-block';
+    mainContent.parentNode.insertBefore(bannerEl, mainContent);
+  }
+  return bannerEl;
+}
+
+// Pure — reads state only, never mutates it (gotcha #10). Each condition has
+// a stable `id` (for future per-condition dismiss-when-resolved support) and
+// a `severity` ('critical' | 'warning') controlling banner color.
+function _computeSystemCriticalConditions() {
+  const conditions = [];
+
+  if (!state.serverOk) {
+    // Nothing else here can be reliably evaluated without the backend
+    // (live prices, regime, risk metrics all depend on it) — report just this.
+    conditions.push({
+      id: 'backend-down', severity: 'critical',
+      text: 'Backend unreachable — live data, AI analysis, and trade execution are unavailable.',
+    });
+    return conditions;
+  }
+
+  if (state.currentRegime?.regime === 'panic') {
+    conditions.push({
+      id: 'panic-regime', severity: 'critical',
+      text: 'PANIC regime active — new positions are blocked by the regime gate. Review existing holdings.',
+    });
+  }
+
+  // Heat budget breach — same $-at-risk-on-the-live-book calc added to the
+  // heat budget gate itself (js/analysis.js, Improvements.md #2), evaluated
+  // here read-only for display (does not affect sizing).
+  try {
+    const heldTickers = new Set((state.portfolio || []).map(h => h.ticker));
+    const consumed = (state.recHistory || [])
+      .filter(r => r.executed && r.stopLoss > 0 && r.qty > 0 &&
+                   (r.action === 'BUY' || r.action === 'TOP_UP') &&
+                   (r.outcome === 'open' || !r.outcome) &&
+                   heldTickers.has(r.ticker))
+      .reduce((s, r) => {
+        const entry = r.executedPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
+        return entry ? s + r.qty * Math.abs(entry - r.stopLoss) : s;
+      }, 0);
+    const totalValue = typeof totalNetWorth === 'function' ? totalNetWorth() : 0;
+    const budgetPct  = parseFloat(state.settings?.maxRiskBudgetPct || 5);
+    const budgetAUD  = totalValue * budgetPct / 100;
+    if (budgetAUD > 0 && consumed > budgetAUD) {
+      conditions.push({
+        id: 'heat-budget', severity: 'warning',
+        text: `Heat budget breached — $${Math.round(consumed).toLocaleString()} at risk vs `
+            + `$${Math.round(budgetAUD).toLocaleString()} budget (${budgetPct}% of net worth).`,
+      });
+    }
+  } catch { /* never let a risk-calc edge case break the banner */ }
+
+  // Stop pierced without exit — an open BUY/TOP_UP recHistory entry whose
+  // stop the live price has already breached, but no SELL/TRIM has closed it.
+  try {
+    (state.recHistory || []).forEach(r => {
+      if (!r.executed || !r.stopLoss || (r.outcome && r.outcome !== 'open')) return;
+      if (r.action !== 'BUY' && r.action !== 'TOP_UP') return;
+      const holding = (state.portfolio || []).find(h => h.ticker === r.ticker);
+      if (!holding) return; // already closed/sold
+      const price = state.liveSignals?.[r.ticker]?.current_price ?? holding.currentPrice;
+      if (price != null && price <= r.stopLoss) {
+        conditions.push({
+          id: `stop-pierced-${r.ticker}`, severity: 'warning',
+          text: `${r.ticker} stop pierced ($${fmt(price)} <= $${fmt(r.stopLoss)}) — no exit recorded yet.`,
+        });
+      }
+    });
+  } catch { /* never let a stop-check edge case break the banner */ }
+
+  return conditions;
+}
+
+function _renderSystemCriticalBanner() {
+  const bannerEl = _getSystemBannerEl();
+  if (!bannerEl) return;
+  const conditions = _computeSystemCriticalConditions();
+  if (!conditions.length) { bannerEl.innerHTML = ''; return; }
+  bannerEl.innerHTML = conditions.map(c => `
+    <div class="system-critical-banner system-critical-banner--${c.severity}">
+      <span class="system-critical-banner-dot"></span>
+      <span class="system-critical-banner-text">${escapeHTML(c.text)}</span>
+    </div>`).join('');
+}
+
 // ── Mobile sidebar toggle ─────────────────────────────────────────────────────
 function toggleMobileSidebar() {
   const sidebar = document.querySelector('.sidebar');
@@ -52,6 +212,24 @@ function showPage(page) {
   renderPage();
 }
 function renderPage() {
+  // System banner renders FIRST so it lands above the page header in the DOM
+  // (both insertBefore() themselves immediately ahead of #main-content, so
+  // insertion order determines final order — system status outranks the page
+  // title). Same isolation reasoning as the header below: its own try/catch,
+  // outside the page-body one, so a crash in a page's renderX() can never
+  // blank it — if anything it matters MORE during a page crash.
+  try {
+    _renderSystemCriticalBanner();
+  } catch (err) {
+    console.error('[renderPage] system banner render crashed:', err);
+  }
+  // Header render is intentionally OUTSIDE the page-body try/catch below, in its
+  // own try/catch, so a crash in a page's renderX() can never blank the title.
+  try {
+    _renderPageHeader(state.page);
+  } catch (err) {
+    console.error('[renderPage] header render crashed:', err);
+  }
   try {
     _renderPageUnsafe();
   } catch (err) {

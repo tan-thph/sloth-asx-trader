@@ -5,7 +5,22 @@
 function renderWatchlistPage(gen) {
   const el = document.getElementById('main-content');
   el.innerHTML = _buildWatchlistHTML();
+  setTimeout(() => { if (state._renderGen === gen) _drawWatchlistSparklines(); }, 50);
   _loadWatchlistSignals(gen);
+}
+
+// Draw the inline 30-day trend sparkline for every watchlist row that has
+// chart_data loaded. Canvases must exist in the DOM first (render-then-draw,
+// same two-step pattern as drawCandleChart/_sigChartDraw in pages/signals.js).
+function _drawWatchlistSparklines() {
+  (state.watchlist || []).forEach(item => {
+    const sig = state.liveSignals && state.liveSignals[item.ticker];
+    if (!sig || !sig.chart_data?.length) return;
+    const canvas = document.getElementById(`wl-spark-${item.ticker}`);
+    if (!canvas) return;
+    const closes = sig.chart_data.slice(-30).map(d => d.close);
+    _drawSparkline(canvas, closes);
+  });
 }
 
 function _buildWatchlistHTML() {
@@ -43,6 +58,7 @@ function _buildWatchlistHTML() {
               <th style="text-align:center;padding:6px 10px;color:var(--text-secondary);font-weight:600">Score</th>
               <th style="text-align:center;padding:6px 10px;color:var(--text-secondary);font-weight:600">BB%B</th>
               <th style="text-align:center;padding:6px 10px;color:var(--text-secondary);font-weight:600">Trend</th>
+              <th style="text-align:center;padding:6px 10px;color:var(--text-secondary);font-weight:600">30d</th>
               <th style="padding:6px 10px"></th>
             </tr></thead>
             <tbody id="watchlist-rows">
@@ -167,6 +183,11 @@ function _watchlistRow(item) {
     <td style="padding:8px 10px;text-align:center;font-weight:600;color:${scoreColor}">${score != null ? score.toFixed(0) : '—'}</td>
     <td style="padding:8px 10px;text-align:center">${bb != null ? fmt(bb * 100, 0) + '%' : '—'}</td>
     <td style="padding:8px 10px;text-align:center">${trendBadge}</td>
+    <td style="padding:8px 10px;text-align:center">
+      ${sig && sig.chart_data?.length > 1
+        ? `<canvas id="wl-spark-${item.ticker}" width="80" height="24" style="width:80px;height:24px;display:inline-block;vertical-align:middle"></canvas>`
+        : '<span class="text-xs text-muted">—</span>'}
+    </td>
     <td style="padding:8px 10px;text-align:right;white-space:nowrap">
       ${sig
         ? `<button class="btn btn-sm" onclick="showPage('signals')" title="View signals">◇</button>`
@@ -185,6 +206,7 @@ async function _loadWatchlistSignals(gen) {
     if (state._renderGen !== gen) return;
     const tbody = document.getElementById('watchlist-rows');
     if (tbody) tbody.innerHTML = (state.watchlist || []).map(item => _watchlistRow(item)).join('');
+    setTimeout(() => { if (state._renderGen === gen) _drawWatchlistSparklines(); }, 50);
   } catch {}
 }
 
