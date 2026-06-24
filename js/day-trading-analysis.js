@@ -222,9 +222,12 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
     // Signal #5: OBV rising (bonus)
     if (s.obv_trend === 'rising') signals.push('OBV rising');
 
-    // Strategy rule: Signal #1 + ≥2 confirms
+    // Strategy rule: Signal #1 + ≥minConfirms confirms (default 2 — the
+    // original strategy rule; configurable via Day Trading → Rules → Entry
+    // Signal Thresholds for testing when the default combination produces
+    // zero setups).
     const confirms = signals.length - 1;
-    if (confirms < 2) continue;
+    if (confirms < (ap.minConfirms ?? 2)) continue;
 
     const confidence = Math.min(0.50 + confirms * 0.08, 0.90);
     if (confidence < _minConf) continue;

@@ -274,7 +274,7 @@ function _renderDtSwingMain() {
 // ── Day Trading Rules Panel ────────────────────────────────────────────────────
 
 const _DT_FILTER_DEFAULTS = { maxBbPctB: 0.20, minAdvAud: 1500000, sma200Floor: 0.985, maxAdx: 35 };
-const _DT_AI_DEFAULTS     = { stopAtrMultiple: 2.5, minRrRatio: 2.0, minConfidence: 0.50, maxPositionPct: 20, rsiThreshold: 35, volZScore: 1.5, fibReturnMin: -20, fibReturnMax: -5 };
+const _DT_AI_DEFAULTS     = { stopAtrMultiple: 2.5, minRrRatio: 2.0, minConfidence: 0.50, maxPositionPct: 20, rsiThreshold: 35, volZScore: 1.5, fibReturnMin: -20, fibReturnMax: -5, minConfirms: 2 };
 
 function _renderDtRulesTab() {
   const fp = { ..._DT_FILTER_DEFAULTS, ...(state.dayTrading.filterParams || {}) };
@@ -359,6 +359,8 @@ function _renderDtRulesTab() {
             '60-day return lower bound for Fibonacci retracement zone')}
           ${nf('Fib return max (%, Signal #4)', 'aiParams', 'fibReturnMax', ap.fibReturnMax, -30, -1, 1,
             '60-day return upper bound for Fibonacci retracement zone')}
+          ${nf('Min confirmations required (of 4)', 'aiParams', 'minConfirms', ap.minConfirms, 1, 4, 1,
+            'Signal #1 (BB reclaim) is automatic — this many of Signals #2–#5 (RSI/VolZ/Fib/OBV) must also fire. Lower to 1 to see more candidates; default 2 is the original strategy rule.')}
         </div>
       </div>
 
@@ -658,8 +660,8 @@ function _renderDtIntradayTab() {
 function _renderIntradayRulesContent() {
   const id = state.intraday;
   const IDEFS = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
-                  universeKey: 'asx100', extremeMode: false,
-                  vwapThreshold: -0.3, rsiThreshold: 40, requireVolRising: false,
+                  universeKey: 'asx100', minConfirms: 2, ignoreEntryWindow: false,
+                  vwapThreshold: -0.3, rsiThreshold: 40,
                   stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5 };
   const ip = { ...IDEFS, ...(id.params || {}) };
   const allocated = id.allocatedCash != null ? id.allocatedCash : Math.round(state.cash * ip.allocPct / 100);
@@ -717,23 +719,14 @@ function _renderIntradayRulesContent() {
           <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">technical indicator gates — client-side, instant</span>
         </div>
         <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
-          Active: VWAP ≤ <b>${ip.vwapThreshold}%</b> · RSI ≤ <b>${ip.rsiThreshold}</b> · Vol rising: <b>${ip.requireVolRising ? 'required' : 'optional'}</b> · Min score: <b>${ip.minScore}</b>
+          Active: VWAP ≤ <b>${ip.vwapThreshold}%</b> · RSI ≤ <b>${ip.rsiThreshold}</b> · Min score: <b>${ip.minScore}</b> · Confirms required: <b>${ip.minConfirms} of 4</b>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
           ${nf('VWAP threshold (%)', 'vwapThreshold', ip.vwapThreshold, -5, 0, 0.1, 'Price must be ≤ this % from VWAP (negative = below). −0.3 = price is 0.3% below VWAP.')}
           ${nf('RSI ceiling', 'rsiThreshold', ip.rsiThreshold, 20, 70, 1, 'Intraday 5m RSI must be at or below this value to qualify as oversold.', 'parseInt')}
           ${nf('Min setup score (0–100)', 'minScore', ip.minScore, 20, 90, 5, 'Setup quality composite score — tickers below this are excluded.', 'parseInt')}
-        </div>
-        <div style="margin-top:12px;padding:8px 10px;background:${ip.requireVolRising ? 'rgba(16,185,129,.07)' : 'var(--bg-inset)'};border:0.5px solid ${ip.requireVolRising ? 'rgba(16,185,129,.3)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
-          <div>
-            <div style="font-size:12px;font-weight:600">Require volume rising</div>
-            <div class="text-xs text-muted">Require last-3-bar avg volume &gt; 20-bar baseline (volume acceleration). Stricter filter; fewer setups.</div>
-          </div>
-          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap">
-            <input type="checkbox" ${ip.requireVolRising ? 'checked' : ''}
-              onchange="updateIntradayParam('requireVolRising', this.checked)">
-            ${ip.requireVolRising ? '<span style="color:#10b981;font-weight:600">On</span>' : 'Off'}
-          </label>
+          ${nf('Min confirmations (of 4)', 'minConfirms', ip.minConfirms, 1, 4, 1,
+            'Confirmation signals: VWAP below threshold, RSI below ceiling, volume rising, price above today\'s open. This many must fire. Lower to 1 to see more candidates; default 2 is the original strategy rule.', 'parseInt')}
         </div>
 
         <div style="margin-top:12px">
@@ -753,15 +746,15 @@ function _renderIntradayRulesContent() {
           <div class="text-xs text-muted mt-1">Larger universes find more setups but take longer to scan</div>
         </div>
 
-        <div style="margin-top:12px;padding:8px 10px;background:${ip.extremeMode ? 'rgba(239,68,68,.08)' : 'var(--bg-secondary)'};border:0.5px solid ${ip.extremeMode ? 'rgba(239,68,68,.4)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div style="margin-top:12px;padding:8px 10px;background:${ip.ignoreEntryWindow ? 'rgba(239,68,68,.08)' : 'var(--bg-secondary)'};border:0.5px solid ${ip.ignoreEntryWindow ? 'rgba(239,68,68,.4)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
           <div>
-            <div style="font-size:12px;font-weight:600;color:${ip.extremeMode ? '#ef4444' : 'var(--text-secondary)'}">⚠️ Extreme Mode</div>
-            <div class="text-xs text-muted">Bypasses all entry filters (window, VWAP, RSI, volume, R:R) — shows every ticker above min score. Testing only.</div>
+            <div style="font-size:12px;font-weight:600;color:${ip.ignoreEntryWindow ? '#ef4444' : 'var(--text-secondary)'}">⚠️ Ignore entry window</div>
+            <div class="text-xs text-muted">Skips the 10:45–15:00 AEST entry-window gate, so you can test the scan outside market hours. The VWAP/RSI/volume/score gates above still apply — use "Min confirmations" to loosen those instead. Testing only.</div>
           </div>
           <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap">
-            <input type="checkbox" ${ip.extremeMode ? 'checked' : ''}
-              onchange="updateIntradayParam('extremeMode', this.checked)">
-            ${ip.extremeMode ? '<span style="color:#ef4444;font-weight:600">On</span>' : 'Off'}
+            <input type="checkbox" ${ip.ignoreEntryWindow ? 'checked' : ''}
+              onchange="updateIntradayParam('ignoreEntryWindow', this.checked)">
+            ${ip.ignoreEntryWindow ? '<span style="color:#ef4444;font-weight:600">On</span>' : 'Off'}
           </label>
         </div>
       </div>
@@ -793,8 +786,8 @@ function resetIntradayRules() {
   // been changed, no matter how many times Reset all was clicked.
   state.intraday.params = {
     targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
-    universeKey: 'asx100', extremeMode: false,
-    vwapThreshold: -0.3, rsiThreshold: 40, requireVolRising: false,
+    universeKey: 'asx100', minConfirms: 2, ignoreEntryWindow: false,
+    vwapThreshold: -0.3, rsiThreshold: 40,
     stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5,
   };
   scheduleSave();
@@ -805,8 +798,9 @@ function resetIntradayRules() {
 
 function _renderIntradaySetupsContent() {
   const id = state.intraday;
-  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100', extremeMode: false,
-               vwapThreshold: -0.3, rsiThreshold: 40, requireVolRising: false,
+  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100',
+               minConfirms: 2, ignoreEntryWindow: false,
+               vwapThreshold: -0.3, rsiThreshold: 40,
                stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5,
                ...(id.params || {}) };
   const allocated = id.allocatedCash != null
@@ -840,7 +834,8 @@ function _renderIntradaySetupsContent() {
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
         <div>
           <div style="font-size:13px;font-weight:600">ASX Intraday Scanner
-            ${ip.extremeMode ? '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:6px">⚠️ EXTREME</span>' : ''}
+            ${ip.minConfirms < 2 ? `<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:6px">⚠️ ${ip.minConfirms} CONFIRM${ip.minConfirms === 1 ? '' : 'S'}</span>` : ''}
+            ${ip.ignoreEntryWindow ? '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:6px">⚠️ NO WINDOW</span>' : ''}
           </div>
           <div class="text-xs text-muted">${scanStatus}</div>
         </div>
