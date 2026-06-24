@@ -57,7 +57,7 @@ function renderJournal() {
   if (jf.status !== 'all') filtered = filtered.filter(t => t.status === jf.status);
   if (jf.pnl === 'winners') filtered = filtered.filter(t => t.pnl != null && t.pnl > 0);
   if (jf.pnl === 'losers')  filtered = filtered.filter(t => t.pnl != null && t.pnl < 0);
-  if (jf.pnl === 'open')    filtered = filtered.filter(t => t.status === 'open');
+  if (jf.pnl === 'open')    filtered = filtered.filter(t => t.status === 'open' || t.status === 'trimmed');
   if (jf.dateFrom) {
     filtered = filtered.filter(t => {
       if (!t.date) return false;
@@ -149,9 +149,10 @@ function renderJournal() {
         <div>
           <div class="form-label" style="margin-bottom:3px">Status</div>
           <select onchange="setJournalFilterKey('status', this.value)" ${selStyle}>
-            <option value="all"    ${jf.status==='all'   ?'selected':''}>All</option>
-            <option value="open"   ${jf.status==='open'  ?'selected':''}>Open</option>
-            <option value="closed" ${jf.status==='closed'?'selected':''}>Closed</option>
+            <option value="all"     ${jf.status==='all'    ?'selected':''}>All</option>
+            <option value="open"    ${jf.status==='open'   ?'selected':''}>Open</option>
+            <option value="trimmed" ${jf.status==='trimmed'?'selected':''}>Trimmed</option>
+            <option value="closed"  ${jf.status==='closed' ?'selected':''}>Closed</option>
           </select>
         </div>
         <!-- P&L outcome -->
@@ -248,13 +249,20 @@ function renderJournal() {
                 ? (t.action==='BUY' ? (t.exitPrice-t.entryPrice)*t.qty : (t.entryPrice-t.exitPrice)*t.qty) - t.fees
                 : null);
               const realIdx = state.tradeJournal.indexOf(t);
-              const parcelBadge = t.action === 'SELL'
-                ? (t.disposalIds && t.disposalIds.length
-                    ? `<span class="badge badge-executed" title="${t.disposalIds.length} parcel(s) consumed">${t.disposalIds.length} lot${t.disposalIds.length!==1?'s':''}</span>`
-                    : '<span class="text-xs text-muted">—</span>')
-                : (t.parcelId
-                    ? `<span class="badge badge-executed" title="Parcel #${t.parcelId}">P#${t.parcelId}</span>`
-                    : `<span class="badge badge-pending" title="Click ⟳ Reconcile to fix">Missing</span>`);
+              // t.parcel (e.g. "P#12" or "P#12-1") is set on disposal-slice rows
+              // created by buildDisposalJournalEntries() — one row per parcel
+              // actually matched, so this is the precise originating lot, not
+              // just a "N lots consumed" count. Legacy rows (pre-dating this)
+              // fall back to the old aggregate rendering.
+              const parcelBadge = t.parcel
+                ? `<span class="badge badge-executed" title="${escapeHTML(t.parcel)}">${escapeHTML(t.parcel)}</span>`
+                : (t.action === 'SELL' || t.action === 'TRIM')
+                  ? (t.disposalIds && t.disposalIds.length
+                      ? `<span class="badge badge-executed" title="${t.disposalIds.length} parcel(s) consumed">${t.disposalIds.length} lot${t.disposalIds.length!==1?'s':''}</span>`
+                      : '<span class="text-xs text-muted">—</span>')
+                  : (t.parcelId
+                      ? `<span class="badge badge-executed" title="Parcel #${t.parcelId}">P#${t.parcelId}</span>`
+                      : `<span class="badge badge-pending" title="Click ⟳ Reconcile to fix">Missing</span>`);
               const matchedRec = t.recId
                 ? (state.recHistory.find(r => r.id === t.recId)
                    || (state.dayTrading?.recommendations || []).find(r => r.id === t.recId)
@@ -270,7 +278,7 @@ function renderJournal() {
                 <td>${t.exitPrice ? '$'+fmt(t.exitPrice) : '&mdash;'}</td>
                 <td>$${fmt(t.fees)}</td>
                 <td class="${pnl!=null?(pnl>=0?'text-success':'text-danger'):'text-muted'}">${pnl!=null?(pnl>=0?'+':'')+' $'+fmt(Math.abs(pnl)):'Open'}</td>
-                <td><span class="badge ${t.status==='open'?'badge-open':'badge-closed'}">${t.status}</span></td>
+                <td><span class="badge ${t.status==='open'?'badge-open':t.status==='trimmed'?'badge-trim':'badge-closed'}">${t.status}</span></td>
                 <td>${parcelBadge}</td>
                 <td>${_journalProvenanceBadge(t)}${matchedRec?._thesis?'<span style="font-size:10px;margin-left:3px" title="'+escapeHTML(matchedRec._thesis)+'">📋</span>':''}</td>
                 <td>${_journalRegimeBadge(matchedRec?.regime)}</td>
@@ -554,21 +562,26 @@ async function addManualTrade() {
     ? ((state.currentRegime && state.currentRegime.regime) || null)
     : null;
   let tradeEntry;
+  let _disposalEntries = null;
 
   if(action === 'SELL') {
     const holding = getPortfolioHolding(symbol);
     if(holding && holding.shares >= qty) {
       const prevLen = state.cgtDisposals.length;
-      const { ok, disposals } = applySellToPortfolio(symbol, qty, price, fees, tradeDate);
-      const grossPnl = disposalsToPnl(disposals);
-      tradeEntry = {
-        id: state.tradeJournal.length + 1, date: tradeDate, ticker: symbol, action,
-        qty, entryPrice: holding.avgPrice, exitPrice: price, fees,
-        status: 'closed', pnl: grossPnl,
-        disposalIds: disposals.map((_,i) => prevLen + i),
-        recId: null, recExecuted: false, timestamp: nowSydney(),
-        entrySignals, thesis, regime
-      };
+      const { disposals } = applySellToPortfolio(symbol, qty, price, fees, tradeDate);
+      // One Trade Journal row per parcel matched (mirrors markExecuted()) —
+      // a manual sell spanning multiple lots shows as separate rows, each
+      // labelled with its originating parcel, and the original BUY/TOP_UP
+      // row(s) get their status updated to 'closed'/'trimmed'.
+      _disposalEntries = buildDisposalJournalEntries({
+        ticker: symbol, account: holding.account || 'personal', disposals, tradePrice: price, action,
+        recId: null, recExecuted: false, timestamp: nowSydney(), date: tradeDate,
+        regime, exitSignals: entrySignals, disposalIdBase: prevLen,
+      });
+      // Manual trades carry a free-text thesis the disposal helper doesn't
+      // know about — attach it to each row created for this sale.
+      _disposalEntries.forEach(e => { e.thesis = thesis; });
+      tradeEntry = _disposalEntries[0] || null;
     } else {
       tradeEntry = {
         id: state.tradeJournal.length + 1, date: tradeDate, ticker: symbol, action,
@@ -593,7 +606,9 @@ async function addManualTrade() {
     };
   }
 
-  state.tradeJournal.unshift(tradeEntry);
+  if (!_disposalEntries) {
+    state.tradeJournal.unshift(tradeEntry);
+  }
   toast('Trade logged', 'success');
   scheduleSave();
   renderPage();

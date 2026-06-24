@@ -374,12 +374,92 @@ function disposalsToPnl(disposals) {
   return disposals.reduce((s,d) => s + d.grossGain, 0);
 }
 
+// Splits a multi-parcel SELL/TRIM disposal into one Trade Journal row per
+// parcel slice consumed (the `disposals` array from matchSaleAgainstParcels/
+// applySellToPortfolio already has one entry per matched parcel) — instead of
+// one aggregate row covering the whole sale, which made it impossible to
+// tell which original lot(s) a trim actually came from once a position had
+// been built from multiple BUY/TOP_UP parcels.
+//
+// Label: "P#<parcelId>" when this is a single, clean disposal that fully
+// closes that parcel in one shot; "P#<parcelId>-<n>" for any partial
+// disposal (n = 1 + count of prior disposal-slice rows already recorded
+// against that parcel) — including the eventual slice that finally exhausts
+// a parcel which already had earlier partial trims against it, since by then
+// it's no longer a single clean closure.
+//
+// Also patches each matched parcel's original BUY/TOP_UP journal row's
+// `status`: 'closed' when the parcel's remainingQty is now 0, 'trimmed' when
+// shares remain — so the original lot's row visibly reflects what's left.
+//
+// Each entry is unshifted into state.tradeJournal as it's built (so the
+// per-parcel "prior disposal rows" count sees earlier slices in the same
+// batch) — callers must NOT also push/unshift the returned entries again.
+function buildDisposalJournalEntries(opts) {
+  const {
+    ticker, account, disposals, tradePrice, action,
+    recId, recExecuted, timestamp, date, regime, exitSignals,
+    disposalIdBase,
+  } = opts;
+
+  const entries = [];
+  (disposals || []).forEach((d, i) => {
+    const parcel = (state.cgtParcels || []).find(p => p.id === d.parcelId);
+    const remainingAfter = parcel ? (parcel.remainingQty || 0) : 0;
+    const buyRow = d.parcelId != null
+      ? (state.tradeJournal || []).find(e => e.parcelId === d.parcelId && (e.action === 'BUY' || e.action === 'TOP_UP'))
+      : null;
+    // Identify prior disposal-slice rows by `e.parcel` being set, rather than a
+    // separate internal-only flag — `parcel` is persisted (round-trips through
+    // save/reload), so a flag that only lived in memory would undercount
+    // historical slices after a reload and mislabel future suffixes.
+    const priorDisposalRows = d.parcelId != null
+      ? (state.tradeJournal || []).filter(e => e.parcelId === d.parcelId && e.parcel).length
+      : 0;
+    const isCleanFullClose = priorDisposalRows === 0 && remainingAfter <= 0;
+    const parcelLabel = d.parcelId == null
+      ? null
+      : (isCleanFullClose ? `P#${d.parcelId}` : `P#${d.parcelId}-${priorDisposalRows + 1}`);
+
+    if (buyRow) {
+      buyRow.status = remainingAfter > 0 ? 'trimmed' : 'closed';
+      if (remainingAfter <= 0) buyRow.closeDate = date;
+    }
+
+    // `date` on this row is the ORIGINAL parcel open date (d.parcelDate, from
+    // matchSaleAgainstParcels), not the transaction date — matching the
+    // existing single-row model's semantics (date=open, closeDate=close) that
+    // the ATO CSV export (exportTradeJournalCSV) and CGT discount-eligibility
+    // check both depend on (>365 days between date and closeDate). `date`
+    // param here is the transaction date, used for closeDate instead.
+    const entry = {
+      id: Date.now() + i,
+      date: d.parcelDate || buyRow?.date || date,
+      ticker, action, qty: d.saleQty,
+      entryPrice: d.parcelCostPerShare, exitPrice: tradePrice, fees: d.saleFee || 0,
+      status: 'closed', pnl: d.grossGain, closeDate: date,
+      disposalIds: disposalIdBase != null ? [disposalIdBase + i] : undefined,
+      parcelId: d.parcelId, parcel: parcelLabel,
+      recId, recExecuted, timestamp, account,
+      exitSignals, regime,
+    };
+    state.tradeJournal.unshift(entry);   // push immediately so the next iteration's priorDisposalRows count sees it
+    entries.push(entry);
+  });
+  return entries;
+}
+
 function rollbackTradeJournalEntry(t) {
   if(!t || !t.action || !t.ticker || !t.qty) return;
   // Treat TOP_UP like BUY and TRIM like SELL for rollback purposes.
   let action = t.action.toUpperCase();
   if(action === 'TOP_UP') action = 'BUY';
   if(action === 'TRIM')   action = 'SELL';
+  // Deliberately does NOT handle status==='trimmed' — a lot that's been
+  // partially sold can't be cleanly "un-bought" without also reversing the
+  // disposal-slice row(s) that consumed shares from it (a separate, more
+  // involved operation). Falls through to a safe no-op for trimmed/closed
+  // BUY rows rather than attempting a partial/incorrect rollback.
   if(action === 'BUY' && t.status === 'open') {
     const holding = getPortfolioHolding(t.ticker);
     if(!holding || holding.shares < t.qty) return;

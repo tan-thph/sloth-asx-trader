@@ -405,6 +405,15 @@ def init_db():
             # today's regime onto a trade that happened on an arbitrary past date
             # would be actively wrong, not just incomplete.
             ("regime",             "TEXT"),
+            # Originating-parcel label for a SELL/TRIM disposal-slice row, e.g.
+            # "P#12" (single clean disposal that fully closed that parcel) or
+            # "P#12-1" (a partial disposal — suffix increments per prior
+            # partial disposal already recorded against that parcel). NULL on
+            # BUY/TOP_UP rows and on disposal rows with no resolvable parcel
+            # (pre-app/legacy positions). Set by buildDisposalJournalEntries()
+            # in js/portfolio-helpers.js — also doubles as the marker that
+            # identifies a disposal-slice row (vs a legacy aggregate SELL row).
+            ("parcel",             "TEXT"),
         ):
             if col not in tj_cols:
                 conn.execute(f"ALTER TABLE trade_journal ADD COLUMN {col} {defn}")

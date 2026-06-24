@@ -23,6 +23,8 @@ from pathlib import Path
 
 import requests
 
+from core import classify_llm_http_error
+
 log = logging.getLogger("news_engine")
 
 # ── GPU / CUDA detection ──────────────────────────────────────────────────────
@@ -1241,7 +1243,8 @@ class GroqLLM:
                 log.info("GroqLLM classify: stop_event set after HTTP — discarding result")
                 return None
             if resp.status_code != 200:
-                log.debug("GroqLLM HTTP %s: %s", resp.status_code, resp.text[:200])
+                kind = classify_llm_http_error(resp.status_code, resp.text)
+                log.warning("GroqLLM %s (HTTP %s): %s", kind, resp.status_code, resp.text[:200])
                 return None
             raw = resp.json()["choices"][0]["message"]["content"]
             # Strip markdown fences and isolate first JSON object
@@ -1252,7 +1255,7 @@ class GroqLLM:
                 raw = m.group(0)
             return _robust_json_parse(raw)
         except Exception as exc:
-            log.debug("GroqLLM classify failed: %s", exc)
+            log.warning("GroqLLM classify failed: %s", exc)
             return None
 
 

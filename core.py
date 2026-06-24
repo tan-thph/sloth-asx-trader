@@ -44,6 +44,26 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
+def classify_llm_http_error(status_code, body_text):
+    """Classify a non-200 LLM provider HTTP response as rate-limit / token-limit /
+    other, from status code + response body alone (Groq/Gemini call sites use
+    raw `requests` — no SDK exception types to distinguish these for us).
+    Matches known error `type`/`status` fields first (Groq mirrors OpenAI's
+    {"error":{"type":"rate_limit_exceeded"|...}}; Gemini returns
+    {"error":{"status":"RESOURCE_EXHAUSTED"|...}}), falling back to substring
+    matching on the raw text. Returns a short human-readable label for logging —
+    never raises, since body_text may not be JSON.
+    """
+    text = (body_text or "")
+    low = text.lower()
+    if status_code == 429 or "rate_limit" in low or "resource_exhausted" in low or "rate limit" in low:
+        return "RATE_LIMIT"
+    if ("context_length" in low or "context window" in low or "token" in low and "limit" in low
+            or "too many tokens" in low or "maximum context" in low):
+        return "TOKEN_LIMIT"
+    return f"HTTP_{status_code}"
+
+
 # ── TTL cache decorator ───────────────────────────────────────────────────────
 # Simple in-process memoiser. Thread-safe via a single lock.
 # Key is (func.__name__, args, frozenset(kwargs.items())).

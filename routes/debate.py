@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 import requests
 from flask import Blueprint, current_app, jsonify, request
 
-from core import OLLAMA_BASE as _OLLAMA_BASE, log
+from core import OLLAMA_BASE as _OLLAMA_BASE, classify_llm_http_error, log
 from db import get_db
 
 
@@ -783,12 +783,16 @@ def _call_gemini_json(api_key: str, model: str, prompt: str, timeout: int = 30) 
             timeout=timeout,
         )
         if r.status_code != 200:
+            kind = classify_llm_http_error(r.status_code, r.text)
+            log.warning("Gemini debate call %s (HTTP %s): %s", kind, r.status_code, r.text[:200])
             return {"ok": False, "error": f"Gemini HTTP {r.status_code}: {r.text[:120]}"}
         text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
         return {"ok": True, "text": (text or "").strip()}
     except requests.exceptions.Timeout:
+        log.warning("Gemini debate call timeout after %ss", timeout)
         return {"ok": False, "error": f"Gemini timeout after {timeout}s"}
     except Exception as ex:
+        log.warning("Gemini debate call failed: %s", ex)
         return {"ok": False, "error": str(ex)}
 
 
@@ -807,12 +811,16 @@ def _call_groq_json(api_key: str, model: str, prompt: str, timeout: int = 30) ->
             timeout=timeout,
         )
         if r.status_code != 200:
+            kind = classify_llm_http_error(r.status_code, r.text)
+            log.warning("Groq debate call %s (HTTP %s): %s", kind, r.status_code, r.text[:200])
             return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:120]}"}
         text = r.json()["choices"][0]["message"]["content"]
         return {"ok": True, "text": (text or "").strip()}
     except requests.exceptions.Timeout:
+        log.warning("Groq debate call timeout after %ss", timeout)
         return {"ok": False, "error": f"Groq timeout after {timeout}s"}
     except Exception as ex:
+        log.warning("Groq debate call failed: %s", ex)
         return {"ok": False, "error": str(ex)}
 
 

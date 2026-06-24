@@ -350,6 +350,16 @@ function renderPendingRecs(recs) {
 
   return summaryBanner + recs.map(r => {
     const isReducing = r.action === 'SELL' || r.action === 'TRIM';
+    // Claude's recs are account-blind (built from mergedPortfolio() across all
+    // accounts) — if this ticker is actually held in more than one account, we
+    // cannot know which one the rec means. Surface an explicit picker rather
+    // than silently guessing 'personal' (the old behavior), which was the root
+    // cause of Day Trading positions going stale/duplicated when a SELL/TRIM
+    // meant for the 'trading' account silently executed against 'personal'.
+    const _rTicker = isReducing ? _normTicker(r.ticker) : null;
+    const _rAccts = isReducing
+      ? [...new Set(state.portfolio.filter(h => _normTicker(h.ticker) === _rTicker).map(h => h.account || 'personal'))]
+      : [];
     const holding   = isReducing ? getPortfolioHolding(r.ticker) : null;
     const avgCost   = holding ? holding.avgPrice : null;
     const heldQty   = holding ? holding.shares : 0;
@@ -620,6 +630,15 @@ function renderPendingRecs(recs) {
             style="width:72px;padding:4px 8px;border:1px solid var(--border-medium);border-radius:6px;font-size:13px;background:var(--bg-primary);color:var(--text-primary)"
             title="Brokerage fee">
         </div>
+        ${_rAccts.length > 1 ? `
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:12px;color:#f59e0b;font-weight:600;white-space:nowrap">⚠ Account</label>
+          <select id="exec-acct-${r.id}"
+            style="padding:4px 8px;border:1.5px solid #f59e0b;border-radius:6px;font-size:12px;font-weight:600;background:var(--bg-primary);color:var(--text-primary)"
+            title="${r.ticker} is held in multiple accounts — pick which one this ${r.action} applies to">
+            ${_rAccts.map(a => `<option value="${escapeHTML(a)}">${escapeHTML(a)}</option>`).join('')}
+          </select>
+        </div>` : ''}
         <div style="display:flex;align-items:center;gap:6px;margin-left:auto">
           <span style="font-size:12px;color:var(--text-secondary);white-space:nowrap">${isReducing ? 'Net proceeds:' : 'Total cost:'}</span>
           <span id="exec-total-${r.id}" style="font-size:14px;font-weight:700;color:${isReducing?'#16a34a':'#f59e0b'};white-space:nowrap">${(()=>{
@@ -1030,13 +1049,15 @@ function confirmExecute(recId) {
   const qtyEl   = document.getElementById(`exec-qty-${recId}`);
   const priceEl = document.getElementById(`exec-price-${recId}`);
   const feeEl   = document.getElementById(`exec-fee-${recId}`);
+  const acctEl  = document.getElementById(`exec-acct-${recId}`);
   const qty   = parseInt(qtyEl?.value);
   const price = parseFloat(priceEl?.value);
   const fee   = parseFloat(feeEl?.value ?? state.settings.brokerage);
+  const acct  = acctEl?.value || undefined;   // only present when the ticker is held in >1 account
   if (isNaN(qty)   || qty <= 0)  { toast('Enter a valid quantity (shares)', 'error'); qtyEl?.focus(); return; }
   if (isNaN(price) || price <= 0){ toast('Enter a valid execution price', 'error'); priceEl?.focus(); return; }
   if (isNaN(fee)   || fee < 0)   { toast('Enter a valid brokerage fee', 'error'); feeEl?.focus(); return; }
-  _showPreTradeChecklist(recId, () => markExecuted(recId, price, fee, qty));
+  _showPreTradeChecklist(recId, () => markExecuted(recId, price, fee, qty, acct));
 }
 
 function _showPreTradeChecklist(recId, onConfirm) {
@@ -1367,7 +1388,7 @@ function _snapshotLiveTechnicals(ticker, tradePrice) {
   };
 }
 
-function markExecuted(id, execPrice, execFee, execQty) {
+async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
   const rec = state.recommendations.find(r => r.id === id); if(!rec) return;
 
   // Immediately mark button as executed so the card looks settled before renderPage fires
@@ -1395,6 +1416,31 @@ function markExecuted(id, execPrice, execFee, execQty) {
   const tradePrice = (execPrice !== undefined && !isNaN(execPrice) && execPrice > 0) ? execPrice : (rec.priceRange?.[0] ?? 0);
   const isReducing = rec.action === 'SELL' || rec.action === 'TRIM';
 
+  // Ensure live signals are available before snapshotting — state.liveSignals
+  // is only ever populated lazily by whichever page/scan the user last visited
+  // (Live Signals, Watchlist, Scanner, Day Trading scan), not proactively for
+  // the whole portfolio. Without this fallback, a ticker that simply wasn't
+  // covered by the user's last visit (e.g. FMG/BHP after a banks-only scan)
+  // would silently record a null entrySignals/exitSignals snapshot. Mirrors
+  // the same fallback already used by executeDayTrade()/executeIntradayTrade().
+  if (!state.liveSignals?.[rec.ticker]?.rsi_14) {
+    try {
+      const _sigR = await fetch(`${API}/api/analyse/${encodeURIComponent(rec.ticker)}`);
+      if (_sigR.ok) {
+        const _sigD = await _sigR.json();
+        if (!state.liveSignals) state.liveSignals = {};
+        state.liveSignals[rec.ticker] = { ...(_sigD || {}), ...state.liveSignals[rec.ticker] };
+      }
+    } catch { /* offline — proceed without signals; snapshot will be null */ }
+  }
+
+  // Same fallback for regime — a trade executed before the Dashboard's
+  // background fetchAndClassifyRegime() call has resolved this session (e.g.
+  // the very first trade of the day) would otherwise record a null regime.
+  if (!state.currentRegime && typeof fetchAndClassifyRegime === 'function') {
+    try { await fetchAndClassifyRegime(); } catch { /* offline — proceed without regime */ }
+  }
+
   // Regime live at the moment this transaction is actually filled — distinct
   // from rec._genRegime (stamped at generation time, possibly days earlier for
   // a rec that sat pending). Prefers the live classifier state; falls back to
@@ -1408,15 +1454,20 @@ function markExecuted(id, execPrice, execFee, execQty) {
 
   // Determine which account's holding this SELL/TRIM applies to. The rec itself
   // carries no account marker (analysis.js builds recs from mergedPortfolio()
-  // across all accounts without tagging one back on). If exactly one account
-  // holds this ticker, use that account unambiguously; if more than one account
-  // holds it, executing against the wrong one would silently corrupt the other
-  // account's holding, so fall back to the old 'personal' default and warn loudly
-  // rather than guess.
-  const _matchingHoldings = state.portfolio.filter(h => h.ticker === rec.ticker.toUpperCase());
+  // across all accounts without tagging one back on). Ticker matching is
+  // normalized (_normTicker strips an optional ".AX" suffix and uppercases) —
+  // Claude's response-validator regex permits ".AX", and matching the raw
+  // value against state.portfolio's always-bare tickers used to silently find
+  // zero accounts, falling through to the wrong default below.
+  const _matchingHoldings = state.portfolio.filter(h => _normTicker(h.ticker) === _normTicker(rec.ticker));
   const _distinctAccts = [...new Set(_matchingHoldings.map(h => h.account || 'personal'))];
   let sellAccount;
-  if (_distinctAccts.length === 1) {
+  if (execAccount && _distinctAccts.includes(execAccount)) {
+    // Explicit choice from the rec card's account picker (rendered whenever
+    // _distinctAccts.length > 1) — always trust this over any guess, since
+    // only the user actually knows which account this rec was meant to close.
+    sellAccount = execAccount;
+  } else if (_distinctAccts.length === 1) {
     sellAccount = _distinctAccts[0];
   } else if (_distinctAccts.length > 1) {
     sellAccount = 'personal';
@@ -1426,45 +1477,33 @@ function markExecuted(id, execPrice, execFee, execQty) {
     sellAccount = 'personal';
   }
 
+  let _disposalEntries = null;   // set when the SELL/TRIM branch creates per-parcel rows
+  let _saleDisposals = null;     // raw disposals — used below for blended entryPrice/holdDays on the learning-loop payload
   if (isReducing) {
     const holding = getPortfolioHolding(rec.ticker, _distinctAccts.length === 1 ? sellAccount : undefined);
     if (holding && holding.shares >= qty) {
-      // Derive open date from earliest live parcel so Performance hold-duration is accurate.
-      // Audit fix #4: CGT parcels never have a `.shares` field (they use
-      // `.remainingQty`, used correctly 350 lines earlier in this same file) —
-      // this filter was always empty, so openDate always fell back to today's
-      // date, corrupting hold-duration math downstream in performance.js.
-      const liveParcels = (state.cgtParcels || []).filter(p => p.ticker === rec.ticker && (p.remainingQty || 0) > 0);
-      const openDate = liveParcels.length
-        ? liveParcels.reduce((earliest, p) => (p.date && p.date < earliest ? p.date : earliest), liveParcels[0].date || today)
-        : null;
       const prevDisposalLen = state.cgtDisposals.length;
       const { disposals } = applySellToPortfolio(rec.ticker, qty, tradePrice, fees, today, undefined, sellAccount);
+      _saleDisposals = disposals;
       realizedPnl = disposalsToPnl(disposals);
-      // Audit fix #6: realized $ P&L (above) is correct — computed per-parcel
-      // against each parcel's true cost via disposalsToPnl. But the journal
-      // entry's entryPrice must NOT be holding.avgPrice, the blended weighted
-      // average across ALL parcels for this ticker — it skews pnlPct, R:R
-      // backfill, and any analytics keyed off entryPrice whenever the position
-      // was built from parcels bought at different prices. Use the qty-weighted
-      // cost of the SPECIFIC parcels actually matched against this sale instead.
-      const _soldQty = disposals.reduce((s, d) => s + d.saleQty, 0);
-      const effectiveEntryPrice = _soldQty > 0
-        ? disposals.reduce((s, d) => s + d.saleQty * d.parcelCostPerShare, 0) / _soldQty
-        : holding.avgPrice;
       // Snapshot live technicals at exit fill time (mirrors entrySignals on the
       // BUY/TOP_UP branch below) so the Journal drawer can show what the chart
       // looked like when the position was actually closed, not just when Claude
-      // generated the SELL/TRIM rec.
+      // generated the SELL/TRIM rec. One snapshot for the whole execution —
+      // every parcel slice in this batch was filled at the same moment.
       const execExitSignals = _snapshotLiveTechnicals(rec.ticker, tradePrice);
-      tradeEntry = {
-        id: state.tradeJournal.length + 1, date: openDate || today, ticker: rec.ticker, action: rec.action,
-        qty, entryPrice: effectiveEntryPrice, exitPrice: tradePrice, fees,
-        status: 'closed', pnl: realizedPnl, closeDate: today,
-        disposalIds: disposals.map((_, i) => prevDisposalLen + i),
-        recId: rec.id, recExecuted: true, timestamp: time, account: sellAccount,
-        exitSignals: execExitSignals, regime: execRegime,
-      };
+      // One Trade Journal row per parcel actually matched — not one aggregate
+      // row for the whole sale. A TRIM spanning multiple lots (e.g. FIFO
+      // consuming all of an older parcel plus part of a newer one) now shows
+      // as separate rows, each labelled with the originating parcel, and each
+      // original BUY/TOP_UP row's status is updated to 'closed'/'trimmed'
+      // depending on what's left in that specific parcel.
+      _disposalEntries = buildDisposalJournalEntries({
+        ticker: rec.ticker, account: sellAccount, disposals, tradePrice, action: rec.action,
+        recId: rec.id, recExecuted: true, timestamp: time, date: today,
+        regime: execRegime, exitSignals: execExitSignals, disposalIdBase: prevDisposalLen,
+      });
+      tradeEntry = _disposalEntries[0] || null;
     } else {
       tradeEntry = {
         id: state.tradeJournal.length + 1, date: today, ticker: rec.ticker, action: rec.action,
@@ -1493,54 +1532,52 @@ function markExecuted(id, execPrice, execFee, execQty) {
     };
   }
 
-  // Save to journal — but first guard against creating a duplicate entry for a
-  // position that was already opened/closed via the Day Trading close functions
-  // (closeIntradayPosition / _closeDayTrade), which patch an existing open entry
-  // by recId or _journalId rather than creating a new one. If this SELL/TRIM is
-  // closing a position whose open leg is still sitting in the journal as
-  // status:'open' for the same ticker+account, patch that entry instead of
-  // unshifting a duplicate.
-  let _existingOpenEntry = null;
-  if (isReducing) {
-    _existingOpenEntry = (state.tradeJournal || []).find(e =>
-      e.status === 'open' && e.ticker === rec.ticker &&
-      (e.account || 'personal') === sellAccount &&
-      (e.recId === rec.id || e.qty === qty)
-    ) || (state.tradeJournal || []).find(e =>
-      e.status === 'open' && e.ticker === rec.ticker && (e.account || 'personal') === sellAccount
-    );
-  }
-  if (_existingOpenEntry) {
-    _existingOpenEntry.exitPrice  = tradeEntry.exitPrice;
-    _existingOpenEntry.fees       = (_existingOpenEntry.fees || 0) + (tradeEntry.fees || 0);
-    _existingOpenEntry.pnl        = tradeEntry.pnl;
-    _existingOpenEntry.status     = tradeEntry.status;
-    _existingOpenEntry.closeDate  = tradeEntry.closeDate || today;
-    if (tradeEntry.disposalIds) _existingOpenEntry.disposalIds = tradeEntry.disposalIds;
-    tradeEntry = _existingOpenEntry;
-  } else {
+  // Save to journal. The SELL/TRIM-with-holding branch above already
+  // unshifted its per-parcel rows via buildDisposalJournalEntries() (and
+  // patched the original BUY/TOP_UP row(s) status directly by parcelId,
+  // which is reliable regardless of which UI flow created them — Day
+  // Trading's own executeDayTrade()/executeIntradayTrade() included) — only
+  // the BUY/TOP_UP branch and the insufficient-shares fallback still need an
+  // explicit unshift here.
+  if (!_disposalEntries) {
     state.tradeJournal.unshift(tradeEntry);
   }
 
-  // Day Trading sync: if the closed holding was in the 'trading' account, the
-  // position may have originated from Day Trading's own flows (executeDayTrade /
-  // executeIntradayTrade), which keep their own bookkeeping in
-  // state.dayTrading.recommendations[] and state.intraday.openPositions[] —
-  // neither of which markExecuted() (the generic Recommendations close path)
-  // otherwise touches. Only act when we can positively match an entry by ticker
-  // (+ status), never blind-clear.
-  if (isReducing && sellAccount === 'trading') {
-    const dtRec = (state.dayTrading && state.dayTrading.recommendations || [])
-      .find(r => r.ticker === rec.ticker && r.status === 'executed');
-    if (dtRec) {
-      dtRec.status      = 'closed';
-      dtRec._closedAt    = today;
-      dtRec._closePrice  = tradePrice;
-    }
-    if (state.intraday && Array.isArray(state.intraday.openPositions)) {
-      const posIdx = state.intraday.openPositions.findIndex(p => p.ticker === rec.ticker);
-      if (posIdx !== -1) {
-        state.intraday.openPositions.splice(posIdx, 1);
+  // Day Trading sync: a position may have originated from Day Trading's own
+  // flows (executeDayTrade / executeIntradayTrade), which keep their own
+  // bookkeeping in state.dayTrading.recommendations[] and
+  // state.intraday.openPositions[] — neither of which markExecuted() (the
+  // generic Recommendations close path) otherwise touches.
+  //
+  // This used to gate on `sellAccount === 'trading'` — but sellAccount is a
+  // guess when the ticker is held in multiple accounts (see resolution above),
+  // so a SELL/TRIM meant to close a day-trade could silently default to
+  // 'personal' and skip this block entirely, leaving the ticker stale in the
+  // Day Trading tab AND creating a duplicate journal row (the original bug
+  // report). Checking the ACTUAL remaining 'trading'-account shares after the
+  // sale is ground truth, independent of which account the guess landed on —
+  // if the trading-account holding is genuinely gone, sync; if this sale
+  // didn't touch it (sellAccount correctly resolved to a different account),
+  // tradingSharesLeft stays > 0 and we correctly leave the day-trade alone.
+  // Also fixes a second bug: a partial TRIM that reduces but doesn't zero the
+  // trading-account shares no longer force-closes the day-trade record.
+  if (isReducing) {
+    const _tradingHolding = state.portfolio.find(h =>
+      _normTicker(h.ticker) === _normTicker(rec.ticker) && (h.account || 'personal') === 'trading');
+    const _tradingSharesLeft = _tradingHolding ? (_tradingHolding.shares || 0) : 0;
+    if (_tradingSharesLeft <= 0) {
+      const dtRec = (state.dayTrading && state.dayTrading.recommendations || [])
+        .find(r => _normTicker(r.ticker) === _normTicker(rec.ticker) && r.status === 'executed');
+      if (dtRec) {
+        dtRec.status      = 'closed';
+        dtRec._closedAt    = today;
+        dtRec._closePrice  = tradePrice;
+      }
+      if (state.intraday && Array.isArray(state.intraday.openPositions)) {
+        const posIdx = state.intraday.openPositions.findIndex(p => _normTicker(p.ticker) === _normTicker(rec.ticker));
+        if (posIdx !== -1) {
+          state.intraday.openPositions.splice(posIdx, 1);
+        }
       }
     }
   }
@@ -1575,14 +1612,25 @@ function markExecuted(id, execPrice, execFee, execQty) {
   // Update learning loop: mark event as executed, or log fresh if no prior event
   if (state.serverOk) {
     const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
-    const entryP = tradeEntry.entryPrice || tradePrice;
+    // Blended across all parcels matched by this sale (not just the first
+    // disposal's own row) — tradeEntry.entryPrice now reflects only ONE
+    // parcel since SELL/TRIM creates one journal row per parcel. The
+    // learning-loop outcome payload still wants the whole-sale picture.
+    const _soldQty = _saleDisposals ? _saleDisposals.reduce((s, d) => s + d.saleQty, 0) : 0;
+    const entryP = (_saleDisposals && _soldQty > 0)
+      ? _saleDisposals.reduce((s, d) => s + d.saleQty * d.parcelCostPerShare, 0) / _soldQty
+      : (tradeEntry.entryPrice || tradePrice);
     const exitP  = tradeEntry.exitPrice  ?? null;
     const pnlPct = realizedPnl != null && entryP > 0
       ? +((realizedPnl / (entryP * qty)) * 100).toFixed(2) : null;
     const outcome = _immediateOutcome !== 'open' ? _immediateOutcome : null;
-    const holdDays = (tradeEntry.date && today && typeof parseDate === 'function')
-      ? Math.max(0, Math.round((parseDate(today).getTime() - parseDate(tradeEntry.date).getTime()) / 86400000))
-      : null;
+    // heldDays on the FIRST (FIFO-earliest) disposal mirrors the old openDate
+    // semantics — the oldest parcel touched by this sale.
+    const holdDays = (_saleDisposals && _saleDisposals.length)
+      ? _saleDisposals[0].heldDays
+      : ((tradeEntry.date && today && typeof parseDate === 'function')
+          ? Math.max(0, Math.round((parseDate(today).getTime() - parseDate(tradeEntry.date).getTime()) / 86400000))
+          : null);
     const currentRegime = execRegime;
     const sector = rec.sector || (typeof getPortfolioHolding === 'function'
       ? getPortfolioHolding(rec.ticker)?.sector : null) || null;

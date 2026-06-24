@@ -33,6 +33,8 @@ from typing import Any, Dict, Generator, List, Optional
 
 import requests
 
+from core import classify_llm_http_error
+
 # ---------------------------------------------------------------------------
 # Optional dependency guards
 # ---------------------------------------------------------------------------
@@ -1825,8 +1827,11 @@ def _classify_groq(prompt: str, settings: Dict) -> Optional[Dict]:
             if result:
                 result["llm_model"] = f"groq/{model}"
                 return result
+        else:
+            kind = classify_llm_http_error(resp.status_code, resp.text)
+            logger.warning("groq classify %s (HTTP %s): %s", kind, resp.status_code, resp.text[:200])
     except Exception as exc:
-        logger.debug("groq classify failed: %s", exc)
+        logger.warning("groq classify failed: %s", exc)
     return None
 
 
@@ -1859,13 +1864,14 @@ def _classify_gemini(prompt: str, settings: Dict) -> Optional[Dict]:
                 return None
             if resp.status_code == 429:
                 wait = 5 * (2 ** attempt)  # 5s, 10s, 20s
-                logger.debug("gemini 429 rate-limit, waiting %ss (attempt %d)", wait, attempt + 1)
+                logger.warning("gemini RATE_LIMIT (429), waiting %ss (attempt %d): %s", wait, attempt + 1, resp.text[:200])
                 time.sleep(wait)
                 continue
-            logger.debug("gemini classify HTTP %s", resp.status_code)
+            kind = classify_llm_http_error(resp.status_code, resp.text)
+            logger.warning("gemini classify %s (HTTP %s): %s", kind, resp.status_code, resp.text[:200])
             return None
         except Exception as exc:
-            logger.debug("gemini classify failed: %s", exc)
+            logger.warning("gemini classify failed: %s", exc)
             return None
     return None
 

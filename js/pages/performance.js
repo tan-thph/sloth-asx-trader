@@ -751,24 +751,43 @@ async function syncClosedTradesToLearningLoop() {
     // close must never grade an AI recommendation. The ticker+date fallback
     // exists only to backfill legacy AI-executed entries that predate recId
     // tracking; it must not be allowed to match a manual close.
-    const jMatch = state.tradeJournal.find(t =>
+    // A single SELL/TRIM execution can now produce MULTIPLE journal rows —
+    // one per parcel actually matched (buildDisposalJournalEntries) — all
+    // sharing the same recId. Aggregate across all of them rather than
+    // .find()'ing just the first, or a multi-parcel trim would backfill the
+    // learning event with only one slice's pnl/qty instead of the whole
+    // execution's.
+    const jMatches = state.tradeJournal.filter(t =>
       t.recId != null &&
       (t.recId === r.id || (t.ticker === r.ticker && t.date === r.date)) &&
       t.status === 'closed' && t.pnl != null
     );
-    if (jMatch) {
-      const outcome = jMatch.pnl > 0 ? 'win' : jMatch.pnl < 0 ? 'loss' : 'breakeven';
-      const entryPrice = jMatch.entryPrice || jMatch.avgPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null);
-      const qty = jMatch.qty || r.qty || 1;
-      const pnlPct = entryPrice && qty ? (jMatch.pnl / (entryPrice * qty)) * 100 : null;
-      const holdDays = (jMatch.date && jMatch.closeDate && typeof parseDate === 'function')
-        ? Math.max(0, Math.round((parseDate(jMatch.closeDate).getTime() - parseDate(jMatch.date).getTime()) / 86400000))
+    if (jMatches.length) {
+      const totalPnl = jMatches.reduce((s, t) => s + t.pnl, 0);
+      const totalQty = jMatches.reduce((s, t) => s + (t.qty || 0), 0);
+      const outcome = totalPnl > 0 ? 'win' : totalPnl < 0 ? 'loss' : 'breakeven';
+      // Qty-weighted blended entry price across the matched slices.
+      const entryPrice = totalQty > 0
+        ? jMatches.reduce((s, t) => s + (t.qty || 0) * (t.entryPrice || t.avgPrice || 0), 0) / totalQty
+        : (jMatches[0].entryPrice || jMatches[0].avgPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null));
+      const qty = totalQty || r.qty || 1;
+      const pnlPct = entryPrice && qty ? (totalPnl / (entryPrice * qty)) * 100 : null;
+      // Hold duration from the earliest open date to the latest close date
+      // across the batch (mirrors the FIFO-earliest semantics used elsewhere).
+      // Both new disposal-slice rows and legacy aggregate rows use `date` as
+      // the open date and `closeDate` as the transaction date.
+      const _dates = jMatches.map(t => t.date).filter(Boolean).sort();
+      const _closeDates = jMatches.map(t => t.closeDate || t.date).filter(Boolean).sort();
+      const earliestOpen = _dates[0];
+      const latestClose = _closeDates[_closeDates.length - 1];
+      const holdDays = (earliestOpen && latestClose && typeof parseDate === 'function')
+        ? Math.max(0, Math.round((parseDate(latestClose).getTime() - parseDate(earliestOpen).getTime()) / 86400000))
         : null;
       const holding = typeof getPortfolioHolding === 'function' ? getPortfolioHolding(r.ticker) : null;
       const sector = r.sector || holding?.sector || null;
       return {
-        ...r, outcome, actualProfit: jMatch.pnl, _pnlPct: pnlPct, _holdDays: holdDays,
-        _entryPrice: entryPrice, _exitPrice: jMatch.exitPrice ?? null, _sector: sector,
+        ...r, outcome, actualProfit: totalPnl, _pnlPct: pnlPct, _holdDays: holdDays,
+        _entryPrice: entryPrice, _exitPrice: jMatches[0].exitPrice ?? null, _sector: sector,
       };
     }
     return r;
@@ -884,12 +903,18 @@ async function syncClosedTradesToLearningLoop() {
 function computeReconciledRecHistory() {
   return state.recHistory.map(r => {
     if (!r.executed || r.outcome === 'skipped') return r;
-    const journalMatch = state.tradeJournal.find(t =>
+    // A single SELL/TRIM execution can now produce MULTIPLE journal rows —
+    // one per parcel actually matched (buildDisposalJournalEntries) — all
+    // sharing the same recId. Sum across all of them rather than .find()'ing
+    // just the first, or a multi-parcel trim would display only one slice's
+    // P&L instead of the whole execution's.
+    const journalMatches = state.tradeJournal.filter(t =>
       t.recId === r.id && t.status === 'closed' && t.pnl != null
     );
-    if (journalMatch) {
-      const outcome = journalMatch.pnl > 0 ? 'win' : journalMatch.pnl < 0 ? 'loss' : 'breakeven';
-      return { ...r, outcome, actualProfit: journalMatch.pnl };
+    if (journalMatches.length) {
+      const totalPnl = journalMatches.reduce((s, t) => s + t.pnl, 0);
+      const outcome = totalPnl > 0 ? 'win' : totalPnl < 0 ? 'loss' : 'breakeven';
+      return { ...r, outcome, actualProfit: totalPnl };
     }
     // Same recId:null guard as syncClosedTradesToLearningLoop() — a manual
     // close (addManualTrade) must never resolve an AI rec's displayed outcome.

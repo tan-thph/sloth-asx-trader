@@ -18,6 +18,18 @@ function _applyTheme(theme) {
   }
 }
 
+// Normalize an AI-supplied ticker for matching against state.portfolio/
+// liveSignals, which always store bare uppercase ASX codes (no .AX suffix).
+// Claude's response-validator regex permits an optional ".AX" suffix
+// (js/response-validator.js), so a rec's ticker can legitimately come back
+// as "CBA.AX" — matching that against a bare "CBA" holding without
+// normalizing first silently finds zero accounts and falls through to a
+// wrong default everywhere ticker equality is checked (account resolution,
+// journal dedup, Day Trading sync). Always normalize before comparing.
+function _normTicker(t) {
+  return String(t || '').toUpperCase().replace(/\.AX$/, '');
+}
+
 // Escape untrusted text before inserting into innerHTML — guards against
 // malformed RSS headlines, AI output, or external API strings breaking layout.
 function escapeHTML(s) {
