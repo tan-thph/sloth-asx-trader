@@ -334,6 +334,15 @@ python3 asx_server.py</pre>
             onchange="updateSetting('autoMacroBrief', this.checked); scheduleSave()">
         </label>
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border-light);${state.settings.autoMacroBrief === false ? 'opacity:0.5' : ''}">
+        <div>
+          <div style="font-size:13px;font-weight:600">Earliest run time <span style="font-size:10px;color:var(--text-muted);font-weight:400">(AEST)</span></div>
+          <div class="text-xs text-muted">Don't auto-run before this time. Leave blank to fire as soon as the app opens (default).</div>
+        </div>
+        <input type="time" value="${state.settings.autoMacroBriefTime || ''}" ${state.settings.autoMacroBrief === false ? 'disabled' : ''}
+          style="padding:4px 8px;border-radius:6px;border:1px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:13px"
+          onchange="updateSetting('autoMacroBriefTime', this.value); scheduleSave()">
+      </div>
     </div>
 
     <div class="card">
@@ -477,7 +486,13 @@ async function settingsSaveGoogleKey() {
 
 
 function updateSetting(key,value) {
-  state.settings[key]=isNaN(Number(value))?value:Number(value);
+  // Booleans (checkbox .checked) must not go through Number() coercion —
+  // Number(true)/Number(false) silently become 1/0, which then fail any
+  // strict `=== false`/`=== true` check downstream (e.g.
+  // checkMacroBriefSchedule()'s `autoMacroBrief === false` guard would never
+  // match a stored 0, so unchecking the toggle wouldn't actually disable it).
+  state.settings[key] = (typeof value === 'boolean') ? value
+    : (isNaN(Number(value)) ? value : Number(value));
   scheduleSave();
   toast('Setting updated','success');
 }

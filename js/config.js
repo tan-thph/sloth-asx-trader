@@ -54,6 +54,7 @@ const state = {
     useLocalLLM: false,
     maxRiskBudgetPct: 5,
     autoMacroBrief: true, // auto-run the AI morning macro once per trading day (scheduler.js); when off, it still runs on the first manual Run Analysis
+    autoMacroBriefTime: '', // 'HH:MM' AEST — don't auto-run before this time; empty = no restriction (fire ASAP, current behaviour)
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary

@@ -263,6 +263,11 @@ async function autoRefreshPrices(reason) {
 // Display). When switched OFF, the brief still runs automatically on the first
 // manual Run Analysis of the day (analysis.js Step 1) or via the Macro page
 // button — this scheduler only removes the need to remember.
+// Optional state.settings.autoMacroBriefTime ('HH:MM' AEST) delays the
+// auto-run until at/after that time — empty string means no restriction
+// (fires the first time this check runs each day, as before this setting
+// existed). Compares against sydneyHHMM(), which is DST-aware (unlike a flat
+// UTC-offset calculation), so this is correct across the AEST/AEDT change.
 // Idempotence: state.macroDate is persisted, so a page reload never re-runs.
 // Failures retry on later ticks, capped at 3 attempts/day to avoid toast spam.
 function checkMacroBriefSchedule() {
@@ -275,8 +280,9 @@ function checkMacroBriefSchedule() {
   if (!hasKey) return;
   const today = todayStr();
   if (state.macroDate === today && state.macroData?.analysis) return;   // already ran today
-  const day = new Date().getDay();
-  if (day === 0 || day === 6) return;                       // weekend — keep Friday's brief
+  if (!isWeekday()) return;                                 // weekend — keep Friday's brief
+  const scheduledTime = state.settings?.autoMacroBriefTime;
+  if (scheduledTime && timeToMins(sydneyHHMM()) < timeToMins(scheduledTime)) return;
   if (window._macroAutoRunning) return;
   let attempts = {};
   try { attempts = JSON.parse(localStorage.getItem('macroAutoAttempts') || '{}'); } catch (_) {}
