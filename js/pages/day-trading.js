@@ -297,9 +297,9 @@ function _renderDtRulesTab() {
     <div style="display:flex;flex-direction:column;gap:14px">
 
       ${anyModified ? `
-      <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:#92400e;display:flex;align-items:center;justify-content:space-between">
+      <div style="background:var(--warn-bg);border:1px solid var(--warn);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--warn);display:flex;align-items:center;justify-content:space-between">
         <span>Custom scanner rules active. Pre-filter applied immediately — AI params injected on next scan.</span>
-        <button class="btn btn-sm" onclick="resetDtRules()" style="white-space:nowrap">↺ Reset all</button>
+        <button class="btn btn-sm" onclick="resetDtRules()" style="white-space:nowrap;color:var(--warn)">↺ Reset all</button>
       </div>` : `
       <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--text-muted)">
         Using default scanner rules. Edit any value below — pre-filter applies immediately, AI params on next scan.
@@ -678,9 +678,9 @@ function _renderIntradayRulesContent() {
     <div style="display:flex;flex-direction:column;gap:14px">
 
       ${anyModified ? `
-      <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:#92400e;display:flex;align-items:center;justify-content:space-between">
+      <div style="background:var(--warn-bg);border:1px solid var(--warn);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--warn);display:flex;align-items:center;justify-content:space-between">
         <span>Custom intraday rules active — applied on next scan.</span>
-        <button class="btn btn-sm" onclick="resetIntradayRules()" style="white-space:nowrap">↺ Reset all</button>
+        <button class="btn btn-sm" onclick="resetIntradayRules()" style="white-space:nowrap;color:var(--warn)">↺ Reset all</button>
       </div>` : `
       <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--text-muted)">
         Using default intraday rules. Edit any value below — changes apply on next scan.
@@ -785,9 +785,15 @@ function _renderIntradayRulesContent() {
 
 function resetIntradayRules() {
   if (!state.intraday) return;
+  // universeKey must reset to the literal default ('asx100'), not preserve
+  // whatever the user last picked — preserving it here was silently keeping
+  // _renderIntradayRulesContent()'s `anyModified` check permanently true
+  // (it compares against the literal 'asx100' default), so the "Custom
+  // intraday rules active" banner never cleared once the universe had ever
+  // been changed, no matter how many times Reset all was clicked.
   state.intraday.params = {
     targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
-    universeKey: state.intraday.params?.universeKey || 'asx100', extremeMode: false,
+    universeKey: 'asx100', extremeMode: false,
     vwapThreshold: -0.3, rsiThreshold: 40, requireVolRising: false,
     stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5,
   };

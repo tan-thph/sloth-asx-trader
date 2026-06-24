@@ -1996,9 +1996,9 @@ function renderRecRulesPanel() {
     <div style="display:flex;flex-direction:column;gap:14px">
 
       ${isModified ? `
-      <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:#92400e;display:flex;align-items:center;justify-content:space-between">
+      <div style="background:var(--warn-bg);border:1px solid var(--warn);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--warn);display:flex;align-items:center;justify-content:space-between">
         <span>Custom rules active — defaults have been modified. These are applied on every analysis run.</span>
-        <button class="btn btn-sm" onclick="resetRecRules()" style="white-space:nowrap">↺ Reset all</button>
+        <button class="btn btn-sm" onclick="resetRecRules()" style="white-space:nowrap;color:var(--warn)">↺ Reset all</button>
       </div>` : `
       <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--text-muted)">
         Using default rules. Edit any value below to override — changes are applied immediately on the next run.
