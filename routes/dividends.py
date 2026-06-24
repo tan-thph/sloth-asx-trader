@@ -214,23 +214,6 @@ def _build_dividend_response(ticker: str, asx_history: list[dict], yf_info: dict
     frequency, freq_label = _infer_frequency(asx_history)
 
     ordinary = [h for h in asx_history if "special" not in h.get("dividend_type", "").lower()]
-    next_est = None
-    if ordinary:
-        last_2_amounts = [h["amount"] for h in ordinary[:2] if h.get("amount") is not None]
-        if last_2_amounts:
-            next_est = round(sum(last_2_amounts) / len(last_2_amounts), 4)
-
-    annual_div = yf_info.get("dividendRate")
-    if not annual_div and next_est and frequency:
-        annual_div = round(next_est * frequency, 4)
-    if not annual_div and ordinary:
-        one_year_ago = (datetime.now() - timedelta(days=370)).strftime("%Y-%m-%d")
-        ttm = [h["amount"] for h in ordinary if h["ex_date"] >= one_year_ago and h.get("amount")]
-        if ttm:
-            annual_div = round(sum(ttm), 4)
-
-    recent_franking = [h["franking_pct"] for h in asx_history[:6] if h.get("franking_pct") is not None]
-    avg_franking = round(sum(recent_franking) / len(recent_franking), 1) if recent_franking else 0.0
 
     today_str = datetime.now().strftime("%Y-%m-%d")
     upcoming = next(
@@ -240,6 +223,42 @@ def _build_dividend_response(ticker: str, asx_history: list[dict], yf_info: dict
     )
     ex_date_str  = upcoming["ex_date"]     if upcoming else (asx_history[0]["ex_date"] if asx_history else None)
     pay_date_str = upcoming["payable_date"] if upcoming else None
+
+    # Trailing 2-period average — used ONLY as (a) the annualization base
+    # below and (b) the next_est fallback when no forward-declared amount is
+    # known yet. Must NOT be conflated with next_est itself: annualizing a
+    # single uneven period (e.g. doubling SGP's $0.162 final) overstates/
+    # understates the true run-rate when interim != final, so the
+    # average-of-last-2 (or the TTM sum fallback below) stays the basis for
+    # annual_div even once next_est below is upgraded to the real forward amount.
+    trailing_avg_est = None
+    if ordinary:
+        last_2_amounts = [h["amount"] for h in ordinary[:2] if h.get("amount") is not None]
+        if last_2_amounts:
+            trailing_avg_est = round(sum(last_2_amounts) / len(last_2_amounts), 4)
+
+    # Prefer the ACTUAL declared amount for the next dividend (upcoming, by
+    # ex_date) over the trailing average — the average is only a fallback for
+    # when no forward-declared amount is known yet. Without this, a stock
+    # whose distribution changed between periods (e.g. SGP: $0.09 interim ->
+    # $0.162 final) showed a meaningless blended figure ($0.126) instead of
+    # the real upcoming amount, even though the correct value was already
+    # sitting in `upcoming["amount"]`.
+    next_est = (round(upcoming["amount"], 4)
+                if upcoming and upcoming.get("amount") is not None
+                else trailing_avg_est)
+
+    annual_div = yf_info.get("dividendRate")
+    if not annual_div and trailing_avg_est and frequency:
+        annual_div = round(trailing_avg_est * frequency, 4)
+    if not annual_div and ordinary:
+        one_year_ago = (datetime.now() - timedelta(days=370)).strftime("%Y-%m-%d")
+        ttm = [h["amount"] for h in ordinary if h["ex_date"] >= one_year_ago and h.get("amount")]
+        if ttm:
+            annual_div = round(sum(ttm), 4)
+
+    recent_franking = [h["franking_pct"] for h in asx_history[:6] if h.get("franking_pct") is not None]
+    avg_franking = round(sum(recent_franking) / len(recent_franking), 1) if recent_franking else 0.0
 
     history = [
         {
