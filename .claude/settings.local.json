@@ -141,7 +141,8 @@
       "PowerShell(node --check \"js\\\\pages\\\\recommendations.js\" 2>&1; \"EXIT:$LASTEXITCODE\")",
       "PowerShell(node --version 2>&1)",
       "PowerShell(node --check js/prompts.js; node --check js/claude-client.js; node --check js/response-validator.js)",
-      "PowerShell(npm *)"
+      "PowerShell(npm *)",
+      "Bash(gh api *)"
     ]
   }
 }

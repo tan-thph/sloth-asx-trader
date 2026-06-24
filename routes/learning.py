@@ -30,6 +30,7 @@ _ALLOWED_OUTCOME_COLS = (
     "tags", "trade_thesis", "rr_ratio",
     "success_tags", "checklist_bypasses",
     "thesis_verdict", "exit_signals_json",
+    "regime_at_execution",
 )
 
 # ── Calibration TTL cache (L4) ────────────────────────────────────────────────

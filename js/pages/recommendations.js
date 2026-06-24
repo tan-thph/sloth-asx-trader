@@ -1395,6 +1395,14 @@ function markExecuted(id, execPrice, execFee, execQty) {
   const tradePrice = (execPrice !== undefined && !isNaN(execPrice) && execPrice > 0) ? execPrice : (rec.priceRange?.[0] ?? 0);
   const isReducing = rec.action === 'SELL' || rec.action === 'TRIM';
 
+  // Regime live at the moment this transaction is actually filled — distinct
+  // from rec._genRegime (stamped at generation time, possibly days earlier for
+  // a rec that sat pending). Prefers the live classifier state; falls back to
+  // the last-known string cache (set during the most recent AI analysis run)
+  // if the live read is for some reason unavailable.
+  const execRegime = (state.currentRegime && state.currentRegime.regime)
+    || (typeof state._lastRegime === 'string' ? state._lastRegime : null);
+
   let tradeEntry;
   let realizedPnl = null;   // will be set for SELL/TRIM when holding exists
 
@@ -1455,13 +1463,14 @@ function markExecuted(id, execPrice, execFee, execQty) {
         status: 'closed', pnl: realizedPnl, closeDate: today,
         disposalIds: disposals.map((_, i) => prevDisposalLen + i),
         recId: rec.id, recExecuted: true, timestamp: time, account: sellAccount,
-        exitSignals: execExitSignals,
+        exitSignals: execExitSignals, regime: execRegime,
       };
     } else {
       tradeEntry = {
         id: state.tradeJournal.length + 1, date: today, ticker: rec.ticker, action: rec.action,
         qty, entryPrice: tradePrice, exitPrice: null, fees,
-        status: 'open', pnl: null, recId: rec.id, recExecuted: true, timestamp: time
+        status: 'open', pnl: null, recId: rec.id, recExecuted: true, timestamp: time,
+        regime: execRegime,
       };
       toast(`${rec.action} ${rec.ticker}: not enough shares held — logged but portfolio unchanged.`, 'warn');
     }
@@ -1480,7 +1489,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
       status: 'open', pnl: null,
       parcelId: newParcel ? newParcel.id : null,
       recId: rec.id, recExecuted: true, timestamp: time,
-      entrySignals: execEntrySignals,
+      entrySignals: execEntrySignals, regime: execRegime,
     };
   }
 
@@ -1574,7 +1583,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
     const holdDays = (tradeEntry.date && today && typeof parseDate === 'function')
       ? Math.max(0, Math.round((parseDate(today).getTime() - parseDate(tradeEntry.date).getTime()) / 86400000))
       : null;
-    const currentRegime = typeof state._lastRegime === 'string' ? state._lastRegime : null;
+    const currentRegime = execRegime;
     const sector = rec.sector || (typeof getPortfolioHolding === 'function'
       ? getPortfolioHolding(rec.ticker)?.sector : null) || null;
 
@@ -1585,6 +1594,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
         actual_entry_price: entryP ?? null,
         actual_exit_price:  exitP  ?? null,
         sector,
+        regime_at_execution: currentRegime,
         ...(rec._tags   ? { tags:         rec._tags   } : {}),
         ...(rec._thesis ? { trade_thesis: rec._thesis } : {}),
       };
@@ -1639,6 +1649,7 @@ function markExecuted(id, execPrice, execFee, execQty) {
                 exit_reason:         prExitReason,
                 actual_exit_price:   tradePrice,
                 holding_period_days: holdDays,
+                regime_at_execution: currentRegime,
                 // Phase 2+3: propagate thesis verdict from the SELL/TRIM rec to parent BUY events
                 thesis_verdict:      rec._thesisCheck?.verdict ?? null,
                 // Exit-signals capture: propagate the same exit snapshot onto the

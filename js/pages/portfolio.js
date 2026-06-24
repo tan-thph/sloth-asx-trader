@@ -1170,6 +1170,9 @@ function applyDrpEvent(ticker) {
     entryPrice: drpPrice, exitPrice: null, fees: 0, pnl: 0,
     status: 'open', recId: null, recExecuted: false, closeDate: null,
     parcelId, account: holding.account || 'personal',
+    // Only stamp today's regime when the DRP date is actually today — a
+    // backdated settlement date shouldn't carry today's market regime.
+    regime: (date === todayStr()) ? ((state.currentRegime && state.currentRegime.regime) || null) : null,
   });
 
   scheduleSave();

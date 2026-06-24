@@ -95,8 +95,8 @@ def db_save():
                     INSERT INTO trade_journal
                         (id, date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status,
                          rec_id, rec_executed, close_date, account, sector, parcel_id, disposal_ids, notes, thesis,
-                         entry_signals_json, exit_signals_json)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         entry_signals_json, exit_signals_json, regime)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     t.get("id"),
                     t.get("date"), t.get("timestamp"), t["ticker"], t["action"],
@@ -109,6 +109,7 @@ def db_save():
                     t.get("notes"), t.get("thesis"),
                     json.dumps(t["entrySignals"]) if t.get("entrySignals") is not None else None,
                     json.dumps(t["exitSignals"])  if t.get("exitSignals")  is not None else None,
+                    t.get("regime"),
                 ))
 
         # --- rec history ---
@@ -203,6 +204,7 @@ def db_load():
                 "thesis": row["thesis"],
                 "entrySignals": json.loads(row["entry_signals_json"]) if row["entry_signals_json"] else None,
                 "exitSignals":  json.loads(row["exit_signals_json"])  if row["exit_signals_json"]  else None,
+                "regime": row["regime"] if "regime" in row.keys() else None,
             })
 
         rec_history = []

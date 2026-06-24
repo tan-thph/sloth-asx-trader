@@ -304,6 +304,16 @@ function renderDashboard() {
     if (cal) cal.outerHTML = _buildEconomicCalendarCard() || '';
   });
 
+  // Ops strip's regime badge needs state.currentRegime, which is otherwise only
+  // populated as a side effect of running AI analysis — fetch it here so the
+  // badge doesn't show "—" until the user happens to trigger a recommendation.
+  if (!state.currentRegime) {
+    fetchAndClassifyRegime().then(() => {
+      const el = document.getElementById('ops-strip-regime');
+      if (el) el.outerHTML = `<span id="ops-strip-regime">${_opsRegimeBadge()}</span>`;
+    });
+  }
+
   const pv=portfolioValue(), nw=totalNetWorth(), gain=totalGain(), gainPct=(gain/totalCost())*100;
   const pending=state.recommendations.filter(r=>r.status==='pending').length;
   const execRate=state.recHistory.length ? state.recHistory.filter(r=>r.executed).length/state.recHistory.length : 0;
@@ -454,92 +464,5 @@ function renderDashboard() {
 
     ${_buildEconomicCalendarCard()}
     ${_buildCashTrackerCard()}
-
-    <div class="card section-gap" id="morning-brief-card">
-      <div class="flex-between" style="margin-bottom:4px">
-        <div class="card-title" style="margin:0">Morning Brief</div>
-        <div class="flex-row" style="gap:8px">
-          ${window._morningBrief ? `<span class="text-xs text-muted">${window._morningBrief.date}</span>` : ''}
-          <button class="btn btn-sm btn-primary" onclick="generateMorningBrief()" id="brief-btn">
-            ${window._morningBrief ? '⟳ Refresh' : 'Generate Brief'}
-          </button>
-        </div>
-      </div>
-      ${window._morningBrief
-        ? `<div style="font-size:13px;line-height:1.65;white-space:pre-wrap;color:var(--text-primary);margin-top:6px">${escapeHTML(window._morningBrief.text)}</div>`
-        : `<p class="text-xs text-muted">Chain macro + regime + holdings into a concise session note. Requires an API key.</p>`}
-      <div id="brief-loading" style="display:none;padding:8px 0">
-        <div class="loading-dots"><span></span><span></span><span></span></div>
-      </div>
-    </div>
   `;
-}
-
-let _morningBriefRunning = false;
-
-async function generateMorningBrief() {
-  if (_morningBriefRunning) return;
-  const btn = document.getElementById('brief-btn');
-  const loading = document.getElementById('brief-loading');
-  if (!btn) return;
-
-  _morningBriefRunning = true;
-  btn.disabled = true;
-  btn.textContent = 'Generating…';
-  if (loading) loading.style.display = 'block';
-
-  try {
-    const pv = portfolioValue(), nw = totalNetWorth();
-    const merged = mergedPortfolio();
-    const regime = state.currentRegime;
-
-    const holdingLines = merged.map(h => {
-      const sig = state.liveSignals[h.ticker];
-      const pl = ((h.currentPrice - h.avgPrice) / h.avgPrice * 100).toFixed(1);
-      return `  ${h.ticker} (${h.sector}): $${(h.shares * h.currentPrice).toFixed(0)}, P&L ${pl}%` +
-        (sig ? `, RSI ${sig.rsi_14 != null ? sig.rsi_14.toFixed(0) : '?'}, score ${sig.score != null ? sig.score : '?'}` : '');
-    }).join('\n');
-
-    const macro = state.macroData;
-    const macroLine = macro
-      ? `ASX200: ${macro.asx200 != null ? macro.asx200.toFixed(0) : '?'}, AUD/USD: ${macro.audusd != null ? macro.audusd.toFixed(4) : '?'}, sentiment: ${macro.sentiment || '?'} (${macro.bullish != null ? macro.bullish + '% bullish' : '?'})`
-      : 'No macro data — run Morning Macro first.';
-
-    const regimeLine = regime
-      ? `Regime: ${regime.regime} (${Math.round((regime.confidence || 0) * 100)}% confidence)`
-      : 'Regime: unknown';
-
-    const pendingCount = state.recommendations.filter(r => r.status === 'pending').length;
-    const rbaLine = `RBA cash rate: ${state.rbaRate}%`;
-
-    const prompt =
-`Date: ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-${macroLine}
-${regimeLine}
-${rbaLine}
-Portfolio: $${pv.toFixed(0)} holdings + $${state.cash.toFixed(0)} cash = $${nw.toFixed(0)} net worth
-Pending recs: ${pendingCount}
-
-Holdings:
-${holdingLines || '  (none)'}
-
-Write a morning briefing covering:
-1. Market regime and macro context (1-2 sentences)
-2. Key risks or events to watch today (1-2 sentences)
-3. Any holdings that stand out based on their signals or recent price action (1-2 sentences)
-4. One suggested focus for the session (1 sentence)`;
-
-    const text = await callClaude('briefing', prompt);
-    window._morningBrief = {
-      text,
-      date: new Date().toLocaleDateString('en-AU', { weekday: 'short', month: 'short', day: 'numeric' }),
-    };
-    renderPage();
-  } catch (e) {
-    toast('Brief failed: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Generate Brief'; }
-    if (loading) loading.style.display = 'none';
-  } finally {
-    _morningBriefRunning = false;
-  }
 }

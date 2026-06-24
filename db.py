@@ -324,6 +324,13 @@ _LE_MIGRATIONS = [
     # timestamp of the last failed fetch attempt; each resolver's WHERE clause
     # excludes rows with a recent failure (retry window, not a permanent block).
     ("fetch_failed_at",     "TEXT"),
+    # Regime captured at execution time (markExecuted()), distinct from the
+    # write-once `regime` column above (which is stamped at generation time and
+    # never updated). A rec sitting "pending" for days could be executed under a
+    # different regime than the one it was generated in — this column lets
+    # calibration/analysis tell the two apart instead of only ever seeing the
+    # generation-time snapshot. Patchable via /api/learning/outcome.
+    ("regime_at_execution", "TEXT"),
 ]
 
 
@@ -393,6 +400,11 @@ def init_db():
             ("thesis",             "TEXT"),
             ("entry_signals_json", "TEXT"),
             ("exit_signals_json",  "TEXT"),
+            # Regime live at the moment this transaction was recorded (BUY/SELL/
+            # TOP_UP/TRIM/DRP/manual). NULL for historical CSV imports — backdating
+            # today's regime onto a trade that happened on an arbitrary past date
+            # would be actively wrong, not just incomplete.
+            ("regime",             "TEXT"),
         ):
             if col not in tj_cols:
                 conn.execute(f"ALTER TABLE trade_journal ADD COLUMN {col} {defn}")

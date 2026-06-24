@@ -209,6 +209,7 @@ function dtCloseSnapshot(snapshotId, exitData) {
     actual_hold_days: exitData.actual_hold_days  || null,
     pnl_pct:          exitData.pnl_pct           || null,
     exit_signals_json: exitData.exitSignals ? JSON.stringify(exitData.exitSignals) : null,
+    regime_at_close:  (state.currentRegime && state.currentRegime.regime) || null,
   };
 
   // Compute pnl_pct if not supplied

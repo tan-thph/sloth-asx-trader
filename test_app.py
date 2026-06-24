@@ -1559,26 +1559,12 @@ class TestSprint5(unittest.TestCase):
         tickers = [x["ticker"] for x in (d["watchlist"] or [])]
         self.assertIn("GMG", tickers)
 
-    def test_morning_brief_prompt_defined(self):
-        """MORNING_BRIEFING_SYSTEM_PROMPT must be defined in prompts.js."""
-        with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
-            src = f.read()
-        self.assertIn("MORNING_BRIEFING_SYSTEM_PROMPT", src)
-        self.assertIn("morning session note", src.lower())
-
     def test_journal_regime_badge_function(self):
         """journal.js must define _journalRegimeBadge helper."""
         with open(os.path.join(ROOT, "js/pages/journal.js"), encoding="utf-8") as f:
             src = f.read()
         self.assertIn("_journalRegimeBadge", src)
         self.assertIn("matchedRec", src)
-
-    def test_generate_morning_brief_function(self):
-        """dashboard.js must define generateMorningBrief and use briefing agent type."""
-        with open(os.path.join(ROOT, "js/pages/dashboard.js"), encoding="utf-8") as f:
-            src = f.read()
-        self.assertIn("async function generateMorningBrief()", src)
-        self.assertIn("callClaude('briefing'", src)
 
     def test_generate_postmortem_digest_function(self):
         """learning.js must define generatePostmortemDigest async function."""
@@ -6268,32 +6254,6 @@ class TestSprint45(unittest.TestCase):
         """recommendations.js must render a Trailed badge when _stopTrailed is set."""
         src = open(os.path.join(ROOT, "js", "pages", "recommendations.js"), encoding="utf-8").read()
         self.assertIn("Trailed", src)
-
-    # ── Item 3: Scheduled morning briefing ──────────────────────────────────
-
-    def test_auto_brief_time_in_config_js(self):
-        """config.js state.settings must contain autoBriefTime default."""
-        src = open(os.path.join(ROOT, "js", "config.js"), encoding="utf-8").read()
-        self.assertIn("autoBriefTime", src)
-
-    def test_check_auto_brief_schedule_function_exists(self):
-        """scheduler.js must define checkAutoBriefSchedule function."""
-        src = open(os.path.join(ROOT, "js", "scheduler.js"), encoding="utf-8").read()
-        self.assertIn("checkAutoBriefSchedule", src)
-        self.assertIn("autoBriefFiredDate", src)
-        self.assertIn("autoBriefTime", src)
-
-    def test_auto_brief_called_from_init(self):
-        """init.js must call checkAutoBriefSchedule after init sequence."""
-        src = open(os.path.join(ROOT, "js", "init.js"), encoding="utf-8").read()
-        self.assertIn("checkAutoBriefSchedule", src)
-
-    def test_auto_brief_input_in_settings_js(self):
-        """settings.js Display section must include auto-brief time input."""
-        src = open(os.path.join(ROOT, "js", "pages", "settings.js"), encoding="utf-8").read()
-        self.assertIn("autoBriefTime", src)
-        self.assertIn("Auto-brief time", src)
-
 
 class TestSprint46(unittest.TestCase):
     """Sprint 46: broker SELL import, rebalance suggestions, universe exclusion list."""

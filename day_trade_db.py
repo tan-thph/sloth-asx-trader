@@ -94,7 +94,11 @@ CREATE TABLE IF NOT EXISTS trade_snapshots (
     -- exit_quality_tag from this blob: exit_into_strength | exit_after_
     -- reversal_confirmed | exit_into_weakness | exit_neutral | NULL.
     exit_signals_json TEXT,
-    exit_quality_tag  TEXT
+    exit_quality_tag  TEXT,
+
+    -- Regime captured at close time, distinct from the entry-time `regime`
+    -- column above — lets analysis compare regime-at-entry vs regime-at-exit.
+    regime_at_close   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_dts_ticker  ON trade_snapshots(ticker);
@@ -173,6 +177,10 @@ def init_dt_db():
             # Exit-signals capture
             "ALTER TABLE trade_snapshots ADD COLUMN exit_signals_json TEXT",
             "ALTER TABLE trade_snapshots ADD COLUMN exit_quality_tag TEXT",
+            # Regime captured at close time, distinct from the entry-time `regime`
+            # column above — lets analysis compare regime-at-entry vs regime-at-exit
+            # instead of only ever seeing the entry snapshot.
+            "ALTER TABLE trade_snapshots ADD COLUMN regime_at_close TEXT",
         ]
         for _sql in _migrations:
             try:

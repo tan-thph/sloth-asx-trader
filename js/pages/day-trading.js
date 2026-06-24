@@ -1194,6 +1194,7 @@ function executeIntradayTrade(recId) {
       parcelId:    newParcel ? newParcel.id : null,
       recId:       rec.id,
       recExecuted: true,
+      regime:      (state.currentRegime && state.currentRegime.regime) || null,
       notes:       'Intraday BUY',
       entrySignals: {
         rsi_14:    _itSig.rsi_14    ?? null,

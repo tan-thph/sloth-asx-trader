@@ -330,9 +330,9 @@ function computeRRRealization(recHistory) {
  * @param {string[]} sectors - Sectors present in the current analysis
  * @param {string[]} tickers - Portfolio tickers for per-ticker / playbook scoping
  * @param {{deep?: boolean}} [opts] - Sprint 71 Phase 3D: deep mode requests the
- *        token-heavy exemplar/playbook/cross-tab blocks (morning-briefing /
- *        full portfolio analysis). Light (default) is stats-only for high-
- *        frequency intraday refreshes. Exemplars (when present) are stashed on
+ *        token-heavy exemplar/playbook/cross-tab blocks (full portfolio
+ *        analysis). Light (default) is stats-only for high-frequency intraday
+ *        refreshes. Exemplars (when present) are stashed on
  *        window._calibExemplars for analysis.js to render as an EXEMPLARS: block.
  */
 async function fetchCalibrationBlock(regime, sectors, tickers, opts = {}) {

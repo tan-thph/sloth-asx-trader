@@ -268,7 +268,6 @@ python3 asx_server.py</pre>
             <option value="universe">universe</option>
             <option value="macro">macro</option>
             <option value="assistant">assistant</option>
-            <option value="briefing">briefing</option>
             <option value="test">test</option>
           </select>
           <button class="btn btn-sm" onclick="loadAICallLog()">&#8635; Refresh</button>
@@ -324,15 +323,6 @@ python3 asx_server.py</pre>
             ${state.settings.useLocalLLM ? 'Local' : 'Off'}
           </span>
         </label>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border-light)">
-        <div>
-          <div style="font-size:13px;font-weight:600">Auto-brief time <span style="font-size:10px;color:var(--text-muted);font-weight:400">(AEST)</span></div>
-          <div class="text-xs text-muted">Morning briefing fires once per day on first load at or after this time. Leave blank to disable.</div>
-        </div>
-        <input type="time" value="${state.settings.autoBriefTime || ''}"
-          style="padding:4px 8px;border-radius:6px;border:1px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:13px"
-          onchange="updateSetting('autoBriefTime', this.value); scheduleSave()">
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border-light)">
         <div>
@@ -621,7 +611,7 @@ function _renderAISpendSummary(d) {
   const agentColors = {
     portfolio: '#6366f1', analyst: '#8b5cf6', pm: '#a78bfa',
     dayTrade: '#f59e0b',  universe: '#f97316', macro: '#0ea5e9',
-    assistant: '#22c55e', briefing: '#14b8a6',
+    assistant: '#22c55e',
   };
   const byAgent = {};
   for (const row of d.breakdown) {
@@ -656,7 +646,7 @@ function _renderAICallLogTable(entries, total) {
   const agentColors = {
     portfolio: '#6366f1', analyst: '#8b5cf6', pm: '#a78bfa',
     dayTrade: '#f59e0b',  universe: '#f97316', macro: '#0ea5e9',
-    assistant: '#22c55e', briefing: '#14b8a6',
+    assistant: '#22c55e',
   };
   const rows = entries.map(e => {
     const col = agentColors[e.agent_type] || 'var(--text-muted)';

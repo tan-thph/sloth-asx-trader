@@ -548,6 +548,11 @@ async function addManualTrade() {
   // Snapshot live technicals — only when trade is today; backdated fills get null.
   const entrySignals = await _fetchSignalSnapshot(symbol, tradeDate);
   const thesis = thesisInput || null;
+  // Same today-only gate as entrySignals — stamping today's regime onto a
+  // backdated manual entry would misrepresent the conditions at that date.
+  const regime = (tradeDate === todayStr())
+    ? ((state.currentRegime && state.currentRegime.regime) || null)
+    : null;
   let tradeEntry;
 
   if(action === 'SELL') {
@@ -562,14 +567,14 @@ async function addManualTrade() {
         status: 'closed', pnl: grossPnl,
         disposalIds: disposals.map((_,i) => prevLen + i),
         recId: null, recExecuted: false, timestamp: nowSydney(),
-        entrySignals, thesis
+        entrySignals, thesis, regime
       };
     } else {
       tradeEntry = {
         id: state.tradeJournal.length + 1, date: tradeDate, ticker: symbol, action,
         qty, entryPrice: price, exitPrice: null, fees,
         status: 'open', pnl: null, recId: null, recExecuted: false, timestamp: nowSydney(),
-        entrySignals, thesis
+        entrySignals, thesis, regime
       };
       toast('Sell logged — no matching portfolio position found. Portfolio unchanged.', 'warn');
     }
@@ -584,7 +589,7 @@ async function addManualTrade() {
       status: 'open', pnl: null,
       parcelId: newParcel ? newParcel.id : null,
       recId: null, recExecuted: false, timestamp: nowSydney(),
-      entrySignals, thesis
+      entrySignals, thesis, regime
     };
   }
 

@@ -245,6 +245,7 @@ def dt_snapshot_close(snap_id):
     exit_date       = d.get("exit_date")
     actual_hold_days = d.get("actual_hold_days")
     exit_signals_json = d.get("exit_signals_json")  # JSON string, opaque here
+    regime_at_close = d.get("regime_at_close")  # regime live at close time, vs entry-time `regime`
 
     # Exit-signals capture: diagnostic-only technical classification of the exit
     # timing, reused from the same pure function the main Learning Loop uses for
@@ -303,11 +304,12 @@ def dt_snapshot_close(snap_id):
             UPDATE trade_snapshots
                SET exit_date=?, exit_price=?, exit_reason=?,
                    actual_hold_days=?, pnl_pct=?, outcome=?, r_multiple=?,
-                   exit_signals_json=?, exit_quality_tag=?,
+                   exit_signals_json=?, exit_quality_tag=?, regime_at_close=?,
                    updated_at=datetime('now')
              WHERE id=?
         """, (exit_date, exit_price, exit_reason, actual_hold_days,
-              pnl_pct, outcome, r_multiple, exit_signals_json, exit_quality_tag, snap_id))
+              pnl_pct, outcome, r_multiple, exit_signals_json, exit_quality_tag,
+              regime_at_close, snap_id))
 
     return jsonify({"ok": True, "id": snap_id, "outcome": outcome})
 

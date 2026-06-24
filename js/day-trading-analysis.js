@@ -379,6 +379,7 @@ function executeDayTrade(recId) {
       parcelId:    newParcel ? newParcel.id : null,
       recId:       rec.id,
       recExecuted: true,
+      regime:      (state.currentRegime && state.currentRegime.regime) || null,
       notes:       `SwingTrade | Target:$${rec.target} | Stop:$${rec.stopLoss} | R:R ${rec.rrRatio?.toFixed(1)}x | Hold:${rec.holdDays}d`,
       entrySignals: _swingSig.rsi_14 != null ? {
         rsi_14:      _swingSig.rsi_14     ?? null,
