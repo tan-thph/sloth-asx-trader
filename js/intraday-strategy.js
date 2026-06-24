@@ -13,29 +13,43 @@ const INTRADAY_DEFAULTS = {
   targetPct:       3.5,   // exit target % (fallback when ATR unavailable)
   stopPct:         1.5,   // stop loss % (fallback when ATR unavailable)
   maxPositions:    2,     // max concurrent intraday trades
-  minScore:        40,    // minimum setup score (0–100) — always enforced, not part of the signal count
+  minScore:        40,    // minimum setup score (0–100)
   allocPct:        20,    // % of state.cash allocated to intraday
-  // Replaces the old binary "Extreme Mode" (which bypassed window/VWAP/RSI/
-  // vol/R:R all at once with no granularity). A ticker needs at least this
-  // many of the 4 confirmation signals below (VWAP, RSI, Vol rising, Above
-  // open) to qualify — lower it during testing instead of an all-or-nothing
-  // bypass. Entry-window timing is a separate concern (see ignoreEntryWindow
-  // below), not one of the 4 counted signals.
-  minConfirms:     2,
-  ignoreEntryWindow: false, // testing-only: skip the 10:45–15:00 AEST entry-window gate
-  // ── Technical indicator thresholds (each is one of the 4 counted signals) ──
+  // ── Technical indicator thresholds (confirmation signals) ───────────────────
   vwapThreshold:   -0.3,  // price must be ≤ VWAP + this % (e.g. -0.3 = 0.3% below VWAP)
   rsiThreshold:    40,    // intraday RSI must be ≤ this value to qualify
   stopAtrMult:     1.5,   // stop = entry − N × ATR5m (when ATR available)
   targetAtrMult:   2.0,   // target = VWAP + N × ATR5m (overrides fixed % when ATR available)
-  minRrRatio:      1.5,   // reject setups with R:R below this after computing stop/target — always enforced
+  minRrRatio:      1.5,   // reject setups with R:R below this after computing stop/target
+  // Every rule below can be individually ticked on/off (Day Trading -> Intraday
+  // -> Rules, table with a checkbox per row) rather than only loosened by
+  // threshold value. entryWindow/minScore/minRrRatio are independent gates;
+  // vwapThreshold/rsiThreshold/volRising/aboveOpen are confirmation signals —
+  // ALL ticked ones must fire (AND logic). Replaces the old binary "Extreme
+  // Mode" (bypassed window+VWAP+RSI+R:R all at once with no granularity) and
+  // the separate "requireVolRising" toggle (now just one of the 4 signals).
+  // volRising/aboveOpen default OFF to match this strategy's original
+  // behavior exactly (only VWAP+RSI were ever mandatory; volRising was a
+  // separate opt-in toggle defaulting false, aboveOpen was display-only and
+  // never gated anything) — ticking them on is a deliberate tightening, not
+  // a behavior change from flipping this feature on.
+  enabled: {
+    entryWindow: true, minScore: true, minRrRatio: true,
+    vwapThreshold: true, rsiThreshold: true, volRising: false, aboveOpen: false,
+  },
 };
 
 // ── Build recs from scan results ──────────────────────────────────────────────
 
 function _buildIntradayRecs(scanData) {
   const id = state.intraday || {};
-  const ip = { ...INTRADAY_DEFAULTS, ...(id.params || {}) };
+  // `enabled` must be merged one level deeper than the rest of params — a
+  // shallow {...DEFAULTS, ...params} would let a saved params.enabled object
+  // with only SOME keys silently wipe out the rest of the defaults (e.g. a
+  // user who only ever toggled minScore would lose entryWindow/minRrRatio
+  // entirely, since the whole `enabled` object reference gets replaced).
+  const ip = { ...INTRADAY_DEFAULTS, ...(id.params || {}),
+               enabled: { ...INTRADAY_DEFAULTS.enabled, ...((id.params || {}).enabled || {}) } };
   const allocated = id.allocatedCash != null
     ? id.allocatedCash
     : Math.round(state.cash * ip.allocPct / 100);
@@ -48,29 +62,37 @@ function _buildIntradayRecs(scanData) {
 
   for (const [ticker, d] of entries) {
     if (d.error) continue;
-    if (d.score < ip.minScore) continue;
+    if (_ruleOn(ip, 'minScore') && d.score < ip.minScore) continue;
     if (openCount + recs.length >= ip.maxPositions) break;
 
-    // Entry-window timing is a hard market-structure constraint, not a
-    // confirmation signal — kept separate from the minConfirms count below.
-    // ignoreEntryWindow exists purely for testing outside 10:45–15:00 AEST.
-    if (!ip.ignoreEntryWindow && !d.in_entry_window) continue;
+    // Entry-window timing is a hard market-structure constraint, kept as its
+    // own togglable row rather than one of the 4 counted confirmation
+    // signals below — untick "Entry window" (Day Trading -> Intraday ->
+    // Rules) to test outside 10:45–15:00 AEST.
+    if (_ruleOn(ip, 'entryWindow') && !d.in_entry_window) continue;
 
     // Client-side effective-pass gate (uses raw backend metrics, ignores
-    // backend's hardcoded thresholds): count how many of the 4 confirmation
-    // signals fire, and require at least ip.minConfirms of them. Replaces
-    // the old binary "Extreme Mode" (which bypassed all of these at once
-    // with no granularity) — lower minConfirms during testing instead.
+    // backend's hardcoded thresholds): every TICKED confirmation signal must
+    // fire (AND logic) — replaces the old binary "Extreme Mode" (bypassed
+    // window+VWAP+RSI+vol+R:R all at once with no granularity) and the
+    // separate "requireVolRising" toggle (now just one of the 4 signals).
+    const _sigDefs = [
+      { key: 'vwapThreshold', fired: d.pct_from_vwap != null && d.pct_from_vwap <= ip.vwapThreshold,
+        label: () => `VWAP −${Math.abs(d.pct_from_vwap).toFixed(1)}%` },
+      { key: 'rsiThreshold', fired: d.intraday_rsi != null && d.intraday_rsi <= ip.rsiThreshold,
+        label: () => `RSI ${d.intraday_rsi}` },
+      { key: 'volRising', fired: !!d.vol_rising, label: () => 'Volume↑' },
+      { key: 'aboveOpen', fired: d.current_price != null && d.day_open != null && d.current_price > d.day_open,
+        label: () => 'Above open' },
+    ];
     const signals = [];
-    if (d.pct_from_vwap != null && d.pct_from_vwap <= ip.vwapThreshold)
-      signals.push(`VWAP −${Math.abs(d.pct_from_vwap).toFixed(1)}%`);
-    if (d.intraday_rsi != null && d.intraday_rsi <= ip.rsiThreshold)
-      signals.push(`RSI ${d.intraday_rsi}`);
-    if (d.vol_rising)
-      signals.push('Volume↑');
-    if (d.current_price != null && d.day_open != null && d.current_price > d.day_open)
-      signals.push('Above open');
-    if (signals.length < ip.minConfirms) continue;
+    let _allTickedFired = true;
+    for (const sig of _sigDefs) {
+      if (!_ruleOn(ip, sig.key)) continue;   // unticked — excluded entirely, not required, not shown
+      if (sig.fired) signals.push(sig.label());
+      else _allTickedFired = false;
+    }
+    if (!_allTickedFired) continue;
 
     const entry = d.current_price;
     // Use 5m ATR when available with user-configured multipliers; fall back to fixed-pct
@@ -95,10 +117,9 @@ function _buildIntradayRecs(scanData) {
     // (stop >= entry) produce a thousands-to-one R:R that trivially passed minRrRatio.
     if (stop >= entry) continue;
 
-    // R:R gate — reject before sizing (always enforced; loosen ip.minRrRatio
-    // itself for testing rather than bypassing this check entirely)
+    // R:R gate — reject before sizing
     const rrRatio = +((target - entry) / (entry - stop)).toFixed(1);
-    if (rrRatio < ip.minRrRatio) continue;
+    if (_ruleOn(ip, 'minRrRatio') && rrRatio < ip.minRrRatio) continue;
 
     // Try quant engine sizing first (requires daily signals for this ticker)
     let qty = null;

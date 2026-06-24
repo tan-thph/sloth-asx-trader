@@ -20,13 +20,15 @@ function _dtPreFilterWithStats(tickers) {
   for (const t of tickers) {
     const s = state.liveSignals[t];
     if (!s || s.error) { stats.noData++; continue; }
-    if ((s.bb_pct_b  ?? 1) > fp.maxBbPctB)                                                                 { stats.bb++;  continue; }
-    if ((s.adv_20    ?? 0) < fp.minAdvAud)                                                                  { stats.adv++; continue; }
+    if (_ruleOn(fp, 'maxBbPctB') && (s.bb_pct_b  ?? 1) > fp.maxBbPctB)                                      { stats.bb++;  continue; }
+    if (_ruleOn(fp, 'minAdvAud') && (s.adv_20    ?? 0) < fp.minAdvAud)                                      { stats.adv++; continue; }
     const ref = s.sma_200 ?? s.sma_50;
-    if (ref && s.current_price < ref * fp.sma200Floor)                                                      { stats.sma++; continue; }
-    if ((s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus)               { stats.adx++; continue; }
+    const trendRuleOn = s.sma_200 ? _ruleOn(fp, 'sma200Floor') : _ruleOn(fp, 'sma50Floor');
+    const trendFloor  = s.sma_200 ? fp.sma200Floor : (fp.sma50Floor ?? 0.970);
+    if (trendRuleOn && ref && s.current_price < ref * trendFloor)                                          { stats.sma++; continue; }
+    if (_ruleOn(fp, 'maxAdx') && (s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus) { stats.adx++; continue; }
     // §2.8 VoV — keep in sync with _dtPreFilter() in strategy.js
-    if ((fp.vovMult ?? 0) > 0 && s.atr_14 != null && s.atr_5d_mean != null
+    if (_ruleOn(fp, 'vovMult') && (fp.vovMult ?? 0) > 0 && s.atr_14 != null && s.atr_5d_mean != null
         && s.atr_5d_mean > 0 && s.atr_14 > fp.vovMult * s.atr_5d_mean)                                     { stats.vov++; continue; }
     passing.push(t);
   }
@@ -182,29 +184,25 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
   // §2.7 market breadth gate — when fewer than minAdr of the ASX200 sit above
   // their 20-day SMA, mean-reversion hit rates collapse. Setups are still built
   // (so they can be shadow-logged for the ML at full stop/target fidelity) but
-  // NONE are surfaced. Tunable via Day Trading → Rules (filterParams.minAdr; 0 disables).
+  // NONE are surfaced. Tunable via Day Trading → Rules (filterParams.minAdr) —
+  // tick off the "Market breadth floor" row to disable instead of zeroing the value.
   const _adr    = state.macroData?.advance_decline_ratio;
   const _minAdr = (state.dayTrading?.filterParams?.minAdr ?? DT_FILTER.minAdr ?? 0.25);
-  const _breadthBlocked = _adr != null && _minAdr > 0 && _adr < _minAdr;
+  const _minAdrOn = _ruleOn(state.dayTrading?.filterParams || {}, 'minAdr');
+  const _breadthBlocked = _minAdrOn && _adr != null && _minAdr > 0 && _adr < _minAdr;
 
   for (let i = 0; i < candidates.length; i++) {
     const t = candidates[i];
     const s = state.liveSignals[t];
     if (!s || s.error) continue;
 
-    // Signal #1: BB reclaim — confirmed by _dtPreFilter (bb_pct_b ≤ threshold)
+    // Signal #1: BB reclaim — confirmed by _dtPreFilter (bb_pct_b ≤ threshold).
+    // Always present — it's structurally guaranteed by the pre-filter, so it
+    // isn't one of the togglable rows in the Rules table.
     const signals = ['BB reclaim'];
 
-    // Signal #2: RSI oversold
-    if (s.rsi_14 != null && s.rsi_14 < (ap.rsiThreshold ?? 35))
-      signals.push(`RSI ${s.rsi_14.toFixed(1)}`);
-
-    // Signal #3: Volume surge
-    if (s.volume_z_score != null && s.volume_z_score >= (ap.volZScore ?? 1.5))
-      signals.push(`VolZ ${s.volume_z_score.toFixed(2)}σ`);
-
-    // Signal #4: Fib zone — 50%–61.8% retracement of 60-day range
-    // Uses high_60d/low_60d when available; falls back to return_60d range
+    // Fib zone — 50%–61.8% retracement of 60-day range. Uses high_60d/low_60d
+    // when available; falls back to return_60d range.
     const _fibOk = (() => {
       const px = s.current_price;
       if (s.high_60d != null && s.low_60d != null && s.high_60d > s.low_60d) {
@@ -217,20 +215,34 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
         && s.return_60d >= (ap.fibReturnMin ?? -20)
         && s.return_60d <= (ap.fibReturnMax ?? -5);
     })();
-    if (_fibOk) signals.push(`Fib zone`);
 
-    // Signal #5: OBV rising (bonus)
-    if (s.obv_trend === 'rising') signals.push('OBV rising');
+    // Signals #2–#5: each independently togglable in Day Trading → Rules →
+    // Entry Signal Thresholds. A ticked signal MUST fire (AND logic across
+    // every ticked signal) — replaces the old hardcoded "Signal #1 + ≥2 of 4"
+    // combination rule with explicit per-signal selection: tick 1 signal and
+    // only that one is required, tick all 4 and all 4 are required.
+    const _sigDefs = [
+      { key: 'rsiThreshold', fired: s.rsi_14 != null && s.rsi_14 < (ap.rsiThreshold ?? 35),
+        label: () => `RSI ${s.rsi_14.toFixed(1)}` },
+      { key: 'volZScore', fired: s.volume_z_score != null && s.volume_z_score >= (ap.volZScore ?? 1.5),
+        label: () => `VolZ ${s.volume_z_score.toFixed(2)}σ` },
+      { key: 'fibZone', fired: _fibOk, label: () => 'Fib zone' },
+      { key: 'obvRising', fired: s.obv_trend === 'rising', label: () => 'OBV rising' },
+    ];
+    let _allTickedFired = true;
+    for (const sig of _sigDefs) {
+      if (!_ruleOn(ap, sig.key)) continue;   // unticked — excluded entirely, not required, not shown
+      if (sig.fired) signals.push(sig.label());
+      else _allTickedFired = false;
+    }
+    if (!_allTickedFired) continue;
 
-    // Strategy rule: Signal #1 + ≥minConfirms confirms (default 2 — the
-    // original strategy rule; configurable via Day Trading → Rules → Entry
-    // Signal Thresholds for testing when the default combination produces
-    // zero setups).
+    // Confidence scales with how many of the ticked signals actually fired —
+    // signals.length always includes the automatic "BB reclaim" entry, so
+    // subtract 1 to get the count of additional confirmations.
     const confirms = signals.length - 1;
-    if (confirms < (ap.minConfirms ?? 2)) continue;
-
     const confidence = Math.min(0.50 + confirms * 0.08, 0.90);
-    if (confidence < _minConf) continue;
+    if (_ruleOn(ap, 'minConfidence') && confidence < _minConf) continue;
 
     const entry = s.current_price;
     let rec = {
@@ -252,7 +264,8 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
               rrRatio: qt.rrRatio, riskAUD: qt.riskAUD, rewardAUD: qt.rewardAUD, _quantEngine: true };
     }
 
-    if (!rec.rrRatio || rec.rrRatio < _minRR) continue;
+    if (!rec.rrRatio) continue;   // missing R:R is a data problem, not a togglable rule
+    if (_ruleOn(ap, 'minRrRatio') && rec.rrRatio < _minRR) continue;
 
     if (typeof applyRegimeModifiers === 'function' && regime) {
       rec = applyRegimeModifiers(rec, regime);

@@ -29,6 +29,17 @@ const DT_AI_PARAMS = {
   stopAtrMultiple: 2.5,  // stop loss = entry − stopAtrMultiple × ATR14
 };
 
+// ── Rule enable/disable ────────────────────────────────────────────────────────
+// Every individual pre-filter/signal rule can be toggled off independently
+// (Day Trading -> Rules, table with a checkbox per row) rather than only
+// loosened by threshold value. A disabled rule is skipped entirely — it never
+// rejects a candidate, regardless of its configured threshold. Defaults to
+// enabled (true) so existing saved params without an `enabled` map behave
+// exactly as before this feature shipped.
+function _ruleOn(paramsObj, key) {
+  return !(paramsObj && paramsObj.enabled && paramsObj.enabled[key] === false);
+}
+
 // ── Pre-filter function ────────────────────────────────────────────────────────
 // Returns the subset of tickers whose live signals pass all hard filters.
 // Called by runUniverseScan() in day-trading-analysis.js.
@@ -40,24 +51,26 @@ function _dtPreFilter(tickers) {
     if (!s || s.error) return false;
 
     // Signal #1 — price at/near lower Bollinger Band
-    if ((s.bb_pct_b ?? 1) > fp.maxBbPctB) return false;
+    if (_ruleOn(fp, 'maxBbPctB') && (s.bb_pct_b ?? 1) > fp.maxBbPctB) return false;
 
     // Liquidity filter — ADV > threshold AUD
-    if ((s.adv_20 ?? 0) < fp.minAdvAud) return false;
+    if (_ruleOn(fp, 'minAdvAud') && (s.adv_20 ?? 0) < fp.minAdvAud) return false;
 
     // Trend floor — SMA200 preferred; SMA50 is the fallback for stocks < 200 days old.
     // Uses a tighter floor for SMA50 (0.970 vs 0.985) because SMA50 is naturally much
     // closer to the current price, so a 1.5% floor would be almost meaningless.
     const ref = s.sma_200 ?? s.sma_50;
-    const trendFloor = s.sma_200 ? fp.sma200Floor : (fp.sma50Floor ?? 0.970);
-    if (ref && s.current_price < ref * trendFloor) return false;
+    const usingSma200 = !!s.sma_200;
+    const trendFloor = usingSma200 ? fp.sma200Floor : (fp.sma50Floor ?? 0.970);
+    const trendRuleOn = usingSma200 ? _ruleOn(fp, 'sma200Floor') : _ruleOn(fp, 'sma50Floor');
+    if (trendRuleOn && ref && s.current_price < ref * trendFloor) return false;
 
     // Regime filter — skip stocks already in a strong uptrend (DI+ > DI- confirms direction).
-    if ((s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus) return false;
+    if (_ruleOn(fp, 'maxAdx') && (s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus) return false;
 
     // §2.8 VoV filter — ATR expanding rapidly vs its recent baseline means the
     // noise-floor estimate behind the stop distance is already stale. Skip.
-    if ((fp.vovMult ?? 0) > 0 && s.atr_14 != null && s.atr_5d_mean != null
+    if (_ruleOn(fp, 'vovMult') && (fp.vovMult ?? 0) > 0 && s.atr_14 != null && s.atr_5d_mean != null
         && s.atr_5d_mean > 0 && s.atr_14 > fp.vovMult * s.atr_5d_mean) return false;
 
     return true;

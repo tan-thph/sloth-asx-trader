@@ -273,25 +273,53 @@ function _renderDtSwingMain() {
 
 // ── Day Trading Rules Panel ────────────────────────────────────────────────────
 
-const _DT_FILTER_DEFAULTS = { maxBbPctB: 0.20, minAdvAud: 1500000, sma200Floor: 0.985, maxAdx: 35 };
-const _DT_AI_DEFAULTS     = { stopAtrMultiple: 2.5, minRrRatio: 2.0, minConfidence: 0.50, maxPositionPct: 20, rsiThreshold: 35, volZScore: 1.5, fibReturnMin: -20, fibReturnMax: -5, minConfirms: 2 };
+const _DT_FILTER_DEFAULTS = {
+  maxBbPctB: 0.20, minAdvAud: 1500000, sma200Floor: 0.985, sma50Floor: 0.970,
+  maxAdx: 35, minAdr: 0.25, vovMult: 1.3, timeOfWeekFilter: true,
+  enabled: { maxBbPctB: true, minAdvAud: true, sma200Floor: true, sma50Floor: true, maxAdx: true, minAdr: true, vovMult: true },
+};
+// rsiThreshold/volZScore default ON, fibZone/obvRising default OFF — approximates
+// the old "Signal #1 + any 2 of 4" combination rule's default strictness (2
+// signals) as a fixed AND-subset, since "any N of M" isn't representable by
+// per-signal on/off alone. Freely re-enable fibZone/obvRising — this is just
+// a starting point, not a hard recommendation.
+const _DT_AI_DEFAULTS     = {
+  stopAtrMultiple: 2.5, minRrRatio: 2.0, minConfidence: 0.50, maxPositionPct: 20,
+  rsiThreshold: 35, volZScore: 1.5, fibReturnMin: -20, fibReturnMax: -5,
+  enabled: { minRrRatio: true, minConfidence: true, rsiThreshold: true, volZScore: true, fibZone: false, obvRising: false },
+};
 
 function _renderDtRulesTab() {
-  const fp = { ..._DT_FILTER_DEFAULTS, ...(state.dayTrading.filterParams || {}) };
-  const ap = { ..._DT_AI_DEFAULTS,     ...(state.dayTrading.aiParams     || {}) };
+  const fp = { ..._DT_FILTER_DEFAULTS, ...(state.dayTrading.filterParams || {}),
+               enabled: { ..._DT_FILTER_DEFAULTS.enabled, ...((state.dayTrading.filterParams || {}).enabled || {}) } };
+  const ap = { ..._DT_AI_DEFAULTS,     ...(state.dayTrading.aiParams     || {}),
+               enabled: { ..._DT_AI_DEFAULTS.enabled,     ...((state.dayTrading.aiParams     || {}).enabled || {}) } };
 
-  const fpModified = Object.keys(_DT_FILTER_DEFAULTS).some(k => fp[k] !== _DT_FILTER_DEFAULTS[k]);
-  const apModified = Object.keys(_DT_AI_DEFAULTS).some(k => ap[k] !== _DT_AI_DEFAULTS[k]);
+  const fpModified = Object.keys(_DT_FILTER_DEFAULTS).some(k => k !== 'enabled' && fp[k] !== _DT_FILTER_DEFAULTS[k])
+    || Object.keys(_DT_FILTER_DEFAULTS.enabled).some(k => fp.enabled[k] !== _DT_FILTER_DEFAULTS.enabled[k]);
+  const apModified = Object.keys(_DT_AI_DEFAULTS).some(k => k !== 'enabled' && ap[k] !== _DT_AI_DEFAULTS[k])
+    || Object.keys(_DT_AI_DEFAULTS.enabled).some(k => ap.enabled[k] !== _DT_AI_DEFAULTS.enabled[k]);
   const anyModified = fpModified || apModified;
 
-  const nf = (label, group, key, value, min, max, step, hint) => `
-    <div>
-      <div class="form-label">${label}</div>
-      <input type="number" value="${value}" min="${min}" max="${max}" step="${step}"
-        style="width:120px" title="${hint}"
-        onchange="setDtParam('${group}','${key}',this.value)">
-      <div class="text-xs text-muted mt-1" style="max-width:210px">${hint}</div>
-    </div>`;
+  // One table row: checkbox (rule on/off) + label/hint + value input(s).
+  // valueHtml is pre-built per-row since some rules have 2 inputs (Fib zone)
+  // and some have none (OBV rising, time-of-week — pure boolean rules).
+  const row = (group, key, label, hint, valueHtml) => `
+    <tr>
+      <td style="width:28px;text-align:center">
+        <input type="checkbox" ${_ruleOn({enabled: (group==='filterParams'?fp:ap).enabled}, key) ? 'checked' : ''}
+          onchange="setDtRuleEnabled('${group}','${key}',this.checked)" title="Enable/disable this rule">
+      </td>
+      <td style="padding:4px 8px">
+        <div style="font-size:12px;font-weight:600">${label}</div>
+        <div class="text-xs text-muted">${hint}</div>
+      </td>
+      <td style="text-align:right;white-space:nowrap">${valueHtml || ''}</td>
+    </tr>`;
+
+  const numInput = (group, key, value, min, max, step) => `
+    <input type="number" value="${value}" min="${min}" max="${max}" step="${step}" style="width:100px"
+      onchange="setDtParam('${group}','${key}',this.value)">`;
 
   return `
     <div style="display:flex;flex-direction:column;gap:14px">
@@ -302,66 +330,83 @@ function _renderDtRulesTab() {
         <button class="btn btn-sm" onclick="resetDtRules()" style="white-space:nowrap;color:var(--warn)">↺ Reset all</button>
       </div>` : `
       <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--text-muted)">
-        Using default scanner rules. Edit any value below — pre-filter applies immediately, AI params on next scan.
+        Using default scanner rules. Tick/untick rules or edit thresholds below — pre-filter applies immediately, AI params on next scan.
       </div>`}
 
-      <!-- Pre-filter thresholds -->
+      <!-- Pre-filter rules -->
       <div class="card">
         <div class="card-title">
-          Pre-filter Thresholds
-          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">applied client-side — AI never sees tickers that fail these</span>
+          Pre-filter Rules
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">applied client-side — AI never sees tickers that fail a TICKED rule</span>
         </div>
-        <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
-          Active: BB %B ≤ <b>${fp.maxBbPctB}</b> · ADV ≥ <b>$${(fp.minAdvAud/1000).toFixed(0)}k</b> · SMA200 floor <b>${(fp.sma200Floor*100).toFixed(1)}%</b> · ADX ≤ <b>${fp.maxAdx}</b>
+        <table class="dt-rules-table" style="width:100%;margin-top:8px">
+          <tbody>
+            ${row('filterParams', 'maxBbPctB', 'BB %B ceiling', 'Price must be at/below this Bollinger %B level (0 = at lower band)',
+              numInput('filterParams', 'maxBbPctB', fp.maxBbPctB, 0, 1, 0.01))}
+            ${row('filterParams', 'minAdvAud', 'Min liquidity (ADV $AUD)', '20-day average daily value — liquidity floor',
+              numInput('filterParams', 'minAdvAud', fp.minAdvAud, 0, 50000000, 100000))}
+            ${row('filterParams', 'sma200Floor', 'SMA200 floor (ratio)', 'Price must be ≥ SMA200 × this (0.985 = within 1.5% below SMA200)',
+              numInput('filterParams', 'sma200Floor', fp.sma200Floor, 0.80, 1.05, 0.005))}
+            ${row('filterParams', 'sma50Floor', 'SMA50 floor (fallback, <200d listings)', 'Used instead of SMA200 floor when a ticker has under 200 days of history',
+              numInput('filterParams', 'sma50Floor', fp.sma50Floor, 0.80, 1.05, 0.005))}
+            ${row('filterParams', 'maxAdx', 'ADX ceiling', 'Skip stocks already in a strong, confirmed uptrend',
+              numInput('filterParams', 'maxAdx', fp.maxAdx, 10, 60, 1))}
+            ${row('filterParams', 'minAdr', 'Market breadth floor (ADR)', 'Suppress ALL new BUYs when ASX200 advance/decline ratio is below this',
+              numInput('filterParams', 'minAdr', fp.minAdr, 0, 1, 0.05))}
+            ${row('filterParams', 'vovMult', 'Volatility expansion ceiling (VoV)', 'Skip when ATR14 is expanding rapidly vs its recent baseline (stop distance already stale)',
+              numInput('filterParams', 'vovMult', fp.vovMult, 0.5, 4, 0.1))}
+          </tbody>
+        </table>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:12px;cursor:pointer">
+          <input type="checkbox" ${fp.timeOfWeekFilter ? 'checked' : ''} onchange="setDtParam('filterParams','timeOfWeekFilter',this.checked)">
+          Block entries Monday before 11:00 AEST / Friday from 14:00 AEST (gap-risk window)
+        </label>
+      </div>
+
+      <!-- Sizing parameters (not pass/fail rules — always applied to whatever qualifies) -->
+      <div class="card">
+        <div class="card-title">
+          Sizing Parameters
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">no on/off — these size the trade, not gate it</span>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px">
-          ${nf('Max BB %B', 'filterParams', 'maxBbPctB', fp.maxBbPctB, 0, 1, 0.01,
-            'Price must be at or below this Bollinger %B level (0 = at lower band)')}
-          ${nf('Min ADV ($AUD)', 'filterParams', 'minAdvAud', fp.minAdvAud, 0, 50000000, 100000,
-            '20-day average daily value — liquidity floor')}
-          ${nf('SMA200 floor (ratio)', 'filterParams', 'sma200Floor', fp.sma200Floor, 0.80, 1.05, 0.005,
-            'Price must be ≥ SMA200 × this (0.985 = within 1.5% below SMA200)')}
-          ${nf('Max ADX', 'filterParams', 'maxAdx', fp.maxAdx, 10, 60, 1,
-            'ADX ceiling — skip stocks already in a strong trend')}
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
+          <div>
+            <div class="form-label">Stop ATR multiple</div>
+            ${numInput('aiParams', 'stopAtrMultiple', ap.stopAtrMultiple, 0.5, 6, 0.5)}
+            <div class="text-xs text-muted mt-1">Stop = entry − N×ATR14</div>
+          </div>
+          <div>
+            <div class="form-label">Max position (% of allocated)</div>
+            ${numInput('aiParams', 'maxPositionPct', ap.maxPositionPct, 5, 100, 5)}
+            <div class="text-xs text-muted mt-1">Max single position as % of allocated day-trade capital</div>
+          </div>
         </div>
       </div>
 
-      <!-- AI Signal Thresholds -->
+      <!-- AI / Entry Signal rules -->
       <div class="card">
         <div class="card-title">
-          AI Signal Thresholds
-          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">injected into AI prompt on every scan</span>
+          AI &amp; Entry Signal Rules
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">every TICKED rule below must pass — untick to exclude it entirely</span>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
-          ${nf('Stop ATR multiple', 'aiParams', 'stopAtrMultiple', ap.stopAtrMultiple, 0.5, 6, 0.5,
-            'Stop = entry − N×ATR14')}
-          ${nf('Min R:R ratio', 'aiParams', 'minRrRatio', ap.minRrRatio, 1, 5, 0.5,
-            'Reject setups with reward:risk below this')}
-          ${nf('Min confidence', 'aiParams', 'minConfidence', ap.minConfidence, 0.20, 1, 0.05,
-            'AI recs below this confidence are dropped client-side')}
-          ${nf('Max position (% of allocated)', 'aiParams', 'maxPositionPct', ap.maxPositionPct, 5, 100, 5,
-            'Max single position as % of allocated day-trade capital')}
+        <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0 0;font-size:11px;color:var(--text-muted)">
+          Signal #1 (BB reclaim) is automatic — guaranteed by the pre-filter's BB %B rule above, so it isn't shown as its own row here.
         </div>
-      </div>
-
-      <!-- Entry Signal Thresholds -->
-      <div class="card">
-        <div class="card-title">
-          Entry Signal Thresholds
-          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">shape which confirmations qualify</span>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
-          ${nf('RSI threshold (Signal #2)', 'aiParams', 'rsiThreshold', ap.rsiThreshold, 20, 55, 1,
-            'RSI must have dipped below this level in the past 5 days')}
-          ${nf('Vol Z-score floor (Signal #3)', 'aiParams', 'volZScore', ap.volZScore, 0.5, 4, 0.25,
-            'Minimum volume Z-score for Signal #3 confirmation')}
-          ${nf('Fib return min (%, Signal #4)', 'aiParams', 'fibReturnMin', ap.fibReturnMin, -60, -5, 1,
-            '60-day return lower bound for Fibonacci retracement zone')}
-          ${nf('Fib return max (%, Signal #4)', 'aiParams', 'fibReturnMax', ap.fibReturnMax, -30, -1, 1,
-            '60-day return upper bound for Fibonacci retracement zone')}
-          ${nf('Min confirmations required (of 4)', 'aiParams', 'minConfirms', ap.minConfirms, 1, 4, 1,
-            'Signal #1 (BB reclaim) is automatic — this many of Signals #2–#5 (RSI/VolZ/Fib/OBV) must also fire. Lower to 1 to see more candidates; default 2 is the original strategy rule.')}
-        </div>
+        <table class="dt-rules-table" style="width:100%;margin-top:8px">
+          <tbody>
+            ${row('aiParams', 'minRrRatio', 'Min reward:risk ratio', 'Reject setups with reward:risk below this',
+              numInput('aiParams', 'minRrRatio', ap.minRrRatio, 0.5, 5, 0.25))}
+            ${row('aiParams', 'minConfidence', 'Min AI confidence', 'Recs below this confidence are dropped client-side',
+              numInput('aiParams', 'minConfidence', ap.minConfidence, 0.20, 1, 0.05))}
+            ${row('aiParams', 'rsiThreshold', 'RSI oversold (Signal #2)', 'RSI must be below this level',
+              numInput('aiParams', 'rsiThreshold', ap.rsiThreshold, 20, 55, 1))}
+            ${row('aiParams', 'volZScore', 'Volume surge (Signal #3)', 'Volume Z-score must be at/above this',
+              numInput('aiParams', 'volZScore', ap.volZScore, 0.25, 4, 0.25))}
+            ${row('aiParams', 'fibZone', 'Fib retracement zone (Signal #4)', '60-day return must fall within this range',
+              numInput('aiParams', 'fibReturnMin', ap.fibReturnMin, -60, -5, 1) + ' to ' + numInput('aiParams', 'fibReturnMax', ap.fibReturnMax, -30, -1, 1))}
+            ${row('aiParams', 'obvRising', 'OBV rising (Signal #5, bonus)', 'On-balance volume trend must be rising — no threshold, pure on/off', '')}
+          </tbody>
+        </table>
       </div>
 
       <!-- Footer -->
@@ -380,8 +425,21 @@ function _renderDtRulesTab() {
   `;
 }
 
+function setDtRuleEnabled(group, key, checked) {
+  if (!state.dayTrading[group]) state.dayTrading[group] = {};
+  if (!state.dayTrading[group].enabled) state.dayTrading[group].enabled = {};
+  state.dayTrading[group].enabled[key] = !!checked;
+  scheduleSave();
+  const el = document.getElementById('dt-tab-content');
+  if (el) el.innerHTML = _renderDtRulesTab();
+}
+
 function setDtParam(group, key, rawValue) {
-  const value = Number(rawValue);
+  // Boolean fields (e.g. timeOfWeekFilter, bound to a checkbox's .checked)
+  // must not go through Number() — Number(true)/Number(false) coerce to 1/0,
+  // silently corrupting the field into a number where boolean logic expects
+  // true/false.
+  const value = typeof rawValue === 'boolean' ? rawValue : Number(rawValue);
   if (!state.dayTrading[group]) state.dayTrading[group] = {};
   state.dayTrading[group][key] = value;
   scheduleSave();
@@ -398,8 +456,12 @@ function setDtParam(group, key, rawValue) {
 }
 
 function resetDtRules() {
-  state.dayTrading.filterParams = { ..._DT_FILTER_DEFAULTS };
-  state.dayTrading.aiParams     = { ..._DT_AI_DEFAULTS };
+  // Deep-copy `enabled` — a shallow {..._DT_FILTER_DEFAULTS} would leave
+  // filterParams.enabled pointing at the SAME object as the shared defaults
+  // constant, so the next setDtRuleEnabled() call would mutate the defaults
+  // themselves (corrupting every future reset for the rest of the session).
+  state.dayTrading.filterParams = { ..._DT_FILTER_DEFAULTS, enabled: { ..._DT_FILTER_DEFAULTS.enabled } };
+  state.dayTrading.aiParams     = { ..._DT_AI_DEFAULTS,     enabled: { ..._DT_AI_DEFAULTS.enabled } };
   scheduleSave();
   const el = document.getElementById('dt-tab-content');
   if (el) el.innerHTML = _renderDtSetupsTab();
@@ -659,14 +721,13 @@ function _renderDtIntradayTab() {
 
 function _renderIntradayRulesContent() {
   const id = state.intraday;
-  const IDEFS = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
-                  universeKey: 'asx100', minConfirms: 2, ignoreEntryWindow: false,
-                  vwapThreshold: -0.3, rsiThreshold: 40,
-                  stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5 };
-  const ip = { ...IDEFS, ...(id.params || {}) };
+  const IDEFS = INTRADAY_DEFAULTS;
+  const ip = { ...IDEFS, ...(id.params || {}),
+               enabled: { ...IDEFS.enabled, ...((id.params || {}).enabled || {}) } };
   const allocated = id.allocatedCash != null ? id.allocatedCash : Math.round(state.cash * ip.allocPct / 100);
 
-  const anyModified = Object.keys(IDEFS).some(k => ip[k] !== IDEFS[k]);
+  const anyModified = Object.keys(IDEFS).some(k => k !== 'enabled' && ip[k] !== IDEFS[k])
+    || Object.keys(IDEFS.enabled).some(k => ip.enabled[k] !== IDEFS.enabled[k]);
 
   const nf = (label, key, value, min, max, step, hint, parser) => `
     <div>
@@ -675,6 +736,24 @@ function _renderIntradayRulesContent() {
         onchange="updateIntradayParam('${key}', ${parser || 'parseFloat'}(this.value))">
       <div class="text-xs text-muted mt-1" style="max-width:220px">${hint}</div>
     </div>`;
+
+  // One table row: checkbox (rule on/off) + label/hint + value input.
+  const row = (key, label, hint, valueHtml) => `
+    <tr>
+      <td style="width:28px;text-align:center">
+        <input type="checkbox" ${_ruleOn(ip, key) ? 'checked' : ''}
+          onchange="updateIntradayRuleEnabled('${key}',this.checked)" title="Enable/disable this rule">
+      </td>
+      <td style="padding:4px 8px">
+        <div style="font-size:12px;font-weight:600">${label}</div>
+        <div class="text-xs text-muted">${hint}</div>
+      </td>
+      <td style="text-align:right;white-space:nowrap">${valueHtml || ''}</td>
+    </tr>`;
+
+  const numInput = (key, value, min, max, step, parser) => `
+    <input type="number" value="${value}" min="${min}" max="${max}" step="${step}" style="width:100px"
+      onchange="updateIntradayParam('${key}', ${parser || 'parseFloat'}(this.value))">`;
 
   return `
     <div style="display:flex;flex-direction:column;gap:14px">
@@ -685,22 +764,21 @@ function _renderIntradayRulesContent() {
         <button class="btn btn-sm" onclick="resetIntradayRules()" style="white-space:nowrap;color:var(--warn)">↺ Reset all</button>
       </div>` : `
       <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;color:var(--text-muted)">
-        Using default intraday rules. Edit any value below — changes apply on next scan.
+        Using default intraday rules. Tick/untick rules or edit thresholds below — changes apply on next scan.
       </div>`}
 
       <!-- Trade Parameters -->
       <div class="card">
         <div class="card-title">
           Trade Parameters
-          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">sizing, stops &amp; targets — apply on next scan</span>
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">sizing, stops &amp; targets — no on/off, always applied to whatever qualifies</span>
         </div>
         <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
-          Active: ATR stop ×<b>${ip.stopAtrMult}</b> · ATR target ×<b>${ip.targetAtrMult}</b> · Min R:R <b>${ip.minRrRatio}</b> · Max <b>${ip.maxPositions}</b> positions · Alloc <b>${ip.allocPct}%</b> (=$${fmt(allocated, 0)})
+          Active: ATR stop ×<b>${ip.stopAtrMult}</b> · ATR target ×<b>${ip.targetAtrMult}</b> · Max <b>${ip.maxPositions}</b> positions · Alloc <b>${ip.allocPct}%</b> (=$${fmt(allocated, 0)})
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px">
           ${nf('ATR stop multiplier', 'stopAtrMult', ip.stopAtrMult, 0.5, 4, 0.25, 'Stop = entry − N × 5m ATR (when ≥15 bars). Higher = wider stop.')}
           ${nf('ATR target multiplier', 'targetAtrMult', ip.targetAtrMult, 0.5, 5, 0.25, 'Target = VWAP + N × 5m ATR. Higher = more ambitious exit.')}
-          ${nf('Min R:R ratio', 'minRrRatio', ip.minRrRatio, 0.5, 5, 0.25, 'Skip setups where (target−entry) / (entry−stop) is below this.')}
           ${nf('Max positions', 'maxPositions', ip.maxPositions, 1, 5, 1, 'Maximum concurrent intraday trades', 'parseInt')}
           ${nf('Capital allocation (%)', 'allocPct', ip.allocPct, 5, 50, 5, 'Percentage of available cash allocated to intraday')}
         </div>
@@ -712,22 +790,27 @@ function _renderIntradayRulesContent() {
         </div>
       </div>
 
-      <!-- Entry Filters -->
+      <!-- Entry Rules -->
       <div class="card">
         <div class="card-title">
-          Entry Filters
-          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">technical indicator gates — client-side, instant</span>
+          Entry Rules
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">every TICKED rule below must pass — untick to exclude it entirely</span>
         </div>
-        <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
-          Active: VWAP ≤ <b>${ip.vwapThreshold}%</b> · RSI ≤ <b>${ip.rsiThreshold}</b> · Min score: <b>${ip.minScore}</b> · Confirms required: <b>${ip.minConfirms} of 4</b>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px">
-          ${nf('VWAP threshold (%)', 'vwapThreshold', ip.vwapThreshold, -5, 0, 0.1, 'Price must be ≤ this % from VWAP (negative = below). −0.3 = price is 0.3% below VWAP.')}
-          ${nf('RSI ceiling', 'rsiThreshold', ip.rsiThreshold, 20, 70, 1, 'Intraday 5m RSI must be at or below this value to qualify as oversold.', 'parseInt')}
-          ${nf('Min setup score (0–100)', 'minScore', ip.minScore, 20, 90, 5, 'Setup quality composite score — tickers below this are excluded.', 'parseInt')}
-          ${nf('Min confirmations (of 4)', 'minConfirms', ip.minConfirms, 1, 4, 1,
-            'Confirmation signals: VWAP below threshold, RSI below ceiling, volume rising, price above today\'s open. This many must fire. Lower to 1 to see more candidates; default 2 is the original strategy rule.', 'parseInt')}
-        </div>
+        <table class="dt-rules-table" style="width:100%;margin-top:8px">
+          <tbody>
+            ${row('entryWindow', 'Entry window (10:45–15:00 AEST)', 'Hard market-structure constraint — untick only for testing outside market hours', '')}
+            ${row('minScore', 'Min setup score', 'Setup quality composite score (0–100) — tickers below this are excluded',
+              numInput('minScore', ip.minScore, 20, 90, 5, 'parseInt'))}
+            ${row('minRrRatio', 'Min reward:risk ratio', 'Skip setups where (target−entry) / (entry−stop) is below this',
+              numInput('minRrRatio', ip.minRrRatio, 0.5, 5, 0.25))}
+            ${row('vwapThreshold', 'VWAP discount (confirmation signal)', 'Price must be ≤ this % from VWAP (negative = below). −0.3 = price is 0.3% below VWAP',
+              numInput('vwapThreshold', ip.vwapThreshold, -5, 0, 0.1))}
+            ${row('rsiThreshold', 'RSI oversold (confirmation signal)', 'Intraday 5m RSI must be at/below this value',
+              numInput('rsiThreshold', ip.rsiThreshold, 20, 70, 1, 'parseInt'))}
+            ${row('volRising', 'Volume rising (confirmation signal)', 'Last-3-bar avg volume must exceed the 20-bar baseline', '')}
+            ${row('aboveOpen', 'Price above today\'s open (confirmation signal)', 'Current price must be above the session open', '')}
+          </tbody>
+        </table>
 
         <div style="margin-top:12px">
           <div class="form-label" style="margin-bottom:7px">Scan universe</div>
@@ -745,25 +828,13 @@ function _renderIntradayRulesContent() {
           </div>
           <div class="text-xs text-muted mt-1">Larger universes find more setups but take longer to scan</div>
         </div>
-
-        <div style="margin-top:12px;padding:8px 10px;background:${ip.ignoreEntryWindow ? 'rgba(239,68,68,.08)' : 'var(--bg-secondary)'};border:0.5px solid ${ip.ignoreEntryWindow ? 'rgba(239,68,68,.4)' : 'var(--border-light)'};border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:10px">
-          <div>
-            <div style="font-size:12px;font-weight:600;color:${ip.ignoreEntryWindow ? '#ef4444' : 'var(--text-secondary)'}">⚠️ Ignore entry window</div>
-            <div class="text-xs text-muted">Skips the 10:45–15:00 AEST entry-window gate, so you can test the scan outside market hours. The VWAP/RSI/volume/score gates above still apply — use "Min confirmations" to loosen those instead. Testing only.</div>
-          </div>
-          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap">
-            <input type="checkbox" ${ip.ignoreEntryWindow ? 'checked' : ''}
-              onchange="updateIntradayParam('ignoreEntryWindow', this.checked)">
-            ${ip.ignoreEntryWindow ? '<span style="color:#ef4444;font-weight:600">On</span>' : 'Off'}
-          </label>
-        </div>
       </div>
 
       <!-- Info -->
       <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
         <div>
           <div style="font-size:13px;font-weight:600">How it works</div>
-          <div class="text-xs text-muted">⏰ Entry window 10:45–15:00 AEST · ATR-based stops/targets use 5m bars (≥15 required); fixed-% fallback otherwise · VWAP &amp; RSI gates computed client-side from raw scan data · yfinance 5m data has ~5–15 min latency</div>
+          <div class="text-xs text-muted">⏰ Entry window 10:45–15:00 AEST (untick above to bypass for testing) · ATR-based stops/targets use 5m bars (≥15 required); fixed-% fallback otherwise · confirmation signals computed client-side from raw scan data · yfinance 5m data has ~5–15 min latency</div>
         </div>
         <div class="flex-row">
           <button class="btn btn-sm" onclick="resetIntradayRules()">↺ Reset to defaults</button>
@@ -776,6 +847,16 @@ function _renderIntradayRulesContent() {
   `;
 }
 
+function updateIntradayRuleEnabled(key, checked) {
+  if (!state.intraday) return;
+  if (!state.intraday.params) state.intraday.params = {};
+  if (!state.intraday.params.enabled) state.intraday.params.enabled = {};
+  state.intraday.params.enabled[key] = !!checked;
+  scheduleSave();
+  const el = document.getElementById('dt-tab-content');
+  if (el) el.innerHTML = _renderDtIntradayTab();
+}
+
 function resetIntradayRules() {
   if (!state.intraday) return;
   // universeKey must reset to the literal default ('asx100'), not preserve
@@ -784,11 +865,12 @@ function resetIntradayRules() {
   // (it compares against the literal 'asx100' default), so the "Custom
   // intraday rules active" banner never cleared once the universe had ever
   // been changed, no matter how many times Reset all was clicked.
+  // `enabled` is deep-copied — a shallow {...INTRADAY_DEFAULTS} would leave
+  // params.enabled pointing at INTRADAY_DEFAULTS.enabled itself, so the next
+  // updateIntradayRuleEnabled() call would mutate the shared defaults.
   state.intraday.params = {
-    targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20,
-    universeKey: 'asx100', minConfirms: 2, ignoreEntryWindow: false,
-    vwapThreshold: -0.3, rsiThreshold: 40,
-    stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5,
+    ...INTRADAY_DEFAULTS, universeKey: 'asx100',
+    enabled: { ...INTRADAY_DEFAULTS.enabled },
   };
   scheduleSave();
   const el = document.getElementById('dt-tab-content');
@@ -798,11 +880,8 @@ function resetIntradayRules() {
 
 function _renderIntradaySetupsContent() {
   const id = state.intraday;
-  const ip = { targetPct: 3.5, stopPct: 1.5, maxPositions: 2, minScore: 40, allocPct: 20, universeKey: 'asx100',
-               minConfirms: 2, ignoreEntryWindow: false,
-               vwapThreshold: -0.3, rsiThreshold: 40,
-               stopAtrMult: 1.5, targetAtrMult: 2.0, minRrRatio: 1.5,
-               ...(id.params || {}) };
+  const ip = { ...INTRADAY_DEFAULTS, universeKey: 'asx100', ...(id.params || {}),
+               enabled: { ...INTRADAY_DEFAULTS.enabled, ...((id.params || {}).enabled || {}) } };
   const allocated = id.allocatedCash != null
     ? id.allocatedCash
     : Math.round(state.cash * ip.allocPct / 100);
@@ -834,8 +913,9 @@ function _renderIntradaySetupsContent() {
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
         <div>
           <div style="font-size:13px;font-weight:600">ASX Intraday Scanner
-            ${ip.minConfirms < 2 ? `<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:6px">⚠️ ${ip.minConfirms} CONFIRM${ip.minConfirms === 1 ? '' : 'S'}</span>` : ''}
-            ${ip.ignoreEntryWindow ? '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:6px">⚠️ NO WINDOW</span>' : ''}
+            ${!_ruleOn(ip, 'entryWindow') ? '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:6px">⚠️ NO WINDOW</span>' : ''}
+            ${Object.keys(INTRADAY_DEFAULTS.enabled).filter(k => k !== 'entryWindow' && !_ruleOn(ip, k)).length
+              ? '<span style="background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:6px">⚠️ RULES OFF</span>' : ''}
           </div>
           <div class="text-xs text-muted">${scanStatus}</div>
         </div>
