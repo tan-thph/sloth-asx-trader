@@ -244,8 +244,49 @@ function splitParcel(parcelId, splitQty) {
   addParcel(p.ticker, p.date, splitQty, p.costPerShare, fracFees, p.sector, p.account);
   const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
   _splitLinkedPosition(p, newParcel, splitQty);
+  _splitParcelJournalRow(p, newParcel, fracFees);
   scheduleSave();
   return true;
+}
+
+// Keeps the journal in 1:1 sync with parcels at split time. The PARENT
+// parcel keeps its number but is now a smaller, divided lot — its existing
+// journal row (if any) flips from 'BUY' to 'RECLASSIFY' immediately (not
+// deferred to a later account change) and its qty is updated to the new
+// reduced remainingQty. A brand-new 'BUY' row is created for the new parcel
+// (same original purchase date/account/cost basis — this isn't a new
+// transaction, just a new lot identity), so it has a row of its own that
+// setParcelAccount() can update in place later.
+//
+// The new row INHERITS the parent row's provenance/technical data verbatim
+// (recId, recExecuted, entrySignals, thesis, regime) rather than leaving them
+// null. Without this, journal.js's _journalProvenanceBadge() and the detail
+// drawer's `source` label both key off `recId` being non-null — a null recId
+// reads as "✋ Manual"/"Manual entry" even though the split-off lot is really
+// the SAME underlying trade, just divided. Multiple journal rows sharing one
+// recId is already an established pattern (gotcha #66 — a SELL spanning
+// several parcels produces one row per parcel, all sharing the SELL's recId),
+// so this isn't a new kind of link, just applying it to splits too.
+function _splitParcelJournalRow(parentParcel, newParcel, newParcelFees) {
+  if (!state.tradeJournal) state.tradeJournal = [];
+  const parentRow = _findParcelJournalRow(parentParcel.id);
+  if (parentRow) {
+    parentRow.action = 'RECLASSIFY';
+    parentRow.qty = parentParcel.remainingQty;
+  }
+  state.tradeJournal.unshift({
+    id: Date.now(), date: newParcel.date || todayStr(), timestamp: nowSydney(),
+    ticker: newParcel.ticker, action: 'BUY',
+    qty: newParcel.remainingQty, entryPrice: newParcel.costPerShare,
+    exitPrice: null, fees: newParcelFees || 0, pnl: null, status: 'open',
+    sector: newParcel.sector, account: newParcel.account,
+    parcel: `P#${newParcel.id}`, parcelId: newParcel.id,
+    recId: parentRow?.recId ?? null, recExecuted: parentRow?.recExecuted ?? false,
+    entrySignals: parentRow?.entrySignals ?? null,
+    thesis: parentRow?.thesis ?? null,
+    regime: (parentRow && parentRow.regime) || (state.currentRegime && state.currentRegime.regime) || null,
+    notes: `Split from P#${parentParcel.id}`,
+  });
 }
 
 // Proportionally splits whichever open Intraday position or executed Swing
@@ -328,26 +369,44 @@ function _removeIntradayPositionForParcel(parcel) {
   return false;
 }
 
-// Logs an audit-trail row for a parcel's account reassignment — references
-// the Parcel # (`P#<id>`) so it's traceable back to the exact lot. Uses a new
-// status value ('reclass') rather than 'open'/'trimmed'/'closed' since this is
-// not a position state — every existing t.status===/!== consumer in the
-// codebase checks an explicit value, never a wildcard, so this new value is
-// simply invisible to P&L/open-position logic (intentional: no cash/CGT
-// effect here, just a record of the move).
-function logParcelReclassification(parcel, fromAccount, toAccount) {
+// Finds the ONE Trade Journal row that represents a given parcel, matched by
+// `parcelId` — every parcel should have exactly one journal row (its original
+// BUY, or a BUY row created for it by splitParcel()). Used by both
+// splitParcel() and setParcelAccount() so account changes UPDATE that row in
+// place instead of inserting a new one each time (the old `logParcelReclassification`
+// design did exactly that and was reverted — every click created a fresh
+// permanent row, cluttering the journal with what was really just one lot's
+// current state). Returns undefined if no row exists yet (legacy parcels
+// predating parcelId tracking) — callers fall back to creating one.
+function _findParcelJournalRow(parcelId) {
+  return (state.tradeJournal || []).find(j => j.parcelId === parcelId);
+}
+
+// Updates parcel's journal row in place for an account move: sets `account`
+// and flips `action` to 'RECLASSIFY' (sticky — once a parcel has ever been
+// reclassified, its row stays labelled RECLASSIFY, since it no longer
+// represents a single clean "bought and held" transaction). No new row is
+// ever created here for a parcel that already has one — only the very first
+// time a legacy parcel (with no existing row) is reclassified does this fall
+// back to creating one.
+function _syncParcelJournalRow(parcel, newAccount) {
   if (!state.tradeJournal) state.tradeJournal = [];
+  const row = _findParcelJournalRow(parcel.id);
+  if (row) {
+    row.account = newAccount;
+    row.action = 'RECLASSIFY';
+    return;
+  }
   state.tradeJournal.unshift({
-    id: Date.now(), date: todayStr(), timestamp: nowSydney(),
+    id: Date.now(), date: parcel.date || todayStr(), timestamp: nowSydney(),
     ticker: parcel.ticker, action: 'RECLASSIFY',
     qty: parcel.remainingQty, entryPrice: parcel.costPerShare,
-    exitPrice: null, fees: 0, pnl: null,
-    status: 'reclass',
-    sector: parcel.sector, account: toAccount,
-    parcel: `P#${parcel.id}`, fromAccount, toAccount,
+    exitPrice: null, fees: parcel.fees || 0, pnl: null, status: 'open',
+    sector: parcel.sector, account: newAccount,
+    parcel: `P#${parcel.id}`, parcelId: parcel.id,
     recId: null, recExecuted: false,
     regime: (state.currentRegime && state.currentRegime.regime) || null,
-    notes: `Reclassified ${fromAccount} → ${toAccount}`,
+    notes: `Reclassified to ${newAccount}`,
   });
 }
 
@@ -355,6 +414,12 @@ function logParcelReclassification(parcel, fromAccount, toAccount) {
 // of the old whole-holding _cycleHoldingAccount. Recomputes both the source
 // and destination (ticker, account) portfolio rows from parcels (rather than
 // patching shares/avgPrice by hand) so repeated partial moves never drift.
+//
+// Journal: updates the parcel's EXISTING journal row in place (account +
+// action:'RECLASSIFY') via _syncParcelJournalRow() — never inserts a new row
+// per move. (Hotfix: the original design inserted a fresh 'RECLASSIFY' row
+// on every single account change, so toggling a lot back and forth created a
+// permanent row per click — exactly the clutter being fixed here.)
 //
 // Also syncs Intraday AND Swing day-trading — but a lot belongs to AT MOST
 // ONE of the two systems, never both, so this must never blindly fire both.
@@ -395,7 +460,7 @@ function setParcelAccount(parcelId, newAccount) {
     }
   }
 
-  logParcelReclassification(p, oldAccount, newAccount);
+  _syncParcelJournalRow(p, newAccount);
 
   scheduleSave();
   renderPage();

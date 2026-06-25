@@ -154,7 +154,6 @@ function renderJournal() {
             <option value="open"    ${jf.status==='open'   ?'selected':''}>Open</option>
             <option value="trimmed" ${jf.status==='trimmed'?'selected':''}>Trimmed</option>
             <option value="closed"  ${jf.status==='closed' ?'selected':''}>Closed</option>
-            <option value="reclass" ${jf.status==='reclass'?'selected':''}>Reclassified</option>
           </select>
         </div>
         <!-- P&L outcome -->
@@ -283,7 +282,7 @@ function renderJournal() {
                 <td><span class="badge ${t.status==='open'?'badge-open':t.status==='trimmed'?'badge-trim':t.status==='reclass'?'badge-drp':'badge-closed'}">${t.status==='reclass'?'reclassified':t.status}</span></td>
                 <td>${parcelBadge}</td>
                 <td>${_journalProvenanceBadge(t)}${matchedRec?._thesis?'<span style="font-size:10px;margin-left:3px" title="'+escapeHTML(matchedRec._thesis)+'">📋</span>':''}</td>
-                <td>${_journalRegimeBadge(matchedRec?.regime)}</td>
+                <td>${_journalRegimeBadge(matchedRec?.regime || t.regime)}</td>
                 <td style="white-space:nowrap">
                   <button class="btn btn-sm" id="jtoggle-${realIdx}" onclick="toggleJournalDetail(${realIdx})" title="Show technicals & thesis">▸</button>
                   <button class="btn btn-sm btn-danger" onclick="removeJournalTrade(${realIdx})" title="Remove trade">✕</button>
