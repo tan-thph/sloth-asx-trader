@@ -492,8 +492,12 @@ async function runMacroAnalysis(force=false) {
 
   // High-relevance macro/geopolitics news from the News Scanner (just refreshed
   // above) — capped at 8 items to keep this a few hundred tokens, well within
-  // the macro call's ~$0.03-0.10 budget. Filters to macro/geopolitics category
-  // or high impact_score so portfolio-specific earnings noise doesn't leak in.
+  // the macro call's ~$0.03-0.10 budget. Category-only filter (no impact_score
+  // fallback) — the impact rubric's portfolio-specificity bonus inflates
+  // scores for stock-specific stories (e.g. "CBA still the premium pick")
+  // that have real portfolio relevance but zero macro relevance; letting
+  // those through wasted tokens with nothing for Claude to cite (2026-06-25
+  // call #10 review — none of 4 impact-only items were used in the brief).
   let newsCtx = '';
   if (state.serverOk) {
     try {
@@ -501,7 +505,7 @@ async function runMacroAnalysis(force=false) {
       if (nr.ok) {
         const nd = await nr.json();
         const items = (nd.items || [])
-          .filter(it => ['macro', 'geopolitics'].includes(it.category) || (it.impact_score || 0) >= 5.5)
+          .filter(it => ['macro', 'geopolitics'].includes(it.category))
           .slice(0, 8);
         if (items.length) {
           newsCtx = ' | Recent news (last 24h): ' + items.map(it => it.signal || it.title).join('; ');
