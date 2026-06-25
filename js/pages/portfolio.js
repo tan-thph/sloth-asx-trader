@@ -586,8 +586,10 @@ function handleCSV(e) {
       return;
     }
 
-    // Sort chronologically so FIFO parcel order is correct
-    parsedRows.sort((a, b) => a.date.localeCompare(b.date));
+    // Sort chronologically so FIFO parcel order is correct.
+    // Dates are DD-MM-YYYY — convert to YYYY-MM-DD for lexicographic sort.
+    const _toISO = d => { const p = (d||'').split('-'); return p.length===3 ? `${p[2]}-${p[1]}-${p[0]}` : (d||''); };
+    parsedRows.sort((a, b) => _toISO(a.date).localeCompare(_toISO(b.date)));
 
     // Audit fix #3: scope every lookup/write by account, mirroring applyBuyToPortfolio.
     // Without this, an import lands on whichever holding object for that ticker
@@ -648,8 +650,8 @@ function handleCSV(e) {
       });
     }
 
-    // Re-sort journal chronologically after import
-    state.tradeJournal.sort((a, b) => (a.date||'').localeCompare(b.date||''));
+    // Re-sort journal chronologically after import (DD-MM-YYYY → convert to YYYY-MM-DD)
+    state.tradeJournal.sort((a, b) => _toISO(a.date||'').localeCompare(_toISO(b.date||'')));
 
     toast(`Imported ${added + updated} holdings · ${parcelsCreated} CGT parcels created — click Refresh Prices for live data`, 'success');
     scheduleSave();
@@ -729,7 +731,8 @@ async function handleBrokerCSV(e) {
       account: importAccount,
     });
   }
-  state.tradeJournal.sort((a, b) => (a.date||'').localeCompare(b.date||''));
+  const _brokerISO = d => { const p = (d||'').split('-'); return p.length===3 ? `${p[2]}-${p[1]}-${p[0]}` : (d||''); };
+  state.tradeJournal.sort((a, b) => _brokerISO(a.date||'').localeCompare(_brokerISO(b.date||'')));
 
   let msg = `Broker CSV (${result.broker}): ${added + updated} holdings · ${parcelsCreated} parcels`;
   if (result.skipped && result.skipped.length) msg += ` · ${result.skipped.length} rows skipped`;
@@ -896,7 +899,8 @@ function _applyImportedSells(sells, importAccount) {
     newEntries.forEach(e => { e.imported = true; });
     applied++;
   }
-  state.tradeJournal.sort((a, b) => (a.date||'').localeCompare(b.date||''));
+  const _sellISO = d => { const p = (d||'').split('-'); return p.length===3 ? `${p[2]}-${p[1]}-${p[0]}` : (d||''); };
+  state.tradeJournal.sort((a, b) => _sellISO(a.date||'').localeCompare(_sellISO(b.date||'')));
   scheduleSave();
   renderPage();
   const msg = skipped > 0
@@ -1207,7 +1211,7 @@ function applyDrpEvent(ticker) {
   const parcelId = Date.now();
   (state.cgtParcels = state.cgtParcels || []).push({
     id: parcelId, ticker, action: 'DRP', qty: drpShares, costPerShare: drpPrice,
-    date, remainingQty: drpShares, notes: 'DRP — dividend reinvestment',
+    date, remainingQty: drpShares, fees: 0, notes: 'DRP — dividend reinvestment',
     account: holding.account || 'personal',
   });
 

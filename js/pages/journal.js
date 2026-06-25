@@ -700,10 +700,10 @@ function _buildMonthlyPnlCard() {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
       <div class="card-title" style="margin:0">Monthly P&amp;L</div>
       <div style="display:flex;gap:16px;font-size:11px">
-        <span style="color:#16a34a">▲ ${totalWinMonths} winning</span>
-        <span style="color:#dc2626">▼ ${totalLoseMonths} losing</span>
-        <span class="text-muted">Best: <strong style="color:#16a34a">$${fmt(buckets[bestMonth])}</strong> (${bestMonth})</span>
-        <span class="text-muted">Worst: <strong style="color:#dc2626">$${fmt(buckets[worstMonth])}</strong> (${worstMonth})</span>
+        <span class="text-success">▲ ${totalWinMonths} winning</span>
+        <span class="text-danger">▼ ${totalLoseMonths} losing</span>
+        <span class="text-muted">Best: <strong class="text-success">$${fmt(buckets[bestMonth])}</strong> (${bestMonth})</span>
+        <span class="text-muted">Worst: <strong class="text-danger">$${fmt(buckets[worstMonth])}</strong> (${worstMonth})</span>
       </div>
     </div>
     <canvas id="monthly-pnl-chart" style="width:100%;height:140px"></canvas>
@@ -713,9 +713,9 @@ function _buildMonthlyPnlCard() {
 function _drawMonthlyPnlChart(canvasId, buckets, months) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
+  if (typeof _fitCanvas === 'function') _fitCanvas(canvas);
+  else { canvas.width = canvas.offsetWidth || 800; canvas.height = canvas.offsetHeight || 140; }
   const ctx = canvas.getContext('2d');
-  canvas.width  = canvas.offsetWidth || 800;
-  canvas.height = canvas.offsetHeight || 140;
   const W = canvas.width, H = canvas.height;
   const PAD_L = 58, PAD_R = 8, PAD_T = 10, PAD_B = 28;
   const chartW = W - PAD_L - PAD_R;
@@ -729,20 +729,25 @@ function _drawMonthlyPnlChart(canvasId, buckets, months) {
   const step   = chartW / months.length;
   const midY   = PAD_T + chartH / 2;
 
+  const _gc = typeof chartColor === 'function'
+    ? (tok, fb) => chartColor(tok, fb)
+    : (tok, fb) => fb;
+
   // Zero line
-  ctx.strokeStyle = 'rgba(128,128,128,0.25)';
+  ctx.strokeStyle = _gc('--chart-grid', 'rgba(128,128,128,0.25)');
   ctx.lineWidth = 0.5;
   ctx.beginPath(); ctx.moveTo(PAD_L, midY); ctx.lineTo(W - PAD_R, midY); ctx.stroke();
 
   // Y-axis grid + labels
-  ctx.font = '10px sans-serif'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(128,128,128,0.6)';
+  ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.6)');
   [0.5, 1].forEach(f => {
     const yPos = midY - f * (chartH / 2);
     const yNeg = midY + f * (chartH / 2);
     const label = '$' + fmt(maxAbs * f, 0);
     ctx.fillText(label,    PAD_L - 4, yPos + 3);
     ctx.fillText('-' + label, PAD_L - 4, yNeg + 3);
-    ctx.strokeStyle = 'rgba(128,128,128,0.08)';
+    ctx.strokeStyle = _gc('--chart-grid', 'rgba(128,128,128,0.08)');
     ctx.beginPath(); ctx.moveTo(PAD_L, yPos); ctx.lineTo(W - PAD_R, yPos); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(PAD_L, yNeg); ctx.lineTo(W - PAD_R, yNeg); ctx.stroke();
   });
@@ -753,12 +758,15 @@ function _drawMonthlyPnlChart(canvasId, buckets, months) {
     const x    = PAD_L + i * step + (step - barW) / 2;
     const barH = Math.abs(v) / maxAbs * (chartH / 2);
     const y    = v >= 0 ? midY - barH : midY;
-    ctx.fillStyle = v >= 0 ? 'rgba(22,163,74,0.75)' : 'rgba(220,38,38,0.75)';
+    ctx.fillStyle = v >= 0 ? _gc('--up', '#16a34a') : _gc('--down', '#dc2626');
+    ctx.globalAlpha = 0.75;
     ctx.fillRect(x, y, barW, barH || 1);
+    ctx.globalAlpha = 1;
 
     // Month label
     const label = m.slice(2).replace('-', '/');  // YY/MM
-    ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(128,128,128,0.7)';
+    ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.7)');
     ctx.fillText(label, x + barW / 2, H - 6);
   });
 }

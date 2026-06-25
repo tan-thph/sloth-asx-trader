@@ -771,7 +771,7 @@ function rollbackTradeJournalEntry(t) {
       holding.avgPrice = totalCostVal / holding.shares;
       holding.currentPrice = t.exitPrice;
     } else {
-      state.portfolio.push({ ticker: t.ticker.toUpperCase(), shares: t.qty, avgPrice: costBasis, currentPrice: t.exitPrice, sector: 'Other' });
+      state.portfolio.push({ ticker: t.ticker.toUpperCase(), shares: t.qty, avgPrice: costBasis, currentPrice: t.exitPrice, sector: t.sector || 'Other', account: t.account || 'personal' });
     }
     state.cash -= t.qty * t.exitPrice - Number(t.fees || 0);
     // Restore parcel remainingQty from disposals that belong to this trade

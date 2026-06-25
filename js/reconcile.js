@@ -7,9 +7,10 @@
 function reconcileJournalParcels() {
   let created = 0;
   // Walk journal oldest-first so parcels are created in chronological order
+  const _rISO = d => { const p = (d||'').split('-'); return p.length===3 ? `${p[2]}-${p[1]}-${p[0]}` : (d||''); };
   const buys = state.tradeJournal
-    .filter(t => t.action === 'BUY' && !t.parcelId)
-    .sort((a, b) => (a.date||'').localeCompare(b.date||''));
+    .filter(t => (t.action === 'BUY' || t.action === 'TOP_UP') && !t.parcelId)
+    .sort((a, b) => _rISO(a.date||'').localeCompare(_rISO(b.date||'')));
 
   for (const t of buys) {
     const tAcct = t.account || 'personal';
