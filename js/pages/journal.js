@@ -675,38 +675,81 @@ function _buildMonthlyPnlCard() {
   const closed = state.tradeJournal.filter(t => t.status === 'closed' && t.pnl != null);
   if (closed.length < 2) return '';
 
-  // Bucket by YYYY-MM (date format is DD-MM-YYYY)
-  const buckets = {};
+  // Bucket by YYYY-MM. `date` is now the sale date (after the Item-1 fix).
+  const buckets = {}, tradeCounts = {}, winCounts = {};
   closed.forEach(t => {
     if (!t.date) return;
     const parts = t.date.split('-');
     if (parts.length < 3) return;
     const key = `${parts[2]}-${parts[1]}`;  // YYYY-MM
-    buckets[key] = (buckets[key] || 0) + (t.pnl || 0);
+    buckets[key]     = (buckets[key]     || 0) + (t.pnl || 0);
+    tradeCounts[key] = (tradeCounts[key] || 0) + 1;
+    winCounts[key]   = (winCounts[key]   || 0) + ((t.pnl || 0) > 0 ? 1 : 0);
   });
 
-  const months = Object.keys(buckets).sort().slice(-18);  // last 18 months
+  const months = Object.keys(buckets).sort().slice(-18);
   if (months.length < 2) return '';
 
-  const totalWinMonths  = months.filter(m => buckets[m] > 0).length;
-  const totalLoseMonths = months.filter(m => buckets[m] < 0).length;
-  const bestMonth       = months.reduce((best, m) => buckets[m] > (buckets[best]||0) ? m : best, months[0]);
-  const worstMonth      = months.reduce((worst, m) => buckets[m] < (buckets[worst]||0) ? m : worst, months[0]);
+  const totalWinM  = months.filter(m => buckets[m] > 0).length;
+  const totalLoseM = months.filter(m => buckets[m] < 0).length;
+  const bestM      = months.reduce((b, m) => buckets[m] > buckets[b] ? m : b, months[0]);
+  const worstM     = months.reduce((w, m) => buckets[m] < buckets[w] ? m : w, months[0]);
+  const totalPnl   = months.reduce((s, m) => s + buckets[m], 0);
+  const avgPnl     = totalPnl / months.length;
 
-  setTimeout(() => _drawMonthlyPnlChart('monthly-pnl-chart', buckets, months), 60);
+  // Compact month name helper
+  const _mLabel = key => {
+    const [y, mo] = key.split('-');
+    try { return new Date(+y, +mo - 1).toLocaleString('en', { month: 'short' }) + ' ' + y.slice(2); }
+    catch { return key; }
+  };
+
+  // Breakdown table rows (newest first)
+  const tableRows = [...months].reverse().map(m => {
+    const pnl = buckets[m] || 0;
+    const n   = tradeCounts[m] || 0;
+    const wr  = n > 0 ? Math.round(winCounts[m] / n * 100) : null;
+    return `<tr style="border-top:0.5px solid var(--border-light)">
+      <td style="padding:4px 8px;font-size:12px;color:var(--text-secondary)">${_mLabel(m)}</td>
+      <td style="padding:4px 8px;font-size:12px;font-weight:600;text-align:right" class="${pnl>=0?'text-success':'text-danger'}">${pnl>=0?'+':''}$${fmt(Math.abs(pnl))}</td>
+      <td style="padding:4px 8px;font-size:11px;text-align:right;color:var(--text-muted)">${n} trade${n!==1?'s':''}</td>
+      <td style="padding:4px 8px;font-size:11px;text-align:right;color:var(--text-muted)">${wr!=null?wr+'% WR':'—'}</td>
+    </tr>`;
+  }).join('');
+
+  setTimeout(() => _drawMonthlyPnlChart('monthly-pnl-chart', buckets, months), 80);
 
   return `
   <div class="card section-gap">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
-      <div class="card-title" style="margin:0">Monthly P&amp;L</div>
-      <div style="display:flex;gap:16px;font-size:11px">
-        <span class="text-success">▲ ${totalWinMonths} winning</span>
-        <span class="text-danger">▼ ${totalLoseMonths} losing</span>
-        <span class="text-muted">Best: <strong class="text-success">$${fmt(buckets[bestMonth])}</strong> (${bestMonth})</span>
-        <span class="text-muted">Worst: <strong class="text-danger">$${fmt(buckets[worstMonth])}</strong> (${worstMonth})</span>
+    <!-- Header row: title + aggregate stats + breakdown toggle -->
+    <div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+        <span class="card-title" style="margin:0">Monthly P&amp;L</span>
+        <span style="font-size:14px;font-weight:700" class="${totalPnl>=0?'text-success':'text-danger'}">${totalPnl>=0?'+':''}$${fmt(Math.abs(totalPnl))}</span>
+        <span class="text-xs text-muted">${months.length}mo · avg ${avgPnl>=0?'+':''}$${fmt(Math.abs(avgPnl))}/mo</span>
+      </div>
+      <div style="display:flex;gap:10px;font-size:11px;flex-wrap:wrap;align-items:center">
+        <span class="text-success" title="Winning months">▲ ${totalWinM}</span>
+        <span class="text-danger" title="Losing months">▼ ${totalLoseM}</span>
+        <span class="text-muted">Best <strong class="text-success">$${fmt(buckets[bestM])}</strong> <span style="opacity:0.6">${_mLabel(bestM)}</span></span>
+        <span class="text-muted">Worst <strong class="text-danger">$${fmt(buckets[worstM])}</strong> <span style="opacity:0.6">${_mLabel(worstM)}</span></span>
+        <button class="btn btn-sm" onclick="(function(){const t=document.getElementById('monthly-pnl-table');t.style.display=t.style.display==='none'?'':'none'})()" style="font-size:10px;padding:2px 8px">☰ Breakdown</button>
       </div>
     </div>
-    <canvas id="monthly-pnl-chart" style="width:100%;height:140px"></canvas>
+    <!-- Bar chart with cumulative overlay -->
+    <canvas id="monthly-pnl-chart" style="width:100%;height:170px;display:block"></canvas>
+    <!-- Collapsible breakdown table -->
+    <div id="monthly-pnl-table" style="display:none;margin-top:10px;overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr>
+          <th style="padding:4px 8px;font-size:10px;font-weight:600;color:var(--text-tertiary);text-align:left;text-transform:uppercase;letter-spacing:0.5px">Month</th>
+          <th style="padding:4px 8px;font-size:10px;font-weight:600;color:var(--text-tertiary);text-align:right;text-transform:uppercase;letter-spacing:0.5px">P&amp;L</th>
+          <th style="padding:4px 8px;font-size:10px;font-weight:600;color:var(--text-tertiary);text-align:right;text-transform:uppercase;letter-spacing:0.5px">Trades</th>
+          <th style="padding:4px 8px;font-size:10px;font-weight:600;color:var(--text-tertiary);text-align:right;text-transform:uppercase;letter-spacing:0.5px">Win rate</th>
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+    </div>
   </div>`;
 }
 
@@ -714,59 +757,120 @@ function _drawMonthlyPnlChart(canvasId, buckets, months) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
   if (typeof _fitCanvas === 'function') _fitCanvas(canvas);
-  else { canvas.width = canvas.offsetWidth || 800; canvas.height = canvas.offsetHeight || 140; }
+  else { canvas.width = canvas.offsetWidth || 800; canvas.height = canvas.offsetHeight || 170; }
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
-  const PAD_L = 58, PAD_R = 8, PAD_T = 10, PAD_B = 28;
+  const PAD_L = 60, PAD_R = 60, PAD_T = 14, PAD_B = 26;
   const chartW = W - PAD_L - PAD_R;
   const chartH = H - PAD_T - PAD_B;
 
   ctx.clearRect(0, 0, W, H);
 
-  const values = months.map(m => buckets[m] || 0);
-  const maxAbs = Math.max(...values.map(Math.abs), 1);
-  const barW   = Math.max(4, Math.floor(chartW / months.length) - 2);
-  const step   = chartW / months.length;
-  const midY   = PAD_T + chartH / 2;
-
   const _gc = typeof chartColor === 'function'
     ? (tok, fb) => chartColor(tok, fb)
     : (tok, fb) => fb;
 
+  const values = months.map(m => buckets[m] || 0);
+  const maxAbs = Math.max(...values.map(Math.abs), 1);
+
+  // Cumulative series
+  let runSum = 0;
+  const cumPoints = months.map((m, i) => {
+    runSum += (buckets[m] || 0);
+    const cx = PAD_L + (i + 0.5) * (chartW / months.length);
+    return { x: cx, cum: runSum };
+  });
+  const maxCumAbs = Math.max(...cumPoints.map(p => Math.abs(p.cum)), 1);
+
+  // Grid helpers
+  const barScale  = v => midY - (v / maxAbs) * (chartH / 2);
+  const cumScale  = v => midY - (v / maxCumAbs) * (chartH / 2);
+  const step      = chartW / months.length;
+  const barW      = Math.max(4, Math.floor(step * 0.6));
+  const midY      = PAD_T + chartH / 2;
+
   // Zero line
-  ctx.strokeStyle = _gc('--chart-grid', 'rgba(128,128,128,0.25)');
+  ctx.strokeStyle = _gc('--chart-grid', 'rgba(128,128,128,0.3)');
   ctx.lineWidth = 0.5;
   ctx.beginPath(); ctx.moveTo(PAD_L, midY); ctx.lineTo(W - PAD_R, midY); ctx.stroke();
 
-  // Y-axis grid + labels
+  // Y-axis grid + left labels (bar scale)
   ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
-  ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.6)');
+  ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.65)');
   [0.5, 1].forEach(f => {
-    const yPos = midY - f * (chartH / 2);
-    const yNeg = midY + f * (chartH / 2);
-    const label = '$' + fmt(maxAbs * f, 0);
-    ctx.fillText(label,    PAD_L - 4, yPos + 3);
-    ctx.fillText('-' + label, PAD_L - 4, yNeg + 3);
-    ctx.strokeStyle = _gc('--chart-grid', 'rgba(128,128,128,0.08)');
-    ctx.beginPath(); ctx.moveTo(PAD_L, yPos); ctx.lineTo(W - PAD_R, yPos); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(PAD_L, yNeg); ctx.lineTo(W - PAD_R, yNeg); ctx.stroke();
+    const yP = barScale(maxAbs * f), yN = barScale(-maxAbs * f);
+    ctx.fillText('$' + fmt(maxAbs * f, 0), PAD_L - 4, yP + 3);
+    ctx.fillText('-$' + fmt(maxAbs * f, 0), PAD_L - 4, yN + 3);
+    ctx.strokeStyle = _gc('--chart-grid', 'rgba(128,128,128,0.07)');
+    ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(PAD_L, yP); ctx.lineTo(W - PAD_R, yP); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD_L, yN); ctx.lineTo(W - PAD_R, yN); ctx.stroke();
   });
 
   // Bars
+  const showLabels = months.length <= 14;
   months.forEach((m, i) => {
-    const v    = buckets[m] || 0;
-    const x    = PAD_L + i * step + (step - barW) / 2;
-    const barH = Math.abs(v) / maxAbs * (chartH / 2);
-    const y    = v >= 0 ? midY - barH : midY;
+    const v  = buckets[m] || 0;
+    const x  = PAD_L + i * step + (step - barW) / 2;
+    const bH = Math.abs(v) / maxAbs * (chartH / 2);
+    const y  = v >= 0 ? barScale(v) : midY;
     ctx.fillStyle = v >= 0 ? _gc('--up', '#16a34a') : _gc('--down', '#dc2626');
-    ctx.globalAlpha = 0.75;
-    ctx.fillRect(x, y, barW, barH || 1);
+    ctx.globalAlpha = 0.72;
+    ctx.fillRect(x, y, barW, bH || 1);
     ctx.globalAlpha = 1;
 
+    // Value label inside/above bar when bar is tall enough
+    if (showLabels && bH > 12) {
+      ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.75)');
+      const lbl = (v >= 0 ? '+' : '') + (Math.abs(v) >= 1000 ? '$' + fmt(Math.abs(v), 0) : '$' + Math.round(Math.abs(v)));
+      ctx.fillText(lbl, x + barW / 2, v >= 0 ? y - 3 : y + bH + 10);
+    }
+
     // Month label
-    const label = m.slice(2).replace('-', '/');  // YY/MM
     ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.7)');
-    ctx.fillText(label, x + barW / 2, H - 6);
+    ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.65)');
+    ctx.fillText(m.slice(2).replace('-', '/'), x + barW / 2, H - 6);
   });
+
+  // Cumulative P&L line (right-axis scale, dashed blue)
+  // Right axis labels
+  ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillStyle = _gc('--chart-1', '#3b82f6');
+  ctx.globalAlpha = 0.7;
+  ctx.fillText('$' + fmt(maxCumAbs, 0), W - PAD_R + 4, barScale(maxAbs));  // top
+  ctx.fillText('-$' + fmt(maxCumAbs, 0), W - PAD_R + 4, barScale(-maxAbs)); // bottom
+  ctx.globalAlpha = 1;
+
+  ctx.strokeStyle = _gc('--chart-1', '#3b82f6');
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 3]);
+  ctx.beginPath();
+  cumPoints.forEach((p, i) => {
+    const cy = cumScale(p.cum);
+    if (i === 0) ctx.moveTo(p.x, cy); else ctx.lineTo(p.x, cy);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Dot at last cumulative point
+  const last = cumPoints[cumPoints.length - 1];
+  ctx.beginPath();
+  ctx.arc(last.x, cumScale(last.cum), 3, 0, Math.PI * 2);
+  ctx.fillStyle = _gc('--chart-1', '#3b82f6');
+  ctx.fill();
+
+  // Legend chips (top-right corner of chart)
+  const ly = PAD_T - 2;
+  ctx.font = '9px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillStyle = _gc('--up', '#16a34a'); ctx.globalAlpha = 0.8;
+  ctx.fillRect(W - PAD_R - 110, ly, 8, 8);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.7)');
+  ctx.fillText('Monthly P&L', W - PAD_R - 99, ly + 8);
+  ctx.strokeStyle = _gc('--chart-1', '#3b82f6'); ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(W - PAD_R - 110, ly + 18); ctx.lineTo(W - PAD_R - 102, ly + 18); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = _gc('--text-tertiary', 'rgba(128,128,128,0.7)');
+  ctx.fillText('Cumulative', W - PAD_R - 99, ly + 20);
 }
