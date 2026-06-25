@@ -163,7 +163,7 @@ const state = {
     allocatedCash: null,   // null = auto (20% of state.cash); user can override
     riskPct: 1.5,          // max risk per trade as % of allocatedCash
     extraTickers: [],      // watchlist tickers for day-trade scans only
-    universeKey: 'asx200', // selected universe for universe scan
+    universeKey: 'portfolio_watchlist', // 'portfolio_watchlist' (default) | 'asx20'|'asx50'|'asx100'|'asx200' — what "Run Day Trade Scan" scans
     scanProgress: null,    // {phase:'fetching'|'analysing', current, total, candidates} | null
     activeTab: 'setups',   // 'setups' | 'intraday' | 'rules'
     filterParams: {        // pre-filter thresholds (applied client-side)

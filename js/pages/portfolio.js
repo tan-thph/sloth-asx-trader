@@ -129,7 +129,10 @@ function renderPortfolio() {
               const lots = openParcels.length;
               const rawEntries = state.portfolio.filter(e => e.ticker === h.ticker && (e.account || 'personal') === hAcct);
               const portfolioIdx = state.portfolio.findIndex(e => e.ticker === h.ticker && (e.account || 'personal') === hAcct);
-              const hasMulti = lots > 1;
+              // Always expandable when there's at least one lot — per-lot account
+              // reassignment + split controls live in the expanded row, so even a
+              // single-lot holding needs to be reachable (not just multi-lot ones).
+              const hasMulti = lots > 0;
               // Dividend data
               const dv = state.dividendData[h.ticker];
               const divYieldStr = dv && dv.dividendYield != null
@@ -145,8 +148,10 @@ function renderPortfolio() {
                 : '<span class="text-muted text-xs">—</span>';
               const _ACCT_COLORS = {personal:'#6366f1',super:'#16a34a',trading:'#d97706'};
               const acct = h.account || 'personal';
+              // Display-only — account is now reassigned per-lot (expand row below),
+              // not per whole holding, since a holding can be split across accounts.
               const acctBadge = state.activeAccount === 'all'
-                ? `<td data-label="Account"><span class="text-xs" style="background:${_ACCT_COLORS[acct]}22;color:${_ACCT_COLORS[acct]};padding:1px 5px;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();_cycleHoldingAccount('${h.ticker}','${acct}')" title="Click to change account">${acct}</span></td>`
+                ? `<td data-label="Account"><span class="text-xs" style="background:${_ACCT_COLORS[acct]}22;color:${_ACCT_COLORS[acct]};padding:1px 5px;border-radius:3px" title="Expand lots below to reassign individual lots">${acct}</span></td>`
                 : '';
               const _lotsKey = `${h.ticker}-${hAcct}`;
               return `
@@ -186,6 +191,8 @@ function renderPortfolio() {
                         <th style="padding:6px 12px;font-size:11px;color:var(--text-secondary)">Unrealised P&L</th>
                         <th style="padding:6px 12px;font-size:11px;color:var(--text-secondary)">Held</th>
                         <th style="padding:6px 12px;font-size:11px;color:var(--text-secondary)">50% Disc?</th>
+                        <th style="padding:6px 12px;font-size:11px;color:var(--text-secondary)">Account</th>
+                        <th style="padding:6px 12px;font-size:11px;color:var(--text-secondary)">Actions</th>
                       </tr></thead>
                       <tbody>
                         ${openParcels.sort((a,b)=>a.date.localeCompare(b.date)).map(p => {
@@ -194,6 +201,8 @@ function renderPortfolio() {
                           const lotPl    = mktVal - costBase;
                           const held     = daysBetween(p.date, todayStr());
                           const disc     = held >= 365;
+                          const pAcct    = p.account || 'personal';
+                          const splittable = p.remainingQty >= p.qty && p.qty > 1;
                           return `<tr>
                             <td></td>
                             <td style="padding:5px 12px;font-size:12px" class="text-muted">#${p.id}</td>
@@ -205,6 +214,15 @@ function renderPortfolio() {
                             <td style="padding:5px 12px;font-size:12px" class="${lotPl>=0?'text-success':'text-danger'}">${sign(lotPl)}$${fmt(Math.abs(lotPl))}</td>
                             <td style="padding:5px 12px;font-size:12px">${held}d</td>
                             <td style="padding:5px 12px;font-size:12px">${disc?'<span class="badge badge-executed">✓ Eligible</span>':`<span class="text-xs text-muted">${365-held}d left</span>`}</td>
+                            <td style="padding:5px 12px;font-size:12px">
+                              <select style="font-size:11px;padding:1px 4px" onclick="event.stopPropagation()" onchange="event.stopPropagation();setParcelAccount(${p.id}, this.value)">
+                                ${['personal','super','trading'].map(a => `<option value="${a}" ${a===pAcct?'selected':''}>${{personal:'Personal',super:'Super',trading:'Trading'}[a]}</option>`).join('')}
+                              </select>
+                            </td>
+                            <td style="padding:5px 12px;font-size:12px;white-space:nowrap">
+                              <button class="btn btn-sm" style="font-size:11px;padding:2px 6px" ${splittable?'':'disabled title="Already fully split or partially sold"'}
+                                onclick="event.stopPropagation();promptSplitParcel(${p.id})">✂ Split</button>
+                            </td>
                           </tr>`;
                         }).join('')}
                       </tbody>
@@ -888,16 +906,26 @@ function _applyImportedSells(sells, importAccount) {
   toast(msg, applied > 0 ? 'success' : 'warning');
 }
 
-function _cycleHoldingAccount(ticker, fromAccount) {
-  const _cycle = {personal:'super', super:'trading', trading:'personal'};
-  // Only cycle the holding in the specific account — if the user has WES in both personal
-  // and trading, clicking the personal badge must not also cycle the trading one.
-  const acct = fromAccount || 'personal';
-  state.portfolio
-    .filter(h => h.ticker === ticker && (h.account || 'personal') === acct)
-    .forEach(h => { h.account = _cycle[acct] || 'personal'; });
-  scheduleSave();
-  renderPage();
+// Splits one open parcel into two sibling lots, then re-renders. Pure mutation
+// logic lives in splitParcel() (portfolio-helpers.js) — this is the UI wrapper
+// (prompt + validation feedback + render), mirroring deleteParcel()'s pattern.
+function promptSplitParcel(parcelId) {
+  const p = state.cgtParcels.find(x => x.id === parcelId);
+  if (!p) return;
+  if (p.remainingQty < p.qty) { toast('Cannot split a partially-sold parcel', 'error'); return; }
+  const input = prompt(
+    `Split parcel #${p.id} (${p.qty} × ${p.ticker} @ $${fmt(p.costPerShare)}) — ` +
+    `how many shares should move into the NEW lot? (1–${p.qty - 1})`
+  );
+  if (input == null) return;
+  const qty = Number(input);
+  if (!(qty > 0) || qty >= p.qty) { toast('Invalid split quantity', 'error'); return; }
+  if (splitParcel(parcelId, qty)) {
+    renderPage();
+    toast(`Split parcel #${p.id} — ${qty} share(s) moved to a new lot`, 'success');
+  } else {
+    toast('Split failed', 'error');
+  }
 }
 
 async function addHolding() {

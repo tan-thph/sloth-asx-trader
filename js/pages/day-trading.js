@@ -201,22 +201,29 @@ function _renderDtSwingMain() {
       <div class="card" style="display:flex;flex-direction:column;gap:10px">
         <div class="card-title">Run Day Trade Scan</div>
         <p class="text-xs text-muted" style="margin:0">
-          Scans portfolio + watchlist tickers for swing-trade setups (5–15 day holds) using orthogonal confluence.
-          Requires BB Primary + ≥2 of 4 confirmations, plus all hard filters (liquidity, SMA200, ADX, no catalyst).
+          Scans for swing-trade setups (5–15 day holds) using orthogonal confluence. Requires BB Primary
+          + ticked confirmations, plus all hard filters (liquidity, SMA200, ADX, no catalyst).
+          Choose what to scan below, then run.
         </p>
+        <div style="display:flex;gap:7px;flex-wrap:wrap">
+          ${_renderDtUniverseSelectorHtml()}
+        </div>
         ${summaryHtml}
-        <button class="btn btn-primary" ${dt.analysisRunning ? 'disabled' : ''}
-          onclick="runDayTradeAnalysis()"
-          style="align-self:flex-start;display:flex;align-items:center;gap:7px">
-          ${dt.analysisRunning
-            ? '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Scanning…'
-            : '▶ Run Day Trade Scan'}
-        </button>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary" ${dt.analysisRunning ? 'disabled' : ''}
+            onclick="runDayTradeAnalysis()"
+            style="display:flex;align-items:center;gap:7px">
+            ${dt.analysisRunning
+              ? '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Scanning…'
+              : '▶ Run Day Trade Scan (' + _dtUniverseLabel(dt.universeKey) + ')'}
+          </button>
+          ${(dt.analysisRunning && dt.scanProgress != null)
+            ? '<button class="btn btn-sm" onclick="cancelUniverseScan()" style="color:#ef4444;border-color:#ef4444;font-size:11px">✕ Cancel</button>'
+            : ''}
+        </div>
+        ${(dt.analysisRunning && dt.scanProgress != null) ? `<div id="dt-universe-progress">${_renderUniverseProgressHtml()}</div>` : ''}
       </div>
     </div>
-
-    <!-- Universe Scanner -->
-    ${_renderUniverseScannerCard()}
 
     <!-- Signal legend -->
     <div class="card" style="margin-bottom:14px;padding:10px 14px">
@@ -582,70 +589,40 @@ function _renderDtRec(r, compact = false) {
     </div>`;
 }
 
-// ── Universe Scanner Card ─────────────────────────────────────────────────────
+// ── Universe selector (merged into the "Run Day Trade Scan" card) ────────────
+// Replaces the old separate "ASX Index Scanner" card + "Scan ASX N" button —
+// the selector now controls what runDayTradeAnalysis() scans directly
+// (see the dispatcher in day-trading-analysis.js).
 
-function _renderUniverseScannerCard() {
+function _dtUniverseLabel(key) {
+  if (!key || key === 'portfolio_watchlist') return 'Portfolio+Watchlist';
+  return (ASX_UNIVERSE_META[key] || {}).label || key;
+}
+
+function _renderDtUniverseSelectorHtml() {
   const dt = state.dayTrading;
-  const uKey = dt.universeKey || 'asx200';
-  const isRunning = dt.analysisRunning;
-  const isScanning = isRunning && dt.scanProgress != null;
-  const universeKeys = ['asx20','asx50','asx100','asx200'];
+  const uKey = dt.universeKey || 'portfolio_watchlist';
+  const isScanning = dt.analysisRunning;
+  const portfolioTickers = mergedPortfolio().map(h => h.ticker);
+  const pwCount = new Set([...portfolioTickers, ...(dt.extraTickers || [])]).size;
 
-  const selectorHtml = universeKeys.map(k => {
-    const meta = ASX_UNIVERSE_META[k];
-    const count = getUniverseTickers(k).length;
-    const active = k === uKey;
+  const options = [
+    { key: 'portfolio_watchlist', label: 'Portfolio+Watchlist', desc: 'Your current holdings + day-trade watchlist tickers only.', count: pwCount },
+    ...['asx20', 'asx50', 'asx100', 'asx200'].map(k => ({
+      key: k, label: ASX_UNIVERSE_META[k].label, desc: ASX_UNIVERSE_META[k].desc, count: getUniverseTickers(k).length,
+    })),
+  ];
+
+  return options.map(({ key, label, desc, count }) => {
+    const active = key === uKey;
     return `<button
       class="btn btn-sm"
-      onclick="state.dayTrading.universeKey='${k}';scheduleSave();renderPage()"
+      onclick="state.dayTrading.universeKey='${key}';scheduleSave();renderPage()"
       style="font-size:11px;font-weight:${active ? '700' : '400'};background:${active ? '#6366f1' : 'var(--bg-secondary)'};color:${active ? '#fff' : 'var(--text-secondary)'};border-color:${active ? '#6366f1' : 'var(--border-medium)'}"
       ${isScanning ? 'disabled' : ''}
-      title="${meta.desc}"
-    >${meta.label} <span style="opacity:.7">(${count})</span></button>`;
+      title="${desc}"
+    >${label} <span style="opacity:.7">(${count})</span></button>`;
   }).join('');
-
-  const progressHtml = isScanning
-    ? `<div id="dt-universe-progress">${_renderUniverseProgressHtml()}</div>`
-    : '<div id="dt-universe-progress"></div>';
-
-  // Last universe scan summary (shown below progress)
-  const lastSummary = dt.lastSummary?.source === 'universe'
-    ? `<div style="margin-top:8px;font-size:12px;color:var(--text-secondary);line-height:1.45">
-         <span style="color:var(--text-muted);font-size:11px">Last universe scan: ${dt.lastSummary.date} ${dt.lastSummary.time || ''}</span><br>
-         ${(dt.lastSummary.text || '').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-       </div>`
-    : '';
-
-  const meta = ASX_UNIVERSE_META[uKey] || {};
-  const tickerCount = getUniverseTickers(uKey).length;
-
-  return `
-  <div class="card" style="margin-bottom:14px">
-    <div class="card-title" style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-      <span style="background:#6366f1;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;letter-spacing:.5px">UNIVERSE</span>
-      ASX Index Scanner
-    </div>
-    <p class="text-xs text-muted" style="margin:0 0 10px 0">
-      Scans an entire ASX index for BB confluence setups. Pre-filters ${tickerCount} tickers client-side
-      (BB near lower band + ADV>$1.5M + SMA200 + ADX), then sends only candidates to AI.
-    </p>
-    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px">
-      ${selectorHtml}
-    </div>
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-      <button class="btn btn-primary btn-sm" onclick="runUniverseScan()"
-        ${isRunning ? 'disabled' : ''}
-        style="background:#6366f1;border-color:#6366f1;display:flex;align-items:center;gap:6px">
-        ${isScanning
-          ? '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Scanning…'
-          : '⬡ Scan ' + meta.label}
-      </button>
-      ${isScanning ? `<button class="btn btn-sm" onclick="cancelUniverseScan()" style="color:#ef4444;border-color:#ef4444;font-size:11px">✕ Cancel</button>` : ''}
-      <span class="text-xs text-muted">${meta.desc}</span>
-    </div>
-    ${progressHtml}
-    ${lastSummary}
-  </div>`;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1188,6 +1165,50 @@ function _showTradeDialog({ ticker, action, qty, defaultPrice, title, readOnlyQt
 
 // ── Execute an intraday trade ─────────────────────────────────────────────────
 
+// Creates an Intraday open position from a parcel that was just reassigned
+// INTO the 'trading' account via setParcelAccount() (portfolio-helpers.js).
+// Unlike executeIntradayTrade(), this isn't a new transaction — entryPrice is
+// the lot's own historical cost basis, no brokerage is charged (already paid
+// at the original buy, captured in parcel.fees), and there's no paired
+// journal BUY row to create (the original BUY row already exists; this is a
+// reclassification of an existing holding, not a new trade).
+async function _openIntradayPositionFromParcel(parcel) {
+  const entryPrice = parcel.costPerShare;
+  let target = null, stop = null;
+  try {
+    const r = await fetch(`${API}/api/intraday/${encodeURIComponent(parcel.ticker)}`);
+    if (r.ok) {
+      const d = await r.json();
+      if (d.atr_5m && d.atr_5m > 0) {
+        stop = +(entryPrice - INTRADAY_DEFAULTS.stopAtrMult * d.atr_5m).toFixed(3);
+        target = d.vwap
+          ? +(d.vwap + INTRADAY_DEFAULTS.targetAtrMult * d.atr_5m).toFixed(3)
+          : +(entryPrice * (1 + INTRADAY_DEFAULTS.targetPct / 100)).toFixed(3);
+      }
+    }
+  } catch (_) { /* ATR fetch is best-effort — fall back to fixed-pct below */ }
+  if (stop == null) {
+    stop   = +(entryPrice * (1 - INTRADAY_DEFAULTS.stopPct  / 100)).toFixed(3);
+    target = +(entryPrice * (1 + INTRADAY_DEFAULTS.targetPct / 100)).toFixed(3);
+  }
+
+  if (!state.intraday) state.intraday = { recommendations: [], openPositions: [], todayPnl: 0 };
+  if (!state.intraday.openPositions) state.intraday.openPositions = [];
+  state.intraday.openPositions.push({
+    id:         `LOT-${Date.now()}-${parcel.ticker}`,
+    parcelId:   parcel.id,
+    ticker:     parcel.ticker,
+    qty:        parcel.remainingQty,
+    entryPrice,
+    entryFees:  0,            // no new transaction — original cost already in parcel.fees
+    target, stop,
+    enteredAt:  nowSydney(),
+    _journalId: null,         // no paired journal row — reclassification, not a buy
+  });
+  scheduleSave();
+  renderPage();
+}
+
 function executeIntradayTrade(recId) {
   if (!state.intraday) return;
   const rec = (state.intraday.recommendations || []).find(r => r.id === recId);
@@ -1230,6 +1251,7 @@ function executeIntradayTrade(recId) {
     if (!state.intraday.openPositions) state.intraday.openPositions = [];
     const newPos = {
       id:         rec.id,
+      parcelId:   null,           // set below once applyBuyToPortfolio creates the parcel
       ticker:     rec.ticker,
       qty,                       // actual qty, not AI-suggested
       entryPrice,
@@ -1247,6 +1269,9 @@ function executeIntradayTrade(recId) {
     const newParcel = (state.cgtParcels || []).length
       ? state.cgtParcels[state.cgtParcels.length - 1]
       : null;
+    // Links this position to its own parcel so setParcelAccount() (portfolio-helpers.js)
+    // can find and remove it precisely if this lot is later moved out of 'trading'.
+    newPos.parcelId = newParcel ? newParcel.id : null;
 
     // Seed liveSignals with the entry price immediately so Live/P&L renders on the first
     // renderPage() call after this dialog closes — before the next refreshPrices() fires.

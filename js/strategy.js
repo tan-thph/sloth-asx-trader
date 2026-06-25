@@ -42,7 +42,7 @@ function _ruleOn(paramsObj, key) {
 
 // ── Pre-filter function ────────────────────────────────────────────────────────
 // Returns the subset of tickers whose live signals pass all hard filters.
-// Called by runUniverseScan() in day-trading-analysis.js.
+// Called by _runUniverseScan() in day-trading-analysis.js.
 function _dtPreFilter(tickers) {
   // Merge defaults with any user-tuned values from state
   const fp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}) };

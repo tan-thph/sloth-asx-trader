@@ -6,7 +6,7 @@
 // Hard filters: ADV, SMA200, ADX, no catalyst.
 // NOTE: Fully quantitative — no Claude call. getDayTradeSystemPrompt /
 //       getDayTradeUniverseScanPrompt exist for potential future use but
-//       are not invoked by runDayTradeAnalysis() or runUniverseScan().
+//       are not invoked by runDayTradeAnalysis() (_runPortfolioWatchlistScan/_runUniverseScan).
 // ============================================================
 
 // ── _dtPreFilterWithStats ─────────────────────────────────────────────────────
@@ -50,7 +50,20 @@ function _dtDismissStaleRecs(maxAgeDays = 3) {
   if (dismissed) console.log(`[DT] Auto-dismissed ${dismissed} stale pending rec(s) (>${maxAgeDays}d old)`);
 }
 
+// Single entry point for the "Run Day Trade Scan" button. Dispatches on
+// state.dayTrading.universeKey: 'portfolio_watchlist' (default) runs the
+// lightweight portfolio+watchlist-only scan; any real index key (asx20/50/
+// 100/200) runs the batched universe scan. Kept as two internal functions
+// (rather than one merged body) because their fetch strategies genuinely
+// differ — single-batch vs paginated-with-progress/cancel — merging them
+// would just be a big if/else inside one function with no benefit.
 async function runDayTradeAnalysis() {
+  const universeKey = state.dayTrading.universeKey || 'portfolio_watchlist';
+  if (universeKey === 'portfolio_watchlist') return _runPortfolioWatchlistScan();
+  return _runUniverseScan();
+}
+
+async function _runPortfolioWatchlistScan() {
   if (state.dayTrading.analysisRunning) { toast('Day trade analysis already running', 'info'); return; }
 
   state.dayTrading.analysisRunning = true;
@@ -108,7 +121,7 @@ async function runDayTradeAnalysis() {
   const newRecs = _dtBuildRecs(candidates, _ap, _dtPortCtx, _dtRegime);
   const newRecTickers = new Set(newRecs.map(r => r.ticker));
 
-  // Mirrors the merge-by-ticker protection in runUniverseScan(): never wholesale-
+  // Mirrors the merge-by-ticker protection in _runUniverseScan(): never wholesale-
   // overwrite state.dayTrading.recommendations. Executed/closed/dismissed (or
   // manually-added) recs must survive a rescan regardless of whether they
   // reappear in this scan's candidate set — overwriting them would silently
@@ -118,7 +131,7 @@ async function runDayTradeAnalysis() {
 
   // Previously-pending recs that did NOT reappear in this scan's results must
   // not be silently dropped either — keep them flagged _stale and age them out
-  // after a few consecutive missed scans (same cutoff as runUniverseScan()).
+  // after a few consecutive missed scans (same cutoff as _runUniverseScan()).
   const MAX_STALE_SCANS = 3;
   const stalePrevPending = (state.dayTrading.recommendations || [])
     .filter(r => r.status === 'pending' && !newRecTickers.has(r.ticker))
@@ -175,7 +188,7 @@ function _dtTimeOfWeekBlocked(now) {
 
 // ── _dtBuildRecs ──────────────────────────────────────────────────────────────
 // Scores pre-filtered tickers against the DT signal stack and returns recs.
-// Called by both runDayTradeAnalysis() and runUniverseScan().
+// Called by both _runPortfolioWatchlistScan() and _runUniverseScan().
 function _dtBuildRecs(candidates, ap, portCtx, regime) {
   const _minConf = ap.minConfidence ?? DT_AI_PARAMS.minConfidence;
   const _minRR   = ap.minRrRatio   ?? DT_AI_PARAMS.minRrRatio;
@@ -458,7 +471,7 @@ function _updateUniverseProgress(msg) {
   if (el) el.innerHTML = msg;
 }
 
-async function runUniverseScan() {
+async function _runUniverseScan() {
   if (state.dayTrading.analysisRunning) {
     toast('A portfolio scan is already running. Please wait.', 'info');
     return;

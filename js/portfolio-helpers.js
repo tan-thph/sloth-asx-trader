@@ -216,6 +216,101 @@ function getParcelsForTicker(ticker, method, account) {
   return open.sort((a,b) => parseDate(a.date) - parseDate(b.date));
 }
 
+// Splits one OPEN parcel into two sibling parcels with arbitrary qtys, so each
+// can be tracked/sold/account-reassigned independently. Rejects partially-sold
+// parcels (remainingQty < qty) — representing the leftover as a fresh "split"
+// lot would misrepresent shares that were actually already disposed of.
+function splitParcel(parcelId, splitQty) {
+  const p = state.cgtParcels.find(x => x.id === parcelId);
+  if (!p) return false;
+  if (p.remainingQty < p.qty) return false;       // partially sold — not splittable
+  splitQty = Number(splitQty);
+  if (!(splitQty > 0) || splitQty >= p.qty) return false;  // must leave both sides > 0
+  const fracFees = (p.fees || 0) * (splitQty / p.qty);
+  p.qty -= splitQty;
+  p.remainingQty -= splitQty;
+  p.fees = (p.fees || 0) - fracFees;
+  addParcel(p.ticker, p.date, splitQty, p.costPerShare, fracFees, p.sector, p.account);
+  scheduleSave();
+  return true;
+}
+
+// Rebuilds the single state.portfolio row for (ticker, account) from the sum
+// of that account's currently-open parcels — qty = sum(remainingQty), avgPrice
+// = parcel-weighted average cost. Removes the row entirely when no open
+// parcels remain (epsilon-safe, mirrors applySellToPortfolio's _SHARE_EPSILON
+// cleanup). Called after any parcel mutation that can change a (ticker,
+// account) holding's true qty/cost — currently just setParcelAccount, since
+// splitParcel/addParcel/applyBuyToPortfolio keep totals unchanged or already
+// maintain state.portfolio directly.
+function _recomputeHoldingFromParcels(ticker, account) {
+  const symbol = ticker.toUpperCase();
+  const acct = account || 'personal';
+  const openParcels = state.cgtParcels.filter(p =>
+    p.ticker === symbol && (p.account || 'personal') === acct && p.remainingQty > 0
+  );
+  const existingIdx = state.portfolio.findIndex(h => h.ticker === symbol && (h.account || 'personal') === acct);
+  const totalQty = openParcels.reduce((s, p) => s + p.remainingQty, 0);
+  if (Math.abs(totalQty) < _SHARE_EPSILON) {
+    if (existingIdx !== -1) state.portfolio.splice(existingIdx, 1);
+    return;
+  }
+  const avgPrice = openParcels.reduce((s, p) => s + p.remainingQty * p.costPerShare, 0) / totalQty;
+  if (existingIdx !== -1) {
+    const existing = state.portfolio[existingIdx];
+    existing.shares = totalQty;
+    existing.avgPrice = avgPrice;
+    if (!existing.currentPrice) existing.currentPrice = avgPrice;
+  } else {
+    state.portfolio.push({
+      ticker: symbol, shares: totalQty, avgPrice, currentPrice: avgPrice,
+      sector: openParcels[0].sector || 'Other', account: acct,
+    });
+  }
+}
+
+// Removes the Intraday open position tied to this parcel (matched by
+// parcelId; falls back to a ticker-only match for legacy positions created
+// before parcelId was tracked on every position — see day-trading.js).
+function _removeIntradayPositionForParcel(parcel) {
+  if (!state.intraday || !Array.isArray(state.intraday.openPositions)) return;
+  const byId = state.intraday.openPositions.findIndex(pos => pos.parcelId === parcel.id);
+  if (byId !== -1) { state.intraday.openPositions.splice(byId, 1); return; }
+  const byTicker = state.intraday.openPositions.findIndex(pos => pos.ticker === parcel.ticker && pos.parcelId == null);
+  if (byTicker !== -1) state.intraday.openPositions.splice(byTicker, 1);
+}
+
+// Reassigns ONE parcel (lot) to a different account — the per-lot equivalent
+// of the old whole-holding _cycleHoldingAccount. Recomputes both the source
+// and destination (ticker, account) portfolio rows from parcels (rather than
+// patching shares/avgPrice by hand) so repeated partial moves never drift.
+// Also syncs Intraday: leaving 'trading' closes the matching open position
+// (Portfolio holding is untouched — shares aren't sold, just reclassified);
+// entering 'trading' opens a new one sized/priced off this lot's own cost
+// basis via the async _openIntradayPositionFromParcel() (day-trading.js).
+function setParcelAccount(parcelId, newAccount) {
+  const p = state.cgtParcels.find(x => x.id === parcelId);
+  if (!p) return false;
+  const oldAccount = p.account || 'personal';
+  if (oldAccount === newAccount) return false;
+  p.account = newAccount;
+
+  _recomputeHoldingFromParcels(p.ticker, oldAccount);
+  _recomputeHoldingFromParcels(p.ticker, newAccount);
+
+  if (oldAccount === 'trading' && newAccount !== 'trading') {
+    _removeIntradayPositionForParcel(p);
+  } else if (oldAccount !== 'trading' && newAccount === 'trading') {
+    if (typeof _openIntradayPositionFromParcel === 'function') {
+      _openIntradayPositionFromParcel(p);   // async — saves/renders itself on completion
+    }
+  }
+
+  scheduleSave();
+  renderPage();
+  return true;
+}
+
 function parseDate(dateStr) {
   if (!dateStr) return null;
   // Handle DD-MM-YYYY format

@@ -196,7 +196,7 @@ ${lines.join('\n')}`;
 }
 
 // buildDtSystemArray — reference implementation for the dormant day-trade Claude path.
-// Not called: runDayTradeAnalysis() and runUniverseScan() are quantitative-only.
+// Not called: runDayTradeAnalysis() (dispatches to _runPortfolioWatchlistScan/_runUniverseScan) is quantitative-only.
 // Kept so the Claude AI phase can be re-activated by wiring callClaude('dayTrade',…)
 // from day-trading-analysis.js and passing buildDtSystemArray(context) as systemArray.
 function buildDtSystemArray(context = {}) {
