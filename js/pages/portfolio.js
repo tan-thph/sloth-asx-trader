@@ -877,24 +877,23 @@ function _applyImportedSells(sells, importAccount) {
       }
     }
 
-    // Trade journal entry
-    const pnl = disposals.reduce((sum, d) => sum + d.grossGain, 0);
-    state.tradeJournal.push({
-      id: Date.now() + Math.random(),
-      date, ticker,
-      action: 'SELL',
-      qty: shares,
-      entryPrice: disposals[0]?.parcelCostPerShare || 0,
-      exitPrice: price,
-      fees: brokerage,
-      pnl: +pnl.toFixed(2),
-      status: 'closed',
-      recId: null,
-      recExecuted: false,
-      closeDate: date,
-      imported: true,
-      account: acct,
+    // Trade journal: one row PER PARCEL matched (gotcha #66), patching each
+    // original BUY/TOP_UP/RECLASSIFY row's status to 'closed'/'trimmed' —
+    // same model markExecuted()/addManualTrade() already use. The previous
+    // version here hand-rolled a single aggregate row using only the FIRST
+    // parcel's cost basis (wrong/misleading for multi-parcel disposals) and
+    // never patched the original rows, leaving fully-sold BUY rows stuck on
+    // status:'open' forever after a CSV-imported sale.
+    const newEntries = buildDisposalJournalEntries({
+      ticker, account: acct, disposals, tradePrice: price, action: 'SELL',
+      recId: null, recExecuted: false, timestamp: nowSydney(), date,
+      regime: null, exitSignals: null,
     });
+    // buildDisposalJournalEntries already sets each entry's `fees` from the
+    // disposal's own proportionally-allocated saleFee (matchSaleAgainstParcels
+    // splits the flat `brokerage` across every parcel matched) — don't
+    // overwrite it with the flat brokerage figure, only tag provenance.
+    newEntries.forEach(e => { e.imported = true; });
     applied++;
   }
   state.tradeJournal.sort((a, b) => (a.date||'').localeCompare(b.date||''));
@@ -951,8 +950,10 @@ async function addHolding() {
     state.portfolio.push({ ticker: symbol, shares, avgPrice: avg, currentPrice: avg, sector, account });
   }
 
-  // Create CGT parcel
-  addParcel(symbol, dateRaw, shares, avg, fees, sector);
+  // Create CGT parcel — account MUST match the portfolio row above, or
+  // getParcelsForTicker(ticker, method, 'trading'/'super') finds zero
+  // parcels for this holding (it always defaulted to 'personal' here).
+  addParcel(symbol, dateRaw, shares, avg, fees, sector, account);
   const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
 
   // Snapshot live technicals when the buy is dated today — same helper and
@@ -990,8 +991,25 @@ async function addHolding() {
   scheduleSave();
   renderPage();
 }
+// Blocks removal while open CGT parcels still exist for this (ticker,account)
+// — removing only the state.portfolio row left them orphaned, and the NEXT
+// unrelated setParcelAccount() call for that ticker (any parcel, any account)
+// would call _recomputeHoldingFromParcels() and silently resurrect the row
+// the user thought they'd deleted. Forcing a sell/reassign first keeps
+// state.portfolio and state.cgtParcels from ever disagreeing about whether
+// a holding exists.
 function removeHolding(i) {
-  if(!confirm(`Remove ${state.portfolio[i].ticker}?`)) return;
+  const h = state.portfolio[i];
+  if (!h) return;
+  const acct = h.account || 'personal';
+  const openParcels = (state.cgtParcels || []).filter(p =>
+    p.ticker === h.ticker && (p.account || 'personal') === acct && p.remainingQty > 0
+  );
+  if (openParcels.length) {
+    toast(`Cannot remove ${h.ticker} (${acct}) — ${openParcels.length} open lot(s) still exist. Sell them or reassign to another account first.`, 'error');
+    return;
+  }
+  if(!confirm(`Remove ${h.ticker}?`)) return;
   state.portfolio.splice(i,1); scheduleSave(); renderPage();
 }
 

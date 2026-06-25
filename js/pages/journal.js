@@ -617,7 +617,16 @@ async function addManualTrade() {
 function removeJournalTrade(i) {
   const t = state.tradeJournal[i];
   if(!t || !confirm(`Remove ${t.action} ${t.qty}x ${t.ticker} on ${t.date}?`)) return;
-  rollbackTradeJournalEntry(t);
+  // rollbackTradeJournalEntry() only has branches for an open BUY/TOP_UP or a
+  // closed SELL/TRIM — a trimmed BUY row, a RECLASSIFY row, or anything else
+  // it can't safely reverse returns false. Refuse to delete in that case:
+  // splicing the row out anyway would silently desync the journal from
+  // portfolio/parcel state (deleting the only record of an open lot, or of
+  // an account-reclassification, without reversing anything).
+  if (!rollbackTradeJournalEntry(t)) {
+    toast(`Can't remove this ${t.action} row — its effect on your portfolio can't be safely reversed (e.g. a trimmed lot or a reclassification). Reverse it manually if needed.`, 'error');
+    return;
+  }
   state.tradeJournal.splice(i,1);
   toast('Trade removed from journal','success');
   scheduleSave();

@@ -378,8 +378,20 @@ function _removeIntradayPositionForParcel(parcel) {
 // permanent row, cluttering the journal with what was really just one lot's
 // current state). Returns undefined if no row exists yet (legacy parcels
 // predating parcelId tracking) — callers fall back to creating one.
+//
+// MUST exclude SELL/TRIM disposal-slice rows — buildDisposalJournalEntries()
+// also stamps `parcelId: d.parcelId` on every disposal row it creates for a
+// partially-trimmed parcel (gotcha #66), and those rows are unshift()ed (so
+// a disposal created AFTER the original BUY ends up EARLIER in the array).
+// An unfiltered .find() would return the disposal row instead of the open
+// lot's own row once a parcel has been partially sold — corrupting a closed,
+// already-realised SELL record's account/action instead of the still-open
+// lot's. Mirrors the action filter buildDisposalJournalEntries() already
+// uses for its own internal `buyRow` lookup.
 function _findParcelJournalRow(parcelId) {
-  return (state.tradeJournal || []).find(j => j.parcelId === parcelId);
+  return (state.tradeJournal || []).find(j =>
+    j.parcelId === parcelId && (j.action === 'BUY' || j.action === 'TOP_UP' || j.action === 'RECLASSIFY')
+  );
 }
 
 // Updates parcel's journal row in place for an account move: sets `account`
@@ -534,9 +546,12 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
     remaining -= matched;
   }
 
-  // If no parcels exist (e.g. pre-app position) fall back to avgPrice
+  // If no parcels exist (e.g. pre-app position) fall back to avgPrice.
+  // Scoped by `account` — unscoped, this could silently borrow a DIFFERENT
+  // account's avgPrice as the cost basis when the same ticker is held in
+  // more than one account, producing a wrong grossGain/netGain.
   if (remaining > 0) {
-    const holding = getPortfolioHolding(ticker);
+    const holding = getPortfolioHolding(ticker, account);
     const costPerShare = holding ? holding.avgPrice : salePrice;
     const proceeds = remaining * salePrice;
     const costBase = remaining * costPerShare;
@@ -707,8 +722,14 @@ function buildDisposalJournalEntries(opts) {
   return entries;
 }
 
+// Returns true iff a rollback was actually performed, false otherwise (e.g.
+// a trimmed/closed BUY row, or a RECLASSIFY row — neither has a rollback
+// branch below). removeJournalTrade() (journal.js) uses this to refuse
+// deleting a row when nothing was actually reversed, rather than silently
+// splicing it out of state.tradeJournal while leaving portfolio/parcel state
+// untouched and inconsistent.
 function rollbackTradeJournalEntry(t) {
-  if(!t || !t.action || !t.ticker || !t.qty) return;
+  if(!t || !t.action || !t.ticker || !t.qty) return false;
   // Treat TOP_UP like BUY and TRIM like SELL for rollback purposes.
   let action = t.action.toUpperCase();
   if(action === 'TOP_UP') action = 'BUY';
@@ -720,7 +741,7 @@ function rollbackTradeJournalEntry(t) {
   // BUY rows rather than attempting a partial/incorrect rollback.
   if(action === 'BUY' && t.status === 'open') {
     const holding = getPortfolioHolding(t.ticker);
-    if(!holding || holding.shares < t.qty) return;
+    if(!holding || holding.shares < t.qty) return false;
     // Back-calculate avgPrice before this buy/top-up was applied.
     // totalCost_before = totalCost_after - (qty × entryPrice)
     const totalCostAfter  = holding.shares * holding.avgPrice;
@@ -739,7 +760,7 @@ function rollbackTradeJournalEntry(t) {
       const idx = [...state.cgtParcels].reverse().findIndex(p => p.ticker === t.ticker && p.qty === t.qty && Math.abs(p.costPerShare - t.entryPrice) < 0.001);
       if(idx !== -1) state.cgtParcels.splice(state.cgtParcels.length - 1 - idx, 1);
     }
-    return;
+    return true;
   }
   if(action === 'SELL' && t.status === 'closed' && t.exitPrice != null) {
     const costBasis = t.entryPrice;
@@ -767,6 +788,7 @@ function rollbackTradeJournalEntry(t) {
       // Remove disposal records (in reverse order to preserve indices)
       t.disposalIds.slice().sort((a,b)=>b-a).forEach(i => state.cgtDisposals.splice(i,1));
     }
-    return;
+    return true;
   }
+  return false;
 }

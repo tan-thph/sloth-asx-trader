@@ -360,7 +360,13 @@ function renderPendingRecs(recs) {
     const _rAccts = isReducing
       ? [...new Set(state.portfolio.filter(h => _normTicker(h.ticker) === _rTicker).map(h => h.account || 'personal'))]
       : [];
-    const holding   = isReducing ? getPortfolioHolding(r.ticker) : null;
+    // Scoped to the single matching account when unambiguous (reuses _rAccts,
+    // computed above). When the ticker is held in 2+ accounts, this preview
+    // can't know which one the rec means — show nothing rather than silently
+    // picking whichever state.portfolio row happens to be first; the actual
+    // execution path in markExecuted() resolves the account correctly via
+    // the picker, so only this pre-execution preview was ever misleading.
+    const holding   = isReducing && _rAccts.length === 1 ? getPortfolioHolding(r.ticker, _rAccts[0]) : null;
     const avgCost   = holding ? holding.avgPrice : null;
     const heldQty   = holding ? holding.shares : 0;
     const qty       = r.qty || 0;
@@ -1664,7 +1670,12 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
 
       // #2: when position fully closes, reconcile all open BUY/TOP_UP learning events for this ticker
       if (isReducing && outcome) {
-        const remaining = getPortfolioHolding(rec.ticker);
+        // Scoped by sellAccount — an unscoped lookup would return the FIRST
+        // state.portfolio row matching the ticker regardless of account, so
+        // fully closing the position in ONE account (e.g. 'trading') could
+        // false-negative as "still open" just because a DIFFERENT account
+        // (e.g. 'personal') still holds shares of the same ticker.
+        const remaining = getPortfolioHolding(rec.ticker, sellAccount);
         const positionClosed = !remaining || (remaining.shares || 0) <= 0;
         if (positionClosed) {
           const parentRecs = (state.recHistory || []).filter(r =>

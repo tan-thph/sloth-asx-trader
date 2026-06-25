@@ -12,18 +12,24 @@ function reconcileJournalParcels() {
     .sort((a, b) => (a.date||'').localeCompare(b.date||''));
 
   for (const t of buys) {
-    // Check if a parcel already exists that matches this trade closely
+    const tAcct = t.account || 'personal';
+    // Check if a parcel already exists that matches this trade closely.
+    // Account is part of the match — without it, two accounts buying the
+    // same ticker on the same day at the same cost could silently link a
+    // journal row to a parcel that actually belongs to a DIFFERENT account.
     const existing = state.cgtParcels.find(p =>
       p.ticker === t.ticker &&
       p.date === t.date &&
       p.qty === t.qty &&
-      Math.abs(p.costPerShare - t.entryPrice) < 0.005
+      Math.abs(p.costPerShare - t.entryPrice) < 0.005 &&
+      (p.account || 'personal') === tAcct
     );
     if (existing) {
       t.parcelId = existing.id;
     } else {
-      // Create the missing parcel
-      addParcel(t.ticker, t.date || todayStr(), t.qty, t.entryPrice, t.fees || 0, t.sector || 'Other');
+      // Create the missing parcel — account MUST match the journal row's,
+      // or it silently defaults to 'personal' regardless of what the row says.
+      addParcel(t.ticker, t.date || todayStr(), t.qty, t.entryPrice, t.fees || 0, t.sector || 'Other', tAcct);
       const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
       t.parcelId = newParcel.id;
       created++;
