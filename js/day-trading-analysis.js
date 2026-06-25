@@ -535,12 +535,17 @@ async function _openSwingPositionFromParcel(parcel) {
 // status is a pure flip with no journal/cash/P&L side effect, whereas
 // 'closed' (_closeDayTrade) always implies a real disposal. No sale happened
 // here, so faking one would corrupt P&L/learning-loop stats.
+// Returns true iff a rec was actually found+dismissed — see the matching
+// _removeIntradayPositionForParcel() return-value contract in
+// portfolio-helpers.js; setParcelAccount() uses this to remember which
+// system a lot belongs to so re-entry doesn't guess.
 function _removeSwingPositionForParcel(parcel) {
   const recs = state.dayTrading.recommendations || [];
   const byId = recs.find(r => r.status === 'executed' && r.parcelId === parcel.id);
-  if (byId) { byId.status = 'dismissed'; return; }
+  if (byId) { byId.status = 'dismissed'; return true; }
   const byTicker = recs.find(r => r.status === 'executed' && r.ticker === parcel.ticker && r.parcelId == null);
-  if (byTicker) byTicker.status = 'dismissed';
+  if (byTicker) { byTicker.status = 'dismissed'; return true; }
+  return false;
 }
 
 // ============================================================

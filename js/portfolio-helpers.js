@@ -316,12 +316,16 @@ function _recomputeHoldingFromParcels(ticker, account) {
 // Removes the Intraday open position tied to this parcel (matched by
 // parcelId; falls back to a ticker-only match for legacy positions created
 // before parcelId was tracked on every position — see day-trading.js).
+// Returns true iff a position was actually found+removed — setParcelAccount()
+// uses this to remember which system (Intraday vs Swing) this lot belongs to,
+// so re-entering 'trading' later reopens the SAME system instead of guessing.
 function _removeIntradayPositionForParcel(parcel) {
-  if (!state.intraday || !Array.isArray(state.intraday.openPositions)) return;
+  if (!state.intraday || !Array.isArray(state.intraday.openPositions)) return false;
   const byId = state.intraday.openPositions.findIndex(pos => pos.parcelId === parcel.id);
-  if (byId !== -1) { state.intraday.openPositions.splice(byId, 1); return; }
+  if (byId !== -1) { state.intraday.openPositions.splice(byId, 1); return true; }
   const byTicker = state.intraday.openPositions.findIndex(pos => pos.ticker === parcel.ticker && pos.parcelId == null);
-  if (byTicker !== -1) state.intraday.openPositions.splice(byTicker, 1);
+  if (byTicker !== -1) { state.intraday.openPositions.splice(byTicker, 1); return true; }
+  return false;
 }
 
 // Logs an audit-trail row for a parcel's account reassignment — references
@@ -351,13 +355,21 @@ function logParcelReclassification(parcel, fromAccount, toAccount) {
 // of the old whole-holding _cycleHoldingAccount. Recomputes both the source
 // and destination (ticker, account) portfolio rows from parcels (rather than
 // patching shares/avgPrice by hand) so repeated partial moves never drift.
-// Also syncs Intraday AND Swing day-trading: leaving 'trading' removes the
-// matching open position/executed rec, keyed strictly by parcelId — never a
-// ticker-wide operation, since splitParcel() (above) guarantees any position
-// is split 1:1 alongside its parcel before this point, so "this lot's
-// position" is always well-defined (Portfolio holding itself is untouched —
-// shares aren't sold, just reclassified). Entering 'trading' opens a new
-// position/rec sized/priced off this lot's own cost basis.
+//
+// Also syncs Intraday AND Swing day-trading — but a lot belongs to AT MOST
+// ONE of the two systems, never both, so this must never blindly fire both.
+// (Hotfix: an earlier version called BOTH _open*PositionFromParcel functions
+// whenever a lot entered 'trading', creating a phantom Swing "Active Setup"
+// for tickers that were only ever Intraday trades — confirmed live with
+// ticker NXL, which picked up a ghost Swing rec purely from being reclassified
+// into 'trading', despite never having been swing-traded.) The fix: on the way
+// OUT of 'trading', whichever remove function actually finds+removes
+// something is remembered on the parcel itself (`p._dtLastSystem`), since
+// removal already tells us unambiguously which system this lot was in. On
+// the way back IN, only that one system is reopened — defaulting to
+// 'intraday' for a lot with no recorded system (a brand-new entry into
+// 'trading', or a legacy parcel from before this field existed), matching the
+// original feature request (which was Intraday-specific).
 function setParcelAccount(parcelId, newAccount) {
   const p = state.cgtParcels.find(x => x.id === parcelId);
   if (!p) return false;
@@ -369,14 +381,17 @@ function setParcelAccount(parcelId, newAccount) {
   _recomputeHoldingFromParcels(p.ticker, newAccount);
 
   if (oldAccount === 'trading' && newAccount !== 'trading') {
-    _removeIntradayPositionForParcel(p);
-    if (typeof _removeSwingPositionForParcel === 'function') _removeSwingPositionForParcel(p);
+    const wasIntraday = _removeIntradayPositionForParcel(p);
+    const wasSwing = (typeof _removeSwingPositionForParcel === 'function') && _removeSwingPositionForParcel(p);
+    if (wasIntraday) p._dtLastSystem = 'intraday';
+    else if (wasSwing) p._dtLastSystem = 'swing';
   } else if (oldAccount !== 'trading' && newAccount === 'trading') {
-    if (typeof _openIntradayPositionFromParcel === 'function') {
-      _openIntradayPositionFromParcel(p);   // async — saves/renders itself on completion
-    }
-    if (typeof _openSwingPositionFromParcel === 'function') {
-      _openSwingPositionFromParcel(p);      // async — saves/renders itself on completion
+    if ((p._dtLastSystem || 'intraday') === 'swing') {
+      if (typeof _openSwingPositionFromParcel === 'function') {
+        _openSwingPositionFromParcel(p);      // async — saves/renders itself on completion
+      }
+    } else if (typeof _openIntradayPositionFromParcel === 'function') {
+      _openIntradayPositionFromParcel(p);     // async — saves/renders itself on completion
     }
   }
 
