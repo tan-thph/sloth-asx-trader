@@ -356,3 +356,115 @@ describe('validateSellTags — driver mention auto-repair', () => {
     expect(fixed).toBeNull();
   });
 });
+
+// ── validateSellTags — ground-truth secondary-tag checks ──────────────────────
+// Regression coverage for the 2026-06-25 live-response audit: three SELL/TRIM
+// recs tagged secondary_factors that contradicted the model's own input data
+// (VGB: unrealised_loss_large on a $76 loss; DRO/NXL: position_oversized on a
+// 1.8%-weight position). The tags feed the learning-loop's deterministic
+// calibration, so a wrong tag silently pollutes win-rate-by-driver stats.
+
+describe('validateSellTags — ground-truth numeric checks', () => {
+  it('strips unrealised_loss_large when the actual loss is under $500 (VGB case)', () => {
+    const ctx = { holding: { weightPct: 1.2, sectorWeightPct: 1.2, unrealisedPnl: -76.72, daysHeld: 540 } };
+    const { valid, errors, fixed } = validateRec(makeRec({
+      action:            'SELL',
+      target:            45.16,
+      stopLoss:          47.20,
+      rrRatio:           2.1,
+      primary_driver:    'regime_change',
+      secondary_factors: ['unrealised_loss_large'],
+      urgency:           'routine',
+      reasoning:         'Yield below RBA rate — regime_change exit; EOFY timing valid for smaller loss.',
+    }), ctx);
+    expect(valid).toBe(true);
+    expect(errors).toHaveLength(0);
+    expect(fixed.secondary_factors).not.toContain('unrealised_loss_large');
+    expect(fixed._groundTruthTagsDropped).toContain('unrealised_loss_large');
+  });
+
+  it('strips position_oversized when actual weight is 1.8%, not >15% (DRO/NXL case)', () => {
+    const ctx = { holding: { weightPct: 1.8, sectorWeightPct: 7.2, unrealisedPnl: 30, daysHeld: 2 } };
+    const { valid, fixed } = validateRec(makeRec({
+      action:            'SELL',
+      priceRange:        [2.55, 2.60],
+      target:            1.90,
+      stopLoss:          2.91,
+      rrRatio:           2.3,
+      primary_driver:    'risk_management',
+      secondary_factors: ['position_oversized'],
+      urgency:           'immediate',
+      reasoning:         'Structural breakdown — risk_management exit given extreme volatility.',
+    }), ctx);
+    // risk_management requires sector_concentration OR position_oversized; once
+    // position_oversized is stripped and nothing else grounds it, this must
+    // surface for review rather than silently pass.
+    expect(valid).toBe(false);
+    expect(fixed).toBeNull();
+  });
+
+  it('silently repairs when a grounded tag remains after stripping the bad one', () => {
+    const ctx = { holding: { weightPct: 1.8, sectorWeightPct: 25, unrealisedPnl: 30, daysHeld: 2 } };
+    const { valid, errors, fixed } = validateRec(makeRec({
+      action:            'SELL',
+      priceRange:        [2.55, 2.60],
+      target:            1.90,
+      stopLoss:          2.91,
+      rrRatio:           2.3,
+      primary_driver:    'risk_management',
+      secondary_factors: ['position_oversized', 'sector_concentration'],
+      urgency:           'immediate',
+      reasoning:         'Structural breakdown — risk_management exit given sector concentration.',
+    }), ctx);
+    expect(valid).toBe(true);
+    expect(errors).toHaveLength(0);
+    expect(fixed.secondary_factors).toEqual(['sector_concentration']);
+  });
+
+  it('keeps unrealised_loss_large when the loss genuinely exceeds $500', () => {
+    const ctx = { holding: { weightPct: 5, sectorWeightPct: 5, unrealisedPnl: -612.40, daysHeld: 200 } };
+    const { valid, fixed } = validateRec(makeRec({
+      action:            'SELL',
+      target:            42.00,
+      stopLoss:          45.50,
+      rrRatio:           1.8,
+      primary_driver:    'tax_optimisation',
+      secondary_factors: ['unrealised_loss_large'],
+      urgency:           'routine',
+      reasoning:         'EOFY tax_optimisation — crystallise the $612 loss.',
+    }), ctx);
+    expect(valid).toBe(true);
+    expect(fixed.secondary_factors).toContain('unrealised_loss_large');
+  });
+
+  it('is a no-op without ctx (existing callers/tests unaffected)', () => {
+    const { valid, errors } = validateRec(makeRec({
+      action:            'SELL',
+      target:            42.00,
+      stopLoss:          45.50,
+      rrRatio:           1.8,
+      primary_driver:    'tax_optimisation',
+      secondary_factors: ['unrealised_loss_large'],
+      urgency:           'routine',
+      reasoning:         'EOFY tax_optimisation harvest.',
+    }));
+    expect(valid).toBe(true);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects target_reached + dividend_at_risk as a forbidden combo (WOW case)', () => {
+    const { valid, errors, fixed } = validateRec(makeRec({
+      action:            'TRIM',
+      target:            34.00,
+      stopLoss:          41.00,
+      rrRatio:           2.0,
+      primary_driver:    'target_reached',
+      secondary_factors: ['dividend_at_risk'],
+      urgency:           'routine',
+      reasoning:         'target_reached — price exceeded fair value; payout ratio also unsustainable.',
+    }));
+    expect(valid).toBe(false);
+    expect(fixed).toBeNull();
+    expect(errors.some(e => e.includes('target_reached') && e.includes('dividend_at_risk'))).toBe(true);
+  });
+});

@@ -3375,7 +3375,7 @@ class TestAiCall20ValidationFixes(unittest.TestCase):
             self.assertIn(field, self.validator_src)
         self.assertIn("_stripUntrustedAiFields", self.validator_src)
         # Must be wired into validateRec
-        validate_rec_idx = self.validator_src.index("function validateRec(rec)")
+        validate_rec_idx = self.validator_src.index("function validateRec(rec, ctx)")
         validate_rec_body = self.validator_src[validate_rec_idx:validate_rec_idx + 300]
         self.assertIn("_stripUntrustedAiFields", validate_rec_body)
 
@@ -7692,12 +7692,12 @@ class TestSellTrimSizingAndMacroRace(unittest.TestCase):
     def test_validator_wired_into_live_path(self):
         """§8.1: validateRec must run in analysis.js post-processing (was dead code).
         Must run AFTER the sizing steps so qty>=1 validates final values."""
-        self.assertIn("validateRec(r)", self.analysis_src,
+        self.assertIn("validateRec(r, ctx)", self.analysis_src,
                       "validateRec must be called per-rec in analysis.js")
         self.assertIn("_validatorFixed", self.analysis_src,
                       "repaired recs must carry the _validatorFixed audit tag")
         sizing_at    = self.analysis_src.index("_exitSized")
-        validator_at = self.analysis_src.index("validateRec(r)")
+        validator_at = self.analysis_src.index("validateRec(r, ctx)")
         self.assertLess(sizing_at, validator_at,
                         "validator must run after SELL/TRIM sizing (qty >= 1 check)")
 

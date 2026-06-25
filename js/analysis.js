@@ -1040,7 +1040,27 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       const validatorDropped = [];
       const validatorDemoted = [];
       recs = recs.flatMap(r => {
-        const { valid, errors, fixed } = validateRec(r);
+        // Ground-truth context for the SELL/TRIM secondary-tag checks — mirrors
+        // the exact weight/unrealisedPnl/daysHeld formulas used to build the
+        // Holdings JSON above (portfolioJson), so the validator checks the AI's
+        // tags (unrealised_loss_large, position_oversized, sector_concentration,
+        // held_over_12m/11_to_12m) against the same numbers it was actually given.
+        const _h = mp.find(x => x.ticker === r.ticker);
+        let ctx;
+        if (_h) {
+          const livePrice = state.liveSignals?.[r.ticker]?.current_price ?? _h.currentPrice;
+          const pv = portfolioValue();
+          const sectorTotal = mp
+            .filter(x => x.sector === _h.sector)
+            .reduce((s, x) => s + x.shares * (state.liveSignals?.[x.ticker]?.current_price ?? x.currentPrice), 0);
+          ctx = { holding: {
+            weightPct:       pv > 0 ? (_h.shares * livePrice) / pv * 100 : null,
+            sectorWeightPct: pv > 0 ? sectorTotal / pv * 100 : null,
+            unrealisedPnl:   (livePrice - _h.avgPrice) * _h.shares,
+            daysHeld:        _daysHeld(r.ticker),
+          } };
+        }
+        const { valid, errors, fixed } = validateRec(r, ctx);
         if (valid) return [fixed || r];   // fixed carries error-free repairs (e.g. [driver: X] suffix)
         if (fixed) {
           console.warn(`[validator] repaired ${r.action} ${r.ticker}:`, errors);

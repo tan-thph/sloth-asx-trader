@@ -66,8 +66,14 @@ const _REJECT_TICKER_RE = /\breject\s+[A-Z0-9]{2,5}\b/i;
 
 // Forbidden combinations — logical contradictions that indicate confused reasoning.
 const SELL_FORBIDDEN_COMBOS = [
-  ['target_reached', 'stop_triggered'],   // can't hit both simultaneously
-  ['time_stop',      'target_reached'],   // time stop implies target NOT hit
+  ['target_reached', 'stop_triggered'],     // can't hit both simultaneously
+  ['time_stop',      'target_reached'],     // time stop implies target NOT hit
+  // target_reached requires "thesis STILL INTACT" (prompt §2.1) — dividend_at_risk
+  // is itself a thesis-deterioration signal (income thesis breaking), so the two
+  // cannot both be true. A 2026-06-25 live response tagged WOW target_reached
+  // while citing an unsustainable payout ratio via dividend_at_risk — the real
+  // driver was thesis_broken wearing a target_reached label.
+  ['target_reached', 'dividend_at_risk'],
 ];
 
 // Certain primary drivers require at least one specific secondary tag to be grounded.
@@ -76,12 +82,49 @@ const SELL_REQUIRED_SECONDARY = {
   risk_management:  ['sector_concentration', 'position_oversized'],
 };
 
+// Secondary tags whose entire definition IS a numeric threshold (prompt §2.2)
+// — these aren't judgment calls, they're checkable facts. Each entry returns
+// true when the threshold the tag claims is actually met by ctx.holding.
+// A 2026-06-25 live response tagged a $76 loss as unrealised_loss_large (>$500
+// required) and two 1.8%-weight positions as position_oversized (>15% required)
+// — both contradicted the very numbers the model had been given in the prompt.
+const SELL_GROUND_TRUTH_CHECKS = {
+  unrealised_loss_large: (h) => h.unrealisedPnl != null && h.unrealisedPnl <= -500,
+  position_oversized:     (h) => h.weightPct != null && h.weightPct > 15,
+  sector_concentration:   (h) => h.sectorWeightPct != null && h.sectorWeightPct > 20,
+  held_over_12m:          (h) => h.daysHeld != null && h.daysHeld >= 365,
+  held_11_to_12m:         (h) => h.daysHeld != null && h.daysHeld >= 335 && h.daysHeld < 365,
+};
+
+/**
+ * _groundTruthFilterSecondary — strips any secondary_factors tag whose claimed
+ * numeric threshold isn't actually met by the holding's real data. Returns the
+ * surviving tags plus a human-readable list of what was dropped and why.
+ * No-op (nothing dropped) when ctx.holding is absent — callers without portfolio
+ * context (e.g. unit tests) get the old permissive behaviour.
+ */
+function _groundTruthFilterSecondary(secondary, ctx) {
+  const h = ctx && ctx.holding;
+  if (!h) return { kept: secondary, dropped: [] };
+  const dropped = [];
+  const kept = secondary.filter(tag => {
+    const check = SELL_GROUND_TRUTH_CHECKS[tag];
+    if (!check) return true;   // not a numeric tag — nothing to ground-check
+    if (check(h)) return true; // threshold genuinely met
+    dropped.push(tag);
+    return false;
+  });
+  return { kept, dropped };
+}
+
 /**
  * validateSellTags — validates the three SELL/TRIM tagging dimensions.
  * Called from validateRec() for every SELL or TRIM rec.
+ * `ctx.holding` (optional) carries real portfolio numbers — { weightPct,
+ * sectorWeightPct, unrealisedPnl, daysHeld } — for the ground-truth checks above.
  * Returns { ok, errors[] } — errors feed into the auto-repair prompt.
  */
-function validateSellTags(rec) {
+function validateSellTags(rec, ctx) {
   const errors = [];
   const action = (rec.action || '').toUpperCase();
   if (action !== 'SELL' && action !== 'TRIM') return { ok: true, errors, repaired: null };
@@ -96,6 +139,31 @@ function validateSellTags(rec) {
     return { ok: true, errors: [], repaired };
   }
 
+  // ── secondary_factors: optional array, max 3, all from closed vocabulary ───
+  const rawSecondary = Array.isArray(rec.secondary_factors) ? rec.secondary_factors : [];
+
+  // Ground-truth numeric check, run before everything else so the
+  // forbidden-combo/required-secondary checks below see the corrected list.
+  // When stripping a bad tag still leaves the primary_driver grounded, this is
+  // a silent, mechanical correction (no model regeneration needed) — same
+  // pattern as the Fix #40 early-return above.
+  const { kept: secondary, dropped: groundTruthDropped } = _groundTruthFilterSecondary(rawSecondary, ctx);
+  if (groundTruthDropped.length) {
+    const needed = SELL_REQUIRED_SECONDARY[rec.primary_driver];
+    const stillGrounded = !needed || needed.some(t => secondary.includes(t));
+    if (stillGrounded) {
+      return {
+        ok: true,
+        errors: [],
+        repaired: { ...rec, secondary_factors: secondary, _groundTruthTagsDropped: groundTruthDropped },
+      };
+    }
+    // Stripping leaves primary_driver without its required grounding — this is
+    // a real reasoning problem (the model needs a different primary_driver or
+    // different evidence), not a mechanical typo, so surface it for review.
+    errors.push(`secondary_factors tag(s) not supported by actual portfolio data: ${groundTruthDropped.join(', ')} — removing them leaves primary_driver "${rec.primary_driver}" without its required secondary factor`);
+  }
+
   // ── primary_driver: required, must be in closed vocabulary ─────────────────
   if (!rec.primary_driver) {
     errors.push('SELL/TRIM requires primary_driver — choose one of: ' + [...SELL_PRIMARY_DRIVERS].join(', '));
@@ -103,8 +171,6 @@ function validateSellTags(rec) {
     errors.push(`primary_driver "${rec.primary_driver}" is not in the allowed list. Valid: ${[...SELL_PRIMARY_DRIVERS].join(', ')}`);
   }
 
-  // ── secondary_factors: optional array, max 3, all from closed vocabulary ───
-  const secondary = Array.isArray(rec.secondary_factors) ? rec.secondary_factors : [];
   if (secondary.length > 3) {
     errors.push(`secondary_factors has ${secondary.length} entries — maximum is 3. Remove the least specific tags.`);
   }
@@ -378,7 +444,10 @@ function _stripUntrustedAiFields(rec) {
 
 // validateRec — returns { valid, errors[], fixed }
 // fixed is the auto-repaired rec if all fixable errors were repaired; null otherwise.
-function validateRec(rec) {
+// `ctx.holding` (optional) — { weightPct, sectorWeightPct, unrealisedPnl, daysHeld } —
+// enables the SELL/TRIM ground-truth secondary-tag checks in validateSellTags().
+// Callers without portfolio context (tests, ad-hoc checks) simply omit it.
+function validateRec(rec, ctx) {
   const errors = [];
   let fixed = { ..._stripUntrustedAiFields(rec) };
   let allFixed = true;
@@ -411,7 +480,7 @@ function validateRec(rec) {
   // validateSellTags() handles Fix #40 auto-repair (better_opportunity → risk_management)
   // and returns { ok, errors, repaired } — apply repaired if set.
   if (action === 'SELL' || action === 'TRIM') {
-    const { ok: sellOk, errors: sellErrors, repaired: sellRepaired } = validateSellTags(fixed);
+    const { ok: sellOk, errors: sellErrors, repaired: sellRepaired } = validateSellTags(fixed, ctx);
     if (sellRepaired) fixed = sellRepaired;
     if (!sellOk) {
       errors.push(...sellErrors);
