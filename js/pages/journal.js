@@ -142,7 +142,8 @@ function renderJournal() {
             <option value="SELL"   ${jf.action==='SELL'  ?'selected':''}>SELL</option>
             <option value="TOP_UP" ${jf.action==='TOP_UP'?'selected':''}>TOP_UP</option>
             <option value="TRIM"   ${jf.action==='TRIM'  ?'selected':''}>TRIM</option>
-            <option value="DRP"    ${jf.action==='DRP'   ?'selected':''}>DRP</option>
+            <option value="DRP"        ${jf.action==='DRP'       ?'selected':''}>DRP</option>
+            <option value="RECLASSIFY" ${jf.action==='RECLASSIFY'?'selected':''}>Reclassify</option>
           </select>
         </div>
         <!-- Status -->
@@ -153,6 +154,7 @@ function renderJournal() {
             <option value="open"    ${jf.status==='open'   ?'selected':''}>Open</option>
             <option value="trimmed" ${jf.status==='trimmed'?'selected':''}>Trimmed</option>
             <option value="closed"  ${jf.status==='closed' ?'selected':''}>Closed</option>
+            <option value="reclass" ${jf.status==='reclass'?'selected':''}>Reclassified</option>
           </select>
         </div>
         <!-- P&L outcome -->
@@ -278,7 +280,7 @@ function renderJournal() {
                 <td>${t.exitPrice ? '$'+fmt(t.exitPrice) : '&mdash;'}</td>
                 <td>$${fmt(t.fees)}</td>
                 <td class="${pnl!=null?(pnl>=0?'text-success':'text-danger'):'text-muted'}">${pnl!=null?(pnl>=0?'+':'')+' $'+fmt(Math.abs(pnl)):'Open'}</td>
-                <td><span class="badge ${t.status==='open'?'badge-open':t.status==='trimmed'?'badge-trim':'badge-closed'}">${t.status}</span></td>
+                <td><span class="badge ${t.status==='open'?'badge-open':t.status==='trimmed'?'badge-trim':t.status==='reclass'?'badge-drp':'badge-closed'}">${t.status==='reclass'?'reclassified':t.status}</span></td>
                 <td>${parcelBadge}</td>
                 <td>${_journalProvenanceBadge(t)}${matchedRec?._thesis?'<span style="font-size:10px;margin-left:3px" title="'+escapeHTML(matchedRec._thesis)+'">📋</span>':''}</td>
                 <td>${_journalRegimeBadge(matchedRec?.regime)}</td>

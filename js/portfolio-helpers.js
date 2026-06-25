@@ -220,6 +220,17 @@ function getParcelsForTicker(ticker, method, account) {
 // can be tracked/sold/account-reassigned independently. Rejects partially-sold
 // parcels (remainingQty < qty) — representing the leftover as a fresh "split"
 // lot would misrepresent shares that were actually already disposed of.
+//
+// Critical invariant: if this parcel is already linked to an open Intraday
+// position or executed Swing rec (parcelId match), that position/rec is split
+// proportionally too — see _splitLinkedPosition() below. Without this, the
+// new sibling parcel has no position of its own, so a later setParcelAccount()
+// move of just the sibling can't correctly attribute "this much of the
+// position" to "this lot" — it either drags the WHOLE original position along
+// or (worse) silently orphans it. This was a real bug: splitting a ticker that
+// already had a trading-account day-trade position, then moving the split-off
+// lot to another account, removed the entire original position instead of
+// leaving the un-moved portion intact.
 function splitParcel(parcelId, splitQty) {
   const p = state.cgtParcels.find(x => x.id === parcelId);
   if (!p) return false;
@@ -231,8 +242,41 @@ function splitParcel(parcelId, splitQty) {
   p.remainingQty -= splitQty;
   p.fees = (p.fees || 0) - fracFees;
   addParcel(p.ticker, p.date, splitQty, p.costPerShare, fracFees, p.sector, p.account);
+  const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
+  _splitLinkedPosition(p, newParcel, splitQty);
   scheduleSave();
   return true;
+}
+
+// Proportionally splits whichever open Intraday position or executed Swing
+// rec is linked to the PARENT parcel (by parcelId) — see splitParcel() above.
+// No-ops silently when there's no linked position (the common case: most
+// parcels were never day-traded). Position qty is assumed to always equal its
+// parcel's remainingQty 1:1 (true for every creation path in this codebase —
+// there is no partial-close mechanism for either Intraday or Swing positions
+// today), so the same splitQty applies to both without re-deriving a ratio.
+function _splitLinkedPosition(parentParcel, newParcel, splitQty) {
+  if (state.intraday && Array.isArray(state.intraday.openPositions)) {
+    const pos = state.intraday.openPositions.find(x => x.parcelId === parentParcel.id);
+    if (pos) {
+      pos.qty -= splitQty;
+      state.intraday.openPositions.push({
+        ...pos, id: `${pos.id}-split-${newParcel.id}`, parcelId: newParcel.id,
+        qty: splitQty, _journalId: null,
+      });
+    }
+  }
+  if (state.dayTrading && Array.isArray(state.dayTrading.recommendations)) {
+    const rec = state.dayTrading.recommendations.find(r => r.status === 'executed' && r.parcelId === parentParcel.id);
+    if (rec) {
+      rec.qty -= splitQty;
+      if (rec._execQty != null) rec._execQty -= splitQty;
+      state.dayTrading.recommendations.push({
+        ...rec, id: `${rec.id}-split-${newParcel.id}`, parcelId: newParcel.id,
+        qty: splitQty, _execQty: splitQty, _snapshotId: null,
+      });
+    }
+  }
 }
 
 // Rebuilds the single state.portfolio row for (ticker, account) from the sum
@@ -280,14 +324,40 @@ function _removeIntradayPositionForParcel(parcel) {
   if (byTicker !== -1) state.intraday.openPositions.splice(byTicker, 1);
 }
 
+// Logs an audit-trail row for a parcel's account reassignment — references
+// the Parcel # (`P#<id>`) so it's traceable back to the exact lot. Uses a new
+// status value ('reclass') rather than 'open'/'trimmed'/'closed' since this is
+// not a position state — every existing t.status===/!== consumer in the
+// codebase checks an explicit value, never a wildcard, so this new value is
+// simply invisible to P&L/open-position logic (intentional: no cash/CGT
+// effect here, just a record of the move).
+function logParcelReclassification(parcel, fromAccount, toAccount) {
+  if (!state.tradeJournal) state.tradeJournal = [];
+  state.tradeJournal.unshift({
+    id: Date.now(), date: todayStr(), timestamp: nowSydney(),
+    ticker: parcel.ticker, action: 'RECLASSIFY',
+    qty: parcel.remainingQty, entryPrice: parcel.costPerShare,
+    exitPrice: null, fees: 0, pnl: null,
+    status: 'reclass',
+    sector: parcel.sector, account: toAccount,
+    parcel: `P#${parcel.id}`, fromAccount, toAccount,
+    recId: null, recExecuted: false,
+    regime: (state.currentRegime && state.currentRegime.regime) || null,
+    notes: `Reclassified ${fromAccount} → ${toAccount}`,
+  });
+}
+
 // Reassigns ONE parcel (lot) to a different account — the per-lot equivalent
 // of the old whole-holding _cycleHoldingAccount. Recomputes both the source
 // and destination (ticker, account) portfolio rows from parcels (rather than
 // patching shares/avgPrice by hand) so repeated partial moves never drift.
-// Also syncs Intraday: leaving 'trading' closes the matching open position
-// (Portfolio holding is untouched — shares aren't sold, just reclassified);
-// entering 'trading' opens a new one sized/priced off this lot's own cost
-// basis via the async _openIntradayPositionFromParcel() (day-trading.js).
+// Also syncs Intraday AND Swing day-trading: leaving 'trading' removes the
+// matching open position/executed rec, keyed strictly by parcelId — never a
+// ticker-wide operation, since splitParcel() (above) guarantees any position
+// is split 1:1 alongside its parcel before this point, so "this lot's
+// position" is always well-defined (Portfolio holding itself is untouched —
+// shares aren't sold, just reclassified). Entering 'trading' opens a new
+// position/rec sized/priced off this lot's own cost basis.
 function setParcelAccount(parcelId, newAccount) {
   const p = state.cgtParcels.find(x => x.id === parcelId);
   if (!p) return false;
@@ -300,11 +370,17 @@ function setParcelAccount(parcelId, newAccount) {
 
   if (oldAccount === 'trading' && newAccount !== 'trading') {
     _removeIntradayPositionForParcel(p);
+    if (typeof _removeSwingPositionForParcel === 'function') _removeSwingPositionForParcel(p);
   } else if (oldAccount !== 'trading' && newAccount === 'trading') {
     if (typeof _openIntradayPositionFromParcel === 'function') {
       _openIntradayPositionFromParcel(p);   // async — saves/renders itself on completion
     }
+    if (typeof _openSwingPositionFromParcel === 'function') {
+      _openSwingPositionFromParcel(p);      // async — saves/renders itself on completion
+    }
   }
+
+  logParcelReclassification(p, oldAccount, newAccount);
 
   scheduleSave();
   renderPage();

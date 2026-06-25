@@ -389,6 +389,10 @@ function executeDayTrade(recId) {
     const newParcel = (state.cgtParcels || []).length
       ? state.cgtParcels[state.cgtParcels.length - 1]
       : null;
+    // Links this rec to its own parcel so setParcelAccount() (portfolio-helpers.js)
+    // and splitParcel()'s position-splitting can find and adjust it precisely if
+    // this lot is later split or moved out of 'trading'.
+    rec.parcelId = newParcel ? newParcel.id : null;
 
     const _swingSig = (state.liveSignals && state.liveSignals[rec.ticker]) || {};
     const entry = {
@@ -449,6 +453,94 @@ function dismissDayTradeRec(recId) {
   if (rec) rec.status = 'dismissed';
   scheduleSave();
   renderPage();
+}
+
+// ── Swing parcel sync (mirrors the Intraday _openIntradayPositionFromParcel /
+// _removeIntradayPositionForParcel pair in js/pages/day-trading.js) ──────────
+// Called from setParcelAccount() (portfolio-helpers.js) whenever a lot moves
+// into/out of the 'trading' account, keyed strictly by parcelId.
+
+// Creates an executed swing rec from a parcel reassigned INTO 'trading'. Not a
+// new transaction — entryPrice is the lot's own cost basis, qty is fixed by
+// the lot's share count (not AI-sized), and there's no paired journal BUY row
+// (setParcelAccount's logParcelReclassification call covers the audit trail).
+async function _openSwingPositionFromParcel(parcel) {
+  const ticker = parcel.ticker;
+  const entryPrice = parcel.costPerShare;
+
+  if (!state.liveSignals?.[ticker]?.atr_14) {
+    try {
+      const r = await fetch(`${API}/api/analyse/${encodeURIComponent(ticker)}`);
+      if (r.ok) {
+        const d = await r.json();
+        if (!state.liveSignals) state.liveSignals = {};
+        state.liveSignals[ticker] = { ...(d || {}), ...state.liveSignals[ticker] };
+      }
+    } catch (_) { /* best-effort — fall back to fixed R:R below if signals stay empty */ }
+  }
+  const signals = state.liveSignals?.[ticker] || {};
+  const regime = state.currentRegime?.regime;
+
+  let stopLoss = null, target = null, rrRatio = null;
+  if (typeof computeTradeParams === 'function' && signals.atr_14 != null) {
+    const allocated = state.dayTrading.allocatedCash != null ? state.dayTrading.allocatedCash : Math.round(state.cash * 0.20);
+    const portCtx = {
+      allocatedCash: allocated, portfolioValue: portfolioValue(),
+      brokerage: state.settings.brokerage, rbaRate: state.rbaRate || 4.35,
+      riskPct: state.dayTrading.riskPct || 1.5,
+    };
+    try {
+      const qt = computeTradeParams(ticker, signals, portCtx, {
+        winProb: 0.6, expectedTimeToTarget: 8, priceRange: [entryPrice, +(entryPrice * 1.01).toFixed(3)],
+      });
+      if (qt && qt.ok) { stopLoss = qt.stopLoss; target = qt.target; rrRatio = qt.rrRatio; }
+    } catch (_) {}
+  }
+  if (stopLoss == null) {
+    // Fallback when quant sizing rejects or ATR is unavailable — direct
+    // regime-aware calc, same stopAtrMult convention used everywhere else.
+    const stopAtrMult = (typeof getRegimeModifiers === 'function' && regime)
+      ? (getRegimeModifiers(regime).stopAtrMult ?? 2.5) : 2.5;
+    const atr = signals.atr_14 || entryPrice * 0.02; // crude fallback: 2% of price
+    stopLoss = +(entryPrice - stopAtrMult * atr).toFixed(3);
+    target   = +(entryPrice + (entryPrice - stopLoss) * 2.0).toFixed(3);
+    rrRatio  = 2.0;
+  }
+
+  if (!state.dayTrading.recommendations) state.dayTrading.recommendations = [];
+  state.dayTrading.recommendations.push({
+    id:            `LOT-${Date.now()}-${ticker}`,
+    parcelId:      parcel.id,
+    ticker,
+    action:        'BUY',
+    status:        'executed',
+    qty:           parcel.remainingQty,
+    _execQty:      parcel.remainingQty,
+    entryPrice,
+    stopLoss, target, rrRatio,
+    date:          todayStr(),
+    generatedAt:   nowSydney(),
+    generatedAtMs: Date.now(),
+    holdDays:      8,
+    regime:        regime || 'unknown',
+    signals:       ['Reclassified into trading'],
+    reasoning:     'Lot reassigned from another account — not a new AI signal.',
+  });
+  scheduleSave();
+  renderPage();
+}
+
+// Removes (dismisses) the swing rec tied to a parcel moving OUT of 'trading'.
+// Uses 'dismissed' rather than 'closed' — dismissDayTradeRec() confirms that
+// status is a pure flip with no journal/cash/P&L side effect, whereas
+// 'closed' (_closeDayTrade) always implies a real disposal. No sale happened
+// here, so faking one would corrupt P&L/learning-loop stats.
+function _removeSwingPositionForParcel(parcel) {
+  const recs = state.dayTrading.recommendations || [];
+  const byId = recs.find(r => r.status === 'executed' && r.parcelId === parcel.id);
+  if (byId) { byId.status = 'dismissed'; return; }
+  const byTicker = recs.find(r => r.status === 'executed' && r.ticker === parcel.ticker && r.parcelId == null);
+  if (byTicker) byTicker.status = 'dismissed';
 }
 
 // ============================================================
