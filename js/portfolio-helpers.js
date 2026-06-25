@@ -657,8 +657,15 @@ function buildDisposalJournalEntries(opts) {
   (disposals || []).forEach((d, i) => {
     const parcel = (state.cgtParcels || []).find(p => p.id === d.parcelId);
     const remainingAfter = parcel ? (parcel.remainingQty || 0) : 0;
+    // 'RECLASSIFY' is included alongside 'BUY'/'TOP_UP' — a parcel that was
+    // ever split or moved between accounts has its journal row's action
+    // flipped to 'RECLASSIFY' (gotcha #79), but it's still THE row
+    // representing that open parcel and must get the same closed/trimmed
+    // status patch when sold. Excluding it left every reclassified parcel's
+    // row permanently stuck on status:'open' even after a full disposal.
     const buyRow = d.parcelId != null
-      ? (state.tradeJournal || []).find(e => e.parcelId === d.parcelId && (e.action === 'BUY' || e.action === 'TOP_UP'))
+      ? (state.tradeJournal || []).find(e => e.parcelId === d.parcelId
+          && (e.action === 'BUY' || e.action === 'TOP_UP' || e.action === 'RECLASSIFY'))
       : null;
     // Identify prior disposal-slice rows by `e.parcel` being set, rather than a
     // separate internal-only flag — `parcel` is persisted (round-trips through
