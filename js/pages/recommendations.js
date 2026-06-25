@@ -1749,7 +1749,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
           ai_confidence:       rec.confidence ?? null,
           ensemble_confidence: rec.ensembleConfidence ?? null,
           recommendation:      rec.action,
-          rationale_summary:   rec.reasoning ? rec.reasoning.slice(0, 400) : null,
+          rationale_summary:   rec.reasoning ? reasoningText(rec.reasoning).slice(0, 400) : null,
           suggested_stop:      rec.stopLoss ?? null,
           suggested_target:    rec.target ?? null,
           rr_ratio:            rrRatio,

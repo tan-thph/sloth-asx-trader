@@ -39,6 +39,17 @@ function escapeHTML(s) {
   return d.innerHTML;
 }
 
+// Defensive coercion for rec.reasoning — should always be a plain string per
+// the Claude response schema, but applyRegimeModifiers() previously wrapped
+// it in an array when a regime warning fired (fixed in regime-engine.js),
+// and any future producer could reintroduce the same shape. Callers that
+// invoke string methods (.replace/.slice/etc.) directly on rec.reasoning
+// should go through this instead of assuming the type.
+function reasoningText(r) {
+  if (Array.isArray(r)) return r.join(' ');
+  return r || '';
+}
+
 const fmt = (n, d=2) => (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString('en-AU',{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtp = (n, d=2) => (n==null||isNaN(n)) ? '—' : (n>=0?'+':'') + fmt(Math.abs(n),d) + '%';
 

@@ -195,7 +195,14 @@ function applyRegimeModifiers(rec, regime) {
     }
   }
   if (mod.warning) {
-    out.reasoning = [...(Array.isArray(out.reasoning) ? out.reasoning : [out.reasoning || '']), `[REGIME:${regime}] ${mod.warning}`];
+    // `reasoning` must stay a plain string — every consumer (analysis.js's
+    // summary builder, the rec-card renderer, escapeHTML, etc.) calls string
+    // methods on it directly. Wrapping it in an array here used to break all
+    // of them downstream with "(r.reasoning || '').replace is not a
+    // function" the moment a regime warning fired. Coerce any pre-existing
+    // array (e.g. from stale/legacy data) back to a string before appending.
+    const base = Array.isArray(out.reasoning) ? out.reasoning.join(' ') : (out.reasoning || '');
+    out.reasoning = `${base} [REGIME:${regime}] ${mod.warning}`.trim();
   }
   return out;
 }

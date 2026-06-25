@@ -263,16 +263,23 @@ describe('applyRegimeModifiers', () => {
     expect(out._regimeAdjusted).toBeUndefined();
   });
 
-  it('appends a regime warning to reasoning array', () => {
-    const rec = { ticker: 'BHP', action: 'BUY', qty: 50, reasoning: ['base reason'] };
+  it('appends a regime warning to reasoning as a string', () => {
+    // reasoning MUST stay a string — every consumer (analysis.js, the rec
+    // card, escapeHTML) calls string methods on it directly. Wrapping it in
+    // an array here was a real bug: "(r.reasoning || '').replace is not a
+    // function" the moment a regime warning fired on a portfolio rec.
+    const rec = { ticker: 'BHP', action: 'BUY', qty: 50, reasoning: 'base reason' };
     const out  = applyRegimeModifiers(rec, 'highVol');
-    expect(Array.isArray(out.reasoning)).toBe(true);
-    expect(out.reasoning.some(r => r.includes('[REGIME:highVol]'))).toBe(true);
+    expect(typeof out.reasoning).toBe('string');
+    expect(out.reasoning).toContain('[REGIME:highVol]');
+    expect(out.reasoning).toContain('base reason');
   });
 
-  it('handles rec with string reasoning (wraps in array)', () => {
-    const rec = { ticker: 'BHP', action: 'BUY', qty: 50, reasoning: 'plain string' };
+  it('coerces a legacy array reasoning back to a string before appending', () => {
+    const rec = { ticker: 'BHP', action: 'BUY', qty: 50, reasoning: ['legacy', 'array', 'reasoning'] };
     const out  = applyRegimeModifiers(rec, 'highVol');
-    expect(Array.isArray(out.reasoning)).toBe(true);
+    expect(typeof out.reasoning).toBe('string');
+    expect(out.reasoning).toContain('legacy array reasoning');
+    expect(out.reasoning).toContain('[REGIME:highVol]');
   });
 });

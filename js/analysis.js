@@ -1464,7 +1464,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // a blunt mid-word slice — the budget was also bumped 70→110 since 70 was too
     // tight to ever land on a clean sentence end.
     const recLines = cappedDedupedRecs.map(r => {
-      const reason = smartTruncate((r.reasoning || '').replace(/\n/g, ' ').trim(), 110);
+      const reason = smartTruncate(reasoningText(r.reasoning).replace(/\n/g, ' ').trim(), 110);
       return `${r.ticker}: ${r.action}${reason ? ' — ' + reason : ''}`;
     });
 
@@ -1658,7 +1658,7 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
                                ? r._calibApplied.orig : (r.confidence ?? null),
         ensemble_confidence: r.ensembleConfidence ?? null,
         recommendation:      r.action,
-        rationale_summary:   r.reasoning ? r.reasoning.slice(0, 400) : null,
+        rationale_summary:   r.reasoning ? reasoningText(r.reasoning).slice(0, 400) : null,
         suggested_stop:      r.stopLoss ?? null,
         suggested_target:    r.target ?? null,
         rr_ratio:            rrRatio != null ? +rrRatio.toFixed(2) : null,
