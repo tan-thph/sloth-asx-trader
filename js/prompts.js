@@ -46,6 +46,7 @@ Rules:
 - sector_impact: −10 strong headwind, 0 neutral, +10 strong tailwind; derive mechanistically from commodities/yields/sentiment
 - confidence: "high" = mechanistic link confirmed (e.g. iron ore +2% → BHP revenue estimate up), "medium" = likely but other drivers possible, "low" = speculative
 - analysis paragraph 1: separate observed facts from explanations. Format: "Gold +0.57% ($2,327 → $2,340). Likely driver: USD weakness (high conf). Geopolitical hedging also possible (low conf)."
+- If a "Recent news" block is present in the user message: treat it as corroborating/contradicting color for the live numeric data above, never as a substitute for it. A geopolitical or macro headline may explain WHY a number moved, or flag a risk the numbers haven't priced in yet — cite the specific headline in "what_changed"/"drivers"/"analysis" when it materially informs the call. Never let a single headline override the deterministic price/yield/commodity data; if they conflict, the live data wins and the headline becomes a lower-confidence risk note instead.
 - BANNED phrases (zero information content — omit entirely): "wall of liquidity", "constructive backdrop", "measured risk appetite", "traders not dismissive of tail risks", "nuanced picture", "persistent but". If removing a sentence would not change any investment decision, delete it.`;
 
 

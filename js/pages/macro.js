@@ -396,6 +396,32 @@ async function fetchRealMacro() {
   }
 }
 
+// Ensures the News Scanner has run recently before the macro brief is built,
+// so MACRO/GEOPOLITICS news is available to inject into the prompt. Triggers
+// a scan only when one isn't already running and the last scan is stale
+// (>30 min) — repeated manual "Run Macro" clicks in the same session won't
+// re-trigger a scan every time. Fails silently (no news_engine, server down,
+// etc.) since news context is an enhancement, not a hard dependency.
+async function _ensureFreshNewsScan(maxWaitMs = 90000) {
+  if (!state.serverOk) return;
+  try {
+    let status = await fetch(`${API}/api/news/status`).then(r => r.json());
+    if (!status.available) return;
+    const lastScanMs = status.last_scan ? new Date(status.last_scan).getTime() : 0;
+    const isStale = (Date.now() - lastScanMs) > 30 * 60 * 1000;
+    if (!status.running && isStale) {
+      toast('Scanning news before macro brief…', 'info');
+      await fetch(`${API}/api/news/scan`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    }
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      status = await fetch(`${API}/api/news/status`).then(r => r.json()).catch(() => ({ running: false }));
+      if (!status.running) return;
+      await new Promise(res => setTimeout(res, 2000));
+    }
+  } catch (_) { /* news context is best-effort */ }
+}
+
 async function runMacroAnalysis(force=false) {
   const key=getApiKey();
   // Proxy mode has no browser-side key — callClaude() routes via the backend
@@ -408,6 +434,9 @@ async function runMacroAnalysis(force=false) {
     renderPage();
     return;
   }
+
+  // Run/await the News Scanner first so RECENT NEWS below has fresh data
+  await _ensureFreshNewsScan();
 
   // First fetch live data if available
   let liveCtx='';
@@ -461,9 +490,30 @@ async function runMacroAnalysis(force=false) {
     }
   }
 
+  // High-relevance macro/geopolitics news from the News Scanner (just refreshed
+  // above) — capped at 8 items to keep this a few hundred tokens, well within
+  // the macro call's ~$0.03-0.10 budget. Filters to macro/geopolitics category
+  // or high impact_score so portfolio-specific earnings noise doesn't leak in.
+  let newsCtx = '';
+  if (state.serverOk) {
+    try {
+      const nr = await fetch(`${API}/api/news/brief?days=1&limit=15`);
+      if (nr.ok) {
+        const nd = await nr.json();
+        const items = (nd.items || [])
+          .filter(it => ['macro', 'geopolitics'].includes(it.category) || (it.impact_score || 0) >= 5.5)
+          .slice(0, 8);
+        if (items.length) {
+          newsCtx = ' | Recent news (last 24h): ' + items.map(it => it.signal || it.title).join('; ');
+        }
+      }
+    } catch (_) {}
+  }
+
   const userMsg = `Provide current macro analysis for ASX morning brief. Today: ${todayStr()}`
     + (liveCtx ? '. Live market data: ' + liveCtx : '. Use realistic current estimates.')
     + (pmCtx || '')
+    + (newsCtx || '')
     + '  Return only JSON.';
 
   try {

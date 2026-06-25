@@ -253,6 +253,13 @@ MARKET_FEEDS = [
         "type":    "news",
         "enabled": False,   # off by default — requires UA header
     },
+    {
+        "key":     "bbc_world",
+        "name":    "BBC World News",
+        "url":     "http://feeds.bbci.co.uk/news/world/rss.xml",
+        "type":    "geopolitics",
+        "enabled": True,
+    },
 ]
 
 
@@ -788,14 +795,14 @@ Portfolio tickers: {tickers}
 {context}
 Required JSON (fill ALL fields):
 {{"summary":"2-3 sentence factual summary",\
-"category":"earnings|regulatory|macro|sector|dividend|analyst|merger|technical|other",\
+"category":"earnings|regulatory|macro|sector|dividend|analyst|merger|technical|geopolitics|other",\
 "sentiment":"bullish|bearish|neutral",\
 "sentiment_score":<float -1.0 to 1.0>,\
 "impact_score":<float 0.0-10.0; score the REAL PORTFOLIO IMPACT using this rubric — \
 STEP 1 — article type: if this is commentary/opinion/question with NO new company data (e.g. 'should I buy X?', 'top stocks for 2025', listicles), set score to 0.5-2.0 and stop; \
-STEP 2 — base score by event class: trading-halt/M&A-bid/regulatory-decision=7-9, earnings-result/dividend-change/capital-raise/guidance-update=6-8, CEO-exec-change/analyst-PT-revision=4-6, RBA-APRA-macro-policy=3-5, operational-company-update=2-4, broad-sector-commentary=1-3; \
-STEP 3 — specificity: add +1.5 if a portfolio ticker is the PRIMARY subject of this article; subtract 2 if it is only mentioned in passing or as part of an index list; \
-STEP 4 — magnitude: add +1 if specific large figures are cited (earnings change >5%, deal >$500M, dividend cut >20%); \
+STEP 2 — base score by event class: trading-halt/M&A-bid/regulatory-decision=7-9, earnings-result/dividend-change/capital-raise/guidance-update=6-8, geopolitical-conflict/war/sanctions/major-election-or-trade-policy-shift=5-8, CEO-exec-change/analyst-PT-revision=4-6, RBA-APRA-macro-policy=3-5, operational-company-update=2-4, broad-sector-commentary=1-3; \
+STEP 3 — specificity: for company-specific articles, add +1.5 if a portfolio ticker is the PRIMARY subject; subtract 2 if only mentioned in passing or as part of an index list — SKIP this step for macro/geopolitics articles (broad market relevance is the point, not a penalty); \
+STEP 4 — magnitude: add +1 if specific large figures are cited (earnings change >5%, deal >$500M, dividend cut >20%, market-wide index move >2%); \
 final = min(10.0, sum of applicable steps)>,\
 "primary_tickers":<ASX codes that are the MAIN SUBJECT — e.g. ["CBA"] for a CBA earnings article; [] for broad-market articles>,\
 "mentioned_tickers":<ALL other ASX codes referenced in passing>,\
