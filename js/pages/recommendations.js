@@ -163,6 +163,17 @@ function renderRunAnalysisPanel() {
           <div><strong>Market view:</strong> ${cfg.marketView ? `<span style="color:var(--text-primary)">${cfg.marketView.substring(0,80)}${cfg.marketView.length>80?'…':''}</span>` : '<span class="text-muted">None (general analysis)</span>'}</div>
           ${!state.serverOk?`<div style="color:#d97706;margin-top:4px">⚠ Backend offline — analysis will use cached/no live data</div>`:''}
         </div>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:8px">
+          <div>
+            <div class="form-label" style="margin-bottom:3px">Claude model</div>
+            <select onchange="updateSetting('analysisModel',this.value)"
+              style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;font-family:var(--font)">
+              <option value="" ${!state.settings.analysisModel?'selected':''}>claude-sonnet-4-6 (default)</option>
+              <option value="claude-opus-4-8" ${state.settings.analysisModel==='claude-opus-4-8'?'selected':''}>claude-opus-4-8 (most capable)</option>
+              <option value="claude-haiku-4-5-20251001" ${state.settings.analysisModel==='claude-haiku-4-5-20251001'?'selected':''}>claude-haiku-4-5 (fastest)</option>
+            </select>
+          </div>
+        </div>
         <div class="flex-row">
           <button class="btn btn-primary" onclick="runAnalysisFromPanel()" ${state.analysisRunning?'disabled':''} style="${state.analysisRunning?'opacity:0.6':''}" id="run-analysis-btn">
             ${state.analysisRunning ? '<span class="loading-dots"><span></span><span></span><span></span></span> Running...' : '▶ Run Full Analysis'}
@@ -1004,26 +1015,47 @@ function renderRecHistory() {
 
     ${filtered.length === 0 ? `<div class="empty-state" style="padding:2rem"><div class="empty-icon">◆</div><p>${state.recHistory.length === 0 ? 'No recommendation history yet.' : 'No records match your filters.'}</p></div>` : `
     <div class="table-wrap"><table class="tbl-stack">
-      <thead><tr><th>Date</th><th>Ticker</th><th>Action</th><th>Confidence</th><th>Est. P&L<br><span style="font-weight:400;font-size:10px">at target</span></th><th>Status</th><th>Outcome</th><th>Actual P&L</th><th>Feedback</th></tr></thead>
+      <thead><tr><th style="width:16px"></th><th>Date</th><th>Ticker</th><th>Action</th><th>Confidence</th><th>Target / Stop</th><th>Status</th><th>Outcome</th><th>Actual P&L</th></tr></thead>
       <tbody>
         ${filtered.map((r)=>{
           const realIdx = state.recHistory.indexOf(r);
-          return `<tr>
+          const detId = 'hdet-' + r.id;
+          const hasDetail = !!(r.reasoning || r.scenarios || r.bullCase || r.bearCase || r.reallocationSuggestion || r.invalidationCondition);
+          const regBadge = r.regime ? `<span class="badge" style="font-size:10px;background:var(--bg-inset,#f3f4f6);color:var(--text-secondary)">${r.regime}</span>` : '';
+          const scenHtml = r.scenarios ? (() => {
+            const keys = ['bull','base','bear'];
+            return '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">'
+              + keys.map(k => { const s = r.scenarios[k]; if (!s) return '';
+                const col = k==='bull'?'var(--up,#15803d)':k==='bear'?'var(--down,#b91c1c)':'var(--text-secondary)';
+                return `<div style="background:var(--bg-inset,#f3f4f6);border-radius:4px;padding:6px 8px;text-align:center"><div style="font-size:10px;font-weight:700;color:${col};text-transform:uppercase">${k}</div><div style="font-size:12px;font-weight:600;color:var(--text-primary)">${s.p!=null?Math.round(s.p*100)+'%':'?'}</div><div style="font-size:11px;color:var(--text-secondary)">${s.ret!=null?(s.ret>=0?'+':'')+fmt(s.ret,0)+'%':'?'}</div></div>`; }).join('')
+              + '</div>';
+          })() : '';
+          const mkSection = (label, col, txt) => txt ? `<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;color:${col};text-transform:uppercase">${label}</span><div style="font-size:12px;color:var(--text-secondary);margin-top:2px">${escapeHTML(txt)}</div></div>` : '';
+          const reasonHtml = r.reasoning ? `<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase">Reasoning</span><div style="font-size:12px;color:var(--text-primary);margin-top:2px;line-height:1.55">${escapeHTML(reasoningText(r.reasoning))}</div></div>` : '';
+          const fbHtml = `<div style="margin-top:10px;display:flex;gap:6px;align-items:center">
+              <span class="text-xs text-muted" style="white-space:nowrap">Feedback:</span>
+              <input type="text" id="hfb-${realIdx}" value="${r.feedback||''}" placeholder="Add feedback..."
+                onclick="event.stopPropagation()"
+                style="flex:1;padding:3px 7px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:11px;font-family:var(--font)">
+              <button class="btn btn-sm" onclick="addHistoryFeedback(${realIdx});event.stopPropagation()" title="Save">&#x2713;</button>
+            </div>${r.feedback?`<div class="text-xs text-muted" style="margin-top:3px">&#x1F4AC; ${r.feedback}</div>`:''}`;
+          return `<tr onclick="toggleHistDetail('${detId}')" style="cursor:pointer">
+            <td style="padding:6px 4px;color:var(--text-tertiary);font-size:11px;text-align:center">${hasDetail?'&#9654;':''}</td>
             <td data-label="Date" class="text-xs">${r.date}</td>
-            <td data-label="Ticker"><strong>${r.ticker}</strong></td>
+            <td data-label="Ticker"><strong>${r.ticker}</strong> ${regBadge}</td>
             <td data-label="Action">${actionBadge(r.action)}</td>
-            <td data-label="Confidence"><div class="flex-row"><div class="conf-bar" style="width:60px"><div class="conf-fill" style="width:${(r.confidence||0)*100}%;background:${confColor(r.confidence||0)}"></div></div><span class="text-xs">${fmt((r.confidence||0)*100,0)}%</span></div></td>
-            <td data-label="Est. P&L" class="text-xs ${r.netProfit!=null?(r.netProfit>=0?'text-success':'text-danger'):''}">${r.netProfit!=null?(r.netProfit>=0?'+ ':'− ')+'$'+fmt(Math.abs(r.netProfit)):'&mdash;'}</td>
-            <td data-label="Status">${statusBadge(r.executed?'executed':'skipped')}${r._stopWidened?`<span class="badge" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;margin-left:4px" title="Stop widened to the ${r._stopWidenedRegime||''} regime multiple on ${(r._stopWidenedAt||'').slice(0,10)}: $${(r._stopWidenedFrom??0).toFixed(2)} → $${(r.stopLoss??0).toFixed(2)} (risk per share increased)">↔ Widened</span>`:''}</td>
-            <td data-label="Outcome" class="text-xs ${r.outcome==='win'?'text-success':r.outcome==='loss'?'text-danger':'text-muted'}">${r.outcome==='win'?'✓ Win':r.outcome==='loss'?'✗ Loss':r.outcome||'&mdash;'}</td>
-            <td data-label="Actual P&L" class="${r.actualProfit!=null?(r.actualProfit>=0?'text-success':'text-danger'):'text-muted'}">${r.actualProfit!=null?(r.actualProfit>=0?'+ ':'− ')+'$'+fmt(Math.abs(r.actualProfit)):'&mdash;'}</td>
-            <td data-label="Feedback" style="min-width:180px">
-              <div style="display:flex;gap:6px;align-items:center">
-                <input type="text" id="hfb-${realIdx}" value="${r.feedback||''}" placeholder="Add feedback…"
-                  style="flex:1;padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:11px;font-family:var(--font)">
-                <button class="btn btn-sm" onclick="addHistoryFeedback(${realIdx})" title="Save feedback">✓</button>
-              </div>
-              ${r.feedback?`<div class="text-xs text-muted" style="margin-top:3px">💬 ${r.feedback}</div>`:''}
+            <td data-label="Confidence"><div class="flex-row"><div class="conf-bar" style="width:50px"><div class="conf-fill" style="width:${(r.confidence||0)*100}%;background:${confColor(r.confidence||0)}"></div></div><span class="text-xs">${fmt((r.confidence||0)*100,0)}%</span></div></td>
+            <td data-label="Target/Stop" class="text-xs">${r.target?'$'+fmt(r.target):'&mdash;'} / ${r.stopLoss?'$'+fmt(r.stopLoss):'&mdash;'}</td>
+            <td data-label="Status">${statusBadge(r.executed?'executed':'skipped')}${r._stopWidened?`<span class="badge" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;margin-left:4px" title="Stop widened: $${(r._stopWidenedFrom??0).toFixed(2)} to $${(r.stopLoss??0).toFixed(2)}">↔ Widened</span>`:''}</td>
+            <td data-label="Outcome" class="text-xs ${r.outcome==='win'?'text-success':r.outcome==='loss'?'text-danger':'text-muted'}">${r.outcome==='win'?'&#x2713; Win':r.outcome==='loss'?'&#x2717; Loss':r.outcome||'&mdash;'}</td>
+            <td data-label="Actual P&L" class="${r.actualProfit!=null?(r.actualProfit>=0?'text-success':'text-danger'):'text-muted'}">${r.actualProfit!=null?(r.actualProfit>=0?'+':'-')+'$'+fmt(Math.abs(r.actualProfit)):'&mdash;'}</td>
+          </tr>
+          <tr id="${detId}" style="display:none;background:var(--bg-secondary)">
+            <td colspan="9" style="padding:10px 16px 14px">
+              ${scenHtml}
+              ${mkSection('Bull case','var(--up,#15803d)',r.bullCase)}${mkSection('Bear case','var(--down,#b91c1c)',r.bearCase)}${mkSection('Reallocation','var(--text-tertiary)',r.reallocationSuggestion)}${mkSection('Invalidated if','#d97706',r.invalidationCondition)}
+              ${reasonHtml}
+              ${fbHtml}
             </td>
           </tr>`;
         }).join('')}
@@ -1031,6 +1063,15 @@ function renderRecHistory() {
     </table></div>`}
   </div>`;
 }
+function toggleHistDetail(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const isOpen = el.style.display !== 'none';
+  el.style.display = isOpen ? 'none' : '';
+  const row = el.previousElementSibling;
+  if (row) { const arrow = row.querySelector('td:first-child'); if (arrow) arrow.textContent = isOpen ? '▶' : '▼'; }
+}
+
 // Persist user-edited execution field onto the rec object (survives tab switches within session)
 function persistExecField(recId, field, value) {
   const rec = state.recommendations.find(r => r.id === recId);

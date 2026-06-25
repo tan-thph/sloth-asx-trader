@@ -418,8 +418,10 @@ async function runAnalysis() {
     return days >= 0 ? days : null;   // future-dated entry = data error → null, not negative
   }
 
-  // Merged portfolio for analysis (deduplicated, weighted avg)
-  const mp = mergedPortfolio();
+  // Merged portfolio for analysis — exclude day-trade ('trading') account
+  // positions. Those are managed via the Day Trading page and should not
+  // receive swing-analysis recommendations.
+  const mp = mergedPortfolio().filter(h => (h.account || 'personal') !== 'trading');
 
   // Phase 2: fetch entry contexts for all holdings (thesis-aware exit analysis).
   // Fire early so it can resolve in parallel with other async fetches below.
@@ -784,7 +786,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 
   // ── Assemble dynamic system prompt (core cached + regime/date modules) ──────
   const _systemArray = typeof buildSystemArray === 'function'
-    ? buildSystemArray({ regime: _activeRegime, portfolio: mergedPortfolio() })
+    ? buildSystemArray({ regime: _activeRegime, portfolio: mp })
     : [{ type: 'text', text: ANALYSIS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
 
   // ── Regime transition detection ───────────────────────────────────────────
@@ -832,6 +834,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   try {
     const { text, usage: _usage } = await callClaude('portfolio', fullUserMessage, {
       systemArray: _systemArray,
+      model: state.settings?.analysisModel || undefined,
     });
 
     console.log(`[Token audit] recHistory sent: ${recentRecs.length} entries (last5=${last5.length} withPnl=${withPnl.length} withFeedback=${withFeedback.length})`);

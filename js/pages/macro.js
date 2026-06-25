@@ -247,13 +247,26 @@ function renderMacro() {
 
     ${m.what_changed?.length ? `
     <div class="card mb-2">
-      <div class="card-title">What Changed (24h)</div>
-      ${m.what_changed.map(w => `
-        <div style="display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:0.5px solid var(--border-light);font-size:13px">
-          <span style="font-weight:600;min-width:80px">${escapeHTML(w.factor||'')}</span>
-          <span class="text-xs" style="color:var(--text-secondary)">${escapeHTML(w.observed||'')}</span>
-          ${w.signal?`<span class="text-xs text-muted">${escapeHTML(w.signal)}</span>`:''}
-        </div>`).join('')}
+      <div class="card-title" style="margin-bottom:10px">What Changed (24h)</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px">
+        ${m.what_changed.map(w => {
+          const sig = (w.signal||'').toLowerCase();
+          const borderCol = sig.includes('bullish')||sig.includes('positive')||sig.includes('up') ? 'var(--up,#16a34a)'
+            : sig.includes('bearish')||sig.includes('negative')||sig.includes('down') ? 'var(--down,#dc2626)'
+            : 'var(--border-medium)';
+          const chipBg = sig.includes('bullish')||sig.includes('positive')||sig.includes('up') ? 'var(--up-bg,#dcfce7)'
+            : sig.includes('bearish')||sig.includes('negative')||sig.includes('down') ? 'var(--down-bg,#fee2e2)'
+            : 'var(--bg-inset,#f3f4f6)';
+          const chipCol = sig.includes('bullish')||sig.includes('positive')||sig.includes('up') ? 'var(--up,#15803d)'
+            : sig.includes('bearish')||sig.includes('negative')||sig.includes('down') ? 'var(--down,#b91c1c)'
+            : 'var(--text-secondary)';
+          return `<div style="background:var(--bg-surface);border-radius:var(--radius-md);padding:10px 12px;border-left:3px solid ${borderCol}">
+            <div style="font-weight:700;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">${escapeHTML(w.factor||'')}</div>
+            <div style="font-size:13px;color:var(--text-primary);line-height:1.5">${escapeHTML(w.observed||'')}</div>
+            ${w.signal ? `<div style="margin-top:6px"><span style="display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:3px;background:${chipBg};color:${chipCol}">${escapeHTML(w.signal)}</span></div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>
     </div>` : ''}
 
     ${m.drivers?.length ? `

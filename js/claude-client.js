@@ -225,7 +225,8 @@ async function callClaude(agentType, userMessage, options = {}) {
     }
   }
 
-  const body = { model: CLAUDE_MODEL, max_tokens: maxTokens, messages };
+  const model = (options.model && options.model.trim()) ? options.model.trim() : CLAUDE_MODEL;
+  const body = { model, max_tokens: maxTokens, messages };
   if (system) body.system = system;
 
   // §8.5: portfolio agent gets grammar-level JSON enforcement via forced tool use.

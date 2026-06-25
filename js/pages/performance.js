@@ -657,8 +657,10 @@ function exportTradeJournalCSV() {
 
   const rows = trades.map(t => {
     const isClose   = t.status === 'closed' && t.pnl != null;
-    // Open/close dates: SELL entries now store date=open, closeDate=close
-    const openDate  = t.date || '';
+    // Open date: new disposal rows store parcelOpenDate (parcel acquisition date)
+    // separately from date (which is now the sale date). Legacy rows stored
+    // date=openDate and closeDate=saleDate — parcelOpenDate||date handles both.
+    const openDate  = t.parcelOpenDate || t.date || '';
     const closeDate = t.closeDate || (isClose ? t.date : '') || '';
     const ticker    = t.ticker || '';
     const action    = t.action || t.type || '';
@@ -772,11 +774,10 @@ async function syncClosedTradesToLearningLoop() {
         : (jMatches[0].entryPrice || jMatches[0].avgPrice || (Array.isArray(r.priceRange) ? r.priceRange[0] : null));
       const qty = totalQty || r.qty || 1;
       const pnlPct = entryPrice && qty ? (totalPnl / (entryPrice * qty)) * 100 : null;
-      // Hold duration from the earliest open date to the latest close date
-      // across the batch (mirrors the FIFO-earliest semantics used elsewhere).
-      // Both new disposal-slice rows and legacy aggregate rows use `date` as
-      // the open date and `closeDate` as the transaction date.
-      const _dates = jMatches.map(t => t.date).filter(Boolean).sort();
+      // Hold duration from the earliest parcel open date to the latest close date.
+      // New disposal rows carry parcelOpenDate (acquisition) + date (sale date).
+      // Legacy rows had date=open, closeDate=sale. Both forms handled below.
+      const _dates = jMatches.map(t => t.parcelOpenDate || t.date).filter(Boolean).sort();
       const _closeDates = jMatches.map(t => t.closeDate || t.date).filter(Boolean).sort();
       const earliestOpen = _dates[0];
       const latestClose = _closeDates[_closeDates.length - 1];

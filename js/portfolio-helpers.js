@@ -699,15 +699,17 @@ function buildDisposalJournalEntries(opts) {
       if (remainingAfter <= 0) buyRow.closeDate = date;
     }
 
-    // `date` on this row is the ORIGINAL parcel open date (d.parcelDate, from
-    // matchSaleAgainstParcels), not the transaction date — matching the
-    // existing single-row model's semantics (date=open, closeDate=close) that
-    // the ATO CSV export (exportTradeJournalCSV) and CGT discount-eligibility
-    // check both depend on (>365 days between date and closeDate). `date`
-    // param here is the transaction date, used for closeDate instead.
+    // `date` is the transaction/sale date so the Journal shows the SELL row
+    // under the date the trade actually happened. The parcel open date is
+    // preserved in `parcelOpenDate` for the ATO CGT discount-eligibility
+    // check (>365 days between parcelOpenDate and date) and for hold-duration
+    // calculations in performance.js. Legacy rows (pre-fix) had date=openDate
+    // and relied on the ATO CSV using (date, closeDate) — exportTradeJournalCSV
+    // now reads parcelOpenDate || date so backwards-compat is maintained.
     const entry = {
       id: Date.now() + i,
-      date: d.parcelDate || buyRow?.date || date,
+      date,   // sale date (today) — what the Journal page shows
+      parcelOpenDate: d.parcelDate || buyRow?.date || null,   // for ATO CGT / hold duration
       ticker, action, qty: d.saleQty,
       entryPrice: d.parcelCostPerShare, exitPrice: tradePrice, fees: d.saleFee || 0,
       status: 'closed', pnl: d.grossGain, closeDate: date,
