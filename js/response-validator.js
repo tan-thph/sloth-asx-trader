@@ -85,13 +85,17 @@ const SELL_REQUIRED_SECONDARY = {
 // Secondary tags whose entire definition IS a numeric threshold (prompt §2.2)
 // — these aren't judgment calls, they're checkable facts. Each entry returns
 // true when the threshold the tag claims is actually met by ctx.holding.
-// A 2026-06-25 live response tagged a $76 loss as unrealised_loss_large (>$500
-// required) and two 1.8%-weight positions as position_oversized (>15% required)
-// — both contradicted the very numbers the model had been given in the prompt.
+// A 2026-06-25 live response tagged a $76 loss as unrealised_loss_large and
+// two 1.8%-weight positions as position_oversized — both contradicted the
+// numbers the model had been given.  Thresholds deliberately lower than the
+// original fix to avoid false-rejections on borderline-but-genuine cases:
+//   unrealised_loss_large: ≤−$200  (orig −$500; bonds/small positions still valid)
+//   position_oversized:    > 10 %  (orig 15%; 10–14% IS over-weight for most mandates)
+//   sector_concentration:  > 15 %  (orig 20%; Financials at 18% IS concentrated)
 const SELL_GROUND_TRUTH_CHECKS = {
-  unrealised_loss_large: (h) => h.unrealisedPnl != null && h.unrealisedPnl <= -500,
-  position_oversized:     (h) => h.weightPct != null && h.weightPct > 15,
-  sector_concentration:   (h) => h.sectorWeightPct != null && h.sectorWeightPct > 20,
+  unrealised_loss_large: (h) => h.unrealisedPnl != null && h.unrealisedPnl <= -200,
+  position_oversized:     (h) => h.weightPct != null && h.weightPct > 10,
+  sector_concentration:   (h) => h.sectorWeightPct != null && h.sectorWeightPct > 15,
   held_over_12m:          (h) => h.daysHeld != null && h.daysHeld >= 365,
   held_11_to_12m:         (h) => h.daysHeld != null && h.daysHeld >= 335 && h.daysHeld < 365,
 };

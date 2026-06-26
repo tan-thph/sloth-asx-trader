@@ -1416,7 +1416,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       };
     });
 
-    // ── SAME-DAY DEDUP: prevent multiple TRIM or TOP_UP on the same ticker today ──
+    // ── SAME-DAY DEDUP: prevent multiple TRIM/TOP_UP and SELL+TRIM conflicts ──
     const todayKey = todayStr();
     const alreadyActioned = new Set();
     for (const hist of state.recHistory) {
@@ -1430,6 +1430,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         alreadyActioned.add(`${pend.ticker}::${pend.action}`);
       }
     }
+    // Within this batch: keep highest-confidence TRIM/TOP_UP per ticker.
     const batchSeen = new Map();
     for (const r of newRecs) {
       if (r.action !== 'TRIM' && r.action !== 'TOP_UP') continue;
@@ -1438,16 +1439,26 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         batchSeen.set(k, r);
       }
     }
+    // batchSells already populated above (line ~1362) — SELL+TRIM conflict:
+    // if SELL and TRIM both appear for the same ticker, SELL wins (full exit
+    // overrides partial exit — they're contradictory positions).
+
     let dupsSuppressed = 0;
     const dedupedRecs = newRecs.filter(r => {
       if (r.action !== 'TRIM' && r.action !== 'TOP_UP') return true;
+      // SELL+TRIM conflict: drop the TRIM when a SELL exists for the same ticker.
+      if (r.action === 'TRIM' && batchSells.has(r.ticker)) {
+        console.warn(`[dedup] Suppressing TRIM ${r.ticker} — SELL also present in this batch (full exit takes priority)`);
+        dupsSuppressed++;
+        return false;
+      }
       const k = `${r.ticker}::${r.action}`;
       if (alreadyActioned.has(k)) { dupsSuppressed++; return false; }
       if (batchSeen.get(k) !== r) { dupsSuppressed++; return false; }
       return true;
     });
     if (dupsSuppressed > 0) {
-      const note = ` [Suppressed ${dupsSuppressed} duplicate TRIM/TOP_UP rec(s) — already actioned/pending today]`;
+      const note = ` [Suppressed ${dupsSuppressed} duplicate/conflicting rec(s)]`;
       summary = (summary ? summary + ' ' : '') + note.trim();
     }
 
