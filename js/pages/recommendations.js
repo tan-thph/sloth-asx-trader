@@ -62,6 +62,17 @@ function switchRecTab(tab) {
   else document.getElementById('rec-content').innerHTML=renderRecRulesPanel();
 }
 
+function _onAnalysisModelSelect(val) {
+  if (val === '__custom__') {
+    const inp = document.getElementById('analysis-model-custom');
+    if (inp) { inp.style.display = ''; inp.value = state.settings.analysisModel && !['','claude-opus-4-8','claude-haiku-4-5-20251001'].includes(state.settings.analysisModel) ? state.settings.analysisModel : ''; inp.focus(); updateSetting('analysisModel', inp.value.trim()); }
+  } else {
+    updateSetting('analysisModel', val);
+    const inp = document.getElementById('analysis-model-custom');
+    if (inp) { inp.style.display = 'none'; inp.value = ''; }
+  }
+}
+
 function renderRunAnalysisPanel() {
   const cfg = state.analysisConfig;
   const portfolioTickers = mergedPortfolio().map(h=>h.ticker);
@@ -166,12 +177,25 @@ function renderRunAnalysisPanel() {
         <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:8px">
           <div>
             <div class="form-label" style="margin-bottom:3px">Claude model</div>
-            <select onchange="updateSetting('analysisModel',this.value)"
-              style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;font-family:var(--font)">
-              <option value="" ${!state.settings.analysisModel?'selected':''}>claude-sonnet-4-6 (default)</option>
-              <option value="claude-opus-4-8" ${state.settings.analysisModel==='claude-opus-4-8'?'selected':''}>claude-opus-4-8 (most capable)</option>
-              <option value="claude-haiku-4-5-20251001" ${state.settings.analysisModel==='claude-haiku-4-5-20251001'?'selected':''}>claude-haiku-4-5 (fastest)</option>
-            </select>
+            ${(()=>{
+              const _knownM = ['','claude-opus-4-8','claude-haiku-4-5-20251001'];
+              const _isCustom = !!(state.settings.analysisModel && !_knownM.includes(state.settings.analysisModel));
+              const _selStyle = 'padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;font-family:var(--font)';
+              return `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <select id="analysis-model-select" onchange="_onAnalysisModelSelect(this.value)" style="${_selStyle}">
+                  <option value="" ${!state.settings.analysisModel?'selected':''}>claude-sonnet-4-6 (default)</option>
+                  <option value="claude-opus-4-8" ${state.settings.analysisModel==='claude-opus-4-8'?'selected':''}>claude-opus-4-8 (most capable)</option>
+                  <option value="claude-haiku-4-5-20251001" ${state.settings.analysisModel==='claude-haiku-4-5-20251001'?'selected':''}>claude-haiku-4-5 (fastest)</option>
+                  <option value="__custom__" ${_isCustom?'selected':''}>Custom…</option>
+                </select>
+                <input id="analysis-model-custom" type="text"
+                  value="${_isCustom?escapeHTML(state.settings.analysisModel):''}"
+                  placeholder="e.g. claude-sonnet-4-7"
+                  oninput="updateSetting('analysisModel',this.value.trim())"
+                  style="${_selStyle};width:200px;${_isCustom?'':'display:none'}"
+                  title="Enter the exact model ID from Anthropic's docs"/>
+              </div>`;
+            })()}
           </div>
         </div>
         <div class="flex-row">
