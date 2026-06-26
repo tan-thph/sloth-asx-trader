@@ -388,10 +388,9 @@ function _renderSeasonality(ticker, d) {
 function drawSparklineFromData(ticker, s) {
   const canvas=document.getElementById(`chart-${ticker}`);
   if(!canvas||!s.chart_data?.length) return;
-  const ctx=canvas.getContext('2d');
-  canvas.width=canvas.offsetWidth||800;
-  canvas.height=180;
-  const w=canvas.width, h=canvas.height;
+  const { ctx, w, h } = typeof _fitCanvas === 'function'
+    ? _fitCanvas(canvas, 180)
+    : (() => { canvas.width = canvas.offsetWidth||800; canvas.height = 180; return { ctx: canvas.getContext('2d'), w: canvas.width, h: 180 }; })();
   const data=s.chart_data;
   const prices=data.map(d=>d.close);
   const allV=[...prices];

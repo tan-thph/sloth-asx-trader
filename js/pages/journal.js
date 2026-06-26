@@ -756,10 +756,14 @@ function _buildMonthlyPnlCard() {
 function _drawMonthlyPnlChart(canvasId, buckets, months) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
-  if (typeof _fitCanvas === 'function') _fitCanvas(canvas);
-  else { canvas.width = canvas.offsetWidth || 800; canvas.height = canvas.offsetHeight || 170; }
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
+  // _fitCanvas returns { ctx, w, h } in logical (CSS) pixels with DPR scaling applied.
+  const CSS_H = 170;
+  const { ctx, w: W, h: H } = typeof _fitCanvas === 'function'
+    ? _fitCanvas(canvas, CSS_H)
+    : (() => {
+        canvas.width = canvas.offsetWidth || 800; canvas.height = CSS_H;
+        return { ctx: canvas.getContext('2d'), w: canvas.width, h: CSS_H };
+      })();
   const PAD_L = 60, PAD_R = 60, PAD_T = 14, PAD_B = 26;
   const chartW = W - PAD_L - PAD_R;
   const chartH = H - PAD_T - PAD_B;

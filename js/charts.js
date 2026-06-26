@@ -293,10 +293,21 @@ async function drawHistoryChart() {
     }
   }
 
-  const allVals = [...nwArr, ...pvArr, ...cashArr, ...(benchArr ? benchArr.filter(Boolean) : [])];
-  const minV = Math.min(...allVals) * 0.98;
-  const maxV = Math.max(...allVals) * 1.02;
-  const range = maxV - minV || 1;
+  // Y scale: anchor to netWorth + portfolioValue only.
+  // Including cash or a drifted benchmark in min/max collapses all lines toward
+  // the top/middle of the chart (cash drags minV to near 0; a diverged benchmark
+  // can drag either extreme).  The cash/benchmark lines are still drawn but may
+  // extend below/above the visible area if they're far from the portfolio range.
+  const scaleVals = [...nwArr, ...pvArr, ...(benchArr ? benchArr.filter(Boolean) : [])];
+  const rawMin = Math.min(...scaleVals);
+  const rawMax = Math.max(...scaleVals);
+  const nwRange = rawMax - rawMin;
+  // Pad: at least 1% of midpoint so flat lines still have breathing room.
+  const midPt  = (rawMin + rawMax) / 2;
+  const padAmt  = Math.max(nwRange * 0.12, midPt * 0.01, 1);
+  const minV    = rawMin - padAmt;
+  const maxV    = rawMax + padAmt;
+  const range   = maxV - minV || 1;
 
   const pad = { t: 16, r: 16, b: 40, l: 72 };
   const cw = w - pad.l - pad.r;

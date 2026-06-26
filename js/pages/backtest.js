@@ -419,10 +419,9 @@ function _renderAiResults(res, horizon, horizonLabel) {
 function _drawAiEquity(curve) {
   const canvas = document.getElementById('bt-ai-equity-chart');
   if (!canvas || curve.length < 2) return;
-  const ctx = canvas.getContext('2d');
-  canvas.width = canvas.offsetWidth || 900;
-  canvas.height = 220;
-  const W = canvas.width, H = canvas.height;
+  const { ctx, w: W, h: H } = typeof _fitCanvas === 'function'
+    ? _fitCanvas(canvas, 220)
+    : (() => { canvas.width = canvas.offsetWidth||900; canvas.height = 220; return { ctx: canvas.getContext('2d'), w: canvas.width, h: 220 }; })();
   const PAD = { t: 24, r: 24, b: 36, l: 78 };
   const cW = W - PAD.l - PAD.r, cH = H - PAD.t - PAD.b;
 
@@ -811,10 +810,9 @@ async function runBacktest() {
 function drawBacktestEquity(equityCurve) {
   const canvas = document.getElementById('bt-equity-chart');
   if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  canvas.width = canvas.offsetWidth || 900;
-  canvas.height = 220;
-  const W = canvas.width, H = canvas.height;
+  const { ctx, w: W, h: H } = typeof _fitCanvas === 'function'
+    ? _fitCanvas(canvas, 220)
+    : (() => { canvas.width = canvas.offsetWidth||900; canvas.height = 220; return { ctx: canvas.getContext('2d'), w: canvas.width, h: 220 }; })();
   const PAD = { t: 20, r: 20, b: 30, l: 60 };
   const cW = W - PAD.l - PAD.r, cH = H - PAD.t - PAD.b;
 

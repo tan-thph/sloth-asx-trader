@@ -544,10 +544,9 @@ function _buildEquityCurveCard(d) {
 function _drawEquityCurveChart(d) {
   const canvas = document.getElementById('equity-curve-canvas');
   if (!canvas || !d.values?.length) return;
-  canvas.width  = canvas.offsetWidth || 800;
-  canvas.height = 200;
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
+  const { ctx, w: W, h: H } = typeof _fitCanvas === 'function'
+    ? _fitCanvas(canvas, 200)
+    : (() => { canvas.width = canvas.offsetWidth || 800; canvas.height = 200; return { ctx: canvas.getContext('2d'), w: canvas.width, h: 200 }; })();
   const PAD_L = 60, PAD_R = 16, PAD_T = 10, PAD_B = 28;
   const cW = W - PAD_L - PAD_R;
   const cH = H - PAD_T - PAD_B;
