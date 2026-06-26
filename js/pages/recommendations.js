@@ -900,6 +900,273 @@ function setRecHistoryFilter(key, value) {
   if (el) el.innerHTML = renderRecHistory();
 }
 
+// ── History rec card — same layout as the pending card, outcome-aware ────────
+function _renderHistoryRecCard(r, realIdx) {
+  const isReducing = r.action === 'SELL' || r.action === 'TRIM';
+  const _warns = Array.isArray(r._ruleWarnings) ? r._ruleWarnings : [];
+
+  const tile = (label, body, sub) => `
+    <div style="background:var(--bg-secondary);padding:8px 12px;border-radius:var(--radius-md)">
+      <div class="text-xs">${label}</div>
+      <div style="font-weight:600;font-size:13px">${body}</div>
+      ${sub ? `<div class="text-xs text-muted" style="margin-top:2px">${sub}</div>` : ''}
+    </div>`;
+
+  // Outcome badge
+  const isSkipped = !r.executed || r.outcome === 'skipped';
+  let outcomeBadge;
+  if (isSkipped) {
+    outcomeBadge = `<span class="badge" style="background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border-medium)">Skipped</span>`;
+  } else if (r.outcome === 'win') {
+    outcomeBadge = `<span class="badge" style="background:#f0fdf4;color:#15803d;border:1px solid #86efac">✓ Won</span>`;
+  } else if (r.outcome === 'loss') {
+    outcomeBadge = `<span class="badge" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5">✗ Lost</span>`;
+  } else {
+    outcomeBadge = `<span class="badge" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe">● Open</span>`;
+  }
+
+  const pnlVal = r.actualProfit;
+  const pnlColor = (pnlVal ?? 0) >= 0 ? '#16a34a' : '#dc2626';
+  const pnlSign  = (pnlVal ?? 0) >= 0 ? '+ ' : '− ';
+  const actualPnlBadge = pnlVal != null
+    ? `<span style="font-size:12px;padding:1px 8px;border-radius:4px;font-weight:600;${pnlVal >= 0 ? 'background:#f0fdf4;color:#15803d;border:0.5px solid #86efac' : 'background:#fef2f2;color:#dc2626;border:0.5px solid #fca5a5'}">${pnlSign}$${fmt(Math.abs(pnlVal))}</span>`
+    : '';
+
+  const regimeBadge = r.regime
+    ? `<span class="badge" style="font-size:10px;background:var(--bg-inset,#f3f4f6);color:var(--text-secondary)">${r.regime}</span>`
+    : '';
+
+  const qty = r.qty || 0;
+  const qtyLine = r.action === 'TRIM'   ? `Trim: ${qty||'—'} shares`
+                : r.action === 'TOP_UP' ? `Add: ${qty||'—'} shares`
+                : r.action === 'SELL'   ? `Sell: ${qty||'—'} shares`
+                : `Qty: ${qty||'—'} shares`;
+
+  // Price tiles — show actual P&L in place of estimate
+  const sellPrice = r.priceRange?.[0] ?? r.target;
+  const topTiles = isReducing
+    ? `
+      ${tile('Sell at (AI target)', `<span class="text-success">$${fmt(sellPrice)}</span>`, `${qty} share${qty===1?'':'s'} · stop $${fmt(r.stopLoss)}`)}
+      ${tile('Target / Stop', `<span class="text-success">$${fmt(r.target)}</span> / <span class="text-danger">$${fmt(r.stopLoss)}</span>`)}
+      ${tile('Actual P&L', pnlVal != null ? `<span style="color:${pnlColor}">${pnlSign}$${fmt(Math.abs(pnlVal))}</span>` : '<span class="text-muted">—</span>', pnlVal != null ? 'Recorded at close' : 'Pending')}`
+    : `
+      ${tile('Entry range (AI)', r.priceRange ? `$${fmt(r.priceRange[0])} &ndash; $${fmt(r.priceRange[1])}` : '—')}
+      ${tile('Target / Stop-loss', `<span class="text-success">$${fmt(r.target)}</span> / <span class="text-danger">$${fmt(r.stopLoss)}</span>`)}
+      ${tile('Actual P&L', pnlVal != null ? `<span style="color:${pnlColor}">${pnlSign}$${fmt(Math.abs(pnlVal))}</span>` : '<span class="text-muted">—</span>', pnlVal != null ? 'Recorded at close' : isSkipped ? 'Skipped' : 'Position open')}`;
+
+  // SELL/TRIM reason block (identical to pending)
+  const sellReasonBlock = isReducing && r.primary_driver ? (() => {
+    const URGENCY_STYLE = {
+      immediate: 'background:#fef2f2;color:#dc2626;border:1px solid #fca5a5',
+      routine:   'background:#f0fdf4;color:#16a34a;border:1px solid #86efac',
+      monitor:   'background:#fefce8;color:#ca8a04;border:1px solid #fde047',
+    };
+    const urgencyStyle = URGENCY_STYLE[r.urgency] || 'background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border-light)';
+    const secondaryChips = (r.secondary_factors || []).map(t =>
+      `<span style="font-size:10px;padding:2px 7px;background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:3px;color:var(--text-secondary)">${t.replace(/_/g,' ')}</span>`
+    ).join('');
+    const altTickerBadge = r.alternativeTicker
+      ? `<span style="font-size:10px;padding:2px 7px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:3px;color:#1d4ed8">→ ${r.alternativeTicker}</span>`
+      : '';
+    const reallocationLine = r.reallocationSuggestion
+      ? `<div style="margin-top:6px;padding:5px 8px;background:var(--bg-inset,var(--bg-secondary));border-radius:4px;border-left:2px solid #60a5fa;font-size:11px;color:var(--text-secondary);display:flex;align-items:flex-start;gap:5px">
+          <span style="font-weight:700;color:#3b82f6;white-space:nowrap;flex-shrink:0">↪ Capital:</span>
+          <span>${escapeHTML(r.reallocationSuggestion)}</span>
+         </div>` : '';
+    return `
+    <div style="padding:7px 10px;background:var(--bg-secondary);border-radius:var(--radius-md);margin-bottom:8px;border-left:3px solid #f59e0b">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:5px">
+        <span style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-right:2px">Sell reason</span>
+        <span style="font-size:11px;font-weight:600;padding:2px 8px;background:#fff7ed;border:1px solid #fed7aa;border-radius:3px;color:#c2410c">${r.primary_driver.replace(/_/g,' ')}</span>
+        ${secondaryChips}${altTickerBadge}
+        <span style="margin-left:auto;font-size:10px;font-weight:600;padding:2px 8px;border-radius:3px;${urgencyStyle}">${r.urgency || '?'}</span>
+      </div>
+      ${reallocationLine}
+    </div>`;
+  })() : '';
+
+  // Thesis check (SELL/TRIM, identical to pending)
+  const thesisCheckBlock = isReducing && r._thesisCheck ? (() => {
+    const tc = r._thesisCheck;
+    const VC = {
+      validated:   { icon: '✅', label: 'Validated',   color: 'var(--up)', bg: 'var(--up-bg,#f0fdf4)', border: '#86efac' },
+      invalidated: { icon: '❌', label: 'Invalidated', color: 'var(--down)', bg: 'var(--down-bg,#fef2f2)', border: '#fca5a5' },
+      irrelevant:  { icon: '➖', label: 'Irrelevant',  color: 'var(--text-tertiary)', bg: 'var(--bg-inset)', border: 'var(--border)' },
+    };
+    const vc = VC[tc.verdict] || VC.irrelevant;
+    const firstKey = Object.keys(tc.deltas || {})[0];
+    const d = firstKey ? tc.deltas[firstKey] : null;
+    const f2 = v => v != null ? Number(v).toFixed(2) : '—';
+    return `
+    <div style="padding:8px 12px;background:${vc.bg};border:1px solid ${vc.border};border-left:3px solid ${vc.color};border-radius:var(--radius-md);margin-bottom:8px;font-size:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+        <span style="font-size:10px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px">Thesis Check</span>
+        <span style="font-weight:600;color:${vc.color}">${vc.icon} ${vc.label}</span>
+      </div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        <span style="color:var(--text-secondary)">Bought because: <strong>${escapeHTML(r._entryDriver || 'untagged')}</strong>${firstKey ? ` · Entry: <strong>${escapeHTML(firstKey.replace(/_/g,' '))+': '+f2(d?.entry)}</strong>` : ''}</span>
+        ${firstKey ? `<span style="color:var(--text-secondary)">Now: <strong>${f2(d?.now)}</strong></span>` : ''}
+      </div>
+      ${tc.reason ? `<div style="color:var(--text-tertiary);font-size:11px;margin-top:3px">${escapeHTML(tc.reason)}</div>` : ''}
+    </div>`;
+  })() : '';
+
+  // Scenarios block (identical to pending)
+  const scenBlock = r.scenarios?.bull && r.scenarios?.base && r.scenarios?.bear ? (() => {
+    const sc = r.scenarios;
+    const fmtPct = v => v != null ? (v >= 0 ? '+' : '') + (v * 100).toFixed(0) + '%' : '—';
+    const fmtP   = v => v != null ? Math.round(v * 100) + '%' : '?';
+    const scCell = (label, data, color, bg) =>
+      `<div style="text-align:center;padding:5px 4px;background:${bg};border-radius:4px">
+        <div style="font-size:9px;font-weight:700;color:${color};text-transform:uppercase;letter-spacing:0.5px">${label}</div>
+        <div style="font-size:13px;font-weight:700;color:${color};margin:1px 0">${fmtPct(data.ret)}</div>
+        <div style="font-size:10px;color:var(--text-muted)">${fmtP(data.p)} prob</div>
+      </div>`;
+    return `
+    <div style="margin-bottom:8px">
+      <div style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">12-month scenarios</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px">
+        ${scCell('Bull',sc.bull,'#15803d','var(--up-bg,rgba(22,163,74,0.08))')}
+        ${scCell('Base',sc.base,'var(--text-secondary)','var(--bg-secondary)')}
+        ${scCell('Bear',sc.bear,'#dc2626','var(--down-bg,rgba(220,38,38,0.06))')}
+      </div>
+    </div>`;
+  })() : '';
+
+  // Traceability (identical to pending, minus debate snippet)
+  const traceBlock = (() => {
+    if (!r._genRegime && !r._signalsSnap && !r._calibSnap) return '';
+    const regimeLine = r._genRegime ? `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <span style="font-weight:600;color:var(--text-secondary)">Regime</span>
+      <span style="padding:1px 7px;background:var(--bg-secondary);border:0.5px solid var(--border-light);border-radius:3px">${r._genRegime}</span>
+      ${r._genRegimeConf != null ? `<span class="text-muted">${fmt(r._genRegimeConf*100,0)}% conf</span>` : ''}
+    </div>` : '';
+    let sigLines = '';
+    if (r._signalsSnap) {
+      const s = r._signalsSnap;
+      const cells = [
+        s.rsi_14    != null ? `RSI ${fmt(s.rsi_14,1)}` : null,
+        s.adx       != null ? `ADX ${fmt(s.adx,1)}` : null,
+        s.bb_pctb   != null ? `BB%B ${fmt(s.bb_pctb,2)}` : null,
+        s.atr_14    != null ? `ATR $${fmt(s.atr_14,3)}` : null,
+        s.score     != null ? `Score ${Math.round(s.score)}/100` : null,
+        s.obv_trend != null ? `OBV ${s.obv_trend}` : null,
+        s.macd_signal != null ? `MACD ${s.macd_signal}` : null,
+        s.volume_ratio != null ? `Vol×${fmt(s.volume_ratio,1)}` : null,
+        s.rs_score  != null ? `RS ${fmt(s.rs_score,0)}` : null,
+      ].filter(Boolean);
+      if (cells.length) sigLines = `<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+        <span style="font-weight:600;color:var(--text-secondary)">Signals</span>
+        ${cells.map(c=>`<span style="padding:1px 7px;background:var(--bg-secondary);border:0.5px solid var(--border-light);border-radius:3px">${c}</span>`).join('')}
+      </div>`;
+    }
+    const calibLine = r._calibSnap ? `<div style="color:var(--text-muted);font-family:monospace;font-size:10px;background:var(--bg-secondary);padding:5px 8px;border-radius:3px;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow-y:auto">
+      <span style="font-weight:600;font-family:var(--font)">Calibration:</span> ${escapeHTML(r._calibSnap)}</div>` : '';
+    return `
+    <details style="margin-top:8px;border-top:0.5px solid var(--border-light);padding-top:6px">
+      <summary style="font-size:11px;color:var(--text-muted);cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:5px">
+        <span class="trace-arrow">▶</span> 🔍 Why this rec? (generation context)
+      </summary>
+      <div style="margin-top:7px;display:grid;gap:6px;font-size:11px">
+        ${regimeLine}${sigLines}${calibLine}
+      </div>
+    </details>`;
+  })();
+
+  return `
+  <div class="rec-card" id="hrec-${r.id}"${_warns.length ? ' style="border-left:3px solid #dc2626"' : ''}>
+    <!-- Header -->
+    <div class="flex-between mb-1">
+      <div class="flex-row" style="flex-wrap:wrap;gap:5px">
+        ${actionBadge(r.action)}
+        ${r._confidenceHeld ? '<span class="badge" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;font-weight:700">⛔ HELD</span>' : ''}
+        <strong style="font-size:15px">${r.ticker}</strong>
+        ${r.sector ? `<span class="text-xs">${r.sector}</span>` : ''}
+        ${regimeBadge}
+        ${r._stopWidened ? `<span class="badge" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa" title="Stop widened: $${(r._stopWidenedFrom??0).toFixed(2)} → $${(r.stopLoss??0).toFixed(2)}">↔ Widened</span>` : ''}
+        ${r._source==='local' ? '<span class="badge" style="background:#fff7ed;color:#92400e;border:none">🔒 Local</span>' : ''}
+        ${outcomeBadge}
+        ${actualPnlBadge}
+        <span class="text-xs text-muted">${r.date}</span>
+      </div>
+    </div>
+
+    <!-- Failed-rule panel -->
+    ${_warns.length ? `
+    <div style="margin-top:8px;padding:8px 12px;border-radius:var(--radius-md);background:var(--down-bg,rgba(220,38,38,0.08));border:1px solid rgba(220,38,38,0.35);border-left:3px solid #dc2626">
+      <div style="font-size:11px;font-weight:700;color:#dc2626;text-transform:uppercase;letter-spacing:0.5px">
+        ⚠ Failed ${_warns.length} rule${_warns.length !== 1 ? 's' : ''} at generation time
+      </div>
+      <ul style="margin:5px 0 0 16px;font-size:11.5px;color:var(--text-secondary);line-height:1.55">
+        ${_warns.map(w => `<li>${escapeHTML(w)}</li>`).join('')}
+      </ul>
+    </div>` : ''}
+
+    <!-- Price tiles -->
+    <div class="grid-3 mb-1" style="margin-top:10px">${topTiles}</div>
+
+    <!-- Confidence + qty -->
+    <div class="flex-row mb-1">
+      <div class="conf-bar" style="width:110px"><div class="conf-fill" style="width:${(r.confidence||0)*100}%;background:${confColor(r.confidence||0)}"></div></div>
+      <span class="text-xs">${fmt((r.confidence||0)*100,0)}% confidence</span>
+      <span class="text-xs text-muted">|</span>
+      <span class="text-xs">${qtyLine}</span>
+    </div>
+
+    <!-- SELL/TRIM decision tags -->
+    ${sellReasonBlock}
+
+    <!-- Thesis check -->
+    ${thesisCheckBlock}
+
+    <!-- Reasoning -->
+    ${r.reasoning ? `<div style="background:var(--bg-secondary);padding:10px 12px;border-radius:var(--radius-md);font-size:13px;line-height:1.65;margin-bottom:8px">
+      <strong>Reasoning:</strong> ${escapeHTML(reasoningText(r.reasoning))}
+    </div>` : ''}
+
+    <!-- Bull / Bear cases -->
+    ${(r.bullCase || r.bearCase) ? `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+      ${r.bullCase ? `<div style="padding:6px 9px;background:var(--up-bg,rgba(22,163,74,0.08));border:1px solid rgba(22,163,74,0.3);border-radius:var(--radius-md);font-size:11.5px;color:var(--text-secondary)">
+        <span style="font-weight:700;color:var(--up,#16a34a);display:block;margin-bottom:2px;font-size:10px;text-transform:uppercase;letter-spacing:0.4px">▲ Bull case</span>
+        ${escapeHTML(r.bullCase)}</div>` : '<div></div>'}
+      ${r.bearCase ? `<div style="padding:6px 9px;background:var(--down-bg,rgba(220,38,38,0.06));border:1px solid rgba(220,38,38,0.25);border-radius:var(--radius-md);font-size:11.5px;color:var(--text-secondary)">
+        <span style="font-weight:700;color:var(--down,#dc2626);display:block;margin-bottom:2px;font-size:10px;text-transform:uppercase;letter-spacing:0.4px">▼ Bear case</span>
+        ${escapeHTML(r.bearCase)}</div>` : '<div></div>'}
+    </div>` : ''}
+
+    <!-- Scenarios -->
+    ${scenBlock}
+
+    <!-- Invalidation condition -->
+    ${r.invalidationCondition ? `
+    <div style="display:flex;align-items:flex-start;gap:7px;padding:6px 10px;background:rgba(217,119,6,0.07);border:1px solid rgba(217,119,6,0.35);border-radius:var(--radius-md);margin-bottom:8px;font-size:11.5px;color:var(--text-secondary)">
+      <span style="font-weight:700;color:#d97706;white-space:nowrap;flex-shrink:0;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;padding-top:1px">⚡ Invalidated if</span>
+      <span>${escapeHTML(r.invalidationCondition)}</span>
+    </div>` : ''}
+
+    ${r.risks ? `<div class="text-xs text-muted mb-1"><strong>Risks:</strong> ${escapeHTML(r.risks)}</div>` : ''}
+    <div class="flex-row" style="margin-bottom:${r._tags || r._thesis ? '6px' : '4px'}">
+      ${(r.signals||[]).map(s=>`<span style="font-size:11px;padding:2px 8px;background:var(--bg-secondary);border-radius:4px;border:0.5px solid var(--border-light)">${s}</span>`).join('')}
+    </div>
+
+    <!-- Tags / thesis captured at generation -->
+    ${r._tags ? `<div class="text-xs text-muted" style="margin-bottom:4px"><strong>Tags:</strong> ${escapeHTML(r._tags)}</div>` : ''}
+    ${r._thesis ? `<div style="padding:5px 9px;background:var(--bg-secondary);border-radius:var(--radius-md);font-size:11.5px;color:var(--text-secondary);margin-bottom:6px"><strong style="color:var(--text-primary)">Thesis:</strong> ${escapeHTML(r._thesis)}</div>` : ''}
+
+    <!-- Generation context -->
+    ${traceBlock}
+
+    <!-- Feedback -->
+    <div style="display:flex;gap:8px;align-items:center;padding-top:8px;border-top:0.5px solid var(--border-light)">
+      <input type="text" id="hfb-${realIdx}" value="${escapeHTML(r.feedback||'')}" placeholder="Add feedback…"
+        style="flex:1;padding:6px 10px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;font-family:var(--font)">
+      <button class="btn btn-sm" onclick="addHistoryFeedback(${realIdx})" title="Save">💬 Save</button>
+    </div>
+    ${r.feedback ? `<div class="text-xs text-muted" style="margin-top:4px">💬 ${escapeHTML(r.feedback)}</div>` : ''}
+  </div>`;
+}
+
 function renderRecHistory() {
   if (!state.recHistoryFilter || Object.keys(state.recHistoryFilter).length === 0) {
      state.recHistoryFilter = {
@@ -1037,65 +1304,11 @@ function renderRecHistory() {
       </div>` : ''}
     </div>` : ''}
 
-    ${filtered.length === 0 ? `<div class="empty-state" style="padding:2rem"><div class="empty-icon">◆</div><p>${state.recHistory.length === 0 ? 'No recommendation history yet.' : 'No records match your filters.'}</p></div>` : `
-    <div class="table-wrap"><table class="tbl-stack">
-      <thead><tr><th style="width:16px"></th><th>Date</th><th>Ticker</th><th>Action</th><th>Confidence</th><th>Target / Stop</th><th>Status</th><th>Outcome</th><th>Actual P&L</th></tr></thead>
-      <tbody>
-        ${filtered.map((r)=>{
-          const realIdx = state.recHistory.indexOf(r);
-          const detId = 'hdet-' + r.id;
-          const hasDetail = !!(r.reasoning || r.scenarios || r.bullCase || r.bearCase || r.reallocationSuggestion || r.invalidationCondition);
-          const regBadge = r.regime ? `<span class="badge" style="font-size:10px;background:var(--bg-inset,#f3f4f6);color:var(--text-secondary)">${r.regime}</span>` : '';
-          const scenHtml = r.scenarios ? (() => {
-            const keys = ['bull','base','bear'];
-            return '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">'
-              + keys.map(k => { const s = r.scenarios[k]; if (!s) return '';
-                const col = k==='bull'?'var(--up,#15803d)':k==='bear'?'var(--down,#b91c1c)':'var(--text-secondary)';
-                return `<div style="background:var(--bg-inset,#f3f4f6);border-radius:4px;padding:6px 8px;text-align:center"><div style="font-size:10px;font-weight:700;color:${col};text-transform:uppercase">${k}</div><div style="font-size:12px;font-weight:600;color:var(--text-primary)">${s.p!=null?Math.round(s.p*100)+'%':'?'}</div><div style="font-size:11px;color:var(--text-secondary)">${s.ret!=null?(s.ret>=0?'+':'')+fmt(s.ret,0)+'%':'?'}</div></div>`; }).join('')
-              + '</div>';
-          })() : '';
-          const mkSection = (label, col, txt) => txt ? `<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;color:${col};text-transform:uppercase">${label}</span><div style="font-size:12px;color:var(--text-secondary);margin-top:2px">${escapeHTML(txt)}</div></div>` : '';
-          const reasonHtml = r.reasoning ? `<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase">Reasoning</span><div style="font-size:12px;color:var(--text-primary);margin-top:2px;line-height:1.55">${escapeHTML(reasoningText(r.reasoning))}</div></div>` : '';
-          const fbHtml = `<div style="margin-top:10px;display:flex;gap:6px;align-items:center">
-              <span class="text-xs text-muted" style="white-space:nowrap">Feedback:</span>
-              <input type="text" id="hfb-${realIdx}" value="${r.feedback||''}" placeholder="Add feedback..."
-                onclick="event.stopPropagation()"
-                style="flex:1;padding:3px 7px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:11px;font-family:var(--font)">
-              <button class="btn btn-sm" onclick="addHistoryFeedback(${realIdx});event.stopPropagation()" title="Save">&#x2713;</button>
-            </div>${r.feedback?`<div class="text-xs text-muted" style="margin-top:3px">&#x1F4AC; ${r.feedback}</div>`:''}`;
-          return `<tr onclick="toggleHistDetail('${detId}')" style="cursor:pointer">
-            <td style="padding:6px 4px;color:var(--text-tertiary);font-size:11px;text-align:center">${hasDetail?'&#9654;':''}</td>
-            <td data-label="Date" class="text-xs">${r.date}</td>
-            <td data-label="Ticker"><strong>${r.ticker}</strong> ${regBadge}</td>
-            <td data-label="Action">${actionBadge(r.action)}</td>
-            <td data-label="Confidence"><div class="flex-row"><div class="conf-bar" style="width:50px"><div class="conf-fill" style="width:${(r.confidence||0)*100}%;background:${confColor(r.confidence||0)}"></div></div><span class="text-xs">${fmt((r.confidence||0)*100,0)}%</span></div></td>
-            <td data-label="Target/Stop" class="text-xs">${r.target?'$'+fmt(r.target):'&mdash;'} / ${r.stopLoss?'$'+fmt(r.stopLoss):'&mdash;'}</td>
-            <td data-label="Status">${statusBadge(r.executed?'executed':'skipped')}${r._stopWidened?`<span class="badge" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;margin-left:4px" title="Stop widened: $${(r._stopWidenedFrom??0).toFixed(2)} to $${(r.stopLoss??0).toFixed(2)}">↔ Widened</span>`:''}</td>
-            <td data-label="Outcome" class="text-xs ${r.outcome==='win'?'text-success':r.outcome==='loss'?'text-danger':'text-muted'}">${r.outcome==='win'?'&#x2713; Win':r.outcome==='loss'?'&#x2717; Loss':r.outcome||'&mdash;'}</td>
-            <td data-label="Actual P&L" class="${r.actualProfit!=null?(r.actualProfit>=0?'text-success':'text-danger'):'text-muted'}">${r.actualProfit!=null?(r.actualProfit>=0?'+':'-')+'$'+fmt(Math.abs(r.actualProfit)):'&mdash;'}</td>
-          </tr>
-          <tr id="${detId}" style="display:none;background:var(--bg-secondary)">
-            <td colspan="9" style="padding:10px 16px 14px">
-              ${scenHtml}
-              ${mkSection('Bull case','var(--up,#15803d)',r.bullCase)}${mkSection('Bear case','var(--down,#b91c1c)',r.bearCase)}${mkSection('Reallocation','var(--text-tertiary)',r.reallocationSuggestion)}${mkSection('Invalidated if','#d97706',r.invalidationCondition)}
-              ${reasonHtml}
-              ${fbHtml}
-            </td>
-          </tr>`;
-        }).join('')}
-      </tbody>
-    </table></div>`}
+    ${filtered.length === 0
+      ? `<div class="empty-state" style="padding:2rem"><div class="empty-icon">◆</div><p>${state.recHistory.length === 0 ? 'No recommendation history yet.' : 'No records match your filters.'}</p></div>`
+      : filtered.map(r => _renderHistoryRecCard(r, state.recHistory.indexOf(r))).join('')}
   </div>`;
 }
-function toggleHistDetail(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  const isOpen = el.style.display !== 'none';
-  el.style.display = isOpen ? 'none' : '';
-  const row = el.previousElementSibling;
-  if (row) { const arrow = row.querySelector('td:first-child'); if (arrow) arrow.textContent = isOpen ? '▶' : '▼'; }
-}
-
 // Persist user-edited execution field onto the rec object (survives tab switches within session)
 function persistExecField(recId, field, value) {
   const rec = state.recommendations.find(r => r.id === recId);
@@ -1854,13 +2067,14 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
 function markSkipped(id) {
   const rec=state.recommendations.find(r=>r.id===id); if(!rec) return;
   rec.status='skipped';
+  // Spread the whole rec so the history card retains all content (reasoning,
+  // scenarios, bull/bear, traceability, etc.) — not just the minimal subset.
   state.recHistory.unshift({
-    id: rec.id, date: todayStr(), ticker: rec.ticker, action: rec.action,
-    confidence: rec.confidence, priceRange: rec.priceRange, target: rec.target,
-    stopLoss: rec.stopLoss, expectedProfit: rec.expectedProfit, netProfit: rec.netProfit,
-    executed: false, executedAt: null, outcome: 'skipped', actualProfit: null,
-    feedback: rec.feedback || null, _learningId: rec._learningId || null,
-    regime: rec._genRegime || null,
+    ...rec,
+    date: todayStr(), executed: false, executedAt: null,
+    outcome: 'skipped', actualProfit: null,
+    feedback: rec.feedback || null,
+    regime: rec._genRegime || rec.regime || null,
   });
   // Update learning loop: mark event as skipped (fire-and-forget)
   if (rec._learningId && state.serverOk) {
