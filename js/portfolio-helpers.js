@@ -178,6 +178,21 @@ function nextParcelId() {
   return max + 1;
 }
 
+function _nextDisposalBaseId() {
+  // Returns the next stable id for a batch of disposals.
+  // Use _nextDisposalBaseId() + i for the i-th disposal in a batch.
+  const max = (state.cgtDisposals || []).reduce((m,d) => Math.max(m, d.id || 0), 0);
+  return max + 1;
+}
+
+function nextJournalId() {
+  // Monotonic, delete-safe journal row id — max existing id + 1.
+  // Replaces the old `state.tradeJournal.length + 1` pattern which collides
+  // after any row deletion (length shrinks, next insert reuses an existing id).
+  const max = (state.tradeJournal || []).reduce((m, j) => Math.max(m, j.id || 0), 0);
+  return max + 1;
+}
+
 function addParcel(ticker, date, qty, costPerShare, fees, sector, account) {
   state.cgtParcels.push({
     id: nextParcelId(),
@@ -207,8 +222,8 @@ function getParcelsForTicker(ticker, method, account) {
   if (method === 'minimise') return open.sort((a,b) => {
     // Minimise CGT: prefer discount-eligible (>12mo) lots first; within same group, sell highest-cost first
     const today = todayStr();
-    const aDisc = daysBetween(a.date, today) >= 365;
-    const bDisc = daysBetween(b.date, today) >= 365;
+    const aDisc = daysBetween(a.date, today) > 365;
+    const bDisc = daysBetween(b.date, today) > 365;
     if (aDisc !== bDisc) return aDisc ? -1 : 1;      // discount-eligible first
     return b.costPerShare - a.costPerShare;            // highest cost first (lowest taxable gain)
   });
@@ -512,11 +527,15 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
   // Split fees proportionally across parcels by qty
   const feePerShare = saleFees / saleQty;
 
+  // Compute stable id base BEFORE the loop so ids don't shift if an earlier
+  // disposal in this batch is counted by a re-entrant call (not expected, but safe).
+  const _disposalIdBase = _nextDisposalBaseId();
+
   for (const parcel of parcels) {
     if (remaining <= 0) break;
     const matched = Math.min(parcel.remainingQty, remaining);
     const held = daysBetween(parcel.date, saleDate);
-    const eligible50 = held >= 365;
+    const eligible50 = held > 365; // ATO: held MORE than 12mo (acquisition day excluded, disposal day included)
     const proceeds = matched * salePrice;
     const costBase = matched * parcel.costPerShare + (parcel.fees * matched / parcel.qty); // pro-rata buy fee
     const allocatedSaleFee = feePerShare * matched;
@@ -525,6 +544,7 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
     const netGain = grossGain - discount;
 
     disposals.push({
+      id: _disposalIdBase + disposals.length, // stable id — survives out-of-order deletes (R2-4)
       saleDate,
       ticker: ticker.toUpperCase(),
       salePrice,
@@ -665,7 +685,9 @@ function buildDisposalJournalEntries(opts) {
   const {
     ticker, account, disposals, tradePrice, action,
     recId, recExecuted, timestamp, date, regime, exitSignals,
-    disposalIdBase,
+    // disposalIdBase is deprecated (was positional); kept in destructure for
+    // backwards-compat with old call sites that still pass it, but ignored.
+    // Stable ids now come from disposal.id assigned in matchSaleAgainstParcels.
   } = opts;
 
   const entries = [];
@@ -707,13 +729,13 @@ function buildDisposalJournalEntries(opts) {
     // and relied on the ATO CSV using (date, closeDate) — exportTradeJournalCSV
     // now reads parcelOpenDate || date so backwards-compat is maintained.
     const entry = {
-      id: Date.now() + i,
+      id: nextJournalId(),
       date,   // sale date (today) — what the Journal page shows
       parcelOpenDate: d.parcelDate || buyRow?.date || null,   // for ATO CGT / hold duration
       ticker, action, qty: d.saleQty,
       entryPrice: d.parcelCostPerShare, exitPrice: tradePrice, fees: d.saleFee || 0,
       status: 'closed', pnl: d.grossGain, closeDate: date,
-      disposalIds: disposalIdBase != null ? [disposalIdBase + i] : undefined,
+      disposalIds: d.id != null ? [d.id] : undefined,
       parcelId: d.parcelId, parcel: parcelLabel,
       recId, recExecuted, timestamp, account,
       exitSignals, regime,
@@ -776,19 +798,19 @@ function rollbackTradeJournalEntry(t) {
       state.portfolio.push({ ticker: t.ticker.toUpperCase(), shares: t.qty, avgPrice: costBasis, currentPrice: t.exitPrice, sector: t.sector || 'Other', account: t.account || 'personal' });
     }
     state.cash -= t.qty * t.exitPrice - Number(t.fees || 0);
-    // Restore parcel remainingQty from disposals that belong to this trade
+    // Restore parcel remainingQty from disposals that belong to this trade.
+    // disposalIds now holds stable disposal.id values (not positional indices),
+    // so find by id — safe regardless of what other disposals have been deleted.
     if(t.disposalIds && t.disposalIds.length) {
-      // Remove those disposals and restore parcel qty
-      t.disposalIds.forEach(dIdx => {
-        const d = state.cgtDisposals[dIdx];
-        if(!d) return;
+      const idSet = new Set(t.disposalIds);
+      state.cgtDisposals.forEach(d => {
+        if(!idSet.has(d.id)) return;
         if(d.parcelId) {
           const parcel = state.cgtParcels.find(p => p.id === d.parcelId);
           if(parcel) parcel.remainingQty += d.saleQty;
         }
       });
-      // Remove disposal records (in reverse order to preserve indices)
-      t.disposalIds.slice().sort((a,b)=>b-a).forEach(i => state.cgtDisposals.splice(i,1));
+      state.cgtDisposals = state.cgtDisposals.filter(d => !idSet.has(d.id));
     }
     return true;
   }

@@ -631,7 +631,7 @@ function handleCSV(e) {
 
       // Create a BUY journal entry for this lot
       state.tradeJournal.push({
-        id: state.tradeJournal.length + 1,
+        id: nextJournalId(),
         date,
         ticker,
         action: 'BUY',
@@ -723,7 +723,7 @@ async function handleBrokerCSV(e) {
     const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
     parcelsCreated++;
     state.tradeJournal.push({
-      id: state.tradeJournal.length + 1,
+      id: nextJournalId(),
       date, ticker, action: 'BUY', qty: shares, entryPrice: price,
       exitPrice: null, fees: brokerage || 0, status: 'open', pnl: null,
       parcelId: newParcel.id, recId: null, recExecuted: false,
@@ -972,7 +972,7 @@ async function addHolding() {
 
   // Create journal entry
   state.tradeJournal.unshift({
-    id: state.tradeJournal.length + 1,
+    id: nextJournalId(),
     date: dateRaw,
     ticker: symbol,
     action: 'BUY',

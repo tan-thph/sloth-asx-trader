@@ -1731,7 +1731,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
       tradeEntry = _disposalEntries[0] || null;
     } else {
       tradeEntry = {
-        id: state.tradeJournal.length + 1, date: today, ticker: rec.ticker, action: rec.action,
+        id: nextJournalId(), date: today, ticker: rec.ticker, action: rec.action,
         qty, entryPrice: tradePrice, exitPrice: null, fees,
         status: 'open', pnl: null, recId: rec.id, recExecuted: true, timestamp: time,
         regime: execRegime,
@@ -1748,7 +1748,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
     // generated the rec, which may have been hours earlier).
     const execEntrySignals = _snapshotLiveTechnicals(rec.ticker, tradePrice);
     tradeEntry = {
-      id: state.tradeJournal.length + 1, date: today, ticker: rec.ticker, action: rec.action,
+      id: nextJournalId(), date: today, ticker: rec.ticker, action: rec.action,
       qty, entryPrice: tradePrice, exitPrice: null, fees,
       status: 'open', pnl: null,
       parcelId: newParcel ? newParcel.id : null,

@@ -1491,16 +1491,28 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       summary = (summary ? summary + ' ' : '') + note.trim();
     }
 
+    // ── Expand SELL/TRIM recs into per-parcel sub-recs ───────────────────────
+    // Must run AFTER the day-cap (we treat a multi-parcel SELL as one trade
+    // decision) but BEFORE state assignment so each card shows accurate data.
+    cappedDedupedRecs = _splitRecsByParcels(
+      cappedDedupedRecs, state.cgtParcels, state.liveSignals, state.settings.brokerage
+    );
+
     state.recommendations = [...cappedDedupedRecs, ...survivingPending];
 
     // Build structured summary from actual recs — never rely on AI free-text for this.
-    // smartTruncate (utils.js) cuts at the last word boundary + ellipsis instead of
-    // a blunt mid-word slice — the budget was also bumped 70→110 since 70 was too
-    // tight to ever land on a clean sentence end.
-    const recLines = cappedDedupedRecs.map(r => {
-      const reason = smartTruncate(reasoningText(r.reasoning).replace(/\n/g, ' ').trim(), 110);
-      return `${r.ticker}: ${r.action}${reason ? ' — ' + reason : ''}`;
-    });
+    // `summaryRecs` carries the full untruncated reasoning for rich card rendering.
+    // `recLines` (truncated) is kept only for the plain-text `text` fallback field.
+    const summaryRecs = cappedDedupedRecs.map(r => ({
+      ticker: r.ticker,
+      action: r.action,
+      confidence: r.confidence,
+      reasoning: reasoningText(r.reasoning).replace(/\n/g, ' ').trim(),
+      _parcelLabel: r._parcelLabel || null,
+    }));
+    const recLines = summaryRecs.map(r =>
+      `${r.ticker}: ${r.action}${r.reasoning ? ' — ' + smartTruncate(r.reasoning, 110) : ''}`
+    );
 
     // Extract [system notes] appended to summary string (e.g. confidence floor drops, conflicts)
     // Filter out JSON array patterns like ["value","growth"] that the AI may dump in the summary field
@@ -1526,7 +1538,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         .trim();
       // Skip if remaining content looks like a JSON fragment
       if (stripped && !/^\s*[{\[]/.test(stripped)) {
-        contextLine = smartTruncate(stripped, 220);
+        contextLine = stripped;   // stored untruncated; renderer wraps naturally
       }
     }
     // Suppress contradictory "no actionable" note when recs were actually generated
@@ -1536,13 +1548,16 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 
     const allParts = [
       ...(recLines.length ? recLines : ['No actionable setups — holding cash.']),
-      ...(contextLine ? [contextLine] : []),
+      ...(contextLine ? [smartTruncate(contextLine, 220)] : []),
       ...(bracketNotes.length ? [bracketNotes.join(' ')] : []),
     ];
     const structuredText = allParts.join('\n');
 
     state.analysisLastSummary = {
-      text: structuredText,
+      text: structuredText,         // plain-text fallback (backward compat)
+      recs: summaryRecs,            // structured rows for rich rendering
+      contextLine,                  // macro/cash context (untruncated)
+      bracketNotes,                 // system notes array e.g. ['[⚠ N recs failed…]']
       date: todayStr(),
       time: nowSydney(),
       recCount: cappedDedupedRecs.length,
@@ -1589,6 +1604,170 @@ const _ENTRY_DRIVERS = new Set([
   'mean_reversion', 'momentum_breakout', 'trend_pullback',
   'fundamental_value', 'macro_tailwind',
 ]);
+
+// ── Per-parcel split for SELL/TRIM recs ──────────────────────────────────────
+// When a SELL or TRIM rec covers a position built from multiple CGT parcels,
+// the aggregate avgCost/unrealisedPnl/daysHeld hides per-lot data.  This
+// function expands one Claude rec into N recs — one per open parcel (SELL) or
+// one per FIFO-consumed portion (TRIM) — so each card shows accurate cost
+// basis, holding period, and CGT eligibility for that specific lot.
+// Single-lot positions are annotated but not split.
+// Called just before state.recommendations is assembled.
+function _splitRecsByParcels(recs, cgtParcels, liveSignals, brokerage) {
+  const _daysSince = (dateStr) => {
+    const d = (typeof parseDate === 'function') ? parseDate(dateStr) : new Date(dateStr);
+    if (!d || isNaN(d.getTime())) return null;
+    const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+    return days >= 0 ? days : null;
+  };
+  const _normTk = t => (t || '').replace(/\.AX$/i, '').toUpperCase();
+
+  const result = [];
+  for (const r of recs) {
+    const action = (r.action || '').toUpperCase();
+    if (action !== 'SELL' && action !== 'TRIM') { result.push(r); continue; }
+
+    const ticker = _normTk(r.ticker);
+    const sellPrice = Array.isArray(r.priceRange) ? Number(r.priceRange[0]) : null;
+    const fees = brokerage || 0;
+
+    // Resolve the single unambiguous account for this ticker's open lots.
+    // When 2+ accounts hold the same ticker we can't know which will be targeted
+    // until the exec-account picker fires — so skip splitting and leave the rec unsplit.
+    const _holdingAccts = [...new Set(
+      (state.portfolio || [])
+        .filter(h => _normTk(h.ticker) === ticker)
+        .map(h => h.account || 'personal')
+    )];
+    const _singleAcct = _holdingAccts.length === 1 ? _holdingAccts[0] : null;
+
+    // Open parcels for this ticker (account-scoped when unambiguous), sorted oldest-first (FIFO order)
+    const openParcels = _holdingAccts.length > 1 ? [] : (cgtParcels || [])
+      .filter(p => _normTk(p.ticker) === ticker && (p.remainingQty || 0) > 0
+                   && (!_singleAcct || (p.account || 'personal') === _singleAcct))
+      .slice()
+      .sort((a, b) => {
+        const da = (typeof parseDate === 'function') ? parseDate(a.date) : new Date(a.date);
+        const db = (typeof parseDate === 'function') ? parseDate(b.date) : new Date(b.date);
+        return (da ? da.getTime() : 0) - (db ? db.getTime() : 0);
+      });
+
+    if (openParcels.length <= 1) {
+      // Single or no parcel — annotate with metadata but keep as one rec
+      if (openParcels.length === 1) {
+        const p = openParcels[0];
+        const days = _daysSince(p.date);
+        const livePrice = liveSignals?.[ticker]?.current_price ?? liveSignals?.[ticker + '.AX']?.current_price;
+        result.push({
+          ...r,
+          _parcelId:            p.id,
+          _parcelLabel:         `P#${p.id}`,
+          _parcelCostPerShare:  p.costPerShare,
+          _parcelDate:          p.date,
+          _parcelRemainingQty:  p.remainingQty,
+          _holdingDays:         days,
+          _cgtEligible:         days != null && days > 365,
+          _parcelUnrealisedPnl: livePrice != null ? (livePrice - p.costPerShare) * p.remainingQty : null,
+        });
+      } else {
+        result.push(r);
+      }
+      continue;
+    }
+
+    // ── Multiple parcels ─────────────────────────────────────────────────────
+    if (action === 'SELL') {
+      // Full exit: one sub-rec per open parcel
+      openParcels.forEach((p, i) => {
+        const days = _daysSince(p.date);
+        const livePrice = liveSignals?.[ticker]?.current_price ?? liveSignals?.[ticker + '.AX']?.current_price;
+        result.push({
+          ...r,
+          id:                   `${r.id}-p${p.id}`,
+          qty:                  p.remainingQty,
+          _parcelId:            p.id,
+          _parcelLabel:         `P#${p.id}`,
+          _parcelCostPerShare:  p.costPerShare,
+          _parcelDate:          p.date,
+          _parcelRemainingQty:  p.remainingQty,
+          _holdingDays:         days,
+          _cgtEligible:         days != null && days > 365,
+          _parcelUnrealisedPnl: livePrice != null ? (livePrice - p.costPerShare) * p.remainingQty : null,
+          // Per-parcel P&L (brokerage charged only on the first sub-rec to avoid duplication)
+          netProfit:     sellPrice != null ? (sellPrice - p.costPerShare) * p.remainingQty - (i === 0 ? fees : 0) : null,
+          expectedProfit: sellPrice != null ? (sellPrice - p.costPerShare) * p.remainingQty : r.expectedProfit,
+          _costBasis:    p.costPerShare,
+          _splitFrom:    r.id,
+          _splitIndex:   i,
+          _splitTotal:   openParcels.length,
+        });
+      });
+    } else {
+      // TRIM: FIFO-distribute the trim qty across parcels
+      let remaining = Number(r.qty) || 0;
+      if (remaining < 1) { result.push(r); continue; }
+
+      const consumed = [];
+      for (const p of openParcels) {
+        if (remaining <= 0) break;
+        const take = Math.min(p.remainingQty, remaining);
+        consumed.push({ parcel: p, qty: take });
+        remaining -= take;
+      }
+
+      if (consumed.length <= 1) {
+        // Trim only touches one parcel — annotate, no split
+        if (consumed.length === 1) {
+          const { parcel: p, qty: trimQty } = consumed[0];
+          const days = _daysSince(p.date);
+          result.push({
+            ...r,
+            qty:                  trimQty,
+            _parcelId:            p.id,
+            _parcelLabel:         `P#${p.id}`,
+            _parcelCostPerShare:  p.costPerShare,
+            _parcelDate:          p.date,
+            _parcelRemainingQty:  p.remainingQty,
+            _holdingDays:         days,
+            _cgtEligible:         days != null && days > 365,
+            _parcelUnrealisedPnl: sellPrice != null ? (sellPrice - p.costPerShare) * trimQty : null,
+            netProfit:     sellPrice != null ? (sellPrice - p.costPerShare) * trimQty - fees : r.netProfit,
+            expectedProfit: sellPrice != null ? (sellPrice - p.costPerShare) * trimQty : r.expectedProfit,
+            _costBasis:    p.costPerShare,
+          });
+        } else {
+          result.push(r);
+        }
+      } else {
+        // Trim spans multiple parcels — split
+        const splitTotal = consumed.length;
+        consumed.forEach(({ parcel: p, qty: trimQty }, i) => {
+          const days = _daysSince(p.date);
+          result.push({
+            ...r,
+            id:                   `${r.id}-p${p.id}`,
+            qty:                  trimQty,
+            _parcelId:            p.id,
+            _parcelLabel:         `P#${p.id}`,
+            _parcelCostPerShare:  p.costPerShare,
+            _parcelDate:          p.date,
+            _parcelRemainingQty:  p.remainingQty,
+            _holdingDays:         days,
+            _cgtEligible:         days != null && days > 365,
+            _parcelUnrealisedPnl: sellPrice != null ? (sellPrice - p.costPerShare) * trimQty : null,
+            netProfit:     sellPrice != null ? (sellPrice - p.costPerShare) * trimQty - (i === 0 ? fees : 0) : null,
+            expectedProfit: sellPrice != null ? (sellPrice - p.costPerShare) * trimQty : r.expectedProfit,
+            _costBasis:    p.costPerShare,
+            _splitFrom:    r.id,
+            _splitIndex:   i,
+            _splitTotal:   splitTotal,
+          });
+        });
+      }
+    }
+  }
+  return result;
+}
 
 // ── Learning Loop: log recommendations to backend ────────────────────────────
 // Fire-and-forget: called after cappedDedupedRecs is finalised.
