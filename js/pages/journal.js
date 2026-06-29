@@ -383,11 +383,24 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
   const entryDriver = detObj?.primary_entry_driver || matchedRec?.primary_entry_driver || null;
   const exitDriver  = detObj?.sell_primary_driver || null;
   const verdict     = detObj?.thesis_verdict || matchedRec?.thesis_verdict || null;
-  const sig         = detObj?.entry_signals || t.entrySignals || null;
-  // Exit signals: snapshotted at fill time by _snapshotLiveTechnicals() in
-  // recommendations.js (same shape as entry). Only present for closed SELL/TRIM
-  // trades — a still-open BUY/TOP_UP has no exit yet.
-  const exitSig     = detObj?.exit_signals || t.exitSignals || null;
+  // For SELL/TRIM rows: entry signals should come from the original BUY parcel's
+  // snapshot (captured at BUY fill time, potentially months ago), not from the
+  // SELL rec's generation-time snapshot which is same-day as the exit and produces
+  // an identical "entry → exit" comparison. Look up the BUY journal row by parcelId.
+  const isExitTrade = t.action === 'SELL' || t.action === 'TRIM';
+  let sig, exitSig;
+  if (isExitTrade) {
+    const buyRow = t.parcelId
+      ? (state.tradeJournal || []).find(j =>
+          j.parcelId === t.parcelId &&
+          (j.action === 'BUY' || j.action === 'TOP_UP' || j.action === 'RECLASSIFY'))
+      : null;
+    sig     = buyRow?.entrySignals || null;          // original BUY signals; null for manual entries
+    exitSig = t.exitSignals || detObj?.exit_signals || null;
+  } else {
+    sig     = detObj?.entry_signals || t.entrySignals || null;
+    exitSig = detObj?.exit_signals  || t.exitSignals  || null;
+  }
   const exitQuality = detObj?.exit_quality_tag || null;
   const source      = lid ? 'AI recommendation' : 'Manual entry';
   const hasEntrySig = sig && Object.values(sig).some(v => v != null);
@@ -413,7 +426,7 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
     const eqStyle = exitQuality ? EXIT_QUALITY_STYLE[exitQuality] : null;
     sigHtml = `<div style="min-width:240px">
       <div class="flex-between" style="margin-bottom:4px">
-        <div class="text-xs text-muted" style="text-transform:uppercase;letter-spacing:.04em">${hasExitSig ? 'Technicals: entry → exit' : 'Technicals at entry'}</div>
+        <div class="text-xs text-muted" style="text-transform:uppercase;letter-spacing:.04em">${isExitTrade ? (hasEntrySig && hasExitSig ? 'Technicals: buy → exit' : hasExitSig ? 'Technicals at exit' : 'Technicals at buy') : (hasExitSig ? 'Technicals: entry → exit' : 'Technicals at entry')}</div>
         ${eqStyle ? `<span style="font-size:10px;padding:1px 6px;border-radius:8px;border:1px solid ${eqStyle.color};color:${eqStyle.color};cursor:help" title="${escapeHTML(EXIT_QUALITY_TOOLTIP[exitQuality] || '')}">${eqStyle.label}</span>` : ''}
       </div>
       <div style="font-size:12px">
@@ -426,7 +439,7 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
         ${_journalSigPair('MACD Hist', sig?.macd_hist, exitSig?.macd_hist, v => Number(v).toFixed(3))}
       </div></div>`;
   } else {
-    sigHtml = `<div style="min-width:240px"><div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Technicals at entry</div>
+    sigHtml = `<div style="min-width:240px"><div class="text-xs text-muted" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">${isExitTrade ? 'Technicals at exit' : 'Technicals at entry'}</div>
       <div class="text-xs text-muted" style="font-style:italic">Not captured at trade time.</div></div>`;
   }
 
