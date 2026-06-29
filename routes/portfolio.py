@@ -117,12 +117,17 @@ def db_save():
             conn.execute("DELETE FROM rec_history")
             for r in data["recHistory"]:
                 pr = r.get("priceRange", [None, None])
+                # extra_json carries the FULL rec object (scenarios, bullCase/bearCase,
+                # qty, primary_driver, _thesisCheck, invalidationCondition, factorsUsed,
+                # traceability snapshots, etc.) so nothing is lost on save/reload — the
+                # explicit columns below remain the canonical source for the fields they
+                # cover (and are what db_load() overlays on top of extra_json).
                 conn.execute("""
                     INSERT OR REPLACE INTO rec_history
                         (id, date, ticker, action, confidence, price_range_low, price_range_high,
                          target, stop_loss, expected_profit, net_profit, executed, executed_at,
-                         outcome, actual_profit, reasoning, risks, signals, learning_id)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         outcome, actual_profit, reasoning, risks, signals, learning_id, extra_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     r["id"], r["date"], r["ticker"], r["action"],
                     r.get("confidence"), pr[0] if pr else None, pr[1] if pr else None,
@@ -132,6 +137,7 @@ def db_save():
                     r.get("reasoning"), r.get("risks"),
                     json.dumps(r.get("signals", [])),
                     r.get("learningId") or r.get("_learningId"),
+                    json.dumps(r),
                 ))
 
         # --- settings ---
@@ -210,7 +216,21 @@ def db_load():
 
         rec_history = []
         for row in conn.execute("SELECT * FROM rec_history ORDER BY date DESC").fetchall():
+            # extra_json (when present) carries the full rec object as it was saved —
+            # scenarios, bullCase/bearCase, qty, primary_driver, _thesisCheck,
+            # invalidationCondition, factorsUsed, traceability snapshots, etc. Used as
+            # the base; the explicit columns below are overlaid on top since they're
+            # the canonical source for the fields they cover. Rows saved before this
+            # column existed have extra_json = NULL and fall back to the explicit
+            # columns only (the pre-existing, narrower behaviour).
+            extra = {}
+            if row["extra_json"] if "extra_json" in row.keys() else None:
+                try:
+                    extra = json.loads(row["extra_json"])
+                except Exception:
+                    extra = {}
             rec_history.append({
+                **extra,
                 "id": row["id"],
                 "date": row["date"],
                 "ticker": row["ticker"],

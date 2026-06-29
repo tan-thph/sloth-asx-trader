@@ -1559,6 +1559,53 @@ class TestSprint5(unittest.TestCase):
         tickers = [x["ticker"] for x in (d["watchlist"] or [])]
         self.assertIn("GMG", tickers)
 
+    def test_db_save_load_rec_history_round_trips_rich_fields(self):
+        """rec_history only has ~19 explicit SQL columns, but the in-memory rec
+        object carries far more (scenarios, bullCase/bearCase, qty, primary_driver,
+        _thesisCheck, invalidationCondition, factorsUsed, etc.) — these used to be
+        silently dropped on every save/reload round trip even though the History
+        tab's _buildRecCardHTML renders them. extra_json must preserve them."""
+        rich_rec = {
+            "id": "rec-rt-1", "date": "01-07-2026", "ticker": "CBA", "action": "SELL",
+            "confidence": 0.8, "priceRange": [130.0, 132.0], "target": 131.0,
+            "stopLoss": 128.0, "expectedProfit": 50.0, "netProfit": 45.0,
+            "executed": True, "executedAt": "10:00", "outcome": "win",
+            "actualProfit": 45.0, "reasoning": "test reasoning", "risks": "test risks",
+            "signals": ["rsi_oversold"], "_learningId": 99,
+            "qty": 10, "primary_driver": "tax_optimisation",
+            "secondary_factors": ["held_over_12m"],
+            "scenarios": {"bull": {"p": 0.3, "ret": 0.1}, "base": {"p": 0.5, "ret": 0.0}, "bear": {"p": 0.2, "ret": -0.1}},
+            "bullCase": "test bull case", "bearCase": "test bear case",
+            "invalidationCondition": "RBA cuts rates",
+            "factorsUsed": ["RSI < 30", "Volume spike"],
+            "_thesisCheck": {"verdict": "validated", "reason": "ok"},
+        }
+        resp = self.client.post(
+            "/api/db/save",
+            data=json.dumps({"recHistory": [rich_rec]}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        resp = self.client.get("/api/db/load")
+        self.assertEqual(resp.status_code, 200)
+        d = json.loads(resp.data)
+        loaded = next((r for r in d["recHistory"] if r["id"] == "rec-rt-1"), None)
+        self.assertIsNotNone(loaded)
+        # Rich fields not covered by explicit SQL columns must survive the round trip
+        self.assertEqual(loaded["qty"], 10)
+        self.assertEqual(loaded["primary_driver"], "tax_optimisation")
+        self.assertEqual(loaded["bullCase"], "test bull case")
+        self.assertEqual(loaded["bearCase"], "test bear case")
+        self.assertEqual(loaded["invalidationCondition"], "RBA cuts rates")
+        self.assertEqual(loaded["factorsUsed"], ["RSI < 30", "Volume spike"])
+        self.assertEqual(loaded["scenarios"]["bull"]["p"], 0.3)
+        self.assertEqual(loaded["_thesisCheck"]["verdict"], "validated")
+        # Canonical explicit-column fields must still be correct (overlaid on extra_json)
+        self.assertEqual(loaded["ticker"], "CBA")
+        self.assertEqual(loaded["outcome"], "win")
+        self.assertEqual(loaded["actualProfit"], 45.0)
+
     def test_journal_regime_badge_function(self):
         """journal.js must define _journalRegimeBadge helper."""
         with open(os.path.join(ROOT, "js/pages/journal.js"), encoding="utf-8") as f:
@@ -3341,27 +3388,29 @@ class TestAiCall20ValidationFixes(unittest.TestCase):
         self.assertNotIn("fix:", rule_block,
                          "reject/defer contradiction must not be auto-fixed silently")
 
-    # ── Issue 1/2: analysis.js auto-demotes the contradiction out of recs[] ────
+    # ── Issue 1/2: analysis.js flags (not drops) the contradiction in recs[] ───
 
-    def test_analysis_demotes_self_contradicting_recs(self):
+    def test_analysis_flags_self_contradicting_recs(self):
         """analysis.js validator step must detect the contradiction error message
-        and drop the rec from recs[] (not just flag-and-keep like other errors),
-        since the AI itself already decided the trade shouldn't be actionable."""
-        self.assertIn("validatorDemoted", self.analysis_src)
+        and flag-not-drop the rec (same as other unfixable validation errors) so
+        every rec from Claude is visible in Pending for the user's own judgment,
+        carrying _ruleWarnings instead of being silently dropped."""
+        self.assertIn("validatorFlagged", self.analysis_src)
         self.assertIn("contradictionHit", self.analysis_src)
-        # Must actually return [] (drop) for the contradiction case, not keep the rec
-        demote_idx = self.analysis_src.index("contradictionHit = errors.find")
-        demote_block = self.analysis_src[demote_idx:demote_idx + 400]
-        self.assertIn("return [];", demote_block)
+        # Must keep the rec with _ruleWarnings attached, not return [] (drop)
+        contradiction_idx = self.analysis_src.index("contradictionHit = errors.find")
+        contradiction_block = self.analysis_src[contradiction_idx:contradiction_idx + 400]
+        self.assertIn("_ruleWarnings", contradiction_block)
+        self.assertNotIn("return [];", contradiction_block)
 
-    def test_analysis_demotion_runs_before_generic_flag_path(self):
-        """The contradiction-demotion check must run before the generic
-        flag-don't-drop fallback so a contradicting rec is never shown as an
-        executable card with just a warning banner."""
-        demote_at = self.analysis_src.index("contradictionHit")
+    def test_analysis_contradiction_check_runs_before_generic_flag_path(self):
+        """The contradiction-specific check must run before the generic
+        flag-don't-drop fallback so its dedicated diagnosis takes priority
+        over the generic one for the same rec."""
+        contradiction_at = self.analysis_src.index("contradictionHit")
         flag_at   = self.analysis_src.index("validatorFlagged.push")
-        self.assertLess(demote_at, flag_at,
-                        "contradiction demotion must be checked before generic flagging")
+        self.assertLess(contradiction_at, flag_at,
+                        "contradiction check must be evaluated before the generic flagging push")
 
     # ── Issue 4: AI-supplied netProfit/expectedProfit/riskAUD/rewardAUD stripped ──
 
@@ -8027,10 +8076,11 @@ class TestSprint64FlagDontDrop(unittest.TestCase):
         self.assertIn("...cappedClean, ..._flaggedRecs", self.analysis_js)
 
     def test_rec_card_renders_failure_panel(self):
-        """Flagged recs render a highlighted panel listing every failed rule,
-        next to the existing Skip / Mark Executed buttons."""
+        """Flagged recs render a compact "Failed N rule(s)" chip (collapsed by
+        default, click to expand the error list) next to the existing
+        Skip / Mark Executed buttons — not a verbose always-visible panel."""
         self.assertIn("_ruleWarnings", self.recs_js)
-        self.assertIn("would have been dropped", self.recs_js)
+        self.assertIn("Failed ${_warns.length} rule", self.recs_js)
         self.assertIn("border-left:3px solid #dc2626", self.recs_js)
 
 

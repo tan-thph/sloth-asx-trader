@@ -370,6 +370,13 @@ def init_db():
         rh_cols = {r[1] for r in conn.execute("PRAGMA table_info(rec_history)").fetchall()}
         if "learning_id" not in rh_cols:
             conn.execute("ALTER TABLE rec_history ADD COLUMN learning_id INTEGER")
+        # rec_history: extra_json carries every rich field the explicit columns don't
+        # cover (scenarios, bullCase/bearCase, qty, primary_driver, _thesisCheck,
+        # invalidationCondition, factorsUsed, traceability snapshots, etc.) — db_save()
+        # previously only wrote the ~19 explicit columns, silently dropping everything
+        # else on every save/reload round trip even though the in-memory rec had it.
+        if "extra_json" not in rh_cols:
+            conn.execute("ALTER TABLE rec_history ADD COLUMN extra_json TEXT")
 
         # ai_learning_events: add new columns
         le_cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_learning_events)").fetchall()}
