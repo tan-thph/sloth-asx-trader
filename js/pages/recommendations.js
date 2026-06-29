@@ -1824,10 +1824,13 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
   const _immediateOutcome = realizedPnl != null
     ? (realizedPnl > 0 ? 'win' : realizedPnl < 0 ? 'loss' : 'breakeven')
     : 'open';
+  // Spread the whole rec so the history card retains all content (scenarios,
+  // bull/bear case, invalidation condition, sell reason, lot/CGT metadata,
+  // analysis factors, traceability, etc.) — not just a minimal subset. Mirrors
+  // the same fix already applied to markSkipped().
   const histEntry = {
+    ...rec,
     id: rec.id, date: today, ticker: rec.ticker, action: rec.action,
-    confidence: rec.confidence, priceRange: rec.priceRange, target: rec.target,
-    stopLoss: rec.stopLoss, expectedProfit: rec.expectedProfit, netProfit: rec.netProfit,
     qty, executedPrice: tradePrice, executedFee: fees,
     executed: true, executedAt: time,
     outcome: _immediateOutcome,
@@ -1837,7 +1840,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
     journalId: tradeEntry.id,
     _learningId: rec._learningId || null,
     _thesis: rec._thesis || null,
-    regime: rec._genRegime || null,
+    regime: rec._genRegime || rec.regime || null,
   };
   state.recHistory.unshift(histEntry);
 
