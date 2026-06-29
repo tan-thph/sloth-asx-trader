@@ -221,6 +221,19 @@ _SCHEMA = """
         original_tag  TEXT                  -- snapshot of error_type at review time
     );
     CREATE INDEX IF NOT EXISTS idx_tag_reviews_event ON tag_reviews(event_id);
+
+    -- Learning Loop improvement E: one row per calendar day, written lazily by
+    -- GET /api/learning/calibration-stats (not a scheduler thread) so calibration
+    -- quality (Brier score) can be plotted over time instead of only ever showing
+    -- the latest snapshot. UNIQUE(snapshot_date) makes the write idempotent —
+    -- multiple calls on the same day update, never duplicate.
+    CREATE TABLE IF NOT EXISTS calibration_snapshots (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        snapshot_date TEXT NOT NULL UNIQUE,
+        brier_score   REAL,
+        n             INTEGER,
+        prompt_version TEXT
+    );
 """
 
 
@@ -331,6 +344,14 @@ _LE_MIGRATIONS = [
     # calibration/analysis tell the two apart instead of only ever seeing the
     # generation-time snapshot. Patchable via /api/learning/outcome.
     ("regime_at_execution", "TEXT"),
+    # Reasoning-text exemplars: Claude's own bullCase/bearCase steelman text
+    # (already required by the prompt schema, js/prompts.js) at rec generation
+    # time. Distinct from trade_thesis (free-text rationale) — these are the
+    # specific opposing-view arguments used by _compute_exemplars() to show
+    # Claude its own past words next to the actual outcome, not just a numeric
+    # entry signature. Sent from logRecsToLearningLoop() (js/analysis.js).
+    ("bull_case", "TEXT"),
+    ("bear_case", "TEXT"),
 ]
 
 

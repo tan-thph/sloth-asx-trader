@@ -1711,6 +1711,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
 
   let _disposalEntries = null;   // set when the SELL/TRIM branch creates per-parcel rows
   let _saleDisposals = null;     // raw disposals — used below for blended entryPrice/holdDays on the learning-loop payload
+  let _executionFailed = false;  // true when SELL/TRIM couldn't execute (no holding found)
   if (isReducing) {
     const holding = getPortfolioHolding(rec.ticker, _distinctAccts.length === 1 ? sellAccount : undefined);
     if (holding && holding.shares >= qty) {
@@ -1737,13 +1738,13 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
       });
       tradeEntry = _disposalEntries[0] || null;
     } else {
-      tradeEntry = {
-        id: nextJournalId(), date: today, ticker: rec.ticker, action: rec.action,
-        qty, entryPrice: tradePrice, exitPrice: null, fees,
-        status: 'open', pnl: null, recId: rec.id, recExecuted: true, timestamp: time,
-        regime: execRegime,
-      };
-      toast(`${rec.action} ${rec.ticker}: not enough shares held — logged but portfolio unchanged.`, 'warn');
+      // Nothing to sell — position not found or shares insufficient.
+      // Don't create a phantom journal entry (it would show as a permanent
+      // open SELL row confusing the journal) and don't mark the learning
+      // event as executed (it would show as "open outcome" in Recent Events
+      // even though nothing actually traded). Rec still moves to history.
+      _executionFailed = true;
+      toast(`${rec.action} ${rec.ticker}: no position found — trade not executed. Check portfolio.`, 'warn');
     }
   } else {
     // BUY or TOP_UP — open/add to a position
@@ -1769,9 +1770,10 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
   // patched the original BUY/TOP_UP row(s) status directly by parcelId,
   // which is reliable regardless of which UI flow created them — Day
   // Trading's own executeDayTrade()/executeIntradayTrade() included) — only
-  // the BUY/TOP_UP branch and the insufficient-shares fallback still need an
-  // explicit unshift here.
-  if (!_disposalEntries) {
+  // the BUY/TOP_UP branch still needs an explicit unshift here.
+  // _executionFailed (SELL/TRIM with no holding found) skips the journal
+  // entirely — no phantom "open SELL" row.
+  if (!_disposalEntries && !_executionFailed) {
     state.tradeJournal.unshift(tradeEntry);
   }
 
@@ -1837,15 +1839,18 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
     actualProfit: realizedPnl,
     reasoning: rec.reasoning || null,
     feedback: rec.feedback || null,
-    journalId: tradeEntry.id,
+    journalId: _executionFailed ? null : (tradeEntry?.id ?? null),
     _learningId: rec._learningId || null,
     _thesis: rec._thesis || null,
     regime: rec._genRegime || rec.regime || null,
   };
   state.recHistory.unshift(histEntry);
 
-  // Update learning loop: mark event as executed, or log fresh if no prior event
-  if (state.serverOk) {
+  // Update learning loop: mark event as executed, or log fresh if no prior event.
+  // Skip entirely when _executionFailed — the SELL/TRIM found no holding so
+  // nothing actually traded; leave the learning event as was_executed=false so
+  // calibration and virtual-outcome resolution treat it as an unexecuted rec.
+  if (state.serverOk && !_executionFailed) {
     const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
     // Blended across all parcels matched by this sale (not just the first
     // disposal's own row) — tradeEntry.entryPrice now reflects only ONE

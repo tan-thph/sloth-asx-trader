@@ -504,24 +504,29 @@ async function runMacroAnalysis(force=false) {
   }
 
   // High-relevance macro/geopolitics news from the News Scanner (just refreshed
-  // above) — capped at 8 items to keep this a few hundred tokens, well within
-  // the macro call's ~$0.03-0.10 budget. Category-only filter (no impact_score
-  // fallback) — the impact rubric's portfolio-specificity bonus inflates
-  // scores for stock-specific stories (e.g. "CBA still the premium pick")
-  // that have real portfolio relevance but zero macro relevance; letting
-  // those through wasted tokens with nothing for Claude to cite (2026-06-25
-  // call #10 review — none of 4 impact-only items were used in the brief).
+  // above) — capped at 12 items (raised from 8: this call runs a handful of
+  // times/day, not per-rec like portfolio analysis, so the token-budget
+  // pressure that justifies tighter caps elsewhere is weaker here). days=2
+  // (was 1) so slower-developing geopolitical stories (sanctions, trade
+  // negotiations) aren't missed by a strict 24h window. Category-only filter,
+  // still no impact_score fallback — the impact rubric's portfolio-specificity
+  // bonus inflates scores for stock-specific stories (e.g. "CBA still the
+  // premium pick") that have real portfolio relevance but zero macro
+  // relevance; letting those through wasted tokens with nothing for Claude to
+  // cite (2026-06-25 call #10 review — none of 4 impact-only items were used
+  // in the brief). A score-based fallback was deliberately tried and removed
+  // for this exact reason — don't re-add one without re-litigating that.
   let newsCtx = '';
   if (state.serverOk) {
     try {
-      const nr = await fetch(`${API}/api/news/brief?days=1&limit=15`);
+      const nr = await fetch(`${API}/api/news/brief?days=2&limit=20`);
       if (nr.ok) {
         const nd = await nr.json();
         const items = (nd.items || [])
           .filter(it => ['macro', 'geopolitics'].includes(it.category))
-          .slice(0, 8);
+          .slice(0, 12);
         if (items.length) {
-          newsCtx = ' | Recent news (last 24h): ' + items.map(it => it.signal || it.title).join('; ');
+          newsCtx = ' | Recent news (last 48h): ' + items.map(it => it.signal || it.title).join('; ');
         }
       }
     } catch (_) {}

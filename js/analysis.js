@@ -1101,6 +1101,67 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       }
     }
 
+    // ── Whipsaw / contradiction check (Learning Loop improvement F) ────────────
+    // Compares each rec's entry signature + direction against the most recent
+    // rec ever logged for the same ticker (any action). A near-identical setup
+    // with a flipped direction inside 10 days is a likely overreaction to noise
+    // rather than a genuine thesis change. Flag-and-keep — same philosophy as
+    // the validator's own contradiction check above (CLAUDE.md: flag-don't-drop,
+    // user decision 2026-06-11) — this never drops a rec, only adds a warning.
+    if (state.serverOk && recs.length && typeof entrySignature === 'function') {
+      try {
+        const uniqueTickers = [...new Set(recs.map(r => r.ticker).filter(Boolean))];
+        const recentMap = {};
+        await Promise.all(uniqueTickers.map(async (tk) => {
+          try {
+            const resp = await fetch(`${API}/api/learning/recent-rec?ticker=${encodeURIComponent(tk)}`);
+            if (resp.ok) {
+              const d = await resp.json();
+              if (d.ok && d.rec) recentMap[tk] = d.rec;
+            }
+          } catch (_) {}
+        }));
+        const isBuySide  = a => a === 'BUY' || a === 'TOP_UP';
+        const isSellSide = a => a === 'SELL' || a === 'TRIM';
+        recs = recs.map(r => {
+          const prior = recentMap[r.ticker];
+          if (!prior) return r;
+          const curAction   = (r.action || '').toUpperCase();
+          const priorAction = (prior.recommendation || '').toUpperCase();
+          const flipped = (isBuySide(curAction) && isSellSide(priorAction)) ||
+                          (isSellSide(curAction) && isBuySide(priorAction));
+          if (!flipped) return r;
+          const priorDate  = prior.timestamp ? prior.timestamp.slice(0, 10) : null;
+          const daysSince  = priorDate ? (Date.now() - new Date(priorDate).getTime()) / 86400000 : 999;
+          if (!priorDate || daysSince > 10) return r;
+          // Build the current ticker's signature from the same derived fields
+          // logRecsToLearningLoop() snapshots into entry_signals_json (CLAUDE.md
+          // gotcha #43) — liveSignals itself doesn't carry px_vs_sma200/setup_score
+          // directly, they're derived from current_price/sma_200/score.
+          const ls = state.liveSignals?.[r.ticker];
+          const curSigObj = ls ? {
+            rsi_14:       ls.rsi_14 ?? null,
+            bb_pct_b:     ls.bb_pct_b ?? null,
+            px_vs_sma200: (typeof ls.current_price === 'number' && typeof ls.sma_200 === 'number' && ls.sma_200)
+                            ? ((ls.current_price / ls.sma_200 - 1) * 100) : null,
+            setup_score:  ls.score ?? null,
+            macd_hist:    ls.macd_hist ?? null,
+          } : null;
+          const curSig   = entrySignature(curSigObj);
+          const priorSig = entrySignature(prior.entry_signals || {});
+          if (!curSig || !priorSig) return r;
+          const curTokens   = curSig.split(' ');
+          const priorTokens = priorSig.split(' ');
+          if (Math.max(curTokens.length, priorTokens.length) < 4) return r;
+          const matches = curTokens.filter(t => priorTokens.includes(t)).length;
+          if (matches < 4) return r;
+          const warn = `contradicts your own ${priorAction} rec on ${priorDate} under a near-identical setup`;
+          const warnings = Array.isArray(r._ruleWarnings) ? [...r._ruleWarnings, warn] : [warn];
+          return { ...r, _ruleWarnings: warnings };
+        });
+      } catch (_) {}
+    }
+
     // ── Ensemble confidence — blend AI confidence with indicator composite ─────
     // Previously computed only inside the unwired validateResponse(), so every
     // learning event logged ensemble_confidence = null. Restored here.
@@ -1864,6 +1925,8 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         ensemble_confidence: r.ensembleConfidence ?? null,
         recommendation:      r.action,
         rationale_summary:   r.reasoning ? reasoningText(r.reasoning).slice(0, 400) : null,
+        bull_case:           r.bullCase ? String(r.bullCase).slice(0, 200) : null,
+        bear_case:           r.bearCase ? String(r.bearCase).slice(0, 200) : null,
         suggested_stop:      r.stopLoss ?? null,
         suggested_target:    r.target ?? null,
         rr_ratio:            rrRatio != null ? +rrRatio.toFixed(2) : null,

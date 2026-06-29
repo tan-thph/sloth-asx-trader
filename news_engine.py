@@ -240,6 +240,17 @@ MARKET_FEEDS = [
         "enabled": False,  # Reuters shut down public RSS feeds in 2020 — feed returns 404
     },
     {
+        # ASX is heavily materials/energy-weighted; oil/gas supply shocks and
+        # OPEC/geopolitical commodity news move those sectors more directly
+        # than generic world news does. Verified reachable with the plain
+        # ASXNewsScanner UA (no browser headers needed), unlike Yahoo/Google.
+        "key":     "oilprice",
+        "name":    "Oilprice.com",
+        "url":     "https://oilprice.com/rss/main",
+        "type":    "geopolitics",
+        "enabled": True,
+    },
+    {
         "key":     "asx_announcements",
         "name":    "ASX Market Announcements",
         "url":     "https://www.asx.com.au/asx/statistics/announcements.do?by=dateFiled&timeframe=D&format=rss",

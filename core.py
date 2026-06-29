@@ -207,7 +207,8 @@ _STOOQ_MAP: dict[str, str] = {
     "^IXIC":    "^ndq",
     "^DJI":     "^dji",
     "^VIX":     "^vix",
-    "^TNX":     "^tnx",
+    # ^TNX (US 10Y yield) — Stooq's ^tnx URL returns a 404 page; removed.
+    # yfinance period='1mo' is reliable for TNX so no fallback needed.
     "AUDUSD=X": "audusd",
     "GC=F":     "gc.f",
     "CL=F":     "cl.f",

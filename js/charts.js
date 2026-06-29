@@ -493,6 +493,73 @@ function _drawSparkline(canvas, values) {
 }
 
 // ============================================================
+// CALIBRATION TREND CHART (Learning Loop improvement E)
+// ============================================================
+//
+// drawCalibrationTrendChart(canvasId, snapshots)
+//   snapshots: [{snapshot_date, brier_score, n}] chronological (oldest first).
+//   Brier score is lower-is-better (0=perfect, 0.25=random guessing) — the
+//   INVERSE of a price sparkline's up=green convention, so colour reflects
+//   direction explicitly rather than reusing _drawSparkline's up/down logic.
+function drawCalibrationTrendChart(canvasId, snapshots) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const { ctx, w, h } = _fitCanvas(canvas, window.innerWidth < 640 ? 140 : 160);
+  ctx.clearRect(0, 0, w, h);
+  if (!snapshots || snapshots.length < 2) return;
+
+  const vals = snapshots.map(s => s.brier_score).filter(v => v != null);
+  if (vals.length < 2) return;
+
+  const pad = { t: 10, r: 10, b: 22, l: 38 };
+  const cw = w - pad.l - pad.r;
+  const ch = h - pad.t - pad.b;
+
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const range = (max - min) || 0.02;
+  const minV = Math.max(0, min - range * 0.15);
+  const maxV = Math.min(1, max + range * 0.15);
+  const span = maxV - minV || 0.02;
+
+  const xAt = i => pad.l + (i / (snapshots.length - 1)) * cw;
+  const yAt = v => pad.t + ch - ((v - minV) / span) * ch;
+
+  // Gridlines + y-axis labels
+  const gridCol = chartColor('--chart-grid', 'rgba(0,0,0,0.07)');
+  const textCol = chartColor('--text-tertiary', '#999');
+  ctx.strokeStyle = gridCol; ctx.lineWidth = 1;
+  ctx.fillStyle = textCol; ctx.font = '10px var(--font, sans-serif)';
+  [minV, (minV + maxV) / 2, maxV].forEach(v => {
+    const y = yAt(v);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.fillText(v.toFixed(3), 2, y + 3);
+  });
+
+  // Direction colour: comparing first vs last value — declining (improving) = up
+  // colour (green), rising (worsening) = down colour (red). Flat = neutral.
+  const declining = vals[vals.length - 1] < vals[0];
+  const col = declining ? chartColor('--up', '#16a34a')
+            : vals[vals.length - 1] > vals[0] ? chartColor('--down', '#dc2626')
+            : chartColor('--text-tertiary', '#94a3b8');
+
+  ctx.beginPath();
+  snapshots.forEach((s, i) => {
+    if (s.brier_score == null) return;
+    const x = xAt(i), y = yAt(s.brier_score);
+    if (i === 0 || snapshots[i - 1]?.brier_score == null) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // X-axis: first/last date labels only (keeps it readable at any width)
+  ctx.fillStyle = textCol;
+  ctx.fillText(snapshots[0].snapshot_date, pad.l, h - 4);
+  const lastLabel = snapshots[snapshots.length - 1].snapshot_date;
+  ctx.fillText(lastLabel, w - pad.r - ctx.measureText(lastLabel).width, h - 4);
+}
+
+// ============================================================
 // CANDLESTICK / OHLCV CHART  (Technical Screener Sandbox)
 // ============================================================
 

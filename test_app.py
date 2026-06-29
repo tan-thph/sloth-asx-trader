@@ -281,6 +281,27 @@ class TestLearningLoopRoutes(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["primary_entry_driver"], "mean_reversion")
 
+    def test_log_stores_bull_case_and_bear_case(self):
+        """POST /api/learning/log must persist bull_case/bear_case -- Claude's own
+        steelman text, used by _compute_exemplars() to show past reasoning."""
+        payload = {
+            "ticker": "FMG", "recommendation": "BUY",
+            "prompt_version": "2026-06-v15", "ai_confidence": 0.71,
+            "bull_case": "iron ore demand recovering on China stimulus",
+            "bear_case": "China property slump could deepen further",
+        }
+        r = self.client.post("/api/learning/log",
+                             data=json.dumps(payload),
+                             content_type="application/json")
+        ev_id = json.loads(r.data)["id"]
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT bull_case, bear_case FROM ai_learning_events WHERE id=?",
+                (ev_id,)
+            ).fetchone()
+        self.assertEqual(row["bull_case"], "iron ore demand recovering on China stimulus")
+        self.assertEqual(row["bear_case"], "China property slump could deepen further")
+
     def test_classify_entry_driver_taxonomy(self):
         """classify_entry_driver maps signal snapshots to the right driver."""
         from routes.learning import classify_entry_driver, ENTRY_DRIVERS
@@ -1170,6 +1191,78 @@ class TestStage2AutoClassification(unittest.TestCase):
         self.assertIn("fetchCalibrationBlock(_activeRegime, _portfolioSectors, _portfolioTickers, { deep: true })", src)
 
 
+class TestWhipsawConsistencyCheck(unittest.TestCase):
+    """Learning Loop improvement F — flag (not drop) a rec that contradicts a
+    very recent same-ticker rec under a near-identical setup."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    @classmethod
+    def tearDownClass(cls):
+        asx_server.get_db = _orig_get_db
+
+    def test_recent_rec_endpoint_requires_ticker(self):
+        resp = self.client.get("/api/learning/recent-rec")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_recent_rec_endpoint_returns_null_for_unknown_ticker(self):
+        resp = self.client.get("/api/learning/recent-rec?ticker=ZZZ999")
+        self.assertEqual(resp.status_code, 200)
+        d = json.loads(resp.data)
+        self.assertTrue(d["ok"])
+        self.assertIsNone(d["rec"])
+
+    def test_recent_rec_endpoint_returns_most_recent_any_action(self):
+        """Must return the latest logged rec for the ticker regardless of
+        action (not scoped to BUY/TOP_UP like entry-context)."""
+        with _test_get_db() as conn:
+            conn.execute("DELETE FROM ai_learning_events WHERE ticker='WHIP.AX'")
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, entry_signals_json, timestamp)
+                VALUES ('recommendation','WHIP.AX','BUY',?,'2026-01-01 09:00:00')
+            """, (json.dumps({"rsi_14": 30}),))
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, entry_signals_json, timestamp)
+                VALUES ('recommendation','WHIP.AX','SELL',?,'2026-01-05 09:00:00')
+            """, (json.dumps({"rsi_14": 62, "bb_pct_b": 0.7,
+                               "px_vs_sma200": 5, "setup_score": 60, "macd_hist": -0.1}),))
+        resp = self.client.get("/api/learning/recent-rec?ticker=WHIP.AX")
+        d = json.loads(resp.data)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["rec"]["recommendation"], "SELL")
+        self.assertEqual(d["rec"]["entry_signals"]["rsi_14"], 62)
+
+    def test_entry_signature_ported_to_js_matches_python_fields(self):
+        """js/utils.js entrySignature() must port _entry_signature() (same
+        field set: rsi_14, bb_pct_b, px_vs_sma200, setup_score, macd_hist)."""
+        with open(os.path.join(ROOT, "js", "utils.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function entrySignature(sig)", src)
+        for field in ("rsi_14", "bb_pct_b", "px_vs_sma200", "setup_score", "macd_hist"):
+            self.assertIn(field, src)
+
+    def test_analysis_js_wires_whipsaw_check(self):
+        """analysis.js must call the recent-rec endpoint and flag (not drop)
+        on a flipped-direction near-identical setup."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("/api/learning/recent-rec", src)
+        self.assertIn("entrySignature(", src)
+        self.assertIn("contradicts your own", src)
+        # Must flag via _ruleWarnings, never drop (no return [] in this block)
+        idx = src.find("Whipsaw / contradiction check")
+        block = src[idx:idx + 4000]
+        self.assertIn("_ruleWarnings", block)
+        self.assertNotIn("return [];", block)
+
+
 class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
@@ -1198,6 +1291,19 @@ class TestStage3PromptInstructions(unittest.TestCase):
                       "analysis.js must include primary_entry_driver in the log payload")
         self.assertIn("_ENTRY_DRIVERS", src,
                       "analysis.js must normalise the driver against the allowed enum")
+
+    def test_bull_bear_case_logged_in_analysis_js(self):
+        """Reasoning-text exemplars: analysis.js must forward bull_case/bear_case
+        to the learning-loop log payload so _compute_exemplars() can quote
+        Claude's own past reasoning next to the outcome."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("bull_case:", src,
+                      "analysis.js must include bull_case in the log payload")
+        self.assertIn("bear_case:", src,
+                      "analysis.js must include bear_case in the log payload")
+        self.assertIn("r.bullCase", src)
+        self.assertIn("r.bearCase", src)
 
     def test_journal_trade_detail_wiring(self):
         """Sprint 69: journal.js must expose the trade-detail drawer + capture manual technicals."""
@@ -5049,6 +5155,121 @@ class TestFix18VirtualOutcomes(unittest.TestCase):
         self.assertIn("virtual_loss", src)
 
 
+class TestHoldOutcomeTracking(unittest.TestCase):
+    """HOLD recs have no stop/target so _resolve_virtual_outcomes() never
+    resolves them -- they were logged then orphaned. _resolve_hold_outcomes()
+    + _compute_hold_outcome_nudge() close that gap.
+
+    Each test self-contains its own _install_in_memory_db()/init_db()/restore
+    (no shared setUpClass) -- mirrors TestSprint71Phase3's pattern so a test
+    that forgets to restore get_db can never leak the real on-disk DB into a
+    sibling test that assumes the patched in-memory one (gotcha #9)."""
+
+    def test_resolve_hold_outcomes_function_exists(self):
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _resolve_hold_outcomes(", src)
+        self.assertIn("_resolve_hold_outcomes(conn)", src)  # wired into _calib_compute
+
+    def test_resolve_hold_outcomes_scoped_to_hold_recommendation(self):
+        """Must filter on recommendation='HOLD' so it never touches BUY/SELL/TRIM
+        rows already handled by _resolve_virtual_outcomes (no stop/target check)."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        idx = src.find("def _resolve_hold_outcomes(")
+        body = src[idx:idx + 3500]
+        self.assertIn("recommendation = 'HOLD'", body)
+        self.assertIn("virtual_hold_miss", body)
+        self.assertIn("virtual_hold_correct", body)
+
+    def test_compute_hold_outcome_nudge_below_n_gate_returns_empty(self):
+        from routes.learning import _compute_hold_outcome_nudge
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                # Only 5 resolved HOLDs — below the n>=10 gate.
+                for i in range(5):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, virtual_outcome, timestamp)
+                        VALUES ('recommendation',?,'HOLD','virtual_hold_miss',?)
+                    """, (f"H{i}.AX", f"2026-01-1{i} 10:00:00"))
+                self.assertEqual(_compute_hold_outcome_nudge(conn), "")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_compute_hold_outcome_nudge_fires_above_threshold(self):
+        """n>=10 and >50% miss rate must emit the ⚠HOLD_TOO_PASSIVE token."""
+        from routes.learning import _compute_hold_outcome_nudge
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                for i in range(8):  # 8 misses
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, virtual_outcome, timestamp)
+                        VALUES ('recommendation',?,'HOLD','virtual_hold_miss',?)
+                    """, (f"M{i}.AX", f"2026-01-{10+i} 10:00:00"))
+                for i in range(2):  # 2 correct -> 8/10 = 80% miss rate
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, virtual_outcome, timestamp)
+                        VALUES ('recommendation',?,'HOLD','virtual_hold_correct',?)
+                    """, (f"C{i}.AX", f"2026-01-{20+i} 10:00:00"))
+                nudge = _compute_hold_outcome_nudge(conn)
+                self.assertIn("HOLD_TOO_PASSIVE", nudge)
+                self.assertIn("8/10", nudge)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_compute_hold_outcome_nudge_low_miss_rate_silent(self):
+        """A low miss rate (correct caution) must not emit a nudge."""
+        from routes.learning import _compute_hold_outcome_nudge
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                for i in range(2):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, virtual_outcome, timestamp)
+                        VALUES ('recommendation',?,'HOLD','virtual_hold_miss',?)
+                    """, (f"M{i}.AX", f"2026-01-{10+i} 10:00:00"))
+                for i in range(8):
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, virtual_outcome, timestamp)
+                        VALUES ('recommendation',?,'HOLD','virtual_hold_correct',?)
+                    """, (f"C{i}.AX", f"2026-01-{20+i} 10:00:00"))
+                self.assertEqual(_compute_hold_outcome_nudge(conn), "")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_stats_endpoint_includes_hold_outcomes(self):
+        """GET /api/learning/stats must surface a hold_outcomes block."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            client = asx_server.app.test_client()
+            resp = client.get("/api/learning/stats")
+            self.assertEqual(resp.status_code, 200)
+            d = json.loads(resp.data)
+            self.assertIn("hold_outcomes", d)
+            self.assertIn("n", d["hold_outcomes"])
+            self.assertIn("miss_rate", d["hold_outcomes"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def _clean_events(self, conn):
+        conn.execute("DELETE FROM ai_learning_events")
+        conn.commit()
+
+
 class TestSprint70DeterministicTagging(unittest.TestCase):
     """Sprint 70 — deterministic post-mortem tagging + skill scoring driven by the
     entry/exit capture (thesis_verdict), replacing the blind local-LLM tagger."""
@@ -6142,6 +6363,209 @@ class TestSprint44(unittest.TestCase):
         data2 = json.loads(r2.data)
         texts2 = [l["lesson_text"] for l in data2["lessons"]]
         self.assertNotIn("Sprint44 high vol specific", texts2)
+
+
+class TestCalibrationTrend(unittest.TestCase):
+    """Learning Loop improvement E — Brier score history, not just a
+    point-in-time snapshot. Snapshots are written lazily by
+    GET /api/learning/calibration-stats; GET /api/learning/calibration-trend
+    is pure read."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    @classmethod
+    def tearDownClass(cls):
+        asx_server.get_db = _orig_get_db
+
+    def _clean(self, conn):
+        conn.execute("DELETE FROM ai_learning_events")
+        conn.execute("DELETE FROM calibration_snapshots")
+
+    def test_calibration_snapshots_table_in_schema(self):
+        with open(os.path.join(ROOT, "db.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("CREATE TABLE IF NOT EXISTS calibration_snapshots", src)
+        self.assertIn("snapshot_date", src)
+        self.assertIn("brier_score", src)
+
+    def test_calibration_stats_writes_snapshot(self):
+        """Calling GET /api/learning/calibration-stats must write/update a
+        same-day row in calibration_snapshots (idempotent, never duplicated)."""
+        with _test_get_db() as conn:
+            self._clean(conn)
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, outcome_status, ai_confidence, timestamp)
+                VALUES ('recommendation','CAL.AX','BUY','win',0.8,'2026-03-01 10:00:00')
+            """)
+        # Two calls on the same day must not create two rows.
+        self.client.get("/api/learning/calibration-stats")
+        self.client.get("/api/learning/calibration-stats")
+        with _test_get_db() as conn:
+            rows = conn.execute("SELECT COUNT(*) AS n FROM calibration_snapshots").fetchone()
+        self.assertEqual(rows["n"], 1)
+
+    def test_calibration_trend_endpoint_returns_chronological_order(self):
+        with _test_get_db() as conn:
+            self._clean(conn)
+            conn.execute("""
+                INSERT INTO calibration_snapshots (snapshot_date, brier_score, n)
+                VALUES ('2026-01-01', 0.22, 10)
+            """)
+            conn.execute("""
+                INSERT INTO calibration_snapshots (snapshot_date, brier_score, n)
+                VALUES ('2026-01-15', 0.18, 20)
+            """)
+        r = self.client.get("/api/learning/calibration-trend")
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertTrue(d["ok"])
+        dates = [s["snapshot_date"] for s in d["snapshots"]]
+        self.assertEqual(dates, sorted(dates))  # chronological, oldest first
+
+    def test_learning_js_renders_trend_chart(self):
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("/api/learning/calibration-trend", src)
+        self.assertIn("drawCalibrationTrendChart", src)
+
+    def test_charts_js_defines_trend_chart_function(self):
+        with open(os.path.join(ROOT, "js", "charts.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function drawCalibrationTrendChart(canvasId, snapshots)", src)
+        # Must use chartColor() tokens, not hardcoded hex, per gotcha #39
+        idx = src.find("function drawCalibrationTrendChart")
+        body = src[idx:idx + 2500]
+        self.assertIn("chartColor(", body)
+
+
+class TestLessonLifecycleScoring(unittest.TestCase):
+    """Learning Loop improvement B — retrospective win-rate-before-vs-after
+    health per lesson. Read-only/additive: never changes lesson matching or
+    injection (lessons_list() is untouched)."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    @classmethod
+    def tearDownClass(cls):
+        asx_server.get_db = _orig_get_db
+
+    def _clean(self, conn):
+        conn.execute("DELETE FROM trading_lessons")
+        conn.execute("DELETE FROM ai_learning_events")
+
+    def test_endpoint_exists_and_returns_ok(self):
+        r = self.client.get("/api/learning/lesson-effectiveness")
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertTrue(d["ok"])
+        self.assertIn("lessons", d)
+
+    def test_insufficient_data_below_n_gate(self):
+        """Fewer than 5 matching trades after creation -> insufficient_data=True."""
+        from routes.learning import _compute_lesson_effectiveness
+        with _test_get_db() as conn:
+            self._clean(conn)
+            conn.execute("""
+                INSERT INTO trading_lessons (lesson_text, ticker, created_at)
+                VALUES ('test lesson', 'LES.AX', '2026-02-01 00:00:00')
+            """)
+            for i in range(3):  # only 3 after creation — below min_n_after=5
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status, timestamp)
+                    VALUES ('recommendation','LES.AX','BUY','win',?)
+                """, (f"2026-02-{10+i} 10:00:00",))
+            results = _compute_lesson_effectiveness(conn)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["insufficient_data"])
+        self.assertEqual(results[0]["n_after"], 3)
+
+    def test_win_rate_before_vs_after_computed_correctly(self):
+        """Win rate must be computed separately for before/after created_at,
+        scoped to the lesson's own ticker (OR-NULL pattern)."""
+        from routes.learning import _compute_lesson_effectiveness
+        with _test_get_db() as conn:
+            self._clean(conn)
+            conn.execute("""
+                INSERT INTO trading_lessons (lesson_text, ticker, created_at)
+                VALUES ('test lesson', 'LES.AX', '2026-02-01 00:00:00')
+            """)
+            # Before: 1 win, 3 losses -> 25% WR
+            for i, outcome in enumerate(["win", "loss", "loss", "loss"]):
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status, timestamp)
+                    VALUES ('recommendation','LES.AX','BUY',?,?)
+                """, (outcome, f"2026-01-{10+i} 10:00:00"))
+            # After: 4 wins, 1 loss -> 80% WR (n=5, clears the gate)
+            for i, outcome in enumerate(["win", "win", "win", "win", "loss"]):
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status, timestamp)
+                    VALUES ('recommendation','LES.AX','BUY',?,?)
+                """, (outcome, f"2026-02-{10+i} 10:00:00"))
+            results = _compute_lesson_effectiveness(conn)
+        self.assertEqual(len(results), 1)
+        r = results[0]
+        self.assertFalse(r["insufficient_data"])
+        self.assertEqual(r["win_rate_before"], 25.0)
+        self.assertEqual(r["win_rate_after"], 80.0)
+        self.assertEqual(r["delta_pp"], 55.0)
+
+    def test_worst_lesson_sorted_first(self):
+        """Results must sort worst (most negative delta_pp) first, with
+        insufficient-data lessons sorted last regardless of delta."""
+        from routes.learning import _compute_lesson_effectiveness
+        with _test_get_db() as conn:
+            self._clean(conn)
+            # Lesson A: improved (positive delta)
+            conn.execute("""
+                INSERT INTO trading_lessons (lesson_text, ticker, created_at)
+                VALUES ('good lesson', 'GOOD.AX', '2026-02-01 00:00:00')
+            """)
+            for o in ["loss", "loss"]:
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, outcome_status, timestamp)
+                    VALUES ('recommendation','GOOD.AX','BUY',?,'2026-01-10 10:00:00')""", (o,))
+            for o in ["win", "win", "win", "win", "win"]:
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, outcome_status, timestamp)
+                    VALUES ('recommendation','GOOD.AX','BUY',?,'2026-02-10 10:00:00')""", (o,))
+            # Lesson B: got worse (negative delta) -- should sort first
+            conn.execute("""
+                INSERT INTO trading_lessons (lesson_text, ticker, created_at)
+                VALUES ('bad lesson', 'BAD.AX', '2026-02-01 00:00:00')
+            """)
+            for o in ["win", "win"]:
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, outcome_status, timestamp)
+                    VALUES ('recommendation','BAD.AX','BUY',?,'2026-01-10 10:00:00')""", (o,))
+            for o in ["loss", "loss", "loss", "loss", "loss"]:
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, outcome_status, timestamp)
+                    VALUES ('recommendation','BAD.AX','BUY',?,'2026-02-10 10:00:00')""", (o,))
+            results = _compute_lesson_effectiveness(conn)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["lesson_text"], "bad lesson")
+        self.assertEqual(results[1]["lesson_text"], "good lesson")
+
+    def test_learning_js_renders_health_chip(self):
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("/api/learning/lesson-effectiveness", src)
+        self.assertIn("insufficient_data", src)
+        self.assertIn("delta_pp", src)
 
 
 class TestSprint45(unittest.TestCase):
@@ -8404,6 +8828,49 @@ class TestSprint71Phase3(unittest.TestCase):
             self.assertTrue(any("poor_entry" in ln for ln in lines))
             self.assertTrue(any("confluence_entry" in ln for ln in lines))
             self.assertTrue(any("in 8d" in ln for ln in win_lines))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_compute_exemplars_includes_reasoning_text_snippet(self):
+        """Exemplar lines must quote Claude's own bull_case (wins / no bear_case)
+        or bear_case (losses, when present) next to the outcome -- not just the
+        numeric entry signature -- so the few-shot feed shows past reasoning."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            from routes.learning import _compute_exemplars
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       realized_pnl_pct, holding_period_days, was_executed,
+                       entry_signals_json, error_type, bull_case, bear_case, timestamp)
+                    VALUES ('recommendation','LOS.AX','BUY','loss',-5.0,5,1,?,?,?,?,?)
+                """, (json.dumps({"rsi_14": 55, "bb_pct_b": 0.6,
+                                  "px_vs_sma200": -2, "setup_score": 40}),
+                      "poor_entry",
+                      "thought oversold bounce was coming",
+                      "rbA could surprise hawkish",
+                      "2026-01-10 10:00:00"))
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, outcome_status,
+                       realized_pnl_pct, holding_period_days, was_executed,
+                       entry_signals_json, success_tags, bull_case, timestamp)
+                    VALUES ('recommendation','WIN.AX','BUY','win',12.0,8,1,?,?,?,?)
+                """, (json.dumps({"rsi_14": 30, "bb_pct_b": 0.1, "setup_score": 75}),
+                      "confluence_entry",
+                      "strong earnings beat expected next quarter",
+                      "2026-01-20 10:00:00"))
+                lines = _compute_exemplars(conn)
+            loss_line = next(ln for ln in lines if "LOS" in ln)
+            win_line  = next(ln for ln in lines if "WIN" in ln)
+            # Loss: bear_case (the risk Claude itself flagged) is the more
+            # instructive line when it played out.
+            self.assertIn("rbA could surprise hawkish", loss_line)
+            # Win: bull_case (original thesis) is shown since no bear_case present.
+            self.assertIn("strong earnings beat expected next quarter", win_line)
         finally:
             asx_server.get_db = _orig_get_db
 

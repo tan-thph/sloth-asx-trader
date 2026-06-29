@@ -220,7 +220,7 @@ def _macro_payload() -> dict:
         "oil":      ("CL=F",     "5d"),
         "aud_usd":  ("AUDUSD=X", "1mo"),
         "vix":      ("^VIX",     "5d"),
-        "us10y":    ("^TNX",     "5d"),
+        "us10y":    ("^TNX",     "1mo"),  # 5d returns only 1 row; need >=2 for change_pct
         "iron_ore": ("TIO=F",    "1mo"),
         "copper":   ("HG=F",     "5d"),
         "spi200":   ("YAP=F",    "5d"),    # ASX SPI200 futures — lead indicator vs ^AXJO spot

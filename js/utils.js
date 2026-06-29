@@ -50,6 +50,28 @@ function reasoningText(r) {
   return r || '';
 }
 
+// Ports routes/learning.py's _entry_signature(sig) verbatim (same fields, same
+// format) so the whipsaw/contradiction check in analysis.js can build a
+// comparable signature client-side without duplicating the field list.
+// Deliberately omits rs_score/rs_5d_alpha — neutral placeholders today (see
+// CLAUDE.md gotcha #43), surfacing them would imply real relative-strength
+// data that doesn't exist. Returns "" when no usable field is present.
+function entrySignature(sig) {
+  if (!sig) return '';
+  const parts = [];
+  const rsi = sig.rsi_14;
+  if (typeof rsi === 'number' && !isNaN(rsi)) parts.push(`RSI${Math.round(rsi)}`);
+  const bb = sig.bb_pct_b;
+  if (typeof bb === 'number' && !isNaN(bb)) parts.push(`%b${bb.toFixed(2)}`);
+  const px200 = sig.px_vs_sma200;
+  if (typeof px200 === 'number' && !isNaN(px200)) parts.push(`vs200${px200 >= 0 ? '+' : ''}${Math.round(px200)}%`);
+  const ss = sig.setup_score;
+  if (typeof ss === 'number' && !isNaN(ss)) parts.push(`setup${Math.round(ss)}`);
+  const mh = sig.macd_hist;
+  if (typeof mh === 'number' && !isNaN(mh)) parts.push(mh > 0 ? 'MACD+' : 'MACD-');
+  return parts.join(' ');
+}
+
 const fmt = (n, d=2) => (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString('en-AU',{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtp = (n, d=2) => (n==null||isNaN(n)) ? '—' : (n>=0?'+':'') + fmt(Math.abs(n),d) + '%';
 

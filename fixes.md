@@ -197,3 +197,116 @@ The status badge ternary still checks for a `'reclass'` status value that, per C
 **Common root cause across most findings:** account-scoping was added incrementally (gotchas #66–#80) to the *primary* execution paths (`markExecuted`, `setParcelAccount`, `splitParcel`), but several **secondary/legacy paths** — CSV import, manual Add Holding, the Reconcile button, and the no-parcel fallback inside `matchSaleAgainstParcels` — were never updated to thread `account` through, and one *primary* path (`_findParcelJournalRow`) has a latent ordering bug from the `unshift()` convention used elsewhere. Recommend a follow-up pass that (a) makes `account` a required, non-optional parameter everywhere parcels are created or queried so a missing argument is a loud error rather than a silent `personal` default, and (b) adds a single shared "find the open-lot journal row for this parcel" helper used by every reassignment/split code path.
 
 No code was changed as part of this audit.
+
+---
+---
+
+# fixes.md — App-wide financial / record-keeping audit (round 2)
+
+Audit date: 2026-06-26. Scope: whole-app sweep for bookkeeping mismatches and logic errors, focused on the money paths — parcel/CGT accounting, cash ledger, P&L, and journal sync. Findings are ordered by severity. File:line references accurate as of working tree on branch `main` (uncommitted changes present in `js/analysis.js`). **Status: NOT yet fixed — reported only.** Numbering continues from the round-1 audit above (R2-1, R2-2, … to avoid collision).
+
+---
+
+## R2-1. [HIGH — tax correctness] CGT 50% discount eligibility is off by one day (`>= 365` should be `> 365`)
+
+**Files / lines (4 sites, all consistent):**
+- `js/portfolio-helpers.js:519` — `const eligible50 = held >= 365;` (the authoritative disposal-recording path, `matchSaleAgainstParcels`)
+- `js/portfolio-helpers.js:211-212` — `minimise` CGT method discount-eligibility sort (`daysBetween(...) >= 365`)
+- `js/analysis.js` `_splitRecsByParcels` — `_cgtEligible: days != null && days >= 365` (3 occurrences: single-parcel, SELL-split, TRIM-split branches)
+
+**Problem:** The ATO 50% CGT discount requires the asset to be held for **more than** 12 months — i.e. the CGT event must occur at least 366 days after acquisition (the acquisition day is excluded from the count, the disposal day is included). A disposal occurring *exactly* 365 days after purchase does **not** qualify, but `held >= 365` grants the discount one day early.
+
+**Impact:** Any disposal landing exactly on the 365-day boundary is recorded with a 50% discount it isn't entitled to, understating the taxable net gain. Because `matchSaleAgainstParcels` is the single source of truth for `state.cgtDisposals`, this flows straight into the EOFY tax pack ZIP (`/api/tax/eofy-pack`), the CGT disposals CSV export (`journal.js exportCSV`), and the CGT page. The `_splitRecsByParcels` copies also mislabel rec cards' CGT-eligibility badge on the boundary day.
+
+**Repro:** Buy 100 BHP on 1 Jul 2024, sell on 1 Jul 2025. `daysBetween('01-07-2024','01-07-2025') = 365` → `eligible50 = true`, `discount = grossGain * 0.5`. Correct ATO treatment: not eligible until 2 Jul 2025.
+
+**Fix:** Change all four sites to `held > 365` (equivalently `>= 366`). Extract a single `cgtDiscountEligible(heldDays)` helper so the threshold can't drift between the disposal path and the display path. **Recommend confirming the exact boundary interpretation with the user's tax adviser before committing** — the direction (currently one day too generous) is not in doubt, but document the chosen convention in a code comment.
+
+---
+
+## R2-2. [HIGH — silent data loss] Manual BUY/SELL of a non-`personal` holding silently no-ops
+
+**File:** `js/pages/journal.js` (`addManualTrade`, lines ~568-608)
+
+```js
+if (action === 'SELL') {
+  const holding = getPortfolioHolding(symbol);                       // unscoped → first ticker match, ANY account
+  if (holding && holding.shares >= qty) {
+    const { disposals } = applySellToPortfolio(symbol, qty, price, fees, tradeDate);  // no account → defaults 'personal'
+    ...
+} else {
+  applyBuyToPortfolio(symbol, qty, price, tradeDate, fees, sector);  // no account → parcel + holding default to 'personal'
+  state.cash -= qty * price + fees;
+}
+```
+
+**Problem:** `getPortfolioHolding(symbol)` (utils.js:142) with no account returns the *first* ticker match regardless of account, so the `holding.shares >= qty` guard **passes** for a `trading`/`super`-only holding. But `applySellToPortfolio` defaults to `account='personal'`, finds no personal holding, and returns `{ok:false, disposals:[]}`. Net result: **no cash credited, no CGT disposal recorded, the portfolio holding is not reduced** — yet the user sees `toast('Trade logged','success')`. `buildDisposalJournalEntries` is called with an empty `disposals` array, so no journal row is created either (and `_disposalEntries` is a truthy `[]`, so the fallback `unshift(tradeEntry)` is skipped too). The manual SELL evaporates entirely.
+
+The BUY branch has the mirror-image defect: a manual BUY is *always* booked to `personal` (and a `personal` parcel created), even when `state.activeAccount === 'trading'`/`'super'`. Cash is debited correctly but the shares land in the wrong account, and a later correctly-scoped SELL of that account won't find them.
+
+**Impact:** Direct ledger corruption / silent loss for any multi-account user transacting manually on a non-personal holding. The portfolio, cash, CGT disposals, and journal all disagree with what the user believes happened.
+
+**Repro:** Hold WES only in `trading`. Journal → manual SELL 50 WES. Guard passes (trading holding found), `applySellToPortfolio` defaults to personal → `{ok:false}`. Toast says "Trade logged". Portfolio still shows 50 WES in trading, cash unchanged, no disposal, no journal row.
+
+**Fix:** Thread the account through both branches. Resolve the target account the same way `markExecuted()` does (gotcha #67) — prefer `holding.account` when the unscoped lookup found exactly one ticker row, otherwise use `state.activeAccount` (when not `'all'`), and surface an account picker / warning when the ticker is held in multiple accounts. Pass it to `getPortfolioHolding(symbol, acct)`, `applySellToPortfolio(..., acct)`, and `applyBuyToPortfolio(..., acct)`. Add a Vitest case asserting a `trading`-only manual SELL actually reduces the trading holding and records a disposal.
+
+---
+
+## R2-3. [MEDIUM — expectation vs. ledger drift] Per-parcel SELL cards mislabel which lot is actually disposed
+
+**File:** `js/analysis.js` (`_splitRecsByParcels`, new in the uncommitted diff)
+
+**Problem:** A multi-parcel SELL rec is expanded into one card per parcel, each stamped with that specific parcel's `_costBasis`, `_holdingDays`, `_cgtEligible` and a `P#<id>` label. But execution routes through `markExecuted → applySellToPortfolio → matchSaleAgainstParcels`, which **always disposes parcels in the configured CGT order (FIFO/LIFO/minimise/maximise)** — never "the parcel this card was labelled with". When the user executes the card labelled with a newer, non-discount-eligible lot, FIFO (default) actually consumes the *oldest* lot, so the disposal recorded in `cgtDisposals` carries a different cost basis and CGT-discount status than the card promised.
+
+Secondary issue: the parcel filter is `_normTk(p.ticker) === ticker` only — **not account-scoped** — so a ticker held in two accounts expands into cards covering both accounts' lots, while the actual SELL debits a single resolved account.
+
+**Impact:** The CGT-eligibility/cost-basis shown at decision time can disagree with the realised disposal record. No ledger corruption (the disposal itself is internally correct), but it undermines the per-lot tax-aware decision the feature exists to support.
+
+**Fix (product decision required):** Either (a) make execution parcel-targeted — pass the card's `_parcelId` through `markExecuted` into a parcel-specific disposal so the labelled lot is the one actually sold; or (b) relabel the cards to reflect that disposal follows the active CGT method (e.g. show the FIFO-order lot that *will* be consumed, and account-scope the parcel filter). Option (a) is the more honest fix for a tax-optimisation feature.
+
+---
+
+## R2-4. [MEDIUM — latent corruption] `cgtDisposals` referenced by array index breaks across out-of-order deletes
+
+**Files:** `js/portfolio-helpers.js` — `buildDisposalJournalEntries` writes `disposalIds: [disposalIdBase + i]` (positional offsets into `state.cgtDisposals`); `rollbackTradeJournalEntry` (`:780-792`) reads `state.cgtDisposals[dIdx]` and `splice`s by those indices.
+
+**Problem:** `disposalIds` are positions, not stable ids. They're only valid while no *earlier* disposal is ever removed. Rolling back / deleting one journal row splices its disposals out of the middle of the array, shifting the positions of every later trade's disposals. A subsequent rollback then restores `remainingQty` to the **wrong parcel**, or splices the wrong `cgtDisposals` entry. The in-trade reverse-order splice (`:791`) only protects indices *within a single trade*, not across trades.
+
+**Impact:** Deleting journal rows out of chronological order can silently corrupt parcel `remainingQty` and the CGT disposal ledger. Pre-existing (not introduced this round); triggers only on multi-delete workflows.
+
+**Fix:** Give each disposal a stable `id` (monotonic, like `nextParcelId`), store `disposalIds` as those ids, and look up/splice by `find`/`findIndex` on `id` rather than by position.
+
+---
+
+## R2-5. [LOW-MEDIUM — latent] Journal `id` generation via `length + 1` collides after deletes
+
+**Files:** `js/pages/recommendations.js:1734,1751`; `js/pages/journal.js:588,601` use `id: state.tradeJournal.length + 1`. Other writers use `Date.now()+i` (`buildDisposalJournalEntries`) and `Date.now()` (DRP, `portfolio.js:1211`).
+
+**Problem:** `length + 1` is not unique once any row has been removed (length shrinks, so the next insert reuses an existing id). `histEntry.journalId = tradeEntry.id` and any `find(j => j.id === …)` can then resolve the wrong journal row. The mixed id schemes (small integers vs. `Date.now()` epoch-millis) compound the fragility.
+
+**Impact:** Mis-linked journal↔recHistory rows, wrong-row edits/deletes. Low probability but real, and worsens over time as rows are deleted.
+
+**Fix:** Introduce a single `nextJournalId()` helper (monotonic `max(existing id)+1`, mirroring `nextParcelId()`) and use it at every journal-insert site. Don't mix `Date.now()` ids in.
+
+---
+
+## R2-6. [INFORMATIONAL] Unrealised vs. realised P&L differ by brokerage — confirmed correct, documented to prevent a "fix" that breaks it
+
+`avgPrice` deliberately excludes buy brokerage (`applyBuyToPortfolio` stores fees on the parcel, not in `avgPrice`), so `portfolioValue()/totalGain()` show a clean price-only unrealised gain. CGT `costBase` in `matchSaleAgainstParcels` *includes* pro-rata buy fees (`parcel.fees * matched / parcel.qty`) plus the allocated sale fee — correct ATO cost-base treatment. Consequence: realised P&L runs slightly below the unrealised figure shown pre-sale by roughly the round-trip brokerage. This is **correct**, not a bug — flagged so a future "the numbers don't tie out" report doesn't reconcile them the wrong way (e.g. by folding fees into `avgPrice`, which would distort weight/CGT).
+
+---
+
+## Summary table (round 2)
+
+| # | Title | File:line | Severity |
+|---|---|---|---|
+| R2-1 | CGT 50% discount eligibility off by one day (`>=365` → `>365`) | `portfolio-helpers.js:519,211`; `analysis.js _splitRecsByParcels` | **High (tax)** |
+| R2-2 | Manual BUY/SELL of non-`personal` holding silently no-ops | `journal.js:~568-608` | **High (data loss)** |
+| R2-3 | Per-parcel SELL cards mislabel the lot actually disposed (FIFO vs. label) | `analysis.js _splitRecsByParcels` | Medium |
+| R2-4 | `cgtDisposals` indexed by position — corrupts across out-of-order deletes | `portfolio-helpers.js:780-792` | Medium |
+| R2-5 | Journal `id = length+1` collides after deletes | `recommendations.js:1734/1751`, `journal.js:588/601` | Low-Medium |
+| R2-6 | Unrealised vs realised P&L brokerage gap — confirmed correct | `utils.js:56-58` vs `portfolio-helpers.js:521` | Informational |
+
+**Common root cause (carries over from round 1):** the same account-scoping gap that produced findings #2-#9 in round 1 also produced R2-2 — `getPortfolioHolding` / `applyBuyToPortfolio` / `applySellToPortfolio` default to `'personal'` when an account isn't threaded through, and the manual-trade path (`addManualTrade`) was never updated alongside `markExecuted`. R2-1 is independent (a tax-rule off-by-one). R2-4/R2-5 are a separate class: positional/`length`-based identifiers that aren't stable across deletion. Recommend prioritising R2-1 (tax correctness, ~4-line change) and R2-2 (silent ledger loss) first; both are small and contained.
+
+No code was changed as part of this audit.

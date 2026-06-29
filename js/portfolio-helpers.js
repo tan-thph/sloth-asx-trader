@@ -786,6 +786,12 @@ function rollbackTradeJournalEntry(t) {
     }
     return true;
   }
+  // Failed-execution SELL/TRIM: status='open', exitPrice=null, pnl=null.
+  // Nothing was applied to portfolio/parcels/CGT, so there's nothing to
+  // reverse — just allow the splice to proceed.
+  if(action === 'SELL' && t.status === 'open' && t.exitPrice == null && t.pnl == null) {
+    return true;
+  }
   if(action === 'SELL' && t.status === 'closed' && t.exitPrice != null) {
     const costBasis = t.entryPrice;
     const holding = getPortfolioHolding(t.ticker);

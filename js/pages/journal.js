@@ -289,7 +289,7 @@ function renderJournal() {
                 </td>
               </tr>
               <tr id="jdetail-${realIdx}" style="display:none">
-                <td colspan="14" style="background:var(--bg-inset);padding:10px 14px"></td>
+                <td colspan="14" style="background:var(--bg-inset);padding:10px 14px;width:1px;overflow-x:auto"></td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -492,7 +492,7 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
   </div>`;
 
   const loading = (det === 'pending') ? '<div class="text-xs text-muted">Loading trade detail…</div>' : '';
-  return `${loading}<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start">
+  return `${loading}<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;min-width:0">
     ${thesisHtml}${sigHtml}${outcomeHtml}</div>`;
 }
 

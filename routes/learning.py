@@ -31,6 +31,7 @@ _ALLOWED_OUTCOME_COLS = (
     "success_tags", "checklist_bypasses",
     "thesis_verdict", "exit_signals_json",
     "regime_at_execution",
+    "bull_case", "bear_case",
 )
 
 # ── Calibration TTL cache (L4) ────────────────────────────────────────────────
@@ -965,8 +966,9 @@ def learning_log():
                      entry_signals_json, exit_signals_json, debate_synthesis_winner,
                      tags, trade_thesis,
                      sell_primary_driver, sell_secondary_factors, sell_urgency,
-                     alternative_ticker, primary_entry_driver, thesis_verdict)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     alternative_ticker, primary_entry_driver, thesis_verdict,
+                     bull_case, bear_case)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -1006,6 +1008,8 @@ def learning_log():
                 data.get("alternative_ticker"),
                 data.get("primary_entry_driver"),
                 data.get("thesis_verdict"),
+                data.get("bull_case"),
+                data.get("bear_case"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -1104,6 +1108,47 @@ def entry_context():
                     "trade_thesis": row["trade_thesis"],
                 }
         return jsonify({"ok": True, "contexts": contexts})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/recent-rec", methods=["GET"])
+def recent_rec():
+    """Return the single most recent logged rec for one ticker, ANY action.
+
+    GET /api/learning/recent-rec?ticker=BHP.AX
+
+    Unlike entry-context (BUY/TOP_UP only, used for HOLDING_CONTEXT at SELL
+    time), this is action-agnostic — used by the whipsaw/contradiction check
+    in analysis.js to compare a new rec's entry signature + direction against
+    whatever was last recommended for the same ticker, regardless of action.
+    Returns {ok:true, rec:null} when the ticker has no history.
+    """
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"ok": False, "error": "ticker required"}), 400
+    try:
+        with get_db() as conn:
+            row = conn.execute("""
+                SELECT recommendation, entry_signals_json, timestamp
+                  FROM ai_learning_events
+                 WHERE ticker = ?
+                 ORDER BY id DESC
+                 LIMIT 1
+            """, (ticker,)).fetchone()
+        if not row:
+            return jsonify({"ok": True, "rec": None})
+        try:
+            sig = json.loads(row["entry_signals_json"] or "{}")
+            if not isinstance(sig, dict):
+                sig = {}
+        except (ValueError, TypeError):
+            sig = {}
+        return jsonify({"ok": True, "rec": {
+            "recommendation": row["recommendation"],
+            "entry_signals":  sig,
+            "timestamp":      row["timestamp"],
+        }})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1477,6 +1522,7 @@ def learning_stats():
                        error_type, error_type_source, debate_summary, skill_score,
                        postmortem_debate, success_tags, checklist_bypasses,
                        sell_primary_driver, sell_secondary_factors, sell_urgency,
+                       primary_entry_driver,
                        virtual_outcome, virtual_speed_weight, virtual_slippage_applied
                 FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
             """).fetchall()
@@ -1598,6 +1644,24 @@ def learning_stats():
             # Sprint 71 Phase 2D: stop_too_tight tag-precision counterfactual.
             stop_tag_precision_stat = _compute_stop_tag_precision(conn)
 
+            # HOLD outcome tracking: surfaced here (not just the compact
+            # calibration token) so the Learning page can show it directly.
+            hold_row = conn.execute("""
+                SELECT
+                    SUM(CASE WHEN virtual_outcome='virtual_hold_miss'    THEN 1 ELSE 0 END) AS n_miss,
+                    SUM(CASE WHEN virtual_outcome='virtual_hold_correct' THEN 1 ELSE 0 END) AS n_correct
+                FROM ai_learning_events
+                WHERE recommendation = 'HOLD'
+            """).fetchone()
+            _hold_n_miss    = hold_row["n_miss"] or 0
+            _hold_n_correct = hold_row["n_correct"] or 0
+            _hold_n          = _hold_n_miss + _hold_n_correct
+            hold_outcomes = {
+                "n":          _hold_n,
+                "miss_rate":  round(_hold_n_miss / _hold_n * 100, 1) if _hold_n else None,
+                "correct_rate": round(_hold_n_correct / _hold_n * 100, 1) if _hold_n else None,
+            }
+
         oci = overall_ci
         # Gap 5: prompt regression detector (uses version_list already built above)
         prompt_regression = _check_prompt_regression(version_list)
@@ -1627,6 +1691,7 @@ def learning_stats():
             "n_virtual_resolved": n_virtual_resolved, # virtual outcome count for UI display
             "stop_tag_precision": stop_tag_precision_stat,  # Sprint 71 Phase 2D
             "by_sector":          by_sector,    # Sprint 71: per-sector WR vs market baseline
+            "hold_outcomes":      hold_outcomes,  # HOLD passivity calibration (virtual_hold_miss/correct)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1818,6 +1883,27 @@ def learning_calibration_stats():
         ]
         brier = round(sum(sq_errors) / n, 4)
 
+        # Learning Loop improvement E: persist one snapshot per calendar day so
+        # Brier score can be plotted over time instead of only ever showing the
+        # latest value — this endpoint already runs regularly from the Learning
+        # page, so piggybacking here avoids a separate scheduler thread.
+        # UNIQUE(snapshot_date) makes this idempotent (INSERT OR REPLACE updates
+        # the same-day row rather than duplicating on repeated calls).
+        try:
+            with get_db() as conn:
+                today = datetime.now().date().isoformat()
+                latest_pv = conn.execute(
+                    "SELECT prompt_version FROM ai_learning_events "
+                    "WHERE prompt_version IS NOT NULL ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR REPLACE INTO calibration_snapshots "
+                    "(snapshot_date, brier_score, n, prompt_version) VALUES (?,?,?,?)",
+                    (today, brier, n, latest_pv["prompt_version"] if latest_pv else None),
+                )
+        except Exception:
+            pass  # snapshotting must never break the stats response
+
         bins = []
         for lo, hi in [(0.50, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]:
             subset = [r for r in rows if lo <= float(r["ai_confidence"]) < hi]
@@ -1837,6 +1923,26 @@ def learning_calibration_stats():
         return jsonify({"brier_score": brier, "n": n, "bins": bins})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/learning/calibration-trend")
+def learning_calibration_trend():
+    """Brier score history (Learning Loop improvement E) — answers "is the
+    learning loop actually learning" by showing whether calibration is
+    sharpening over time, not just the latest snapshot. Snapshots are written
+    lazily by GET /api/learning/calibration-stats (one row/day); this endpoint
+    is pure read. Capped to the last 180 days."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT snapshot_date, brier_score, n, prompt_version
+                FROM calibration_snapshots
+                ORDER BY snapshot_date DESC LIMIT 180
+            """).fetchall()
+        snapshots = [dict(r) for r in rows][::-1]  # chronological order for charting
+        return jsonify({"ok": True, "snapshots": snapshots})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # Improvements.md #5: shared retry window for the fetch_failed_at sentinel —
@@ -1987,6 +2093,113 @@ def _event_slippage(row) -> float:
     except (KeyError, IndexError):
         regime = ""
     return adv_slippage(adv) * _SLIP_REGIME_MULT.get(regime, 1.0)
+
+
+def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> int:
+    """Lazy-evaluate HOLD recommendations for outcome signal.
+
+    HOLD recs carry no suggested_stop/suggested_target (the validator's
+    requiredUnless:'HOLD' rule means Claude/the quant engine never sizes a
+    HOLD), so _resolve_virtual_outcomes()'s WHERE clause (which requires both
+    NOT NULL) structurally never touches them. They get logged at generation
+    time and then sit orphaned forever — outcome_status NULL, excluded from
+    every calibration query that filters on outcome_status IN
+    ('win','loss','breakeven') — so the model is never calibrated on its own
+    passivity: was staying out correct, or did it miss a real move?
+
+    Algorithm per unresolved HOLD event ≥30 days old:
+      1. Fetch daily close history from the event's own date to today.
+      2. Find the largest |% move| from that entry-day close anywhere in the
+         window (either direction — a HOLD doesn't commit to a direction, so
+         a big move either way means something actionable was missed).
+      3. >= move_threshold (default 8%) -> 'virtual_hold_miss' (a real move
+         existed; BUY or SELL/TRIM likely would have captured it).
+      4. Otherwise -> 'virtual_hold_correct' (price stayed in a tight band;
+         patience was the right call, nothing actionable existed).
+
+    Writes to the existing virtual_outcome column, scoped to
+    recommendation='HOLD' — these values never collide with the
+    virtual_win/virtual_loss/virtual_open values _resolve_virtual_outcomes()
+    writes for BUY/SELL/TRIM, and the existing v_rows_raw calibration query
+    only selects virtual_win/virtual_loss, so this doesn't perturb existing
+    weighting logic.
+
+    Returns the number of events resolved this call.
+    """
+    cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+    retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
+    try:
+        rows = conn.execute("""
+            SELECT id, ticker, timestamp
+            FROM ai_learning_events
+            WHERE recommendation = 'HOLD'
+              AND virtual_outcome IS NULL
+              AND timestamp < ?
+              AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
+            ORDER BY timestamp DESC LIMIT ?
+        """, (cutoff, retry_cutoff, cap)).fetchall()
+    except Exception:
+        return 0
+
+    if not rows:
+        return 0
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+
+    resolved = 0
+    for row in rows:
+        ticker = row["ticker"] or ""
+        yf_sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+        start  = row["timestamp"][:10]  # YYYY-MM-DD
+
+        try:
+            hist = yf.Ticker(yf_sym).history(start=start, interval="1d")
+            if hist.empty or len(hist) < 2:
+                conn.execute(
+                    "UPDATE ai_learning_events SET virtual_outcome='virtual_open' WHERE id=?",
+                    (row["id"],))
+                resolved += 1
+                continue
+        except Exception:
+            _mark_fetch_failed(conn, row["id"])
+            continue
+
+        entry_close = float(hist["Close"].iloc[0])
+        if entry_close <= 0:
+            continue
+        max_pct = float(((hist["Close"] - entry_close) / entry_close).abs().max())
+        outcome = "virtual_hold_miss" if max_pct >= move_threshold else "virtual_hold_correct"
+        conn.execute(
+            "UPDATE ai_learning_events SET virtual_outcome=? WHERE id=?",
+            (outcome, row["id"]))
+        resolved += 1
+
+    return resolved
+
+
+def _compute_hold_outcome_nudge(conn) -> str:
+    """Single calibration nudge token from resolved HOLD outcomes (see
+    _resolve_hold_outcomes). n>=10 resolved HOLDs required before judging;
+    >50% miss rate emits a compact ⚠HOLD_TOO_PASSIVE token. A low miss rate
+    is not flagged — correct caution isn't a problem to nudge against."""
+    row = conn.execute("""
+        SELECT
+            SUM(CASE WHEN virtual_outcome='virtual_hold_miss' THEN 1 ELSE 0 END) AS n_miss,
+            SUM(CASE WHEN virtual_outcome IN ('virtual_hold_miss','virtual_hold_correct')
+                     THEN 1 ELSE 0 END) AS n_total
+        FROM ai_learning_events
+        WHERE recommendation = 'HOLD'
+    """).fetchone()
+    n_total = row["n_total"] or 0
+    if n_total < 10:
+        return ""
+    n_miss = row["n_miss"] or 0
+    if (n_miss / n_total) > 0.5:
+        return f"⚠HOLD_TOO_PASSIVE({n_miss}/{n_total} HOLDs missed a >=8% move)"
+    return ""
 
 
 def _resolve_virtual_outcomes(conn) -> int:
@@ -2164,7 +2377,7 @@ def _compute_exemplars(conn, max_losses: int = 3, max_wins: int = 2,
     rows = conn.execute("""
         SELECT recommendation, ticker, outcome_status, realized_pnl_pct,
                holding_period_days, entry_signals_json, error_type, success_tags,
-               timestamp, sector
+               timestamp, sector, bull_case, bear_case
           FROM ai_learning_events
          WHERE was_executed = 1
            AND recommendation IN ('BUY','TOP_UP')
@@ -2205,8 +2418,16 @@ def _compute_exemplars(conn, max_losses: int = 3, max_wins: int = 2,
         else:
             tags = (r["error_type"] or "").strip()
         tag_str = f", {tags}" if tags and tags not in ("none", "") else ""
+        # Reasoning-text snippet: shows Claude its own past words next to the
+        # outcome, not just a numeric signature. bull_case is the original
+        # investment thesis (required on every BUY/TOP_UP) so it's preferred for
+        # both wins and losses; bear_case (the steelman risk, only required at
+        # confidence>=0.70) is shown for losses when present since "the risk you
+        # yourself flagged" is the more instructive line when it played out.
+        case_text = (r["bear_case"] if r["outcome_status"] != "win" and r["bear_case"] else r["bull_case"]) or ""
+        case_str = f' — "{case_text.strip()[:70]}"' if case_text.strip() else ""
         return (f"{r['recommendation']} {r['ticker']} @ {signature} → "
-                f"{pnl:+.1f}%{days_str}{tag_str}")
+                f"{pnl:+.1f}%{days_str}{tag_str}{case_str}")
 
     losses, wins = [], []
     seen_l, seen_w = set(), set()
@@ -2622,6 +2843,11 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             # Fix #18: lazy-resolve skipped trades — capped at 10, fast, idempotent.
             # Failures degrade gracefully (yfinance timeout → marks virtual_open, skipped).
             _resolve_virtual_outcomes(conn)
+            # HOLD outcome tracking: HOLD recs have no stop/target (validator's
+            # requiredUnless:'HOLD' rule), so _resolve_virtual_outcomes() never
+            # touches them — they were logged but orphaned, never calibrating
+            # the model on its own passivity. Capped at 5, idempotent.
+            _resolve_hold_outcomes(conn)
             # Sprint 37: lazy-resolve sell tag outcomes (Gap 3 + Gap 7) — capped at 5.
             _resolve_sell_outcomes(conn)
             # Sprint 70: lazily assign deterministic error_type + skill_score to
@@ -3148,6 +3374,17 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                             break  # only one driver nudge per calibration block
         except Exception:
             pass  # never let thesis-matrix errors break calibration
+
+        # HOLD outcome tracking: nudge when HOLD recs frequently miss a large
+        # move (n>=10, >50% miss rate) — the model is too passive. Continuous-
+        # metric n-gate (like _compute_thesis_drift), not a Wilson CI, since
+        # this is a single proportion rather than a win/loss comparison.
+        try:
+            _hold_nudge = _compute_hold_outcome_nudge(conn)
+            if _hold_nudge:
+                parts.append(_hold_nudge)
+        except Exception:
+            pass
 
         # ── Sprint 71 Phase 3B/3C — heavy conditional blocks (deep mode only) ──
         # These are the lowest-priority, most token-heavy lines. They are appended
@@ -3915,6 +4152,101 @@ def lessons_delete(lesson_id):
         if rows == 0:
             return jsonify({"ok": False, "error": "Lesson not found"}), 404
         return jsonify({"ok": True, "deleted": lesson_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── Lesson lifecycle scoring (Learning Loop improvement B) ───────────────────
+# Lessons are injected forever once created, never retrospectively validated —
+# a lesson from months ago, in a regime that's since shifted, could be net-
+# negative now and nobody would know. This is a read-only health check: it
+# never changes which lessons match/inject (see lessons_list() above), it only
+# surfaces whether each lesson's win rate actually improved since creation so
+# the user can prune low/negative-impact lessons manually.
+
+def _compute_lesson_effectiveness(conn, min_n_after: int = 5) -> list[dict]:
+    """For each lesson, reuse the same ticker/sector/regime OR-NULL scope-
+    matching pattern as GET /api/learning/lessons against closed
+    ai_learning_events, split into before/after buckets by the lesson's own
+    created_at. Requires n>=min_n_after in the 'after' bucket before reporting
+    a verdict (below that: insufficient_data=True — not enough trades since
+    creation to judge yet).
+
+    Returns a list sorted worst-first (most negative delta_pp), with
+    insufficient-data lessons sorted last regardless of delta.
+    """
+    lessons = conn.execute("""
+        SELECT id, ticker, sector, regime, lesson_text, created_at
+        FROM trading_lessons
+    """).fetchall()
+
+    results = []
+    for lesson in lessons:
+        clauses, vals = ["outcome_status IN ('win','loss')"], []
+        # Exact-match on scope fields (no OR-NULL fallback) — we want events
+        # that fall within this lesson's declared scope, not events with no
+        # scope data at all (those would dilute the before/after comparison,
+        # especially for sector where backfill is lazy and many rows are null).
+        if lesson["ticker"]:
+            clauses.append("ticker=?")
+            vals.append(lesson["ticker"])
+        if lesson["sector"]:
+            clauses.append("sector=?")
+            vals.append(lesson["sector"])
+        if lesson["regime"]:
+            clauses.append("regime=?")
+            vals.append(lesson["regime"])
+        where = " AND ".join(clauses)
+
+        before_row = conn.execute(f"""
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) AS wins
+              FROM ai_learning_events
+             WHERE {where} AND timestamp < ?
+        """, vals + [lesson["created_at"]]).fetchone()
+        after_row = conn.execute(f"""
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) AS wins
+              FROM ai_learning_events
+             WHERE {where} AND timestamp >= ?
+        """, vals + [lesson["created_at"]]).fetchone()
+
+        n_before = before_row["n"] or 0
+        n_after  = after_row["n"] or 0
+        wr_before = round(before_row["wins"] / n_before * 100, 1) if n_before else None
+        wr_after  = round(after_row["wins"] / n_after * 100, 1) if n_after else None
+        insufficient = n_after < min_n_after
+        delta_pp = round(wr_after - wr_before, 1) if (wr_after is not None and wr_before is not None) else None
+
+        results.append({
+            "lesson_id":          lesson["id"],
+            "lesson_text":        lesson["lesson_text"],
+            "ticker":             lesson["ticker"],
+            "sector":             lesson["sector"],
+            "regime":             lesson["regime"],
+            "created_at":         lesson["created_at"],
+            "n_before":           n_before,
+            "n_after":            n_after,
+            "win_rate_before":    wr_before,
+            "win_rate_after":     wr_after,
+            "delta_pp":           delta_pp,
+            "insufficient_data":  insufficient,
+        })
+
+    results.sort(key=lambda r: (r["insufficient_data"], r["delta_pp"] if r["delta_pp"] is not None else 0))
+    return results
+
+
+@bp.route("/api/learning/lesson-effectiveness", methods=["GET"])
+def lesson_effectiveness():
+    """Retrospective lesson health: win rate before vs after each lesson was
+    created, scoped to the lesson's own ticker/sector/regime. Sorted worst-
+    performing first. Read-only — surfaces health only, the user prunes
+    lessons manually via the existing DELETE endpoint."""
+    try:
+        with get_db() as conn:
+            results = _compute_lesson_effectiveness(conn)
+        return jsonify({"ok": True, "lessons": results})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

@@ -186,6 +186,8 @@ async function renderLearningPage(gen) {
   renderDebateStatsCard().catch(() => {});
   // Async: load trading lessons card
   renderLessonsCard().catch(() => {});
+  // Async: load calibration trend card (Learning Loop improvement E)
+  renderCalibrationTrendCard().catch(() => {});
   // Async: load sell decision tracker card (Gap 3 + Gap 7)
   renderSellOutcomesCard().catch(() => {});
   // Async: load thesis drift analytics card (Sprint 45)
@@ -432,7 +434,8 @@ function _renderLearningContent(d, brier) {
         </div>
         <div style="font-size:9px;color:var(--text-muted);margin-top:2px">Dashed line = predicted confidence · Bar = actual win rate</div>
       </div>` : ''}
-    </div>`;
+    </div>
+    <div id="ll-calib-trend-card" style="display:none"></div>`;
 
   // ── Regime performance ─────────────────────────────────────────────────────
   const regimeCard = `
@@ -637,7 +640,7 @@ function _renderLearningContent(d, brier) {
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
                 <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
-                <th style="text-align:left;padding:4px 6px" title="Claude's generation-time tags — exit driver + urgency for SELL/TRIM; win pattern tags for wins">Claude ℹ</th>
+                <th style="text-align:left;padding:4px 6px" title="Claude's generation-time tags — entry driver for BUY/TOP_UP; exit driver + urgency for SELL/TRIM; win pattern tags for wins">Claude ℹ</th>
                 <th style="padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. Sk = trigger Ollama scoring">
                   <div style="display:inline-flex;align-items:center;gap:2px">
                     <span style="width:28px;flex-shrink:0"></span>
@@ -714,7 +717,7 @@ function _renderLearningContent(d, brier) {
                 // For wins:      success_tags chips (tagged by Ollama skill scorer).
                 // For others:    em-dash placeholder.
                 const isExitRec = ['SELL','TRIM'].includes((ev.recommendation||'').toUpperCase());
-                const DRIVER_META = {
+                const EXIT_DRIVER_META = {
                   thesis_broken:      { label: 'thes broken',  color: '#dc2626' },
                   stop_triggered:     { label: 'stop hit',     color: '#ea580c' },
                   target_reached:     { label: 'target hit',   color: '#16a34a' },
@@ -725,30 +728,49 @@ function _renderLearningContent(d, brier) {
                   tax_optimisation:   { label: 'tax optim',    color: '#059669' },
                   regime_change:      { label: 'regime chg',   color: '#d97706' },
                 };
+                const ENTRY_DRIVER_META = {
+                  mean_reversion:     { label: 'mean rev',     color: '#3b82f6' },
+                  momentum_breakout:  { label: 'breakout',     color: '#f97316' },
+                  trend_pullback:     { label: 'trend pull',   color: '#16a34a' },
+                  fundamental_value:  { label: 'fundamental',  color: '#7c3aed' },
+                  macro_tailwind:     { label: 'macro',        color: '#0891b2' },
+                };
                 const URG_META = {
                   immediate: { label: 'immediate', color: '#dc2626' },
                   monitor:   { label: 'monitor',   color: '#ca8a04' },
                   routine:   { label: 'routine',   color: '#6b7280' },
                 };
+                const _chip = (key, label, color, title) =>
+                  `<span title="${title}: ${key}"
+                         style="font-size:9px;padding:1px 5px;border-radius:2px;font-weight:600;white-space:nowrap;
+                                background:${color}20;color:${color};border:1px solid ${color}66"
+                   >${label}</span>`;
                 const claudeTagsEl = (() => {
+                  // SELL/TRIM: exit driver + urgency
                   if (isExitRec && ev.sell_primary_driver) {
-                    const dm = DRIVER_META[ev.sell_primary_driver]
+                    const dm = EXIT_DRIVER_META[ev.sell_primary_driver]
                       || { label: ev.sell_primary_driver.replace(/_/g,' '), color: '#6b7280' };
                     const um = ev.sell_urgency
                       ? (URG_META[ev.sell_urgency] || { label: ev.sell_urgency, color: '#6b7280' })
                       : null;
                     return `<div style="display:flex;gap:2px;flex-wrap:wrap;align-items:center">
-                      <span title="Exit driver: ${ev.sell_primary_driver}"
-                            style="font-size:9px;padding:1px 5px;border-radius:2px;font-weight:600;white-space:nowrap;
-                                   background:${dm.color}20;color:${dm.color};border:1px solid ${dm.color}66"
-                      >${dm.label}</span>
+                      ${_chip(ev.sell_primary_driver, dm.label, dm.color, 'Exit driver')}
                       ${um ? `<span title="Urgency: ${ev.sell_urgency}"
                               style="font-size:9px;padding:1px 5px;border-radius:2px;font-weight:500;white-space:nowrap;
                                      color:${um.color};border:1px solid ${um.color}55"
                             >${um.label}</span>` : ''}
                     </div>`;
                   }
+                  // Wins: success tags take priority over entry driver chip for closed
+                  // winners (most informative once Ollama has tagged the trade).
+                  // Open wins (successTagsEl is '' = falsy) fall through to entry driver.
                   if (ev.outcome_status === 'win' && successTagsEl) return successTagsEl;
+                  // BUY/TOP_UP: entry driver (open wins and losses/breakevens land here)
+                  if (!isExitRec && ev.primary_entry_driver) {
+                    const dm = ENTRY_DRIVER_META[ev.primary_entry_driver]
+                      || { label: ev.primary_entry_driver.replace(/_/g,' '), color: '#6b7280' };
+                    return _chip(ev.primary_entry_driver, dm.label, dm.color, 'Entry driver');
+                  }
                   return `<span style="color:var(--text-muted);font-size:10px">—</span>`;
                 })();
 
@@ -2207,6 +2229,42 @@ async function renderCalibQualityCard() {
   await _fetchAndRender(false);
 }
 
+// ── Calibration trend card (Learning Loop improvement E) ─────────────────────
+// Brier score over time — answers "is the learning loop actually learning"
+// instead of only ever showing the latest snapshot. Snapshots are written
+// lazily by GET /api/learning/calibration-stats (one row/day); this card is
+// pure read via GET /api/learning/calibration-trend.
+async function renderCalibrationTrendCard() {
+  const el = document.getElementById('ll-calib-trend-card');
+  if (!el || !state.serverOk) return;
+
+  let data;
+  try {
+    const r = await fetch(`${API}/api/learning/calibration-trend`);
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  const snapshots = (data.snapshots || []).filter(s => s.brier_score != null);
+  if (snapshots.length < 2) return;  // nothing useful to chart yet
+
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="card section-gap">
+      <div class="card-title">Calibration Trend</div>
+      <p class="text-xs text-muted mb-1">
+        Brier score over time (lower = better calibrated; 0=perfect, 0.25=random).
+        One snapshot per day — shows whether the learning loop's nudges/lessons/exemplars
+        are actually sharpening confidence over time, not just the latest reading.
+      </p>
+      <canvas id="ll-calib-trend-canvas" style="width:100%;height:160px;display:block"></canvas>
+    </div>`;
+
+  if (typeof drawCalibrationTrendChart === 'function') {
+    drawCalibrationTrendChart('ll-calib-trend-canvas', snapshots);
+  }
+}
+
 // ── Trading Lessons card ──────────────────────────────────────────────────────
 // Shows all stored lessons with filter inputs. Lessons are distilled from
 // adjudicated postmortems (auto) or added manually.
@@ -2223,6 +2281,19 @@ async function renderLessonsCard() {
 
   const lessons = data.lessons || [];
 
+  // Lesson lifecycle scoring (Learning Loop improvement B) — retrospective
+  // win-rate-before-vs-after health per lesson, keyed by lesson_id. Best-
+  // effort: a failed fetch just means no health chips render, never blocks
+  // the lessons table itself.
+  let effectivenessById = {};
+  try {
+    const er = await fetch(`${API}/api/learning/lesson-effectiveness`);
+    if (er.ok) {
+      const ed = await er.json();
+      (ed.lessons || []).forEach(l => { effectivenessById[l.lesson_id] = l; });
+    }
+  } catch { /* health chips are an enhancement, not required */ }
+
   const WIN_TAG_COLORS = {
     catalyst_capture: '#3b82f6', regime_aligned: '#8b5cf6',
     confluence_entry: '#0891b2', disciplined_hold: '#059669',
@@ -2233,6 +2304,19 @@ async function renderLessonsCard() {
   const rows = lessons.map(l => {
     const scope = [l.ticker, l.sector, l.regime].filter(Boolean).join(' / ') || 'General';
     const srcColor = SOURCE_COLORS[l.source] || '#6b7280';
+    const eff = effectivenessById[l.id];
+    let healthHTML = '<span class="text-xs text-muted">—</span>';
+    if (eff) {
+      if (eff.insufficient_data) {
+        healthHTML = `<span class="text-xs text-muted" title="Needs ≥5 matching trades since creation (n=${eff.n_after})">not enough data yet</span>`;
+      } else if (eff.delta_pp != null) {
+        const up = eff.delta_pp >= 0;
+        const color = up ? 'var(--up,#16a34a)' : 'var(--down,#dc2626)';
+        healthHTML = `<span style="font-size:11px;font-weight:600;color:${color}"
+          title="Win rate ${eff.win_rate_before ?? '—'}% before → ${eff.win_rate_after}% after (n=${eff.n_before}/${eff.n_after})">
+          ${up ? '▲' : '▼'} ${eff.delta_pp >= 0 ? '+' : ''}${eff.delta_pp}pp</span>`;
+      }
+    }
     return `<tr style="border-bottom:1px solid var(--border);font-size:12px">
       <td style="padding:5px 8px;color:var(--text-muted)">${(l.created_at||'').slice(0,10)}</td>
       <td style="padding:5px 8px;font-weight:600">${escapeHTML(scope)}</td>
@@ -2240,6 +2324,7 @@ async function renderLessonsCard() {
       <td style="padding:5px 8px">
         <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${srcColor}22;color:${srcColor}">${l.source}</span>
       </td>
+      <td style="padding:5px 8px">${healthHTML}</td>
       <td style="padding:5px 8px">
         <button onclick="deleteLesson(${l.id})" title="Delete lesson"
           style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:12px;padding:2px;border-radius:3px"
@@ -2268,6 +2353,7 @@ async function renderLessonsCard() {
                 <th style="text-align:left;padding:4px 8px">Scope</th>
                 <th style="text-align:left;padding:4px 8px">Lesson</th>
                 <th style="text-align:left;padding:4px 8px">Source</th>
+                <th style="text-align:left;padding:4px 8px" title="Win rate on matching trades before vs after this lesson was created">Health</th>
                 <th style="padding:4px 8px"></th>
               </tr>
             </thead>
