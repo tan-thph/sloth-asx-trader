@@ -996,7 +996,7 @@ async function generatePostmortemDigest() {
     const d = await r.json();
     if (d.error) throw new Error(d.error);
 
-    const failures = d.recent_failures || [];
+    const agg = d.aggregates || {};
     const wr = d.overall_total > 0 ? Math.round(d.overall_wins / d.overall_total * 100) : null;
     const errorParts = (d.error_dist || []).map(e => `${e.error_type}: ${e.n}`).join(', ');
     const exitParts  = (d.exit_dist  || []).map(e => `${e.exit_reason}: ${e.n}`).join(', ');
@@ -1004,32 +1004,67 @@ async function generatePostmortemDigest() {
       .map(r => `${r.regime} ${r.win_rate != null ? r.win_rate + '% win' : ''}/${r.total} trades`)
       .join('; ');
 
-    const failureSummary = failures.slice(0, 10).map(f =>
-      `- ${f.ticker} (${f.recommendation}, ${f.regime||'?'} regime, conf ${f.ai_confidence != null ? Math.round(f.ai_confidence*100)+'%' : '?'}): ` +
-      `${f.outcome_status}, exit=${f.exit_reason||'?'}, PnL=${f.realized_pnl_pct != null ? f.realized_pnl_pct.toFixed(1)+'%' : '?'}` +
-      (f.error_type ? `, tags=${f.error_type}` : '') +
-      (f.trade_thesis ? `, thesis="${f.trade_thesis.slice(0, 60)}"` : '')
-    ).join('\n');
+    // Macro-bucket cross-tab — independent of the classified regime label.
+    // '⚑' marks buckets whose win rate is significantly off the overall rate
+    // (Wilson CI gated server-side — _ci_excludes()), so Claude doesn't treat
+    // a 7/10 fluke the same as a real divergence.
+    const macroParts = (agg.macro_bucket_stats || [])
+      .map(b => `${b.bucket}: ${b.win_rate}% (n=${b.n})${b.flagged ? ' ⚑' : ''}`)
+      .join('; ');
+
+    // Luck vs skill split — invalidated/reversed-thesis losses are process
+    // errors (fixable by a rule change); validated-thesis losses are bad
+    // variance (the read was right, the trade still lost).
+    const verdictParts = (agg.thesis_verdict_xtab || [])
+      .map(v => `${v.verdict}: ${v.win_rate}% (n=${v.n})`)
+      .join('; ');
+
+    const driverParts = (agg.driver_xtab || [])
+      .map(dr => `${dr.driver}: ${dr.win_rate}% (n=${dr.n})${dr.flagged ? ' ⚑' : ''}`)
+      .join('; ');
+
+    const skillLine = (agg.skill_score_avg?.win != null || agg.skill_score_avg?.loss != null)
+      ? `Avg skill_score — wins: ${agg.skill_score_avg.win ?? '?'}, losses: ${agg.skill_score_avg.loss ?? '?'} (0-10 process-quality score)`
+      : null;
+    const confLine = (agg.confidence_avg?.win != null || agg.confidence_avg?.loss != null)
+      ? `Avg stated confidence — wins: ${agg.confidence_avg.win != null ? Math.round(agg.confidence_avg.win * 100) + '%' : '?'}, losses: ${agg.confidence_avg.loss != null ? Math.round(agg.confidence_avg.loss * 100) + '%' : '?'}`
+      : null;
+    const exitQualityParts = Object.entries(agg.exit_quality_dist || {})
+      .map(([k, v]) => `${k}: ${v}`).join(', ');
+
+    const exemplarBlock = (d.exemplars || []).join('\n');
 
     const prompt =
-`You are reviewing my ASX trading learning loop. Here is a summary of my recent performance:
+`You are reviewing my ASX trading learning loop. This is a statistical sample of
+${agg.n || 0} recent closed trades (wins and losses both included).
 
 Overall win rate: ${wr != null ? wr + '%' : 'unknown'} (${d.overall_total} closed trades)
 Error type distribution: ${errorParts || 'none tagged'}
 Exit reason distribution: ${exitParts || 'none recorded'}
-Regime performance: ${regimeParts || 'no data'}
+Regime performance (classified label): ${regimeParts || 'no data'}
+Macro-condition performance (raw tape, independent of regime label): ${macroParts || 'insufficient data'}
+Entry-driver win rate: ${driverParts || 'insufficient data'}
+Thesis-verdict win rate (luck vs skill — see below): ${verdictParts || 'insufficient data'}
+${skillLine || ''}
+${confLine || ''}
+Exit-quality tag distribution (closed SELL/TRIM only): ${exitQualityParts || 'none tagged'}
 
-Recent losses/breakevens (up to 10):
-${failureSummary || 'No recent failures to analyse.'}
+Curated examples (worst losses, best wins, process failures, validated stop-widening
+evidence, early-exit drag cases — entry→exit technicals, macro tape, and my own
+bull/bear case at the time):
+${exemplarBlock || 'No exemplars available yet.'}
 
-Please write a concise postmortem digest (under 250 words) in plain text. Structure it as:
-1. The 1-2 most recurring failure patterns you see
-2. One or two specific adjustments I should make (rules, filters, or process changes)
-3. The regime(s) where performance is weakest and what that suggests
+Please write a concise postmortem digest (under 320 words) in plain text. Structure it as:
+1. The 2-3 most recurring patterns, each citing the specific stat above that supports it —
+   do not state a pattern that isn't backed by one of these numbers.
+2. Luck vs skill: based on the thesis-verdict win rates, how much of any recent drawdown
+   is process error (invalidated/reversed thesis — fixable) vs bad variance (validated
+   thesis, still lost — not fixable by a rule change)?
+3. Any macro/regime-conditional pattern (cite a ⚑-flagged bucket if one exists; if none
+   are flagged, say so plainly rather than inventing one).
+4. One or two concrete, specific rule/threshold changes to make — no generic advice.`;
 
-Be direct, specific, and actionable. No generic advice.`;
-
-    const text = await callClaude('assistant', prompt, { maxTokens: 600, noCache: true });
+    const text = await callClaude('assistant', prompt, { maxTokens: 700, noCache: true });
     const dateStr = new Date().toLocaleDateString('en-AU');
     out.innerHTML = `
       <div style="border-top:1px solid var(--border);padding-top:10px">

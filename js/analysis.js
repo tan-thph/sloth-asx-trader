@@ -1839,8 +1839,22 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
   }
   const _promptHash = _hash.toString(16).padStart(8, '0').slice(0, 12);
 
-  // Capture market context once per analysis run
-  const _mktCtx = { rba_rate: typeof state.rbaRate === 'number' ? state.rbaRate : null };
+  // Capture market context once per analysis run. Macro fields ride this existing
+  // JSON bucket (no new column) so the postmortem digest can later answer
+  // "do I lose more when SPI futures are negative / vol is high / breadth is weak"
+  // independent of the classified regime label — _md.* is whatever GET /api/macro
+  // last populated state.macroData with; all null-safe since macro fetch is best-effort.
+  const _md = state.macroData || {};
+  const _mktCtx = {
+    rba_rate:              typeof state.rbaRate === 'number' ? state.rbaRate : null,
+    asx200_chg:            _md.asx200?.change_pct ?? null,
+    aud_usd_chg:           _md.aud_usd?.change_pct ?? null,
+    gold_chg:              _md.gold?.change_pct ?? null,
+    iron_ore_chg:          _md.iron_ore?.change_pct ?? null,
+    spi200_futures_chg:    _md.spi200_futures_chg ?? null,
+    asx_vol_20d:           _md.asx_vol_20d ?? null,
+    advance_decline_ratio: _md.advance_decline_ratio ?? null,
+  };
   // §9.3: max |ρ| vs holdings at generation time — lets later analysis answer
   // "do high-correlation entries underperform?" from the learning DB.
   const _corrM = window._lastCorrMatrix || {};

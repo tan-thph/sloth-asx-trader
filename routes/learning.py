@@ -1778,25 +1778,232 @@ def learning_debate_stats():
     })
 
 
+_DIGEST_MIN_N = 6  # minimum bucket/cell size before a cross-tab cell is reported —
+                    # same small-n suppression philosophy as _ESS_MIN elsewhere (gotcha #42):
+                    # a "pattern" computed off 2-3 trades is sampling noise, not signal.
+
+
+def _compute_digest_aggregates(rows: list[dict]) -> dict:
+    """Pure cross-tab aggregation over the digest's closed-trade sample.
+
+    `rows` are dict-like sqlite Rows already fetched by the caller (one query,
+    reused for both these aggregates and exemplar selection — see
+    learning_digest_data()). Every cross-tab cell is gated at n>=_DIGEST_MIN_N;
+    macro-bucket and driver cells are additionally CI-flagged (via _ci_excludes)
+    when they're significantly off the overall win rate, so the digest prompt
+    can distinguish "this is a real divergence" from "this is just noise."
+    """
+    n_total = len(rows)
+    if n_total == 0:
+        return {"n": 0}
+
+    n_wins = sum(1 for r in rows if r["outcome_status"] == "win")
+    overall_wr = n_wins / n_total
+
+    # ── Macro-bucket cross-tab: win rate vs the CLASSIFIED regime ignores the
+    # raw macro tape. A trade can be tagged "trend" regardless of whether SPI
+    # futures were up or down that morning — this answers "does it matter
+    # independent of the label?" Buckets derived from market_context JSON
+    # (gotcha: this field only carries macro data on events logged after this
+    # feature shipped — older rows have it null/partial, which is fine, they
+    # just don't contribute to these specific buckets).
+    buckets: dict = {}
+    for r in rows:
+        try:
+            mc = json.loads(r["market_context"]) if r["market_context"] else {}
+        except Exception:
+            mc = {}
+        spi = mc.get("spi200_futures_chg")
+        vol = mc.get("asx_vol_20d")
+        adl = mc.get("advance_decline_ratio")
+        if isinstance(spi, (int, float)):
+            buckets.setdefault(f"spi_{'pos' if spi >= 0 else 'neg'}", []).append(r)
+        if isinstance(vol, (int, float)):
+            buckets.setdefault(f"vol_{'high' if vol >= 18 else 'low'}", []).append(r)
+        if isinstance(adl, (int, float)):
+            buckets.setdefault(f"breadth_{'above50' if adl >= 0.5 else 'below50'}", []).append(r)
+
+    macro_bucket_stats = []
+    for label, brows in buckets.items():
+        n = len(brows)
+        if n < _DIGEST_MIN_N:
+            continue
+        wins = sum(1 for r in brows if r["outcome_status"] == "win")
+        macro_bucket_stats.append({
+            "bucket": label, "n": n,
+            "win_rate": round(wins / n * 100, 1),
+            "flagged": _ci_excludes(wins, n, overall_wr),
+        })
+    macro_bucket_stats.sort(key=lambda x: -x["n"])
+
+    # ── thesis_verdict × outcome — the luck-vs-skill split. invalidated/reversed
+    # losses are process errors (the read on the setup was wrong, fixable);
+    # validated losses are bad variance (the thesis held, the trade still lost —
+    # not something a rule change fixes). See gotcha #59 for the verdict taxonomy.
+    verdict_counts: dict = {}
+    for r in rows:
+        v = r["thesis_verdict"] or "unresolved"
+        d = verdict_counts.setdefault(v, {"n": 0, "wins": 0})
+        d["n"] += 1
+        if r["outcome_status"] == "win":
+            d["wins"] += 1
+    thesis_verdict_xtab = [
+        {"verdict": v, "n": d["n"], "win_rate": round(d["wins"] / d["n"] * 100, 1)}
+        for v, d in verdict_counts.items() if d["n"] >= 3 and v != "unresolved"
+    ]
+
+    # ── skill_score / ai_confidence avg, win vs loss — is the model's own
+    # process-quality self-score and its stated conviction actually tracking
+    # the outcome, or flat across both buckets (i.e. not discriminating)?
+    def _avg(vals):
+        return round(sum(vals) / len(vals), 2) if len(vals) >= 3 else None
+
+    skill_win  = [r["skill_score"] for r in rows if r["outcome_status"] == "win" and r["skill_score"] is not None]
+    skill_loss = [r["skill_score"] for r in rows if r["outcome_status"] in ("loss", "breakeven") and r["skill_score"] is not None]
+    conf_win   = [r["ai_confidence"] for r in rows if r["outcome_status"] == "win" and r["ai_confidence"] is not None]
+    conf_loss  = [r["ai_confidence"] for r in rows if r["outcome_status"] in ("loss", "breakeven") and r["ai_confidence"] is not None]
+
+    # ── exit_quality_tag distribution — systemic early-exit/panic-exit detection
+    # across the whole sample, not just the single existing nudge (gotcha #64).
+    exit_quality_dist: dict = {}
+    for r in rows:
+        t = r["exit_quality_tag"]
+        if t:
+            exit_quality_dist[t] = exit_quality_dist.get(t, 0) + 1
+
+    # ── entry-driver win rate (primary_entry_driver, BUY/TOP_UP only by construction)
+    driver_counts: dict = {}
+    for r in rows:
+        dr = r["primary_entry_driver"]
+        if not dr:
+            continue
+        d = driver_counts.setdefault(dr, {"n": 0, "wins": 0})
+        d["n"] += 1
+        if r["outcome_status"] == "win":
+            d["wins"] += 1
+    driver_xtab = [
+        {"driver": dr, "n": d["n"], "win_rate": round(d["wins"] / d["n"] * 100, 1),
+         "flagged": _ci_excludes(d["wins"], d["n"], overall_wr)}
+        for dr, d in driver_counts.items() if d["n"] >= _DIGEST_MIN_N
+    ]
+    driver_xtab.sort(key=lambda x: -x["n"])
+
+    return {
+        "n": n_total,
+        "overall_win_rate":  round(overall_wr * 100, 1),
+        "macro_bucket_stats": macro_bucket_stats,
+        "thesis_verdict_xtab": thesis_verdict_xtab,
+        "skill_score_avg":   {"win": _avg(skill_win), "loss": _avg(skill_loss)},
+        "confidence_avg":    {"win": _avg(conf_win),  "loss": _avg(conf_loss)},
+        "exit_quality_dist": exit_quality_dist,
+        "driver_xtab":       driver_xtab,
+    }
+
+
+def _format_digest_exemplar(row: dict) -> str:
+    """Render one curated trade as a compact, information-dense line for the
+    digest prompt: action/ticker/regime/macro context, entry→exit technical
+    delta, tags, P&L, and a short bull/bear-case quote (mirrors the reasoning-
+    text exemplar pattern already used in deep calibration — gotcha #47)."""
+    def _j(raw):
+        try:
+            return json.loads(raw) if raw else {}
+        except Exception:
+            return {}
+
+    entry = _j(row.get("entry_signals_json"))
+    exitd = _j(row.get("exit_signals_json"))
+    mc    = _j(row.get("market_context"))
+
+    def _n(v, suffix=""):
+        return f"{v}{suffix}" if isinstance(v, (int, float)) else "?"
+
+    tech = (f"RSI {_n(entry.get('rsi_14'))}→{_n(exitd.get('rsi_14'))}, "
+            f"BB%b {_n(entry.get('bb_pct_b'))}→{_n(exitd.get('bb_pct_b'))}")
+    macro = (f"SPI{_n(mc.get('spi200_futures_chg'), '%')} "
+             f"vol{_n(mc.get('asx_vol_20d'))} "
+             f"breadth{_n(mc.get('advance_decline_ratio'))}")
+    tags = ",".join(t for t in [row.get("error_type"), row.get("success_tags"),
+                                 row.get("thesis_verdict"), row.get("exit_quality_tag")] if t)
+    case_text = (row.get("bear_case") if row.get("outcome_status") != "win" and row.get("bear_case")
+                 else row.get("bull_case")) or ""
+    case_str = f' — "{case_text.strip()[:70]}"' if case_text.strip() else ""
+
+    pnl = row.get("realized_pnl_pct")
+    pnl_str = f"{pnl:+.1f}%" if isinstance(pnl, (int, float)) else "?"
+    days = row.get("holding_period_days")
+    days_str = f" in {days}d" if days else ""
+
+    return (f"- {row.get('ticker')} ({row.get('recommendation') or '?'}, "
+            f"{row.get('regime') or '?'} regime, {macro}): {pnl_str}{days_str}. "
+            f"Tech {tech}. Tags: {tags or 'none'}{case_str}")
+
+
+def _select_digest_exemplars(rows: list[dict], cap: int = 15) -> list[dict]:
+    """Hand-pick the most instructive trades from the sample rather than a
+    blind top-N-by-recency: worst losses, best wins, process failures
+    (thesis invalidated/reversed), validated stop-widening evidence
+    (stop_cf_saved), and early-exit-drag cases. Capped well below the full
+    fetch (~150) because these go verbatim into the LLM prompt body — see
+    the digest design note: aggregate over many, show the model only a few
+    rich examples."""
+    by_id = {}
+
+    def _take(candidates, n):
+        for r in candidates[:n]:
+            by_id[r["id"]] = r
+
+    losses = [r for r in rows if r["outcome_status"] in ("loss", "breakeven")
+              and isinstance(r["realized_pnl_pct"], (int, float))]
+    losses.sort(key=lambda r: r["realized_pnl_pct"])
+    _take(losses, 5)
+
+    wins = [r for r in rows if r["outcome_status"] == "win"
+            and isinstance(r["realized_pnl_pct"], (int, float))]
+    wins.sort(key=lambda r: -r["realized_pnl_pct"])
+    _take(wins, 3)
+
+    process_fail = [r for r in rows if r["thesis_verdict"] in ("invalidated", "reversed")]
+    _take(process_fail, 3)
+
+    stop_saved = [r for r in rows if r["stop_cf_saved"] == 1]
+    _take(stop_saved, 3)
+
+    early_exit = [r for r in rows if r["exit_quality_tag"] == "exit_into_strength"
+                  and isinstance(r["sell_verify_sold_chg"], (int, float))
+                  and r["sell_verify_sold_chg"] >= 3]
+    _take(early_exit, 3)
+
+    return list(by_id.values())[:cap]
+
+
 @bp.route("/api/learning/digest-data")
 def learning_digest_data():
-    """Structured data for the postmortem digest AI prompt.
+    """Structured data for the AI Postmortem Digest prompt.
 
-    Returns recent closed losses + breakevens, failure pattern counts,
-    and regime win-rate breakdown so the frontend can build a Claude prompt.
+    Pulls up to 150 recent closed trades (wins included — you can't separate
+    luck from skill or see what's working if the sample is loss-only) with
+    full technical/macro/tag context, computes CI-gated cross-tab aggregates
+    over the whole sample, and hand-picks ~15 rich exemplars for the prompt
+    body. See CLAUDE.md "AI Postmortem Digest" for the full design rationale.
     """
     try:
         with get_db() as conn:
-            failures = conn.execute("""
-                SELECT ticker, regime, ai_confidence, recommendation,
-                       outcome_status, realized_pnl_pct, exit_reason,
-                       error_type, trade_thesis, timestamp, debate_summary, tags
+            rows = conn.execute("""
+                SELECT id, ticker, sector, regime, regime_at_execution, ai_confidence,
+                       ensemble_confidence, recommendation, outcome_status,
+                       realized_pnl_pct, realized_pnl_aud, holding_period_days,
+                       exit_reason, error_type, success_tags, primary_entry_driver,
+                       thesis_verdict, sell_primary_driver, sell_urgency, skill_score,
+                       mae_pct, mfe_pct, rr_ratio, trade_thesis, bull_case, bear_case,
+                       entry_signals_json, exit_signals_json, market_context, timestamp,
+                       prompt_version, stop_cf_saved, exit_quality_tag, sell_verify_sold_chg
                 FROM ai_learning_events
-                WHERE outcome_status IN ('loss', 'breakeven')
-                  AND was_executed = 1
+                WHERE outcome_status IN ('win','loss','breakeven') AND was_executed = 1
                 ORDER BY timestamp DESC
-                LIMIT 20
+                LIMIT 150
             """).fetchall()
+            rows = [dict(r) for r in rows]
 
             regime_rows = conn.execute("""
                 SELECT regime,
@@ -1806,13 +2013,6 @@ def learning_digest_data():
                 WHERE outcome_status IN ('win','loss','breakeven') AND was_executed=1
                 GROUP BY regime
             """).fetchall()
-
-            overall = conn.execute("""
-                SELECT SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) as wins,
-                       COUNT(*) as total
-                FROM ai_learning_events
-                WHERE outcome_status IN ('win','loss','breakeven') AND was_executed=1
-            """).fetchone()
 
             error_dist = conn.execute("""
                 SELECT error_type, COUNT(*) as n
@@ -1841,14 +2041,22 @@ def learning_digest_data():
             }
             for r in regime_rows
         ]
+        overall_total = sum(r["total"] for r in regime_rows)
+        overall_wins  = sum(r["wins"] for r in regime_rows)
+
+        aggregates = _compute_digest_aggregates(rows)
+        exemplar_rows = _select_digest_exemplars(rows)
+        exemplars = [_format_digest_exemplar(r) for r in exemplar_rows]
 
         return jsonify({
-            "recent_failures": [dict(r) for r in failures],
-            "regime_stats": regime_stats,
-            "overall_wins": overall["wins"] if overall else 0,
-            "overall_total": overall["total"] if overall else 0,
-            "error_dist": [dict(r) for r in error_dist],
-            "exit_dist": [dict(r) for r in exit_dist],
+            "n_sample":           len(rows),
+            "regime_stats":       regime_stats,
+            "overall_wins":       overall_wins,
+            "overall_total":      overall_total,
+            "error_dist":         [dict(r) for r in error_dist],
+            "exit_dist":          [dict(r) for r in exit_dist],
+            "aggregates":         aggregates,
+            "exemplars":          exemplars,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

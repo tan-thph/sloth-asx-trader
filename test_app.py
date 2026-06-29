@@ -1565,14 +1565,16 @@ class TestSprint5(unittest.TestCase):
         resp = self.client.get("/api/learning/digest-data")
         self.assertEqual(resp.status_code, 200)
         d = json.loads(resp.data)
-        self.assertIn("recent_failures", d)
         self.assertIn("regime_stats", d)
         self.assertIn("error_dist", d)
         self.assertIn("exit_dist", d)
-        self.assertIsInstance(d["recent_failures"], list)
+        self.assertIn("aggregates", d)
+        self.assertIn("exemplars", d)
+        self.assertIsInstance(d["exemplars"], list)
+        self.assertEqual(d["aggregates"]["n"], 0)
 
     def test_learning_digest_data_with_losses(self):
-        """GET /api/learning/digest-data includes recent loss events."""
+        """GET /api/learning/digest-data includes recent loss events as exemplars."""
         # Seed a loss event
         self.client.post(
             "/api/learning/log",
@@ -1594,8 +1596,119 @@ class TestSprint5(unittest.TestCase):
         resp = self.client.get("/api/learning/digest-data")
         self.assertEqual(resp.status_code, 200)
         d = json.loads(resp.data)
-        tickers = [f["ticker"] for f in d["recent_failures"]]
-        self.assertIn("TLS.AX", tickers)
+        self.assertTrue(any("TLS.AX" in e for e in d["exemplars"]))
+        # Shared in-memory DB across this class's tests — other closed events
+        # may already exist, so just assert at least this one is counted.
+        self.assertGreaterEqual(d["aggregates"]["n"], 1)
+
+    def test_learning_digest_data_includes_wins(self):
+        """The digest sample must include wins, not just losses/breakevens —
+        you can't separate luck from skill on a loss-only sample."""
+        self.client.post(
+            "/api/learning/log",
+            data=json.dumps({"ticker": "BHP.AX", "event_type": "recommendation",
+                             "recommendation": "BUY", "ai_confidence": 0.80}),
+            content_type="application/json",
+        )
+        row = _get_shared_conn().execute(
+            "SELECT id FROM ai_learning_events WHERE ticker='BHP.AX'"
+        ).fetchone()
+        self.client.post(
+            "/api/learning/outcome",
+            data=json.dumps({"id": row["id"], "outcome_status": "win",
+                             "was_executed": 1, "realized_pnl_pct": 8.5,
+                             "exit_reason": "target_hit"}),
+            content_type="application/json",
+        )
+        resp = self.client.get("/api/learning/digest-data")
+        d = json.loads(resp.data)
+        self.assertTrue(any("BHP.AX" in e for e in d["exemplars"]))
+
+    def test_digest_aggregates_macro_bucket_gated_by_min_n(self):
+        """Macro-bucket cells with fewer than _DIGEST_MIN_N trades must not
+        appear in aggregates — a 2-trade 'pattern' is noise, not signal."""
+        from routes.learning import _compute_digest_aggregates
+        rows = [
+            {"outcome_status": "win", "market_context": json.dumps({"spi200_futures_chg": 0.5}),
+             "thesis_verdict": None, "skill_score": None, "ai_confidence": None,
+             "exit_quality_tag": None, "primary_entry_driver": None}
+            for _ in range(2)
+        ]
+        agg = _compute_digest_aggregates(rows)
+        self.assertEqual(agg["macro_bucket_stats"], [])
+
+    def test_digest_aggregates_macro_bucket_reported_above_min_n(self):
+        """A macro bucket with n>=_DIGEST_MIN_N trades must be reported."""
+        from routes.learning import _compute_digest_aggregates
+        rows = [
+            {"outcome_status": "win" if i % 2 == 0 else "loss",
+             "market_context": json.dumps({"spi200_futures_chg": 0.5}),
+             "thesis_verdict": None, "skill_score": None, "ai_confidence": None,
+             "exit_quality_tag": None, "primary_entry_driver": None}
+            for i in range(8)
+        ]
+        agg = _compute_digest_aggregates(rows)
+        self.assertEqual(len(agg["macro_bucket_stats"]), 1)
+        self.assertEqual(agg["macro_bucket_stats"][0]["bucket"], "spi_pos")
+        self.assertEqual(agg["macro_bucket_stats"][0]["n"], 8)
+
+    def test_digest_aggregates_thesis_verdict_luck_vs_skill(self):
+        """thesis_verdict x outcome cross-tab must split invalidated vs validated."""
+        from routes.learning import _compute_digest_aggregates
+        rows = (
+            [{"outcome_status": "loss", "market_context": None, "thesis_verdict": "invalidated",
+              "skill_score": None, "ai_confidence": None, "exit_quality_tag": None,
+              "primary_entry_driver": None} for _ in range(3)]
+            + [{"outcome_status": "loss", "market_context": None, "thesis_verdict": "validated",
+                "skill_score": None, "ai_confidence": None, "exit_quality_tag": None,
+                "primary_entry_driver": None} for _ in range(3)]
+        )
+        agg = _compute_digest_aggregates(rows)
+        verdicts = {v["verdict"]: v["win_rate"] for v in agg["thesis_verdict_xtab"]}
+        self.assertEqual(verdicts["invalidated"], 0.0)
+        self.assertEqual(verdicts["validated"], 0.0)
+
+    def test_digest_exemplar_selection_picks_worst_losses_and_best_wins(self):
+        """_select_digest_exemplars must surface the worst losses and best wins,
+        not just the most recent rows."""
+        from routes.learning import _select_digest_exemplars
+        rows = [
+            {"id": 1, "outcome_status": "loss", "realized_pnl_pct": -1.0,
+             "thesis_verdict": None, "stop_cf_saved": 0, "exit_quality_tag": None,
+             "sell_verify_sold_chg": None},
+            {"id": 2, "outcome_status": "loss", "realized_pnl_pct": -15.0,
+             "thesis_verdict": None, "stop_cf_saved": 0, "exit_quality_tag": None,
+             "sell_verify_sold_chg": None},
+            {"id": 3, "outcome_status": "win", "realized_pnl_pct": 2.0,
+             "thesis_verdict": None, "stop_cf_saved": 0, "exit_quality_tag": None,
+             "sell_verify_sold_chg": None},
+            {"id": 4, "outcome_status": "win", "realized_pnl_pct": 20.0,
+             "thesis_verdict": None, "stop_cf_saved": 0, "exit_quality_tag": None,
+             "sell_verify_sold_chg": None},
+        ]
+        picked = _select_digest_exemplars(rows, cap=15)
+        picked_ids = {r["id"] for r in picked}
+        self.assertIn(2, picked_ids)  # worst loss
+        self.assertIn(4, picked_ids)  # best win
+
+    def test_digest_exemplar_format_includes_macro_and_case_text(self):
+        """_format_digest_exemplar must render macro context and a bull/bear case snippet."""
+        from routes.learning import _format_digest_exemplar
+        row = {
+            "ticker": "CBA.AX", "recommendation": "BUY", "regime": "trend",
+            "outcome_status": "loss", "realized_pnl_pct": -3.5, "holding_period_days": 12,
+            "entry_signals_json": json.dumps({"rsi_14": 65, "bb_pct_b": 0.8}),
+            "exit_signals_json": json.dumps({"rsi_14": 40, "bb_pct_b": 0.2}),
+            "market_context": json.dumps({"spi200_futures_chg": -0.8, "asx_vol_20d": 22, "advance_decline_ratio": 0.3}),
+            "error_type": "thesis_broken", "success_tags": None,
+            "thesis_verdict": "invalidated", "exit_quality_tag": None,
+            "bull_case": "rate cuts coming", "bear_case": "valuation stretched",
+        }
+        line = _format_digest_exemplar(row)
+        self.assertIn("CBA.AX", line)
+        self.assertIn("SPI", line)
+        self.assertIn("-3.5%", line)
+        self.assertIn("valuation stretched", line)  # bear_case used since outcome is a loss
 
     def test_eofy_pack_returns_zip(self):
         """GET /api/tax/eofy-pack returns a zip file."""
