@@ -1348,12 +1348,14 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       if (a === 'BUY' || a === 'TOP_UP') sameDayBoughtToday.add(pend.ticker);
       if (a === 'SELL' || a === 'TRIM')  sameDaySoldToday.add(pend.ticker);
     }
-    const batchBuys  = new Set();
-    const batchSells = new Set();
+    const batchBuys      = new Set();
+    const batchSells     = new Set(); // SELL + TRIM (BUY/SELL same-day conflict guard)
+    const batchSellsOnly = new Set(); // SELL only (TRIM suppression — full exit beats partial)
     for (const r of filteredRecs) {
       const a = (r.action || '').toUpperCase();
       if (a === 'BUY' || a === 'TOP_UP') batchBuys.add(r.ticker);
       if (a === 'SELL' || a === 'TRIM')  batchSells.add(r.ticker);
+      if (a === 'SELL')                  batchSellsOnly.add(r.ticker);
     }
     let sameDayConflictDropped = 0;
     const conflictFreeRecs = filteredRecs.filter(r => {
@@ -1437,7 +1439,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     const dedupedRecs = newRecs.filter(r => {
       if (r.action !== 'TRIM' && r.action !== 'TOP_UP') return true;
       // SELL+TRIM conflict: drop the TRIM when a SELL exists for the same ticker.
-      if (r.action === 'TRIM' && batchSells.has(r.ticker)) {
+      if (r.action === 'TRIM' && batchSellsOnly.has(r.ticker)) {
         console.warn(`[dedup] Suppressing TRIM ${r.ticker} — SELL also present in this batch (full exit takes priority)`);
         dupsSuppressed++;
         return false;
