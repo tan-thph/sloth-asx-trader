@@ -529,6 +529,9 @@ function _buildRecCardHTML(r, opts) {
   const execFee = r._execFee != null ? r._execFee : fees;
 
   const _warns = Array.isArray(r._ruleWarnings) ? r._ruleWarnings : [];
+  const failedRulesBadge = _warns.length
+    ? `<span class="badge" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;font-weight:700;font-size:10px" title="${escapeHTML(_warns.join(' | '))}">⚠ ${_warns.length} rule${_warns.length !== 1 ? 's' : ''}</span>`
+    : '';
 
   // ── Header ────────────────────────────────────────────────────────────────
   const headerHTML = isHistory ? `
@@ -563,9 +566,6 @@ function _buildRecCardHTML(r, opts) {
     </div>`;
 
   // ── Failed-rule chip (collapsed; click to see error details) ────────────────
-  const failedRulesBadge = _warns.length
-    ? `<span class="badge" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;font-weight:700;font-size:10px" title="${escapeHTML(_warns.join(' | '))}">⚠ ${_warns.length} rule${_warns.length !== 1 ? 's' : ''}</span>`
-    : '';
   const failedRulesHTML = _warns.length ? `
     <details style="margin-top:8px">
       <summary style="cursor:pointer;font-size:11px;font-weight:700;color:#dc2626;padding:4px 10px;border-radius:var(--radius-md);background:var(--down-bg,rgba(220,38,38,0.08));border:1px solid rgba(220,38,38,0.35);display:inline-flex;align-items:center;gap:5px;list-style:none;user-select:none">
