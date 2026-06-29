@@ -566,15 +566,18 @@ function _buildRecCardHTML(r, opts) {
     </div>`;
 
   // ── Failed-rule chip (collapsed; click to see error details) ────────────────
+  // Note: <details>/<summary> with display:inline-flex breaks Chrome/Firefox disclosure
+  // widget — use a button + hidden div toggle instead.
   const failedRulesHTML = _warns.length ? `
-    <details style="margin-top:8px">
-      <summary style="cursor:pointer;font-size:11px;font-weight:700;color:#dc2626;padding:4px 10px;border-radius:var(--radius-md);background:var(--down-bg,rgba(220,38,38,0.08));border:1px solid rgba(220,38,38,0.35);display:inline-flex;align-items:center;gap:5px;list-style:none;user-select:none">
-        ⚠ Failed ${_warns.length} rule${_warns.length !== 1 ? 's' : ''}
-      </summary>
-      <ul style="margin:5px 0 4px 16px;font-size:11.5px;color:var(--text-secondary);line-height:1.55">
+    <div style="margin-top:8px">
+      <button onclick="var u=this.nextElementSibling;u.style.display=u.style.display==='block'?'none':'block';this.querySelector('.frh-arrow').textContent=u.style.display==='block'?'▾':'▸'"
+              style="cursor:pointer;font-size:11px;font-weight:700;color:#dc2626;padding:4px 10px;border-radius:var(--radius-md);background:var(--down-bg,rgba(220,38,38,0.08));border:1px solid rgba(220,38,38,0.35);display:inline-flex;align-items:center;gap:5px;user-select:none">
+        ⚠ Failed ${_warns.length} rule${_warns.length !== 1 ? 's' : ''} <span class="frh-arrow">▸</span>
+      </button>
+      <ul style="display:none;margin:6px 0 4px 16px;font-size:11.5px;color:var(--text-secondary);line-height:1.55">
         ${_warns.map(w => `<li>${escapeHTML(w)}</li>`).join('')}
       </ul>
-    </details>` : '';
+    </div>` : '';
 
   // ── Parcel metadata row (SELL/TRIM, when parcel data present) ────────────
   const parcelMetaHTML = (isReducing && r._parcelLabel) ? (() => {
