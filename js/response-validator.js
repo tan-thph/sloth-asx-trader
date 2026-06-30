@@ -152,6 +152,10 @@ function validateSellTags(rec, ctx) {
   // a silent, mechanical correction (no model regeneration needed) — same
   // pattern as the Fix #40 early-return above.
   const { kept: secondary, dropped: groundTruthDropped } = _groundTruthFilterSecondary(rawSecondary, ctx);
+  // groundTruthUngrounded: true when stripping left the primary driver without its
+  // required evidence — used below to suppress the redundant required-secondary check
+  // (same root cause, only one user-facing message needed).
+  let groundTruthUngrounded = false;
   if (groundTruthDropped.length) {
     const needed = SELL_REQUIRED_SECONDARY[rec.primary_driver];
     const stillGrounded = !needed || needed.some(t => secondary.includes(t));
@@ -162,10 +166,19 @@ function validateSellTags(rec, ctx) {
         repaired: { ...rec, secondary_factors: secondary, _groundTruthTagsDropped: groundTruthDropped },
       };
     }
-    // Stripping leaves primary_driver without its required grounding — this is
-    // a real reasoning problem (the model needs a different primary_driver or
-    // different evidence), not a mechanical typo, so surface it for review.
-    errors.push(`secondary_factors tag(s) not supported by actual portfolio data: ${groundTruthDropped.join(', ')} — removing them leaves primary_driver "${rec.primary_driver}" without its required secondary factor`);
+    // Stripping leaves primary_driver without its required grounding — flag for
+    // user review with a plain-English message (no internal tag names / JSON paths).
+    groundTruthUngrounded = true;
+    const _GT_LABELS = {
+      position_oversized:    'position not oversized (≤10% of portfolio)',
+      sector_concentration:  'sector not overconcentrated (≤15% of portfolio)',
+      unrealised_loss_large: 'unrealised loss too small (above −$200)',
+      held_over_12m:         'holding under 12 months',
+      held_11_to_12m:        'holding is not in the 11–12 month CGT window',
+    };
+    const droppedLabels = groundTruthDropped.map(t => _GT_LABELS[t] || t).join('; ');
+    const driverLabel = (rec.primary_driver || 'unknown').replace(/_/g, ' ');
+    errors.push(`AI cited "${driverLabel}" but actual data doesn't support it: ${droppedLabels} — retry or skip`);
   }
 
   // ── primary_driver: required, must be in closed vocabulary ─────────────────
@@ -204,10 +217,14 @@ function validateSellTags(rec, ctx) {
   }
 
   // ── required secondary for certain primaries ───────────────────────────────
-  if (rec.primary_driver && SELL_REQUIRED_SECONDARY[rec.primary_driver]) {
+  // Skip when groundTruthUngrounded already captured the same problem above
+  // (double-firing both messages for one root cause confuses the user).
+  if (!groundTruthUngrounded && rec.primary_driver && SELL_REQUIRED_SECONDARY[rec.primary_driver]) {
     const needed = SELL_REQUIRED_SECONDARY[rec.primary_driver];
     if (!needed.some(t => secondary.includes(t))) {
-      errors.push(`primary_driver "${rec.primary_driver}" requires at least one of: ${needed.join(', ')} in secondary_factors`);
+      const driverLabel = rec.primary_driver.replace(/_/g, ' ');
+      const neededLabels = needed.map(t => t.replace(/_/g, ' ')).join(' or ');
+      errors.push(`"${driverLabel}" requires supporting evidence (${neededLabels}) — add one of these as a secondary factor`);
     }
   }
 

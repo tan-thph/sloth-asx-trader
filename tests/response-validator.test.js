@@ -403,6 +403,33 @@ describe('validateSellTags — ground-truth numeric checks', () => {
     expect(fixed).toBeNull();
   });
 
+  it('ground-truth ungrounded: emits exactly one user-facing error with no internal tag names', () => {
+    // Regression: previously emitted two errors — one from the ground-truth block
+    // and one from the required-secondary check — for the same root cause.
+    // Also verifies the message uses plain English, not "secondary_factors"/"primary_driver" jargon.
+    const ctx = { holding: { weightPct: 1.8, sectorWeightPct: 7.2, unrealisedPnl: 30, daysHeld: 2 } };
+    const { valid, errors, fixed } = validateRec(makeRec({
+      action:            'TRIM',
+      priceRange:        [114.0, 114.5],
+      target:            108.0,
+      stopLoss:          118.0,
+      rrRatio:           2.0,
+      primary_driver:    'risk_management',
+      secondary_factors: ['position_oversized'],
+      urgency:           'routine',
+      reasoning:         'Risk management trim — position oversized relative to risk tolerance.',
+    }), ctx);
+    expect(valid).toBe(false);
+    expect(fixed).toBeNull();
+    // Exactly one error — no double-fire from redundant required-secondary check
+    expect(errors).toHaveLength(1);
+    // Message must be user-readable — no internal jargon
+    expect(errors[0]).not.toMatch(/secondary_factors/);
+    expect(errors[0]).not.toMatch(/primary_driver/);
+    expect(errors[0]).toMatch(/position not oversized/);
+    expect(errors[0]).toMatch(/risk management/);
+  });
+
   it('silently repairs when a grounded tag remains after stripping the bad one', () => {
     const ctx = { holding: { weightPct: 1.8, sectorWeightPct: 25, unrealisedPnl: 30, daysHeld: 2 } };
     const { valid, errors, fixed } = validateRec(makeRec({
