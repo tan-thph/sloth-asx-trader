@@ -290,7 +290,7 @@ function _splitParcelJournalRow(parentParcel, newParcel, newParcelFees) {
     parentRow.qty = parentParcel.remainingQty;
   }
   state.tradeJournal.unshift({
-    id: Date.now(), date: newParcel.date || todayStr(), timestamp: nowSydney(),
+    id: nextJournalId(), date: newParcel.date || todayStr(), timestamp: nowSydney(),
     ticker: newParcel.ticker, action: 'BUY',
     qty: newParcel.remainingQty, entryPrice: newParcel.costPerShare,
     exitPrice: null, fees: newParcelFees || 0, pnl: null, status: 'open',
@@ -425,7 +425,7 @@ function _syncParcelJournalRow(parcel, newAccount) {
     return;
   }
   state.tradeJournal.unshift({
-    id: Date.now(), date: parcel.date || todayStr(), timestamp: nowSydney(),
+    id: nextJournalId(), date: parcel.date || todayStr(), timestamp: nowSydney(),
     ticker: parcel.ticker, action: 'RECLASSIFY',
     qty: parcel.remainingQty, entryPrice: parcel.costPerShare,
     exitPrice: null, fees: parcel.fees || 0, pnl: null, status: 'open',
@@ -517,9 +517,10 @@ function daysBetween(dateStr1, dateStr2) {
 function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees, method, account) {
   // Fix #31: guard against saleQty=0 which would produce feePerShare=Infinity and corrupt
   // all downstream CGT disposal records (grossGain/netGain become Infinity or NaN).
+  // Fix #31: guard against saleQty=0 — "Invalid sale qty" returns [] (not an error object)
+  // so both callers can safely spread/iterate the result. Returns empty array on invalid qty.
   if (!saleQty || saleQty <= 0) {
-    return { disposals: [], remainder: 0, totalCostBase: 0, totalGrossGain: 0,
-             error: `Invalid sale qty: ${saleQty}` };
+    return [];
   }
   const parcels = getParcelsForTicker(ticker, method, account);
   let remaining = saleQty;
@@ -709,7 +710,7 @@ function buildDisposalJournalEntries(opts) {
     // save/reload), so a flag that only lived in memory would undercount
     // historical slices after a reload and mislabel future suffixes.
     const priorDisposalRows = d.parcelId != null
-      ? (state.tradeJournal || []).filter(e => e.parcelId === d.parcelId && e.parcel).length
+      ? (state.tradeJournal || []).filter(e => e.parcelId === d.parcelId && (e.action === 'SELL' || e.action === 'TRIM')).length
       : 0;
     const isCleanFullClose = priorDisposalRows === 0 && remainingAfter <= 0;
     const parcelLabel = d.parcelId == null
@@ -764,7 +765,7 @@ function rollbackTradeJournalEntry(t) {
   // involved operation). Falls through to a safe no-op for trimmed/closed
   // BUY rows rather than attempting a partial/incorrect rollback.
   if(action === 'BUY' && t.status === 'open') {
-    const holding = getPortfolioHolding(t.ticker);
+    const holding = getPortfolioHolding(t.ticker, t.account || 'personal');
     if(!holding || holding.shares < t.qty) return false;
     // Back-calculate avgPrice before this buy/top-up was applied.
     // totalCost_before = totalCost_after - (qty × entryPrice)
@@ -794,7 +795,7 @@ function rollbackTradeJournalEntry(t) {
   }
   if(action === 'SELL' && t.status === 'closed' && t.exitPrice != null) {
     const costBasis = t.entryPrice;
-    const holding = getPortfolioHolding(t.ticker);
+    const holding = getPortfolioHolding(t.ticker, t.account || 'personal');
     if(holding) {
       const totalCostVal = holding.shares * holding.avgPrice + t.qty * costBasis;
       holding.shares += t.qty;
@@ -817,6 +818,18 @@ function rollbackTradeJournalEntry(t) {
         }
       });
       state.cgtDisposals = state.cgtDisposals.filter(d => !idSet.has(d.id));
+      // Reset the parent BUY/TOP_UP/RECLASSIFY row's status now that this disposal is reversed.
+      const parcel = t.parcelId != null
+        ? (state.cgtParcels || []).find(p => p.id === t.parcelId)
+        : null;
+      const parentBuyRow = state.tradeJournal.find(e =>
+        e.parcelId === t.parcelId &&
+        (e.action === 'BUY' || e.action === 'TOP_UP' || e.action === 'RECLASSIFY')
+      );
+      if (parentBuyRow && parcel) {
+        parentBuyRow.status = parcel.remainingQty < parcel.qty ? 'trimmed' : 'open';
+        if (parentBuyRow.status === 'open') parentBuyRow.closeDate = null;
+      }
     }
     return true;
   }

@@ -856,6 +856,7 @@ function _applyImportedSells(sells, importAccount) {
   let applied = 0, skipped = 0;
   for (const s of sells) {
     const { ticker, shares, price, date, brokerage } = s;
+    if (!shares || shares <= 0) continue;
     const openParcels = (state.cgtParcels || []).filter(p =>
       p.ticker === ticker && p.remainingQty > 0 && (p.account || 'personal') === acct
     );
@@ -1208,7 +1209,7 @@ function applyDrpEvent(ticker) {
   // parcel previously had no account field at all — it would silently default to
   // 'personal' everywhere parcels are read (p.account || 'personal'), even when
   // the actual holding being reinvested into is 'trading'/'super'.
-  const parcelId = Date.now();
+  const parcelId = nextParcelId();
   (state.cgtParcels = state.cgtParcels || []).push({
     id: parcelId, ticker, action: 'DRP', qty: drpShares, costPerShare: drpPrice,
     date, remainingQty: drpShares, fees: 0, notes: 'DRP — dividend reinvestment',
@@ -1216,7 +1217,7 @@ function applyDrpEvent(ticker) {
   });
 
   state.tradeJournal.push({
-    id: parcelId + 1, date, ticker, action: 'DRP', qty: drpShares,
+    id: nextJournalId(), date, ticker, action: 'DRP', qty: drpShares,
     entryPrice: drpPrice, exitPrice: null, fees: 0, pnl: 0,
     status: 'open', recId: null, recExecuted: false, closeDate: null,
     parcelId, account: holding.account || 'personal',

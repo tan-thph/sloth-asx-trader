@@ -759,8 +759,7 @@ async function syncClosedTradesToLearningLoop() {
     // learning event with only one slice's pnl/qty instead of the whole
     // execution's.
     const jMatches = state.tradeJournal.filter(t =>
-      t.recId != null &&
-      (t.recId === r.id || (t.ticker === r.ticker && t.date === r.date)) &&
+      t.recId === r.id &&
       t.status === 'closed' && t.pnl != null
     );
     if (jMatches.length) {
@@ -814,21 +813,26 @@ async function syncClosedTradesToLearningLoop() {
         const raw2 = Math.abs((_rrT2 - _rrE2) / (_rrE2 - _rrS2));
         if (isFinite(raw2) && raw2 > 0) _rr2 = +raw2.toFixed(2);
       }
+      // FE-1 fix: build payload conditionally — omit any key whose value is null/undefined
+      // so the partial-patch endpoint leaves existing columns intact instead of wiping them.
+      // A parent-BUY graded by markExecuted() has no _pnlPct/_holdDays/_exitPrice, so sending
+      // those as null would overwrite the per-entry values markExecuted() already recorded.
+      const _payload = {
+        id:              r._learningId,
+        outcome_status:  r.outcome,
+        was_executed:    r.executed,
+        ...(_rr2 != null ? { rr_ratio:            _rr2 } : {}),   // backfill for legacy NULL records
+        ...(r.actualProfit != null ? { realized_pnl_aud:    +r.actualProfit.toFixed(2) } : {}),
+        ...(r._pnlPct      != null ? { realized_pnl_pct:    +r._pnlPct.toFixed(2)     } : {}),
+        ...(r._holdDays    != null ? { holding_period_days: r._holdDays                } : {}),
+        ...(r._entryPrice  != null ? { actual_entry_price:  r._entryPrice              } : {}),
+        ...(r._exitPrice   != null ? { actual_exit_price:   r._exitPrice               } : {}),
+        ...(r._sector      != null ? { sector:              r._sector                  } : {}),
+        ...(r._exitPrice   != null ? { exit_reason:         _detectExitReason(r._exitPrice, r.stopLoss, r.target, r.action) } : {}),
+      };
       const resp = await fetch(`${API}/api/learning/outcome`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: r._learningId,
-          outcome_status:      r.outcome,
-          was_executed:        r.executed,
-          rr_ratio:            _rr2,   // backfill for legacy NULL records
-          realized_pnl_aud:    r.actualProfit != null ? +r.actualProfit.toFixed(2) : null,
-          realized_pnl_pct:    r._pnlPct != null ? +r._pnlPct.toFixed(2) : null,
-          holding_period_days: r._holdDays ?? null,
-          actual_entry_price:  r._entryPrice ?? null,
-          actual_exit_price:   r._exitPrice  ?? null,
-          sector:              r._sector     ?? null,
-          exit_reason:         _detectExitReason(r._exitPrice, r.stopLoss, r.target, r.action),
-        }),
+        body: JSON.stringify(_payload),
       });
       if ((await resp.json()).ok) updated++;
     } catch (_) {}

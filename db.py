@@ -442,6 +442,7 @@ def init_db():
             # in js/portfolio-helpers.js — also doubles as the marker that
             # identifies a disposal-slice row (vs a legacy aggregate SELL row).
             ("parcel",             "TEXT"),
+            ("parcel_open_date",   "TEXT"),
         ):
             if col not in tj_cols:
                 conn.execute(f"ALTER TABLE trade_journal ADD COLUMN {col} {defn}")

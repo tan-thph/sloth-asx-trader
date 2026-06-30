@@ -589,11 +589,13 @@ def _resolve_deterministic_tags(conn, cap: int = 50) -> int:
          WHERE was_executed = 1
            AND recommendation IN ('BUY','TOP_UP')
            AND outcome_status IN ('win','loss','breakeven')
-           AND (skill_score IS NULL
-                OR (outcome_status IN ('loss','breakeven')
-                    AND (error_type IS NULL OR error_type = ''))
-                OR (outcome_status = 'win'
-                    AND (success_tags IS NULL OR success_tags = '')))
+           AND (
+                 (skill_score IS NULL AND NOT (outcome_status = 'win' AND success_tags = 'none'))
+                 OR (outcome_status IN ('loss','breakeven')
+                     AND (error_type IS NULL OR error_type = ''))
+                 OR (outcome_status = 'win'
+                     AND (success_tags IS NULL OR success_tags = ''))
+               )
          ORDER BY timestamp DESC
          LIMIT ?
     """, (cap,)).fetchall()
@@ -620,8 +622,10 @@ def _resolve_deterministic_tags(conn, cap: int = 50) -> int:
                 if s == "skill_score=?":
                     merged["skill_score"] = vals[i]
             stags = _classify_success_tags_deterministic(merged)
-            if stags:
-                sets.append("success_tags=?"); vals.append(stags)
+            # BE-2 fix: write 'none' sentinel even when no tags fire so this row
+            # doesn't re-enter the batch cap forever. Mirrors error_type='none' for
+            # losses. Skill-score-less wins stay NULL until thesis_verdict arrives.
+            sets.append("success_tags=?"); vals.append(stags if stags else "none")
         if sets:
             vals.append(r["id"])
             conn.execute(f"UPDATE ai_learning_events SET {', '.join(sets)} WHERE id=?", vals)
@@ -2101,14 +2105,24 @@ def learning_digest_data():
                 GROUP BY regime
             """).fetchall()
 
-            error_dist = conn.execute("""
-                SELECT error_type, COUNT(*) as n
+            # BE-3 fix: aggregate error_dist by splitting multi-tag error_type on
+            # ',' so "thesis_broken,overconfident" counts as two separate tags
+            # rather than one opaque compound bucket.  Mirrors the split-on-','
+            # convention used in failure_patterns / by_sector / _is_shock etc.
+            _error_dist_rows = conn.execute("""
+                SELECT error_type
                 FROM ai_learning_events
                 WHERE outcome_status IN ('loss','breakeven') AND was_executed=1
                   AND error_type IS NOT NULL AND error_type != ''
-                GROUP BY error_type
-                ORDER BY n DESC
             """).fetchall()
+            _err_counter: dict = {}
+            for _er in _error_dist_rows:
+                for _tag in (_er["error_type"] or "").split(","):
+                    _tag = _tag.strip()
+                    if _tag and _tag not in ("none", "external_shock"):
+                        _err_counter[_tag] = _err_counter.get(_tag, 0) + 1
+            error_dist = [{"error_type": k, "n": v}
+                          for k, v in sorted(_err_counter.items(), key=lambda x: -x[1])]
 
             exit_dist = conn.execute("""
                 SELECT exit_reason, COUNT(*) as n
@@ -2140,7 +2154,7 @@ def learning_digest_data():
             "regime_stats":       regime_stats,
             "overall_wins":       overall_wins,
             "overall_total":      overall_total,
-            "error_dist":         [dict(r) for r in error_dist],
+            "error_dist":         error_dist,
             "exit_dist":          [dict(r) for r in exit_dist],
             "aggregates":         aggregates,
             "exemplars":          exemplars,
@@ -2464,6 +2478,11 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
 
         entry_close = float(hist["Close"].iloc[0])
         if entry_close <= 0:
+            conn.execute(
+                "UPDATE ai_learning_events SET virtual_outcome='virtual_open' WHERE id=?",
+                (row["id"],)
+            )
+            conn.commit()
             continue
         max_pct = float(((hist["Close"] - entry_close) / entry_close).abs().max())
         outcome = "virtual_hold_miss" if max_pct >= move_threshold else "virtual_hold_correct"
@@ -3127,7 +3146,16 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
     _regime_flip_token = ""
     if flipped_at and flipped_to and flipped_to == regime:
         try:
-            flip_dt  = datetime.fromisoformat(flipped_at.replace("Z", "+00:00").replace("+00:00", ""))
+            import re as _re
+            try:
+                _fa = flipped_at.rstrip("Z")
+                # strip any +HH:MM or -HH:MM offset suffix robustly
+                _fa = _re.sub(r'[+-]\d{2}:\d{2}$', '', _fa)
+                flip_dt = datetime.fromisoformat(_fa)
+            except Exception:
+                flip_dt = None
+            if flip_dt is None:
+                raise ValueError(f"unparseable flipped_at: {flipped_at!r}")
             flip_days = (datetime.now() - flip_dt).days
             if flip_days <= 30:
                 # Count executed trades logged since the flip
@@ -3221,16 +3249,24 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             _resolve_hold_outcomes(conn)
             # Sprint 37: lazy-resolve sell tag outcomes (Gap 3 + Gap 7) — capped at 5.
             _resolve_sell_outcomes(conn)
-            # Sprint 70: lazily assign deterministic error_type + skill_score to
-            # closed trades from the entry/exit capture (replaces the LLM tagger).
-            _resolve_deterministic_tags(conn)
             # Exit-signals capture: lazily classify SELL/TRIM exit timing quality
             # from the captured exit_signals_json snapshot — capped at 50, idempotent.
             _resolve_exit_quality_tags(conn)
             # Sprint 71 Phase 1B: lazily capture MAE/MFE path stats for closed
             # executed BUY/TOP_UP trades — capped at 5, idempotent, degrades
             # gracefully on yfinance failure (row left unresolved).
+            # BE-1 fix: resolve MAE/MFE (and execution alpha) BEFORE deterministic
+            # tags so the empirical stop_too_tight/early_exit paths can read live
+            # mae_pct/mfe_pct/exec_mech_pnl_pct values rather than still-NULL ones.
             _resolve_mae_mfe(conn)
+            # BE-1 fix: resolve execution alpha BEFORE deterministic tags so the
+            # empirical early_exit path can read exec_mech_pnl_pct values.
+            _resolve_execution_alpha(conn)
+            # Sprint 70: lazily assign deterministic error_type + skill_score to
+            # closed trades from the entry/exit capture (replaces the LLM tagger).
+            # Runs AFTER MAE/MFE + execution alpha so the empirical
+            # stop_too_tight/early_exit paths read live values rather than NULLs.
+            _resolve_deterministic_tags(conn)
             # Sprint 71 Phase 2D: lazily score the wider-stop counterfactual for
             # stop_too_tight-tagged trades — capped at 5, idempotent. Feeds the
             # tag-precision self-suppression gate below.

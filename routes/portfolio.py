@@ -95,8 +95,8 @@ def db_save():
                     INSERT INTO trade_journal
                         (id, date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status,
                          rec_id, rec_executed, close_date, account, sector, parcel_id, disposal_ids, notes, thesis,
-                         entry_signals_json, exit_signals_json, regime, parcel)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         entry_signals_json, exit_signals_json, regime, parcel, parcel_open_date)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     t.get("id"),
                     t.get("date"), t.get("timestamp"), t["ticker"], t["action"],
@@ -109,7 +109,7 @@ def db_save():
                     t.get("notes"), t.get("thesis"),
                     json.dumps(t["entrySignals"]) if t.get("entrySignals") is not None else None,
                     json.dumps(t["exitSignals"])  if t.get("exitSignals")  is not None else None,
-                    t.get("regime"), t.get("parcel"),
+                    t.get("regime"), t.get("parcel"), t.get("parcelOpenDate"),
                 ))
 
         # --- rec history ---
@@ -211,7 +211,8 @@ def db_load():
                 "entrySignals": json.loads(row["entry_signals_json"]) if row["entry_signals_json"] else None,
                 "exitSignals":  json.loads(row["exit_signals_json"])  if row["exit_signals_json"]  else None,
                 "regime": row["regime"] if "regime" in row.keys() else None,
-                "parcel": row["parcel"] if "parcel" in row.keys() else None,
+                "parcel":         row["parcel"]          if "parcel"          in row.keys() else None,
+                "parcelOpenDate": row["parcel_open_date"] if "parcel_open_date" in row.keys() else None,
             })
 
         rec_history = []

@@ -1911,7 +1911,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
         // (e.g. 'personal') still holds shares of the same ticker.
         const remaining = getPortfolioHolding(rec.ticker, sellAccount);
         const positionClosed = !remaining || (remaining.shares || 0) <= 0;
-        if (positionClosed) {
+        if (positionClosed && _distinctAccts.length <= 1) {
           const parentRecs = (state.recHistory || []).filter(r =>
             r.ticker === rec.ticker &&
             r._learningId &&
@@ -1955,7 +1955,10 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
               }),
             }).catch(() => {});
             const rh = state.recHistory.find(r => r.id === pr.id);
-            if (rh) rh.outcome = prOutcome;
+            if (rh) {
+              rh.outcome = prOutcome;
+              if (prPnlAud != null) rh.actualProfit = prPnlAud;
+            }
           }
 
           // #2b: thesis review — surface thesis from any parent BUY rec
