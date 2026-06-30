@@ -143,6 +143,7 @@ async function schedulerTick() {
   state.settings._lastScheduledRunAt = sydneyHHMM(); // track for dashboard display
   scheduleSave();
   toast('⏱ Scheduled analysis running...', 'info');
+  checkMonthlyDigestReminder();
   await runAnalysis();
 }
 
@@ -294,6 +295,38 @@ function checkMacroBriefSchedule() {
   Promise.resolve(typeof runMacroAnalysis === 'function' ? runMacroAnalysis() : null)
     .catch(() => {})
     .finally(() => { window._macroAutoRunning = false; });
+}
+
+// Monthly postmortem digest reminder — fires once per calendar month when ≥15
+// new closed trades have accumulated since the last digest run. Uses the
+// notifications system so it's visible in the bell without interrupting the UI.
+function checkMonthlyDigestReminder() {
+  if (typeof state === 'undefined' || !state.serverOk) return;
+  const today = todayStr();
+  const lastCheck = localStorage.getItem('digestReminderChecked') || '';
+  // Only check once per calendar month
+  const thisMonth = today.slice(0, 7); // YYYY-MM
+  if (lastCheck.startsWith(thisMonth)) return;
+  localStorage.setItem('digestReminderChecked', today);
+  // Count closed trades since last digest run
+  const lastDigestDate = localStorage.getItem('lastPostmortemDigestDate') || '';
+  if (!lastDigestDate) return; // never run digest — no reminder until first manual run
+  fetch(`${API}/api/learning/stats`).then(r => r.ok ? r.json() : null).then(d => {
+    if (!d) return;
+    const closed = d.closed || 0;
+    const lastDigestClosed = parseInt(localStorage.getItem('lastPostmortemDigestClosed') || '0', 10);
+    const newTrades = closed - lastDigestClosed;
+    if (newTrades >= 15) {
+      if (typeof postNotification === 'function') {
+        postNotification({
+          type: 'info',
+          title: 'Monthly Postmortem Digest',
+          body: `${newTrades} new closed trades since your last digest. Learning → Digest tab to review patterns.`,
+          category: 'learning',
+        });
+      }
+    }
+  }).catch(() => {});
 }
 
 function startPriceRefresh() {

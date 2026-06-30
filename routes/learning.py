@@ -1662,6 +1662,89 @@ def learning_stats():
                 "correct_rate": round(_hold_n_correct / _hold_n * 100, 1) if _hold_n else None,
             }
 
+            # ── Deepening fields ───────────────────────────────────────────────
+
+            # a) BUY vs TOP_UP performance split
+            buy_vs_topup_rows = conn.execute("""
+                SELECT recommendation,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) AS wins,
+                       AVG(realized_pnl_pct) AS avg_pnl,
+                       AVG(holding_period_days) AS avg_hold
+                FROM ai_learning_events
+                WHERE recommendation IN ('BUY','TOP_UP')
+                  AND outcome_status IN ('win','loss','breakeven')
+                GROUP BY recommendation
+            """).fetchall()
+            buy_vs_topup = {r["recommendation"]: {
+                "n": r["n"], "wins": r["wins"],
+                "win_rate": round(r["wins"]/r["n"]*100, 1) if r["n"] else None,
+                "avg_pnl": round(r["avg_pnl"], 2) if r["avg_pnl"] is not None else None,
+                "avg_hold": round(r["avg_hold"], 1) if r["avg_hold"] is not None else None,
+            } for r in buy_vs_topup_rows}
+
+            # b) Capital efficiency (pnl/day by entry driver)
+            cap_eff_rows = conn.execute("""
+                SELECT primary_entry_driver,
+                       COUNT(*) AS n,
+                       AVG(CASE WHEN holding_period_days > 0
+                           THEN realized_pnl_pct / holding_period_days ELSE NULL END) AS avg_pnl_per_day,
+                       AVG(realized_pnl_pct) AS avg_pnl,
+                       AVG(holding_period_days) AS avg_hold
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven')
+                  AND realized_pnl_pct IS NOT NULL
+                  AND holding_period_days IS NOT NULL AND holding_period_days > 0
+                  AND primary_entry_driver IS NOT NULL AND primary_entry_driver != ''
+                GROUP BY primary_entry_driver
+                ORDER BY avg_pnl_per_day DESC NULLS LAST
+            """).fetchall()
+            capital_efficiency = [{
+                "driver": r["primary_entry_driver"],
+                "n": r["n"],
+                "avg_pnl_per_day": round(r["avg_pnl_per_day"], 3) if r["avg_pnl_per_day"] is not None else None,
+                "avg_pnl": round(r["avg_pnl"], 2) if r["avg_pnl"] is not None else None,
+                "avg_hold": round(r["avg_hold"], 1) if r["avg_hold"] is not None else None,
+            } for r in cap_eff_rows]
+
+            # c) Ensemble divergence cross-tab
+            ens_div_rows = conn.execute("""
+                SELECT
+                    CASE WHEN ABS(COALESCE(ensemble_confidence, ai_confidence) - ai_confidence) > 0.10
+                         THEN 'diverged' ELSE 'aligned' END AS div_group,
+                    COUNT(*) AS n,
+                    SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) AS wins
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven')
+                  AND ai_confidence IS NOT NULL
+                GROUP BY div_group
+            """).fetchall()
+            ensemble_divergence = {r["div_group"]: {
+                "n": r["n"], "wins": r["wins"],
+                "win_rate": round(r["wins"]/r["n"]*100, 1) if r["n"] else None,
+            } for r in ens_div_rows}
+
+            # d) MAE/MFE distribution summary
+            mae_mfe_row = conn.execute("""
+                SELECT
+                    AVG(CASE WHEN outcome_status='win'  THEN mae_pct END) AS avg_mae_wins,
+                    AVG(CASE WHEN outcome_status='loss' THEN mae_pct END) AS avg_mae_losses,
+                    AVG(CASE WHEN outcome_status='win'  THEN mfe_pct END) AS avg_mfe_wins,
+                    AVG(CASE WHEN outcome_status='loss' THEN mfe_pct END) AS avg_mfe_losses,
+                    COUNT(CASE WHEN mae_pct IS NOT NULL AND outcome_status='win'  THEN 1 END) AS n_mae_wins,
+                    COUNT(CASE WHEN mae_pct IS NOT NULL AND outcome_status='loss' THEN 1 END) AS n_mae_losses
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven')
+            """).fetchone()
+            mae_mfe_summary = {
+                "avg_mae_wins":   round(mae_mfe_row["avg_mae_wins"], 2)   if mae_mfe_row["avg_mae_wins"]   is not None else None,
+                "avg_mae_losses": round(mae_mfe_row["avg_mae_losses"], 2) if mae_mfe_row["avg_mae_losses"] is not None else None,
+                "avg_mfe_wins":   round(mae_mfe_row["avg_mfe_wins"], 2)   if mae_mfe_row["avg_mfe_wins"]   is not None else None,
+                "avg_mfe_losses": round(mae_mfe_row["avg_mfe_losses"], 2) if mae_mfe_row["avg_mfe_losses"] is not None else None,
+                "n_wins":  mae_mfe_row["n_mae_wins"]   or 0,
+                "n_losses": mae_mfe_row["n_mae_losses"] or 0,
+            }
+
         oci = overall_ci
         # Gap 5: prompt regression detector (uses version_list already built above)
         prompt_regression = _check_prompt_regression(version_list)
@@ -1692,6 +1775,10 @@ def learning_stats():
             "stop_tag_precision": stop_tag_precision_stat,  # Sprint 71 Phase 2D
             "by_sector":          by_sector,    # Sprint 71: per-sector WR vs market baseline
             "hold_outcomes":      hold_outcomes,  # HOLD passivity calibration (virtual_hold_miss/correct)
+            "buy_vs_topup":       buy_vs_topup,
+            "capital_efficiency": capital_efficiency,
+            "ensemble_divergence": ensemble_divergence,
+            "mae_mfe_summary":    mae_mfe_summary,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2896,6 +2983,82 @@ def driver_matrix():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/learning/factor-win-rates")
+def learning_factor_win_rates():
+    """Win-rate analysis segmented by entry-signal buckets from entry_signals_json.
+
+    For each of the 5 core entry signals (rsi_14, bb_pct_b, adx_14, return_5d,
+    return_20d), computes mean value for wins vs losses among executed closed
+    BUY/TOP_UP trades that carry an entry snapshot. Returns the mean difference
+    (wins_mean - losses_mean) as an empirical IC proxy from real trades.
+
+    Response: { ok, factors: [{factor, n_wins, n_losses, wins_mean, losses_mean,
+                                mean_diff, interpretation}] }
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT entry_signals_json, outcome_status
+                FROM ai_learning_events
+                WHERE was_executed = 1
+                  AND outcome_status IN ('win','loss','breakeven')
+                  AND recommendation IN ('BUY','TOP_UP')
+                  AND entry_signals_json IS NOT NULL
+            """).fetchall()
+
+        factors_of_interest = ["rsi_14", "bb_pct_b", "adx_14", "return_5d", "return_20d", "setup_score"]
+        accum = {f: {"wins": [], "losses": []} for f in factors_of_interest}
+
+        for row in rows:
+            try:
+                sig = json.loads(row["entry_signals_json"] or "{}")
+            except Exception:
+                continue
+            bucket = "wins" if row["outcome_status"] == "win" else "losses"
+            for f in factors_of_interest:
+                v = sig.get(f)
+                try:
+                    fv = float(v) if v is not None else None
+                except (TypeError, ValueError):
+                    fv = None
+                if fv is not None:
+                    accum[f][bucket].append(fv)
+
+        result = []
+        for f, data in accum.items():
+            wins_vals   = data["wins"]
+            losses_vals = data["losses"]
+            if len(wins_vals) < 3 or len(losses_vals) < 3:
+                continue
+            wins_mean   = round(sum(wins_vals)   / len(wins_vals),   3)
+            losses_mean = round(sum(losses_vals) / len(losses_vals), 3)
+            mean_diff   = round(wins_mean - losses_mean, 3)
+            # Interpretation: for rsi/bb, lower=better at entry (oversold);
+            # for adx/return_20d, higher=better; for return_5d, context-dependent.
+            _interp_map = {
+                "rsi_14":     "lower at entry = more oversold = better for mean-reversion",
+                "bb_pct_b":   "lower at entry = near lower band = better for mean-reversion",
+                "adx_14":     "higher = stronger trend = better for trend-pullback",
+                "return_5d":  "negative diff = buying dips works; positive = momentum pays",
+                "return_20d": "positive = uptrend context helps wins",
+                "setup_score":"higher at entry = better setup quality",
+            }
+            result.append({
+                "factor":      f,
+                "n_wins":      len(wins_vals),
+                "n_losses":    len(losses_vals),
+                "wins_mean":   wins_mean,
+                "losses_mean": losses_mean,
+                "mean_diff":   mean_diff,
+                "interpretation": _interp_map.get(f, ""),
+            })
+
+        result.sort(key=lambda x: abs(x["mean_diff"]), reverse=True)
+        return jsonify({"ok": True, "factors": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 def _compute_sell_negative_confirmation(conn, cap: int = 3) -> str:
     """Negative-confirmation line: SELL/TRIM calls that subsequently ROSE — i.e.
     the model sold and the stock then climbed (sell_verify_verdict='invalidated'
@@ -3462,6 +3625,30 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                             "→lean into this"
                         )
 
+        # 6c. Cluster loss detection — ≥3 losses within a 5-trading-day window
+        # indicates correlated losses (sector/macro event), not independent failures.
+        # Lower priority than top_err / success nudge (placed after 6b) — survives
+        # truncation less often but avoids displacing the more actionable error nudge.
+        _loss_rows_dated = sorted(
+            [r for r in rows if r["outcome_status"] in ("loss", "breakeven") and r["timestamp"]],
+            key=lambda r: r["timestamp"]
+        )
+        if len(_loss_rows_dated) >= 3:
+            from datetime import timedelta as _td
+            for _i, _anchor in enumerate(_loss_rows_dated):
+                try:
+                    _anchor_dt = datetime.fromisoformat(_anchor["timestamp"][:10])
+                    _window = [r for r in _loss_rows_dated[_i:]
+                               if (datetime.fromisoformat(r["timestamp"][:10]) - _anchor_dt).days <= 5]
+                    if len(_window) >= 3:
+                        parts.append(
+                            f"⚠CLUSTER_LOSS({len(_window)} losses in 5d "
+                            f"from {_anchor['timestamp'][:10]})→check portfolio correlation"
+                        )
+                        break
+                except Exception:
+                    continue
+
         # 7. Per-ticker memory — ESS≥2.5 AND |delta from overall WR| > 15pp
         if tickers_req and len(calib_rows) >= 5:
             overall_wr = _wwr(calib_rows)
@@ -3552,6 +3739,23 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                     st_parts.append(f"✓SELL_TAG:{short}(n={n_st},val={val_rate*100:.0f}%)→reliable")
             if st_parts:
                 parts.append(" | ".join(st_parts))
+
+        # 9b. Lesson drag — warn when a trading lesson is making performance worse.
+        # Reads lesson-effectiveness results directly (no extra network call — same conn).
+        # Only fires when n_after >= 5 and delta_pp <= -5 AND n<=3 worst offenders.
+        try:
+            _drag_lessons = _compute_lesson_effectiveness(conn, min_n_after=5)
+            _drag_lines = [l for l in _drag_lessons if l.get("delta_pp") is not None and l["delta_pp"] <= -5.0]
+            if _drag_lines:
+                _drag_lines.sort(key=lambda l: l["delta_pp"])
+                _drag_top = _drag_lines[:2]
+                for _dl in _drag_top:
+                    scope = _dl.get("ticker") or _dl.get("sector") or _dl.get("regime") or "general"
+                    parts.append(
+                        f"⚠LESSON_DRAG({scope},Δ{_dl['delta_pp']:+.0f}pp,n={_dl['n_after']})→consider removing"
+                    )
+        except Exception:
+            pass
 
         # Sprint 44: insert regime-flip warning at the front (high priority — survives truncation)
         if _regime_flip_token:

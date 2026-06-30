@@ -198,6 +198,8 @@ async function renderLearningPage(gen) {
   renderExecutionAlphaCard().catch(() => {});
   // Async: load tag accuracy card (Gap 6)
   renderTagAccuracyCard().catch(() => {});
+  // Async: load entry signal factor analysis card
+  renderFactorWinRatesCard().catch(() => {});
 }
 
 function _renderLearningContent(d, brier) {
@@ -601,6 +603,147 @@ function _renderLearningContent(d, brier) {
       </div>
     </div>` : '';
 
+  // ── Deepening stat cards ───────────────────────────────────────────────────
+  const buyVsTopup       = d.buy_vs_topup       || {};
+  const capitalEff       = d.capital_efficiency  || [];
+  const ensDiv           = d.ensemble_divergence || {};
+  const maeMfe           = d.mae_mfe_summary     || {};
+
+  // ── BUY vs TOP_UP performance split ───────────────────────────────────────
+  const buyRow   = buyVsTopup['BUY']    || {};
+  const topupRow = buyVsTopup['TOP_UP'] || {};
+  const buyVsTopupCard = (buyRow.n || topupRow.n) ? `
+    <div class="card section-gap">
+      <div class="card-title">BUY vs TOP_UP Performance</div>
+      <p class="text-xs text-muted" style="margin-bottom:8px">Initial entries vs position additions — divergence reveals whether adding to winners/losers pays off.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:4px 8px">Action</th>
+            <th style="text-align:right;padding:4px 8px">Trades</th>
+            <th style="text-align:right;padding:4px 8px">Win Rate</th>
+            <th style="text-align:right;padding:4px 8px">Avg P&amp;L%</th>
+            <th style="text-align:right;padding:4px 8px">Avg Hold</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${['BUY','TOP_UP'].map(action => {
+            const r = buyVsTopup[action];
+            if (!r || !r.n) return `<tr><td colspan="5" style="padding:5px 8px;color:var(--text-muted)">${action}: no data</td></tr>`;
+            const pnlColor = r.avg_pnl == null ? 'var(--text-secondary)' : r.avg_pnl >= 0 ? '#16a34a' : '#dc2626';
+            return `<tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:5px 8px;font-weight:600">${action}</td>
+              <td style="padding:5px 8px;text-align:right">${r.n}</td>
+              <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(r.win_rate)}">${pct(r.win_rate)}</td>
+              <td style="padding:5px 8px;text-align:right;color:${pnlColor}">${r.avg_pnl != null ? (r.avg_pnl >= 0 ? '+' : '') + r.avg_pnl.toFixed(1) + '%' : '—'}</td>
+              <td style="padding:5px 8px;text-align:right;color:var(--text-secondary)">${r.avg_hold != null ? r.avg_hold.toFixed(0) + 'd' : '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>` : '';
+
+  // ── Capital efficiency by entry driver ─────────────────────────────────────
+  const capitalEffCard = capitalEff.length ? `
+    <div class="card section-gap">
+      <div class="card-title">Capital Efficiency by Entry Driver</div>
+      <p class="text-xs text-muted" style="margin-bottom:8px">Daily P&amp;L rate (realized % ÷ hold days) — shows which setups return the most per day of capital deployed.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:4px 8px">Entry Driver</th>
+            <th style="text-align:right;padding:4px 8px">n</th>
+            <th style="text-align:right;padding:4px 8px">P&amp;L/day</th>
+            <th style="text-align:right;padding:4px 8px">Avg P&amp;L%</th>
+            <th style="text-align:right;padding:4px 8px">Avg Hold</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${capitalEff.map(r => {
+            const ppdColor = r.avg_pnl_per_day == null ? 'var(--text-secondary)' : r.avg_pnl_per_day >= 0 ? '#16a34a' : '#dc2626';
+            const pnlColor = r.avg_pnl == null ? 'var(--text-secondary)' : r.avg_pnl >= 0 ? '#16a34a' : '#dc2626';
+            return `<tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:5px 8px">${r.driver.replace(/_/g,' ')}${sampleBadge(r.n)}</td>
+              <td style="padding:5px 8px;text-align:right">${r.n}</td>
+              <td style="padding:5px 8px;text-align:right;font-weight:600;color:${ppdColor}">${r.avg_pnl_per_day != null ? (r.avg_pnl_per_day >= 0 ? '+' : '') + r.avg_pnl_per_day.toFixed(3) + '%' : '—'}</td>
+              <td style="padding:5px 8px;text-align:right;color:${pnlColor}">${r.avg_pnl != null ? (r.avg_pnl >= 0 ? '+' : '') + r.avg_pnl.toFixed(1) + '%' : '—'}</td>
+              <td style="padding:5px 8px;text-align:right;color:var(--text-secondary)">${r.avg_hold != null ? r.avg_hold.toFixed(0) + 'd' : '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>` : '';
+
+  // ── Ensemble divergence cross-tab ──────────────────────────────────────────
+  const ensDivAligned  = ensDiv['aligned']  || {};
+  const ensDivDiverged = ensDiv['diverged'] || {};
+  const ensembleDivCard = (ensDivAligned.n || ensDivDiverged.n) ? `
+    <div class="card section-gap">
+      <div class="card-title">Ensemble vs AI Confidence Divergence</div>
+      <p class="text-xs text-muted" style="margin-bottom:8px">When the indicator-composite score and Claude's stated confidence diverge by &gt;10pp — does alignment predict better outcomes?</p>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:4px 8px">Group</th>
+            <th style="text-align:right;padding:4px 8px">Trades</th>
+            <th style="text-align:right;padding:4px 8px">Win Rate</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${['aligned','diverged'].map(group => {
+            const r = ensDiv[group];
+            if (!r || !r.n) return `<tr><td colspan="3" style="padding:5px 8px;color:var(--text-muted)">${group}: no data</td></tr>`;
+            return `<tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:5px 8px;font-weight:600">${group === 'aligned' ? '✓ Aligned (≤10pp gap)' : '⚠ Diverged (>10pp gap)'}</td>
+              <td style="padding:5px 8px;text-align:right">${r.n}</td>
+              <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(r.win_rate)}">${pct(r.win_rate)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <p class="text-xs text-muted" style="margin-top:6px">If aligned win rate is consistently higher, size down when ensemble and AI confidence diverge significantly.</p>
+    </div>` : '';
+
+  // ── MAE/MFE path quality summary ───────────────────────────────────────────
+  const maeMfeCard = (maeMfe.n_wins > 0 || maeMfe.n_losses > 0) ? `
+    <div class="card section-gap">
+      <div class="card-title">MAE / MFE Path Quality</div>
+      <p class="text-xs text-muted" style="margin-bottom:8px">
+        Maximum Adverse Excursion (worst drawdown before exit) and Maximum Favourable Excursion (best unrealised gain).
+        Winners and losers compared — reveals stop placement and profit-capture patterns.
+      </p>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:4px 8px">Outcome</th>
+            <th style="text-align:right;padding:4px 8px">n</th>
+            <th style="text-align:right;padding:4px 8px" title="Average worst intraday drawdown from entry">Avg MAE%</th>
+            <th style="text-align:right;padding:4px 8px" title="Average best unrealised gain before exit">Avg MFE%</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:5px 8px;font-weight:600;color:#16a34a">Wins</td>
+            <td style="padding:5px 8px;text-align:right">${maeMfe.n_wins}</td>
+            <td style="padding:5px 8px;text-align:right;color:#d97706">${maeMfe.avg_mae_wins != null ? maeMfe.avg_mae_wins.toFixed(2) + '%' : '—'}</td>
+            <td style="padding:5px 8px;text-align:right;color:#16a34a">${maeMfe.avg_mfe_wins != null ? '+' + maeMfe.avg_mfe_wins.toFixed(2) + '%' : '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:5px 8px;font-weight:600;color:#dc2626">Losses</td>
+            <td style="padding:5px 8px;text-align:right">${maeMfe.n_losses}</td>
+            <td style="padding:5px 8px;text-align:right;color:#dc2626">${maeMfe.avg_mae_losses != null ? maeMfe.avg_mae_losses.toFixed(2) + '%' : '—'}</td>
+            <td style="padding:5px 8px;text-align:right;color:#d97706">${maeMfe.avg_mfe_losses != null ? '+' + maeMfe.avg_mfe_losses.toFixed(2) + '%' : '—'}</td>
+          </tr>
+        </tbody>
+      </table>
+      ${maeMfe.avg_mae_wins != null && maeMfe.avg_mae_losses != null ? `
+      <div style="margin-top:8px;padding:6px 10px;background:var(--bg-secondary);border-radius:4px;font-size:11px;color:var(--text-secondary)">
+        ${Math.abs(maeMfe.avg_mae_wins) < Math.abs(maeMfe.avg_mae_losses || 0)
+          ? '✓ Winners have shallower adverse excursion than losers — stop placement is reasonable.'
+          : '⚠ Winners dig as deep as losers before recovering — stops may be too tight or entries poorly timed.'}
+      </div>` : ''}
+    </div>` : '';
+
   // ── Recent events ──────────────────────────────────────────────────────────
   const outcomeChip = o => {
     const map = { win:'#16a34a', loss:'#dc2626', breakeven:'#9ca3af', open:'#3b82f6', expired:'#6b7280', invalidated:'#d97706', skipped:'#6b7280' };
@@ -973,7 +1116,10 @@ function _renderLearningContent(d, brier) {
 
   return introNote + summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
-    failureCard + successCard + recentCard + failedCard + debateInsightsCard +
+    failureCard + successCard +
+    buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
+    `<div id="ll-factor-winrates-card" style="display:none"></div>` +
+    recentCard + failedCard + debateInsightsCard +
     digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder +
     thesisMatrixPlaceholder + execAlphaPlaceholder + debateCollapsible;
 }
@@ -1078,6 +1224,11 @@ Please write a concise postmortem digest (under 320 words) in plain text. Struct
     state.digestHistory.unshift({ date: dateStr, text });
     if (state.digestHistory.length > 50) state.digestHistory.length = 50;
     await saveStateToDb();
+    localStorage.setItem('lastPostmortemDigestDate', todayStr());
+    // Store closed trade count so monthly reminder knows how many trades since last digest
+    fetch(`${API}/api/learning/stats`).then(r => r.ok ? r.json() : null).then(d => {
+      if (d && d.closed) localStorage.setItem('lastPostmortemDigestClosed', String(d.closed));
+    }).catch(() => {});
   } catch (e) {
     out.innerHTML = `<div class="text-sm text-danger" style="padding:8px">${e.message}</div>`;
   } finally {
@@ -2689,6 +2840,55 @@ async function renderExecutionAlphaCard() {
   } catch {
     el.innerHTML = '';
   }
+}
+
+// ── Entry Signal Factor Analysis card ────────────────────────────────────────
+// Shows mean entry-signal values for wins vs losses (empirical IC from real trades).
+async function renderFactorWinRatesCard() {
+  const el = document.getElementById('ll-factor-winrates-card');
+  if (!el) return;
+  try {
+    const resp = await fetch(`${API}/api/learning/factor-win-rates`);
+    if (!resp.ok) { el.style.display = 'none'; return; }
+    const d = await resp.json();
+    if (!d.ok || !d.factors || !d.factors.length) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    el.innerHTML = `
+      <div class="card section-gap">
+        <div class="card-title">Entry Signal Factor Analysis</div>
+        <p class="text-xs text-muted" style="margin-bottom:8px">
+          Mean signal value at entry for wins vs losses (executed BUY/TOP_UP only).
+          A positive mean_diff means the factor was higher at entry on winners — useful for calibrating scanner thresholds.
+        </p>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead>
+            <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+              <th style="text-align:left;padding:4px 8px">Factor</th>
+              <th style="text-align:right;padding:4px 8px">n (W/L)</th>
+              <th style="text-align:right;padding:4px 8px">Wins mean</th>
+              <th style="text-align:right;padding:4px 8px">Losses mean</th>
+              <th style="text-align:right;padding:4px 8px">Diff</th>
+              <th style="text-align:left;padding:4px 8px">Signal</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${d.factors.map(f => {
+              const diffColor = Math.abs(f.mean_diff) < 1 ? 'var(--text-muted)' :
+                                f.mean_diff > 0 ? '#16a34a' : '#dc2626';
+              const diffStr = f.mean_diff >= 0 ? '+' + f.mean_diff.toFixed(3) : f.mean_diff.toFixed(3);
+              return `<tr style="border-bottom:1px solid var(--border)">
+                <td style="padding:5px 8px;font-family:monospace;font-size:11px">${f.factor}</td>
+                <td style="padding:5px 8px;text-align:right;color:var(--text-muted)">${f.n_wins}/${f.n_losses}</td>
+                <td style="padding:5px 8px;text-align:right">${f.wins_mean.toFixed(2)}</td>
+                <td style="padding:5px 8px;text-align:right">${f.losses_mean.toFixed(2)}</td>
+                <td style="padding:5px 8px;text-align:right;font-weight:600;color:${diffColor}">${diffStr}</td>
+                <td style="padding:5px 8px;font-size:10px;color:var(--text-muted)">${f.interpretation}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (_) { el.style.display = 'none'; }
 }
 
 // ── Sell Decision Tracker card (Gap 3 + Gap 7) ───────────────────────────────

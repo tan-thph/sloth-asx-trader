@@ -214,6 +214,25 @@ class TestLearningLoopRoutes(unittest.TestCase):
         self.assertIsInstance(body["exit_reason_dist"], dict)
         self.assertIsInstance(body["rr_stats"], dict)
 
+    def test_stats_has_deepening_fields(self):
+        """stats must include buy_vs_topup, capital_efficiency, ensemble_divergence, mae_mfe_summary."""
+        resp = self.client.get("/api/learning/stats")
+        body = json.loads(resp.data)
+        for key in ("buy_vs_topup", "capital_efficiency", "ensemble_divergence", "mae_mfe_summary"):
+            self.assertIn(key, body, f"Missing deepening field: {key}")
+        self.assertIsInstance(body["buy_vs_topup"], dict)
+        self.assertIsInstance(body["capital_efficiency"], list)
+        self.assertIsInstance(body["ensemble_divergence"], dict)
+        self.assertIsInstance(body["mae_mfe_summary"], dict)
+
+    def test_factor_win_rates_endpoint(self):
+        """GET /api/learning/factor-win-rates must return ok and factors list."""
+        resp = self.client.get("/api/learning/factor-win-rates")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+        self.assertIsInstance(body.get("factors"), list)
+
     def test_stats_recent_events_has_richer_fields(self):
         """recent_events must now include stop, target, rr_ratio, hold days, exit_reason."""
         resp = self.client.get("/api/learning/stats")
@@ -1258,7 +1277,7 @@ class TestWhipsawConsistencyCheck(unittest.TestCase):
         self.assertIn("contradicts your own", src)
         # Must flag via _ruleWarnings, never drop (no return [] in this block)
         idx = src.find("Whipsaw / contradiction check")
-        block = src[idx:idx + 4000]
+        block = src[idx:idx + 5500]  # wider window — whipsawCtxMap pre-fetch adds ~500 chars
         self.assertIn("_ruleWarnings", block)
         self.assertNotIn("return [];", block)
 

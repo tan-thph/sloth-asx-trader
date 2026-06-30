@@ -1121,6 +1121,21 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
             }
           } catch (_) {}
         }));
+        // Pre-fetch historical calibration context for all unique tickers so the
+        // recs.map() below stays synchronous (avoids async-in-map pattern).
+        const whipsawCtxMap = {};
+        await Promise.all(uniqueTickers.map(async (tk) => {
+          try {
+            const hist = await fetch(`${API}/api/learning/calibration?tickers=${encodeURIComponent(tk)}&days=180`);
+            if (hist.ok) {
+              const hd = await hist.json();
+              if (hd.available && hd.block) {
+                const tkMatch = hd.block.match(new RegExp(`${tk}:[^;]+`));
+                if (tkMatch) whipsawCtxMap[tk] = ` (historical: ${tkMatch[0].replace(/[;.]+$/, '')})`;
+              }
+            }
+          } catch (_) {}
+        }));
         const isBuySide  = a => a === 'BUY' || a === 'TOP_UP';
         const isSellSide = a => a === 'SELL' || a === 'TRIM';
         recs = recs.map(r => {
@@ -1155,7 +1170,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           if (Math.max(curTokens.length, priorTokens.length) < 4) return r;
           const matches = curTokens.filter(t => priorTokens.includes(t)).length;
           if (matches < 4) return r;
-          const warn = `contradicts your own ${priorAction} rec on ${priorDate} under a near-identical setup`;
+          const warn = `contradicts your own ${priorAction} rec on ${priorDate} under a near-identical setup${whipsawCtxMap[r.ticker] || ''}`;
           const warnings = Array.isArray(r._ruleWarnings) ? [...r._ruleWarnings, warn] : [warn];
           return { ...r, _ruleWarnings: warnings };
         });
