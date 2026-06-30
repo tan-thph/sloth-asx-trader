@@ -1077,6 +1077,33 @@ function _renderLearningContent(d, brier) {
       ${digestHistoryHtml}
     </div>`;
 
+  // ── AI Lesson Generator card ─────────────────────────────────────────────────
+  // Distinct from the digest above: the digest is prose for YOU to read; this
+  // distils ~100 closed trades + today's macro tape into SCOPED lessons written
+  // to trading_lessons, which are injected back into every future decision prompt
+  // for Claude to study. Manual-trigger only.
+  const lessonGenCard = `
+    <div class="card section-gap" id="lesson-gen-card">
+      <div class="flex-between" style="margin-bottom:6px">
+        <div class="card-title" style="margin:0">🎓 AI Lesson Generator</div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <label class="text-xs text-muted" style="display:flex;align-items:center;gap:4px">
+            trades
+            <input id="lesson-gen-n" type="number" min="30" max="200" step="10" value="100"
+              style="width:62px;padding:2px 4px" title="How many recent closed trades to learn from (30-200)">
+          </label>
+          <button class="btn btn-sm btn-primary" onclick="generateTradingLessons()"
+            id="lesson-gen-btn">Generate Lessons</button>
+        </div>
+      </div>
+      <p class="text-xs text-muted">
+        Claude studies your last ~100 closed trades alongside today's macro tape
+        (US market, commodities, FX, market risk) and writes a few durable, scoped
+        lessons. Each is saved to your Trading Lessons and fed into future analysis.
+      </p>
+      <div id="lesson-gen-result" style="display:none;margin-top:10px"></div>
+    </div>`;
+
   // ── Trading Lessons card (async — filled by renderLessonsCard()) ─────────────
   const lessonsPlaceholder = `<div id="ll-lessons-card" class="card section-gap" style="min-height:60px"></div>`;
 
@@ -1120,7 +1147,7 @@ function _renderLearningContent(d, brier) {
     buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
     `<div id="ll-factor-winrates-card" style="display:none"></div>` +
     recentCard + failedCard + debateInsightsCard +
-    digestCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder +
+    digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder +
     thesisMatrixPlaceholder + execAlphaPlaceholder + debateCollapsible;
 }
 
@@ -1234,6 +1261,167 @@ Please write a concise postmortem digest (under 320 words) in plain text. Struct
   } finally {
     btn.disabled = false;
     btn.textContent = 'Generate Digest';
+  }
+}
+
+// ── AI Lesson Generator ───────────────────────────────────────────────────────
+// Manual-trigger. Distils ~100 closed trades + today's macro tape (US market,
+// commodities, FX, market risk) into a few DURABLE, SCOPED lessons that are
+// written to trading_lessons and injected into every future decision prompt.
+// Distinct from generatePostmortemDigest(): the digest is prose for the user;
+// this produces structured, persisted lessons for Claude to study next time.
+async function generateTradingLessons() {
+  const btn = document.getElementById('lesson-gen-btn');
+  const out = document.getElementById('lesson-gen-result');
+  if (!btn || !out) return;
+  if (!state.serverOk) { toast('Backend not running', 'error'); return; }
+
+  let n = parseInt(document.getElementById('lesson-gen-n')?.value, 10);
+  if (!Number.isFinite(n)) n = 100;
+  n = Math.max(30, Math.min(200, n));
+
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  out.style.display = 'block';
+  out.innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div>';
+
+  try {
+    // 1. Trade learning data (~100 closed trades + CI-gated cross-tabs + exemplars)
+    const r = await fetch(`${API}/api/learning/lesson-source?n=${n}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    if (!d.n_sample) {
+      out.innerHTML = `<div class="text-sm text-muted" style="padding:8px">Not enough closed trades yet to distil lessons (need a handful of executed, closed recs first).</div>`;
+      return;
+    }
+
+    // 2. Live macro tape — US market, commodities, FX, market risk. Fetch fresh
+    //    (best-effort) and fall back to the morning brief already in state.macroData.
+    let md = state.macroData || {};
+    try {
+      const mr = await fetch(`${API}/api/macro`);
+      if (mr.ok) md = { ...(state.macroData || {}), ...(await mr.json()) };
+    } catch (_) { /* best-effort — proceed with whatever state has */ }
+
+    const _chg = (b) => (b && typeof b.change_pct === 'number')
+      ? `${b.change_pct > 0 ? '+' : ''}${b.change_pct}%` : 'n/a';
+    const _lvl = (b) => (b && typeof b.value === 'number') ? b.value : 'n/a';
+    const regimeNow = state.currentRegime?.regime || 'unknown';
+    const macroBlock =
+`Current macro tape (today):
+- Regime: ${regimeNow}
+- US market: S&P 500 ${_chg(md.sp500)}, Nasdaq ${_chg(md.nasdaq)}
+- Market risk: VIX ${_lvl(md.vix)} (${_chg(md.vix)}), ASX 20d vol ${md.asx_vol_20d ?? 'n/a'}, breadth(adv/decline) ${md.advance_decline_ratio ?? 'n/a'}
+- Commodities: gold ${_chg(md.gold)}, oil ${_chg(md.oil)}, copper ${_chg(md.copper)}, iron ore ${_chg(md.iron_ore)}
+- FX: AUD/USD ${_chg(md.aud_usd)}
+- SPI200 futures vs spot: ${md.spi200_futures_chg ?? 'n/a'}%, RBA cash rate: ${state.rbaRate ?? 'n/a'}%`;
+    const briefNarrative = (md.analysis || md.keyDrivers)
+      ? `\nThis morning's AI macro brief: ${md.analysis || md.keyDrivers}`.slice(0, 600)
+      : '';
+
+    // 3. Trade-data summary (reuse the digest framing)
+    const agg = d.aggregates || {};
+    const wr = d.overall_total > 0 ? Math.round(d.overall_wins / d.overall_total * 100) : null;
+    const errorParts  = (d.error_dist || []).map(e => `${e.error_type}: ${e.n}`).join(', ');
+    const regimeParts = (d.regime_stats || [])
+      .map(x => `${x.regime} ${x.win_rate != null ? x.win_rate + '%' : '?'}/${x.total}`).join('; ');
+    const driverParts = (d.buy_drivers || [])
+      .map(x => `${x.driver} ${x.win_rate}%/${x.total} (avg ${x.avg_pnl ?? '?'}%)`).join('; ');
+    const verdictParts = (agg.thesis_verdict_xtab || [])
+      .map(v => `${v.verdict}: ${v.win_rate}% (n=${v.n})`).join('; ');
+    const macroParts = (agg.macro_bucket_stats || [])
+      .map(b => `${b.bucket}: ${b.win_rate}% (n=${b.n})${b.flagged ? ' ⚑' : ''}`).join('; ');
+    const exemplarBlock = (d.exemplars || []).join('\n');
+
+    const prompt =
+`You are distilling durable trading lessons for an ASX equity decision system. These
+lessons will be stored and injected verbatim into FUTURE recommendation prompts for you
+to follow — so each must be specific, actionable, and backed by the data below, not
+generic advice.
+
+Sample: ${d.n_sample} recent closed trades (BUY/TOP_UP/SELL/TRIM, wins and losses).
+Overall win rate: ${wr != null ? wr + '%' : 'unknown'} (${d.overall_total} closed)
+Error-tag distribution: ${errorParts || 'none tagged'}
+Win rate by regime: ${regimeParts || 'no data'}
+BUY entry-driver performance: ${driverParts || 'insufficient data'}
+Thesis-verdict win rate (process vs luck): ${verdictParts || 'insufficient data'}
+Macro-condition performance (⚑ = significant vs overall): ${macroParts || 'insufficient data'}
+
+Curated examples (worst losses, best wins, process failures — entry→exit technicals,
+macro tape, and my own bull/bear case at the time):
+${exemplarBlock || 'No exemplars available yet.'}
+
+${macroBlock}${briefNarrative}
+
+Write 3 to 6 lessons. Each lesson MUST:
+- be ONE sentence, <= 200 characters, concrete and testable (cite a number/threshold/tag
+  from the data when possible, e.g. "When VIX > 25, mean_reversion BUYs won only 31% (n=12) — require a confirmed reversal first");
+- generalise to future decisions (a repeatable rule, not a one-off);
+- carry an optional scope so it only fires in the right context.
+
+Return ONLY a JSON object, no prose, no markdown fences, in exactly this shape:
+{"lessons":[{"lesson_text":"...","regime":null|"riskOn"|"riskOff"|"highVol"|"panic"|"trend"|"sideways","sector":null|"Materials"|"Financials"|"Healthcare"|"Energy"|"RealEstate"|"Technology"|"Consumer"|"Industrials"|"Utilities"|"Communication","breadth_scope":null|"high_vol"|"low_vol"|"adl_below_0.3"|"adl_above_0.7"|"earnings_season"|"cgt_window"}]}
+Use null for any scope that does not apply (a broadly-true lesson has all three null).`;
+
+    const text = await callClaude('assistant', prompt, { maxTokens: 900, noCache: true });
+
+    // 4. Parse the JSON (tolerate stray prose / code fences)
+    let parsed = null;
+    try { parsed = JSON.parse(text); }
+    catch (_) {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) { try { parsed = JSON.parse(m[0]); } catch (_) {} }
+    }
+    const lessons = Array.isArray(parsed?.lessons) ? parsed.lessons : [];
+    if (!lessons.length) throw new Error('Model returned no parseable lessons. Raw: ' + text.slice(0, 160));
+
+    // 5. Persist each lesson to trading_lessons (source flags it as AI-generated)
+    const _REGIMES = new Set(['riskOn', 'riskOff', 'highVol', 'panic', 'trend', 'sideways']);
+    const _SCOPES  = new Set(['high_vol', 'low_vol', 'adl_below_0.3', 'adl_above_0.7', 'earnings_season', 'cgt_window']);
+    const saved = [];
+    for (const L of lessons) {
+      const lesson_text = String(L?.lesson_text || '').trim().slice(0, 240);
+      if (!lesson_text) continue;
+      const body = {
+        lesson_text,
+        regime:        _REGIMES.has(L?.regime) ? L.regime : null,
+        sector:        (L?.sector && typeof L.sector === 'string') ? L.sector : null,
+        breadth_scope: _SCOPES.has(L?.breadth_scope) ? L.breadth_scope : null,
+        source: 'ai_digest',
+      };
+      try {
+        const resp = await fetch(`${API}/api/learning/lessons`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if ((await resp.json()).ok) saved.push(body);
+      } catch (_) { /* skip the one that failed, keep the rest */ }
+    }
+
+    const dateStr = new Date().toLocaleDateString('en-AU');
+    out.innerHTML = `
+      <div style="border-top:1px solid var(--border);padding-top:10px">
+        <div class="flex-between" style="margin-bottom:6px">
+          <span class="text-xs text-muted" style="font-weight:600">${saved.length} lesson${saved.length === 1 ? '' : 's'} saved — ${dateStr}</span>
+          <button class="btn btn-sm" onclick="document.getElementById('lesson-gen-result').style.display='none'">✕</button>
+        </div>
+        <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.6;color:var(--text-primary)">
+          ${saved.map(s => `<li>${escapeHTML(s.lesson_text)}${
+            (s.regime || s.sector || s.breadth_scope)
+              ? ` <span class="text-xs text-muted">[${[s.regime, s.sector, s.breadth_scope].filter(Boolean).join(' · ')}]</span>`
+              : ''
+          }</li>`).join('')}
+        </ul>
+        <p class="text-xs text-muted" style="margin-top:8px">These are now in your Trading Lessons below and will be injected into future analysis.</p>
+      </div>`;
+    toast(`${saved.length} AI lesson${saved.length === 1 ? '' : 's'} saved`, 'success');
+    renderLessonsCard().catch(() => {});  // refresh the lessons list so they show immediately
+  } catch (e) {
+    out.innerHTML = `<div class="text-sm text-danger" style="padding:8px">${escapeHTML(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate Lessons';
   }
 }
 

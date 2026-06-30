@@ -1869,6 +1869,19 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
     spi200_futures_chg:    _md.spi200_futures_chg ?? null,
     asx_vol_20d:           _md.asx_vol_20d ?? null,
     advance_decline_ratio: _md.advance_decline_ratio ?? null,
+    // US market (overnight lead), commodities, and risk gauges — captured per-rec
+    // so the digest / lesson generator can analyse e.g. high-VIX or S&P-down-
+    // overnight performance, not just ASX-local conditions. /api/macro already
+    // returns these ({value, change_pct} blocks); they were simply never snapshotted
+    // onto the trade. Rides the existing market_context JSON column (no schema
+    // change; backfill-limited to trades logged after this shipped, same as every
+    // other snapshot field).
+    sp500_chg:             _md.sp500?.change_pct  ?? null,
+    nasdaq_chg:            _md.nasdaq?.change_pct  ?? null,
+    vix:                   _md.vix?.value          ?? null,
+    vix_chg:               _md.vix?.change_pct     ?? null,
+    oil_chg:               _md.oil?.change_pct     ?? null,
+    copper_chg:            _md.copper?.change_pct  ?? null,
   };
   // §9.3: max |ρ| vs holdings at generation time — lets later analysis answer
   // "do high-correlation entries underperform?" from the learning DB.

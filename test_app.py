@@ -1643,6 +1643,47 @@ class TestSprint5(unittest.TestCase):
         d = json.loads(resp.data)
         self.assertTrue(any("BHP.AX" in e for e in d["exemplars"]))
 
+    def test_lesson_source_empty_shape_and_clamp(self):
+        """GET /api/learning/lesson-source returns the lesson-synthesis shape and
+        clamps n to [30, 200]."""
+        resp = self.client.get("/api/learning/lesson-source?n=100")
+        self.assertEqual(resp.status_code, 200)
+        d = json.loads(resp.data)
+        for k in ("n_sample", "n_requested", "regime_stats", "error_dist",
+                  "buy_drivers", "aggregates", "exemplars"):
+            self.assertIn(k, d)
+        self.assertIsInstance(d["exemplars"], list)
+        self.assertIsInstance(d["buy_drivers"], list)
+        # clamp
+        self.assertEqual(json.loads(self.client.get(
+            "/api/learning/lesson-source?n=5").data)["n_requested"], 30)
+        self.assertEqual(json.loads(self.client.get(
+            "/api/learning/lesson-source?n=9999").data)["n_requested"], 200)
+        # bad input falls back to default 100
+        self.assertEqual(json.loads(self.client.get(
+            "/api/learning/lesson-source?n=abc").data)["n_requested"], 100)
+
+    def test_lesson_source_counts_closed_buy(self):
+        """A closed, executed BUY must be counted in the lesson-source sample."""
+        self.client.post(
+            "/api/learning/log",
+            data=json.dumps({"ticker": "CSL.AX", "event_type": "recommendation",
+                             "recommendation": "BUY", "ai_confidence": 0.75}),
+            content_type="application/json",
+        )
+        row = _get_shared_conn().execute(
+            "SELECT id FROM ai_learning_events WHERE ticker='CSL.AX'"
+        ).fetchone()
+        self.client.post(
+            "/api/learning/outcome",
+            data=json.dumps({"id": row["id"], "outcome_status": "win",
+                             "was_executed": 1, "realized_pnl_pct": 6.0,
+                             "exit_reason": "target_hit"}),
+            content_type="application/json",
+        )
+        d = json.loads(self.client.get("/api/learning/lesson-source?n=100").data)
+        self.assertGreaterEqual(d["n_sample"], 1)
+
     def test_digest_aggregates_macro_bucket_gated_by_min_n(self):
         """Macro-bucket cells with fewer than _DIGEST_MIN_N trades must not
         appear in aggregates — a 2-trade 'pattern' is noise, not signal."""
@@ -1857,6 +1898,27 @@ class TestSprint5(unittest.TestCase):
             src = f.read()
         self.assertIn("async function generatePostmortemDigest()", src)
         self.assertIn("/api/learning/digest-data", src)
+
+    def test_generate_trading_lessons_function(self):
+        """learning.js must define the AI Lesson Generator: pulls lesson-source,
+        calls Claude, and persists results to trading_lessons."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function generateTradingLessons()", src)
+        self.assertIn("/api/learning/lesson-source", src)
+        self.assertIn("generateTradingLessons()", src)  # button wired
+        # Must write the distilled lessons back to trading_lessons (the injection
+        # channel) — otherwise Claude never studies them next time.
+        self.assertIn("/api/learning/lessons", src)
+        self.assertIn("ai_digest", src)
+
+    def test_macro_snapshot_captures_us_and_risk_fields(self):
+        """logRecsToLearningLoop()'s per-rec market_context must capture US market /
+        risk / commodity fields (fine-tuning gap fix), not just ASX-local macro."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        for field in ("sp500_chg", "nasdaq_chg", "vix", "oil_chg", "copper_chg"):
+            self.assertIn(field, src)
 
     def test_download_eofy_pack_function(self):
         """cgt.js must define downloadEofyPack async function."""

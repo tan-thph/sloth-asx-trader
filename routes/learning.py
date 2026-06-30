@@ -2163,6 +2163,120 @@ def learning_digest_data():
         return jsonify({"error": str(e)}), 500
 
 
+@bp.route("/api/learning/lesson-source")
+def learning_lesson_source():
+    """Structured dataset for the AI Lesson Generator (manual-trigger only).
+
+    Sibling of /digest-data, but tuned for *lesson synthesis* rather than a
+    free-text postmortem: pulls the most recent N closed+executed trades (BUY,
+    TOP_UP, SELL, TRIM — wins AND losses, since a lesson must know what works,
+    not just what failed), reuses the same CI-gated cross-tab aggregates, and
+    returns a WIDER curated exemplar set (cap 30 vs the digest's 15) so Claude
+    has enough concrete cases to generalise from.
+
+    Unlike the digest (which produces prose for the user to read), this feeds a
+    prompt whose output is parsed into scoped rows written to `trading_lessons`,
+    which are then injected back into every future decision prompt. The point of
+    the larger sample / exemplar cap is to bias toward durable, repeatable
+    patterns over one-off recency.
+
+    Query: ?n=100 (default 100, clamped 30..200).
+    """
+    try:
+        try:
+            n = int(request.args.get("n", 100))
+        except (TypeError, ValueError):
+            n = 100
+        n = max(30, min(200, n))
+
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT id, ticker, sector, regime, regime_at_execution, ai_confidence,
+                       ensemble_confidence, recommendation, outcome_status,
+                       realized_pnl_pct, realized_pnl_aud, holding_period_days,
+                       exit_reason, error_type, success_tags, primary_entry_driver,
+                       thesis_verdict, sell_primary_driver, sell_urgency, skill_score,
+                       mae_pct, mfe_pct, rr_ratio, trade_thesis, bull_case, bear_case,
+                       entry_signals_json, exit_signals_json, market_context, timestamp,
+                       prompt_version, stop_cf_saved, exit_quality_tag, sell_verify_sold_chg
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven') AND was_executed = 1
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (n,)).fetchall()
+            rows = [dict(r) for r in rows]
+
+            regime_rows = conn.execute("""
+                SELECT regime,
+                       SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) as wins,
+                       COUNT(*) as total
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven') AND was_executed=1
+                GROUP BY regime
+            """).fetchall()
+
+            # Error distribution — split multi-tag error_type on ',' (gotcha #45).
+            _error_dist_rows = conn.execute("""
+                SELECT error_type
+                FROM ai_learning_events
+                WHERE outcome_status IN ('loss','breakeven') AND was_executed=1
+                  AND error_type IS NOT NULL AND error_type != ''
+            """).fetchall()
+            _err_counter: dict = {}
+            for _er in _error_dist_rows:
+                for _tag in (_er["error_type"] or "").split(","):
+                    _tag = _tag.strip()
+                    if _tag and _tag not in ("none", "external_shock"):
+                        _err_counter[_tag] = _err_counter.get(_tag, 0) + 1
+            error_dist = [{"error_type": k, "n": v}
+                          for k, v in sorted(_err_counter.items(), key=lambda x: -x[1])]
+
+            # Entry-driver × outcome (BUY/TOP_UP) — what setup styles actually pay.
+            buy_driver_rows = conn.execute("""
+                SELECT primary_entry_driver as driver,
+                       SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) as wins,
+                       COUNT(*) as total,
+                       ROUND(AVG(realized_pnl_pct), 2) as avg_pnl
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss','breakeven') AND was_executed=1
+                  AND recommendation IN ('BUY','TOP_UP')
+                  AND primary_entry_driver IS NOT NULL AND primary_entry_driver != ''
+                GROUP BY primary_entry_driver
+            """).fetchall()
+            buy_drivers = [
+                {"driver": r["driver"], "wins": r["wins"], "total": r["total"],
+                 "win_rate": round(r["wins"] / r["total"] * 100, 1) if r["total"] else None,
+                 "avg_pnl": r["avg_pnl"]}
+                for r in buy_driver_rows if r["total"] >= _DIGEST_MIN_N
+            ]
+
+        regime_stats = [
+            {"regime": r["regime"] or "unknown", "wins": r["wins"], "total": r["total"],
+             "win_rate": round(r["wins"] / r["total"] * 100, 1) if r["total"] else None}
+            for r in regime_rows
+        ]
+        overall_total = sum(r["total"] for r in regime_rows)
+        overall_wins  = sum(r["wins"] for r in regime_rows)
+
+        aggregates = _compute_digest_aggregates(rows)
+        exemplar_rows = _select_digest_exemplars(rows, cap=30)
+        exemplars = [_format_digest_exemplar(r) for r in exemplar_rows]
+
+        return jsonify({
+            "n_sample":      len(rows),
+            "n_requested":   n,
+            "regime_stats":  regime_stats,
+            "overall_wins":  overall_wins,
+            "overall_total": overall_total,
+            "error_dist":    error_dist,
+            "buy_drivers":   buy_drivers,
+            "aggregates":    aggregates,
+            "exemplars":     exemplars,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/api/learning/calibration-stats")
 def learning_calibration_stats():
     """Brier score + reliability-diagram bins.
