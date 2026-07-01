@@ -13,7 +13,7 @@ On Linux / macOS you can also use gunicorn:
 
 Compared to `python asx_server.py` (Flask dev server), both options give:
   • Proper multi-threaded request handling (not Flask's single-threaded default)
-  • Graceful shutdown that terminates the ngrok tunnel cleanly
+  • Graceful worker shutdown/recycling
   • Production-level logging
 """
 
@@ -21,7 +21,7 @@ import multiprocessing
 
 # Bind to loopback only — prevents other devices on your LAN from reaching the API.
 # Change to "0.0.0.0:5000" only if you deliberately access the app from another
-# device (e.g. phone on the same Wi-Fi).
+# device (e.g. phone on the same Wi-Fi, or over Tailscale).
 bind = "127.0.0.1:5000"
 
 # Threaded model: yfinance is I/O-bound, so threads beat processes.

@@ -15,7 +15,7 @@ Equivalent to:
 Config mirrors gunicorn.conf.py:
   • 16 threads (matches 2 workers × 8 threads)
   • 180 s request timeout
-  • Bind 0.0.0.0:5000 so ngrok and LAN access both work
+  • Bind 0.0.0.0:5000 so LAN and Tailscale access both work
 """
 
 import logging

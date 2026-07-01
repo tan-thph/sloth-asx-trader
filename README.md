@@ -274,7 +274,7 @@ Everything is configurable from the Settings page — no code editing:
 ## Tips & Troubleshooting
 
 - **Save on API cost:** turn on local LLM mode for routine portfolio analysis and reserve Claude for high-stakes decisions.
-- **Mobile / remote read-only:** the app is served on a single origin, so it works behind an ngrok tunnel without config changes — handy for checking positions from your phone during the day.
+- **Mobile / remote read-only:** the app is served on a single origin, so it works over a [Tailscale](https://tailscale.com) connection without config changes — handy for checking positions from your phone during the day. Install Tailscale on both the server machine and your phone and sign into the same account; no public tunnel/exposure needed.
 - **Low-power box:** enable SBC mode to slow refreshes and avoid background scans.
 - **"Page crashed" card:** a render error was caught by the error boundary; the stack is in the browser console. Reload the page.
 - **Stale prices / missing data:** the app falls back from yfinance to Stooq automatically; a `_source: stooq` flag and a stale-data badge (>25 min) tell you when live data is degraded.
