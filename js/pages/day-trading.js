@@ -416,6 +416,18 @@ function _renderDtRulesTab() {
         </table>
       </div>
 
+      <!-- Always-applied quant engine checks — NOT part of the toggle system above -->
+      <div class="card">
+        <div class="card-title">
+          Always-Applied Quant Engine Checks
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:6px">not togglable — risk-management floors, not preferences</span>
+        </div>
+        <div style="background:var(--bg-secondary);border-radius:var(--radius-md);padding:8px 12px;margin:8px 0;font-size:11px;color:var(--text-muted)">
+          Every candidate that clears the rules above still passes through the deterministic sizing engine (<code>computeTradeParams()</code>). These 9 checks always run regardless of what's ticked above — a candidate can pass every visible rule and still be rejected here. Counts below are from the most recent scan.
+        </div>
+        ${_renderDtQuantChecksTable()}
+      </div>
+
       <!-- Footer -->
       <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
         <div>
@@ -432,13 +444,53 @@ function _renderDtRulesTab() {
   `;
 }
 
+// Renders the "Always-Applied Quant Engine Checks" table. Reads counts from
+// state.dayTrading.lastSummary.quantStats (populated by _dtBuildRecs() via the
+// quantStats accumulator — see js/day-trading-analysis.js). Empty/undefined
+// until the first scan of the session runs.
+const _DT_QUANT_CHECK_DESCRIPTIONS = {
+  noSignals:     'Live signals unavailable for the ticker at scan time',
+  noWinProb:     'Confidence value missing going into sizing',
+  noAtr:         'Price or ATR14 unavailable — can\'t place a stop',
+  noTarget:      'No valid target found above entry price',
+  rrFloor:       'Reward:risk below the minimum floor (duplicates the "Min reward:risk ratio" row above — sizing enforces it independently)',
+  noLiquidity:   '20-day ADV data unavailable — liquidity cap can\'t be computed',
+  negativeKelly: 'Kelly fraction ≤ 0 — the trade has negative expected value',
+  sizingZero:    'Risk/position/liquidity constraints combined size the trade to 0 shares',
+  minTradeSize:  'Position too small vs. the configured minimum trade notional',
+  other:         'Rejected by computeTradeParams() for another reason',
+};
+
+function _renderDtQuantChecksTable() {
+  const qs = state.dayTrading.lastSummary?.quantStats || {};
+  const rows = Object.keys(_DT_QUANT_CHECK_DESCRIPTIONS).map(key => {
+    const n = qs[key] || 0;
+    return `
+      <tr>
+        <td style="padding:4px 8px">
+          <div style="font-size:12px;font-weight:600">${DT_QUANT_REJECT_LABELS[key] || key}</div>
+          <div class="text-xs text-muted">${_DT_QUANT_CHECK_DESCRIPTIONS[key]}</div>
+        </td>
+        <td style="text-align:right;white-space:nowrap;font-size:12px;font-weight:${n ? 700 : 400};color:${n ? 'var(--warn)' : 'var(--text-muted)'}">${n || '—'}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <table class="dt-rules-table" style="width:100%;margin-top:4px">
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
 function setDtRuleEnabled(group, key, checked) {
   if (!state.dayTrading[group]) state.dayTrading[group] = {};
   if (!state.dayTrading[group].enabled) state.dayTrading[group].enabled = {};
   state.dayTrading[group].enabled[key] = !!checked;
   scheduleSave();
   const el = document.getElementById('dt-tab-content');
-  if (el) el.innerHTML = _renderDtRulesTab();
+  // Must re-render via _renderDtSetupsTab() (not _renderDtRulesTab() alone) —
+  // the latter omits the "Setups / ⚙ Rules" sub-tab bar that wraps it, which
+  // made every checkbox toggle silently drop those tab buttons until the user
+  // navigated away and back to force a full re-render.
+  if (el) el.innerHTML = _renderDtSetupsTab();
 }
 
 function setDtParam(group, key, rawValue) {

@@ -131,7 +131,8 @@ async function _runPortfolioWatchlistScan() {
 
   // ── Quantitative setup detection (no Claude) ─────────────────────────────────
   const { passing: candidates, stats: filterStats } = _dtPreFilterWithStats(allTickers);
-  const newRecs = _dtBuildRecs(candidates, _ap, _dtPortCtx, _dtRegime);
+  const _quantStats = {};
+  const newRecs = _dtBuildRecs(candidates, _ap, _dtPortCtx, _dtRegime, _quantStats);
   const newRecTickers = new Set(newRecs.map(r => r.ticker));
 
   // Mirrors the merge-by-ticker protection in _runUniverseScan(): never wholesale-
@@ -161,9 +162,11 @@ async function _runPortfolioWatchlistScan() {
   const _twNote = _tw
     ? `⏰ TIME-OF-WEEK: ${_tw.rule} — ${_tw.suppressed} setup(s) deferred (re-scan after the window). `
     : '';
+  const _quantRejLine = _dtQuantRejLine(_quantStats);
   state.dayTrading.lastSummary = {
-    text: `${_bbNote}${_twNote}Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} passed · Rejected — ${_rejLine}`,
+    text: `${_bbNote}${_twNote}Quant scan: ${newRecs.length} setup(s) · ${candidates.length}/${allTickers.length} passed · Rejected — ${_rejLine}. ${_quantRejLine}`,
     filterStats,
+    quantStats: _quantStats,
     date: todayStr(),
     time: nowSydney(),
     recCount: newRecs.length,
@@ -199,10 +202,58 @@ function _dtTimeOfWeekBlocked(now) {
   return null;
 }
 
+// ── _dtCategorizeQuantReason / DT_QUANT_REJECT_LABELS ──────────────────────────
+// computeTradeParams() (quant-engine.js) enforces its own hard sizing/EV checks
+// (R:R floor, liquidity data, Kelly EV, min trade size) that are NOT part of the
+// Rules-tab checkbox system — unlike the pre-filter and confirmation signals,
+// these can't be individually disabled, because they're risk-management floors,
+// not preferences (same principle as gotcha #25 in CLAUDE.md). Ticking off every
+// row in the Rules tab still leaves these active, which was confusing with no
+// visibility into why a candidate that cleared every visible rule still didn't
+// produce a rec. This buckets computeTradeParams()'s free-text `reason` string
+// into a stable key so scan summaries can show counts without parsing the
+// dynamic numbers embedded in the message.
+function _dtCategorizeQuantReason(reason) {
+  if (!reason) return 'other';
+  if (reason.startsWith('no signals for'))                 return 'noSignals';
+  if (reason === 'winProb missing')                         return 'noWinProb';
+  if (reason === 'price or ATR unavailable')                return 'noAtr';
+  if (reason === 'no valid target above entry')             return 'noTarget';
+  if (reason.startsWith('R:R'))                             return 'rrFloor';
+  if (reason.startsWith('ADV data unavailable'))            return 'noLiquidity';
+  if (reason.startsWith('negative expected value'))         return 'negativeKelly';
+  if (reason.startsWith('sizing constraints reject trade')) return 'sizingZero';
+  if (reason.startsWith('min trade size'))                  return 'minTradeSize';
+  return 'other';
+}
+
+const DT_QUANT_REJECT_LABELS = {
+  noSignals:     'No live signals',
+  noWinProb:     'Confidence missing',
+  noAtr:         'Price/ATR unavailable',
+  noTarget:      'No valid target above entry',
+  rrFloor:       'R:R below floor',
+  noLiquidity:   'ADV/liquidity data unavailable',
+  negativeKelly: 'Negative EV (Kelly)',
+  sizingZero:    'Sizing → 0 shares',
+  minTradeSize:  'Below min trade size',
+  other:         'Other',
+};
+
+// Builds a one-line summary of quant-engine rejections for the scan toast/card.
+function _dtQuantRejLine(quantStats) {
+  const parts = Object.entries(quantStats || {})
+    .filter(([, n]) => n > 0)
+    .map(([k, n]) => `${DT_QUANT_REJECT_LABELS[k] || k}:${n}`);
+  return parts.length ? `Quant engine (always-on, not togglable) rejected — ${parts.join(' ')}. ` : '';
+}
+
 // ── _dtBuildRecs ──────────────────────────────────────────────────────────────
 // Scores pre-filtered tickers against the DT signal stack and returns recs.
 // Called by both _runPortfolioWatchlistScan() and _runUniverseScan().
-function _dtBuildRecs(candidates, ap, portCtx, regime) {
+// `quantStats`, if passed, is mutated in place with a tally of why candidates
+// were rejected by the always-on quant engine (see _dtCategorizeQuantReason).
+function _dtBuildRecs(candidates, ap, portCtx, regime, quantStats) {
   const _minConf = ap.minConfidence ?? DT_AI_PARAMS.minConfidence;
   const _minRR   = ap.minRrRatio   ?? DT_AI_PARAMS.minRrRatio;
   const recs = [];
@@ -285,13 +336,25 @@ function _dtBuildRecs(candidates, ap, portCtx, regime) {
         expectedTimeToTarget: 8,
         priceRange: rec.priceRange,
       });
-      if (!qt.ok) continue;
+      if (!qt.ok) {
+        if (quantStats) {
+          const cat = _dtCategorizeQuantReason(qt.reason);
+          quantStats[cat] = (quantStats[cat] || 0) + 1;
+        }
+        continue;
+      }
       rec = { ...rec, qty: qt.qty, stopLoss: qt.stopLoss, target: qt.target,
               rrRatio: qt.rrRatio, riskAUD: qt.riskAUD, rewardAUD: qt.rewardAUD, _quantEngine: true };
     }
 
-    if (!rec.rrRatio) continue;   // missing R:R is a data problem, not a togglable rule
-    if (_ruleOn(ap, 'minRrRatio') && rec.rrRatio < _minRR) continue;
+    if (!rec.rrRatio) {   // missing R:R is a data problem, not a togglable rule
+      if (quantStats) quantStats.noTarget = (quantStats.noTarget || 0) + 1;
+      continue;
+    }
+    if (_ruleOn(ap, 'minRrRatio') && rec.rrRatio < _minRR) {
+      if (quantStats) quantStats.rrFloor = (quantStats.rrFloor || 0) + 1;
+      continue;
+    }
 
     if (typeof applyRegimeModifiers === 'function' && regime) {
       rec = applyRegimeModifiers(rec, regime);
@@ -587,7 +650,13 @@ async function _runUniverseScan() {
     return;
   }
   const universeKey = state.dayTrading.universeKey || 'asx200';
-  const universeTickers = getUniverseTickers(universeKey);
+  // Strip .AX suffix — _ASX_UNIVERSES entries carry it, but every other ticker
+  // in state (portfolio, watchlist, liveSignals, dividendData) is bare. Passing
+  // "BHP.AX" through would key liveSignals/dividendData separately from "BHP"
+  // and, once executed, create a duplicate portfolio/CGT holding instead of
+  // merging with an existing bare-ticker position. Mirrors the same fix already
+  // applied in intraday-strategy.js's universe scan.
+  const universeTickers = getUniverseTickers(universeKey).map(t => t.replace('.AX', ''));
   if (!universeTickers.length) { toast('Unknown universe key', 'error'); return; }
 
   const meta = ASX_UNIVERSE_META[universeKey] || { label: universeKey };
@@ -680,7 +749,8 @@ async function _runUniverseScan() {
   };
   const _uRegime = state.currentRegime?.regime;
 
-  const newRecs = _dtBuildRecs(candidates, _uAp, _uPortCtx, _uRegime)
+  const _quantStats = {};
+  const newRecs = _dtBuildRecs(candidates, _uAp, _uPortCtx, _uRegime, _quantStats)
     .map(r => ({ ...r, source: 'universe', universeKey }));
   const newRecTickers = new Set(newRecs.map(r => r.ticker));
 
@@ -712,9 +782,11 @@ async function _runUniverseScan() {
   const _utwNote = _utw
     ? `⏰ TIME-OF-WEEK: ${_utw.rule} — ${_utw.suppressed} setup(s) deferred (re-scan after the window). `
     : '';
+  const _quantRejLine = _dtQuantRejLine(_quantStats);
   state.dayTrading.lastSummary = {
-    text: `${_ubbNote}${_utwNote}${meta.label}: ${candidates.length}/${universeTickers.length} passed · ${newRecs.length} setup(s) · Rejected — ${_rejLine} (${elapsed}s)`,
+    text: `${_ubbNote}${_utwNote}${meta.label}: ${candidates.length}/${universeTickers.length} passed · ${newRecs.length} setup(s) · Rejected — ${_rejLine} (${elapsed}s). ${_quantRejLine}`,
     filterStats,
+    quantStats: _quantStats,
     date: todayStr(),
     time: nowSydney(),
     recCount: newRecs.length,
