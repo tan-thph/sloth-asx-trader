@@ -823,6 +823,7 @@ def portfolio_nav_history():
             payload["bench_return"] = round(
                 (cached[0]["_bench_raw"][-1] - first_b) / first_b * 100, 2
             ) if first_b else None
+        payload.pop("_bench_raw", None)
         return jsonify(payload)
 
     benchmark   = "^AXJO"
@@ -838,6 +839,26 @@ def portfolio_nav_history():
 
         closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw[["Close"]]
         closes = closes.ffill().dropna(how="all")
+
+        # yf.download's batch call can silently drop individual symbols on a
+        # transient rate-limit/network hiccup ("N Failed downloads" in logs)
+        # without raising — if the benchmark index was one of the casualties,
+        # retry it alone rather than caching a benchmark-less NAV chart for
+        # the full 5-minute TTL.
+        if benchmark not in closes.columns or closes[benchmark].dropna().empty:
+            try:
+                bench_raw_dl = fetch_with_retry(
+                    yf.download, benchmark, period=period, auto_adjust=True, progress=False,
+                    cache_key=f"nav_bench_{benchmark}_{period}", max_retries=2,
+                )
+                bench_close = (bench_raw_dl["Close"] if isinstance(bench_raw_dl.columns, pd.MultiIndex)
+                               else bench_raw_dl["Close"] if "Close" in bench_raw_dl.columns else None)
+                if bench_close is not None and not bench_close.empty:
+                    if isinstance(bench_close, pd.DataFrame):
+                        bench_close = bench_close.iloc[:, 0]
+                    closes[benchmark] = bench_close.reindex(closes.index, method="ffill")
+            except Exception as bench_exc:
+                log.warning("nav-history: benchmark retry failed for %s: %s", benchmark, bench_exc)
 
         nav = pd.Series(0.0, index=closes.index)
         for t, asx_t in zip(tickers, asx_tickers):

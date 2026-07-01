@@ -251,3 +251,37 @@ describe('computeTradeParams — pre-earnings adjustment', () => {
     expect(earnsDist).toBeCloseTo(baseDist * 1.3, 3);
   });
 });
+
+describe('computeTradeParams — minTradeSize floor', () => {
+  afterEach(() => {
+    delete state.settings;
+  });
+
+  it('ignores the floor when qty is already above it', () => {
+    state.settings = { minTradeSize: 500 };
+    const r = computeTradeParams('BHP', makeSignals(), makeCtx(), makeAnalyst());
+    expect(r.ok).toBe(true);
+    expect(r._minTradeSizeBumped).toBeFalsy();
+  });
+
+  it('bumps qty up to meet the floor when hard caps allow it', () => {
+    const noFloor = computeTradeParams('BHP', makeSignals(), makeCtx(), makeAnalyst());
+    expect(noFloor.ok).toBe(true);
+    const belowFloorNotional = noFloor.qty * noFloor.entryPrice;
+
+    state.settings = { minTradeSize: belowFloorNotional + 4000 };
+    const r = computeTradeParams('BHP', makeSignals(), makeCtx(), makeAnalyst());
+    expect(r.ok).toBe(true);
+    expect(r._minTradeSizeBumped).toBe(true);
+    expect(r.qty).toBeGreaterThan(noFloor.qty);
+    expect(r.qty * r.entryPrice).toBeGreaterThanOrEqual(state.settings.minTradeSize);
+    expect(r.constraintBinding).toBe('minTradeSize');
+  });
+
+  it('rejects the trade when the floor cannot be met without breaching risk/position/liquidity caps', () => {
+    state.settings = { minTradeSize: 1_000_000 };
+    const r = computeTradeParams('BHP', makeSignals(), makeCtx(), makeAnalyst());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/min trade size/i);
+  });
+});

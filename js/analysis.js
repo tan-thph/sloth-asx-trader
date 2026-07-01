@@ -980,6 +980,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
           _quantEngine: true,
           _constraintBinding: qt.constraintBinding,
           _preEarningsAdj: qt._preEarningsAdj,
+          _minTradeSizeBumped: qt._minTradeSizeBumped,
         };
       });
     }

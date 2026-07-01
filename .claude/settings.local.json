@@ -142,7 +142,8 @@
       "PowerShell(node --version 2>&1)",
       "PowerShell(node --check js/prompts.js; node --check js/claude-client.js; node --check js/response-validator.js)",
       "PowerShell(npm *)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "Bash(ps -p 3034855 -o pid,ppid,etime,cmd)"
     ]
   }
 }

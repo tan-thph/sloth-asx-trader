@@ -19,6 +19,10 @@ const DT_FILTER = {
   vovMult:       1.3,   // §2.8 VoV filter — skip when atr_14 > vovMult × atr_5d_mean
                         // (ATR expanding rapidly = stop distances already stale; 0 disables)
   timeOfWeekFilter: true, // §2.9 — block new entries Mon <11:00 / Fri ≥14:00 AEST (false disables)
+  // Keep in sync with _DT_FILTER_DEFAULTS.enabled in js/pages/day-trading.js —
+  // both must agree on which rules default on/off, since day-trading-analysis.js
+  // deep-merges against THIS object at scan time.
+  enabled: { maxBbPctB: true, minAdvAud: true, sma200Floor: true, sma50Floor: true, maxAdx: true, minAdr: true, vovMult: true },
 };
 
 // ── AI-phase parameters ────────────────────────────────────────────────────────
@@ -27,6 +31,9 @@ const DT_AI_PARAMS = {
   minRrRatio:      2.0,  // minimum reward:risk ratio
   minConfidence:   0.50, // minimum AI confidence to accept a rec
   stopAtrMultiple: 2.5,  // stop loss = entry − stopAtrMultiple × ATR14
+  // Keep in sync with _DT_AI_DEFAULTS.enabled in js/pages/day-trading.js.
+  // fibZone/obvRising default OFF (approximates old "any 2 of 4" strictness).
+  enabled: { minRrRatio: true, minConfidence: true, rsiThreshold: true, volZScore: true, fibZone: false, obvRising: false },
 };
 
 // ── Rule enable/disable ────────────────────────────────────────────────────────
@@ -66,7 +73,7 @@ function _dtPreFilter(tickers) {
     if (trendRuleOn && ref && s.current_price < ref * trendFloor) return false;
 
     // Regime filter — skip stocks already in a strong uptrend (DI+ > DI- confirms direction).
-    if (_ruleOn(fp, 'maxAdx') && (s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus) return false;
+    if (_ruleOn(fp, 'maxAdx') && (s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.adx_plus_di > s.adx_minus_di) return false;
 
     // §2.8 VoV filter — ATR expanding rapidly vs its recent baseline means the
     // noise-floor estimate behind the stop distance is already stale. Skip.

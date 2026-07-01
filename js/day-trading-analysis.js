@@ -13,7 +13,13 @@
 // Same logic as _dtPreFilter() but returns rejection counts per filter so the UI
 // can display a breakdown of why tickers were rejected.
 function _dtPreFilterWithStats(tickers) {
-  const fp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}) };
+  // NB: `enabled` must be deep-merged, not spread wholesale — a partial saved
+  // `enabled` map (only the rules the user has actually toggled) would otherwise
+  // silently drop DT_FILTER's defaults for every untouched rule (see the matching
+  // fix for `_ap` below; filterParams' defaults are all `true` so this specific
+  // object rarely surfaces a visible symptom, but the merge must stay correct).
+  const fp = { ...DT_FILTER, ...(state.dayTrading.filterParams || {}),
+               enabled: { ...DT_FILTER.enabled, ...((state.dayTrading.filterParams || {}).enabled || {}) } };
   const stats = { bb: 0, adv: 0, sma: 0, adx: 0, vov: 0, noData: 0 };
   const passing = [];
 
@@ -26,7 +32,7 @@ function _dtPreFilterWithStats(tickers) {
     const trendRuleOn = s.sma_200 ? _ruleOn(fp, 'sma200Floor') : _ruleOn(fp, 'sma50Floor');
     const trendFloor  = s.sma_200 ? fp.sma200Floor : (fp.sma50Floor ?? 0.970);
     if (trendRuleOn && ref && s.current_price < ref * trendFloor)                                          { stats.sma++; continue; }
-    if (_ruleOn(fp, 'maxAdx') && (s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.di_plus > s.di_minus) { stats.adx++; continue; }
+    if (_ruleOn(fp, 'maxAdx') && (s.adx ?? 0) > fp.maxAdx && s.trend_strength === 'strong' && s.adx_plus_di > s.adx_minus_di) { stats.adx++; continue; }
     // §2.8 VoV — keep in sync with _dtPreFilter() in strategy.js
     if (_ruleOn(fp, 'vovMult') && (fp.vovMult ?? 0) > 0 && s.atr_14 != null && s.atr_5d_mean != null
         && s.atr_5d_mean > 0 && s.atr_14 > fp.vovMult * s.atr_5d_mean)                                     { stats.vov++; continue; }
@@ -103,7 +109,14 @@ async function _runPortfolioWatchlistScan() {
     ? state.dayTrading.allocatedCash
     : Math.round(state.cash * 0.20);
   const riskPct = state.dayTrading.riskPct || 1.5;
-  const _ap = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}) };
+  // Deep-merge `enabled` — see the matching comment in _dtPreFilterWithStats().
+  // A shallow spread here was the root cause of a zero-recs bug: any rule the
+  // user never explicitly toggled (e.g. fibZone/obvRising, which default OFF)
+  // fell out of the merged `enabled` map entirely once ANY key was saved, so
+  // _ruleOn() silently treated them as ON (required) — opposite of both the
+  // documented default and what the Rules-page UI displayed to the user.
+  const _ap = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}),
+                enabled: { ...DT_AI_PARAMS.enabled, ...((state.dayTrading.aiParams || {}).enabled || {}) } };
   const _dtPortCtx = {
     allocatedCash: allocated,
     portfolioValue: portfolioValue(),
@@ -654,7 +667,8 @@ async function _runUniverseScan() {
   }
 
   // ── Phase 3: Quantitative rec generation ────────────────────────────────────
-  const _uAp = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}) };
+  const _uAp = { ...DT_AI_PARAMS, ...(state.dayTrading.aiParams || {}),
+                 enabled: { ...DT_AI_PARAMS.enabled, ...((state.dayTrading.aiParams || {}).enabled || {}) } };
   const allocated = state.dayTrading.allocatedCash != null ? state.dayTrading.allocatedCash : Math.round(state.cash * 0.20);
   const riskPct = state.dayTrading.riskPct || 1.5;
   const _uPortCtx = {

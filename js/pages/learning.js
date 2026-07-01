@@ -3189,7 +3189,7 @@ function _dtPnlCell(pct) {
 function _dtDetailHTML(e) {
   const rows = [];
   const push = (label, val) => { if (val != null && val !== '') rows.push(
-    `<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0"><span class="text-muted">${label}</span><strong>${val}</strong></div>`); };
+    `<div style="display:inline-flex;gap:4px;align-items:baseline;margin:2px 20px 2px 0"><span class="text-muted">${label}:</span><strong>${val}</strong></div>`); };
   push('Sector', e.sector ? escapeHTML(e.sector) : null);
   push('Regime (generated)', e.regime || null);
   push('Regime (executed)', e.regime_at_execution || null);
@@ -3204,7 +3204,7 @@ function _dtDetailHTML(e) {
   if (e.bull_case) push('Bull case', escapeHTML(e.bull_case));
   if (e.bear_case) push('Bear case', escapeHTML(e.bear_case));
   if (!rows.length) return '<span class="text-xs text-muted">No further detail captured.</span>';
-  return rows.join('');
+  return `<div style="display:flex;flex-wrap:wrap">${rows.join('')}</div>`;
 }
 
 function toggleDtRow(rowId) {
@@ -3295,12 +3295,11 @@ async function renderSellOutcomesCard() {
       <td style="padding:5px 8px;font-size:11px;color:var(--text-muted)">${e.regime || '—'}</td>
       <td style="padding:5px 8px">${_dtPnlCell(e.realized_pnl_pct)}</td>
       <td style="padding:5px 8px">${_dtExitQualityChip(e.exit_quality_tag)}</td>
-      <td style="padding:5px 8px">${_dtSkillChip(e.skill_score)}</td>
       <td style="padding:5px 8px">${verifyCell}</td>
       <td style="padding:5px 8px"><button class="btn btn-sm" id="${rowId}-btn" onclick="toggleDtRow('${rowId}')" title="Show more detail">▸</button></td>
     </tr>
     <tr id="${rowId}" style="display:none">
-      <td colspan="11" style="background:var(--bg-inset);padding:8px 12px;font-size:12px">${_dtDetailHTML(e)}</td>
+      <td colspan="10" style="background:var(--bg-inset);padding:8px 12px;font-size:12px">${_dtDetailHTML(e)}</td>
     </tr>`;
   }).join('');
 
@@ -3336,7 +3335,6 @@ async function renderSellOutcomesCard() {
             <th style="text-align:left;padding:4px 8px">Regime</th>
             <th style="text-align:left;padding:4px 8px">P&amp;L</th>
             <th style="text-align:left;padding:4px 8px">Exit Quality</th>
-            <th style="text-align:left;padding:4px 8px">Skill</th>
             <th style="text-align:left;padding:4px 8px">30d Verdict</th>
             <th style="text-align:left;padding:4px 8px"></th>
           </tr>

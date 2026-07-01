@@ -328,6 +328,12 @@
 /* ── Reset ───────────────────────────────────────────────────── */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Disable mobile "font boosting" — without this, browsers auto-enlarge text
+   inside multi-line blocks (e.g. a Learning Loop detail row that wraps to
+   2+ lines once expanded) to improve perceived legibility, which reads as
+   the font size randomly changing on expand/collapse. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
 body {
   font-family: var(--font);
   background: var(--bg-base);

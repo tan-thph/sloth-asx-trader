@@ -168,13 +168,40 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
   // only shrink a positive rawQty toward zero by rounding, never flip a genuine
   // zero/negative rawQty into a false positive.
   if (rawQty * volScalar <= 0) return { ok: false, reason: 'sizing constraints reject trade (qty=0)' };
-  const qty = Math.max(QUANT_CONFIG.minQty, Math.floor(rawQty * volScalar));
+  let qty = Math.max(QUANT_CONFIG.minQty, Math.floor(rawQty * volScalar));
+
+  // ── Minimum trade size floor ────────────────────────────────────────────
+  // state.settings.minTradeSize is a user-configured floor on trade notional
+  // (Settings → "Min trade size ($)"). Kelly/vol-scalar sizing above can
+  // legitimately land on a qty worth far less than that (e.g. 1 share of a
+  // $180 stock) — nothing upstream ever consulted this setting on the normal
+  // success path (it was only used as a decline-path fallback in analysis.js).
+  // Bump qty up to meet the floor, but never past the hard risk/position/
+  // liquidity caps — those are safety constraints, not preferences, and must
+  // never be overridden by a sizing convenience setting (same principle as
+  // gotcha #25: a floor must never silently defeat a harder constraint).
+  const minTradeSize = Number(state.settings?.minTradeSize) || 0;
+  let _minTradeSizeBumped = false;
+  if (minTradeSize > 0 && qty * price < minTradeSize) {
+    const hardCapBase = Math.min(qtyByRisk, qtyByPosition, qtyByLiquidity);
+    const hardCapAfterVar = varMult < 1.0 ? Math.floor(hardCapBase * varMult) : hardCapBase;
+    const hardCapScaled = Math.floor(hardCapAfterVar * volScalar);
+    const minQtyForNotional = Math.ceil(minTradeSize / price);
+    if (minQtyForNotional > hardCapScaled) {
+      return {
+        ok: false,
+        reason: `min trade size $${minTradeSize} needs ${minQtyForNotional} sh @ $${price.toFixed(2)} but risk/position/liquidity caps allow only ${hardCapScaled} sh`,
+      };
+    }
+    qty = minQtyForNotional;
+    _minTradeSizeBumped = true;
+  }
 
   // Which constraint is binding?
   const scaledByRisk     = Math.floor(qtyByRisk * volScalar);
   const scaledByPosition = Math.floor(qtyByPosition * volScalar);
   const scaledByKelly    = Math.floor(qtyByKelly * volScalar);
-  const constraintBinding =
+  const constraintBinding = _minTradeSizeBumped ? 'minTradeSize' :
     qty <= scaledByRisk     && qty === scaledByRisk     ? 'accountRisk%' :
     qty <= scaledByPosition && qty === scaledByPosition ? 'maxPosition%' :
     qty <= scaledByKelly    && qty === scaledByKelly    ? 'kelly' :
@@ -219,6 +246,7 @@ function computeTradeParams(ticker, signals, portfolioCtx, analystOutput) {
     winProb: p,
     ...(earningsAdj > 1 ? { _preEarningsAdj: true } : {}),
     ...(varMult < 1.0   ? { _varAdjusted: true, _varMult: varMult } : {}),
+    ...(_minTradeSizeBumped ? { _minTradeSizeBumped: true } : {}),
     _gapRiskActive:      gapRiskActive,
     gap95Pct:            +gap95Pct.toFixed(5),
     _kellyPhase:         _kellyPhase,
