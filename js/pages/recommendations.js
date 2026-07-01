@@ -1006,6 +1006,13 @@ if (!state.recHistoryFilter) state.recHistoryFilter = {
   dateFrom: '', dateTo: '', minConf: 0, sortBy: 'date_desc'
 };
 
+// hist.date is stored as DD-MM-YYYY (todayStr(), utils.js) — not lexicographically
+// sortable/comparable as-is. Convert to YYYY-MM-DD once, shared by filter + sort.
+function _histDateISO(dateStr) {
+  const [dd, mm, yyyy] = (dateStr || '').split('-');
+  return (dd && mm && yyyy) ? `${yyyy}-${mm}-${dd}` : '';
+}
+
 function applyRecHistoryFilter(hist) {
   if ((hist.action||'').toUpperCase() === 'HOLD') return false;
   const f = state.recHistoryFilter;
@@ -1018,14 +1025,11 @@ function applyRecHistoryFilter(hist) {
   if (f.outcome !== 'all' && (hist.outcome || 'open') !== f.outcome) return false;
   if (f.minConf > 0 && (hist.confidence || 0) < f.minConf / 100) return false;
   if (f.dateFrom) {
-    // dateFrom is YYYY-MM-DD; hist.date is DD-MM-YYYY
-    const [dd,mm,yyyy] = (hist.date||'').split('-');
-    const histISO = `${yyyy}-${mm}-${dd}`;
+    const histISO = _histDateISO(hist.date);
     if (histISO < f.dateFrom) return false;
   }
   if (f.dateTo) {
-    const [dd,mm,yyyy] = (hist.date||'').split('-');
-    const histISO = `${yyyy}-${mm}-${dd}`;
+    const histISO = _histDateISO(hist.date);
     if (histISO > f.dateTo) return false;
   }
   return true;
@@ -1091,12 +1095,12 @@ function _renderHistoryRecCard(r, realIdx) {
     <!-- Compact summary row (always visible, click to expand) -->
     <div style="display:flex;align-items:center;gap:7px;flex-wrap:nowrap;padding:10px 14px;cursor:pointer;overflow:hidden"
          onclick="toggleHistoryDetail('${r.id}', ${realIdx})">
+      <span class="text-xs text-muted" style="white-space:nowrap;flex-shrink:0">${escapeHTML(r.date)}</span>
       ${actionBadge(r.action)}
       ${_warns.length ? `<span class="badge" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;font-weight:700;font-size:10px;flex-shrink:0" title="${escapeHTML(_warns.join(' | '))}">⚠ ${_warns.length} rule${_warns.length !== 1 ? 's' : ''}</span>` : ''}
       ${r._confidenceHeld ? '<span class="badge" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;font-weight:700;flex-shrink:0"></span>' : ''}
       <strong style="font-size:14px;white-space:nowrap;flex-shrink:0">${escapeHTML(r.ticker)}</strong>
       ${r._parcelLabel ? `<span style="font-size:10px;padding:1px 5px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:3px;color:#1d4ed8;flex-shrink:0">${escapeHTML(r._parcelLabel)}</span>` : ''}
-      <span class="text-xs text-muted" style="white-space:nowrap;flex-shrink:0">${escapeHTML(r.date)}</span>
       ${outcomeBadge}
       ${actualPnlBadge}
       ${regimeBadge}
@@ -1129,9 +1133,11 @@ function renderRecHistory() {
   // Filter
   let filtered = state.recHistory.filter(applyRecHistoryFilter);
 
-  // Sort
-  if (f.sortBy === 'date_desc')    filtered = filtered.slice().sort((a,b) => (b.date||'').localeCompare(a.date||''));
-  else if (f.sortBy === 'date_asc') filtered = filtered.slice().sort((a,b) => (a.date||'').localeCompare(b.date||''));
+  // Sort — date is DD-MM-YYYY, so compare via _histDateISO, not raw string
+  // (raw localeCompare on DD-MM-YYYY sorts by day-of-month first, e.g. "30-06-2026"
+  // outranks "01-07-2026", making today's trades appear to vanish under yesterday's).
+  if (f.sortBy === 'date_desc')    filtered = filtered.slice().sort((a,b) => _histDateISO(b.date).localeCompare(_histDateISO(a.date)));
+  else if (f.sortBy === 'date_asc') filtered = filtered.slice().sort((a,b) => _histDateISO(a.date).localeCompare(_histDateISO(b.date)));
   else if (f.sortBy === 'conf_desc') filtered = filtered.slice().sort((a,b) => (b.confidence||0) - (a.confidence||0));
   else if (f.sortBy === 'pnl_desc') filtered = filtered.slice().sort((a,b) => (b.actualProfit||b.netProfit||0) - (a.actualProfit||a.netProfit||0));
 

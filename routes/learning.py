@@ -2250,6 +2250,17 @@ def learning_lesson_source():
                 for r in buy_driver_rows if r["total"] >= _DIGEST_MIN_N
             ]
 
+            # Last 60 trading-day macro snapshots for trend context in the lesson prompt.
+            _macro_hist_rows = conn.execute("""
+                SELECT snapshot_date, asx200_chg, aud_usd_chg, gold_chg, oil_chg,
+                       iron_ore_chg, spi200_futures_chg, asx_vol_20d,
+                       advance_decline_ratio, vix_level, sp500_chg, copper_chg, us10y_level
+                FROM macro_snapshots
+                ORDER BY snapshot_date DESC
+                LIMIT 60
+            """).fetchall()
+            macro_history = [dict(r) for r in _macro_hist_rows]
+
         regime_stats = [
             {"regime": r["regime"] or "unknown", "wins": r["wins"], "total": r["total"],
              "win_rate": round(r["wins"] / r["total"] * 100, 1) if r["total"] else None}
@@ -2272,6 +2283,7 @@ def learning_lesson_source():
             "buy_drivers":   buy_drivers,
             "aggregates":    aggregates,
             "exemplars":     exemplars,
+            "macro_history": macro_history,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -4821,26 +4833,91 @@ def sell_outcomes():
 
     Query params:
       limit (default 30, max 100) — number of events to return.
-      force (0|1) — if 1, immediately run _resolve_sell_outcomes before querying.
+      action (all|SELL|TRIM, default all) — filter by exit action type.
+      force (0|1) — if 1, immediately run the lazy resolvers (sell-verify,
+        deterministic tags, exit-quality tags, MAE/MFE) before querying, so a
+        manual "Check Now" click reflects the freshest data instead of waiting
+        for the next incidental _calib_compute() call.
     """
     limit = min(int(request.args.get("limit", 30)), 100)
+    action = (request.args.get("action") or "all").upper()
     force = request.args.get("force", "0") == "1"
     try:
         with get_db() as conn:
             if force:
                 _resolve_sell_outcomes(conn)
-            rows = conn.execute("""
-                SELECT id, ticker, sell_primary_driver, sell_secondary_factors,
+                _resolve_exit_quality_tags(conn, cap=10)
+                _resolve_deterministic_tags(conn, cap=10)
+                _resolve_mae_mfe(conn, cap=10)
+            sql = """
+                SELECT id, ticker, recommendation, sell_primary_driver, sell_secondary_factors,
                        sell_urgency, alternative_ticker,
-                       actual_exit_price, realized_pnl_pct, outcome_status,
+                       actual_entry_price, actual_exit_price, realized_pnl_pct, outcome_status,
                        sell_verify_date, sell_verify_verdict,
                        sell_verify_sold_chg, sell_verify_alt_chg,
+                       holding_period_days, regime, regime_at_execution, sector,
+                       skill_score, exit_quality_tag, mae_pct, mfe_pct,
+                       thesis_verdict, error_type, bull_case, bear_case,
                        timestamp
                 FROM ai_learning_events
                 WHERE was_executed = 1
                   AND sell_primary_driver IS NOT NULL
-                ORDER BY timestamp DESC LIMIT ?
-            """, (limit,)).fetchall()
+            """
+            params = []
+            if action in ("SELL", "TRIM"):
+                sql += " AND recommendation = ?"
+                params.append(action)
+            sql += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
+        return jsonify({"ok": True, "events": [dict(r) for r in rows]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/buy-outcomes", methods=["GET"])
+def buy_outcomes():
+    """Return executed BUY/TOP_UP events with entry-driver + outcome detail.
+
+    Per-trade complement to /api/learning/sell-outcomes for the entry side.
+    Existing BUY/TOP_UP analytics (thesis-matrix, factor-win-rates) are
+    aggregate cross-tabs only — this is the first per-trade view of entry
+    decisions, mirroring the sell tracker's shape so both can share a
+    frontend rendering pattern.
+
+    Query params:
+      limit (default 30, max 100) — number of events to return.
+      action (all|BUY|TOP_UP, default all) — filter by entry action type.
+      force (0|1) — if 1, immediately run the lazy resolvers before querying.
+    """
+    limit = min(int(request.args.get("limit", 30)), 100)
+    action = (request.args.get("action") or "all").upper()
+    force = request.args.get("force", "0") == "1"
+    try:
+        with get_db() as conn:
+            if force:
+                _resolve_deterministic_tags(conn, cap=10)
+                _resolve_mae_mfe(conn, cap=10)
+                _resolve_exit_quality_tags(conn, cap=10)
+            sql = """
+                SELECT id, ticker, recommendation, primary_entry_driver, thesis_verdict,
+                       actual_entry_price, actual_exit_price, realized_pnl_pct, outcome_status,
+                       holding_period_days, regime, regime_at_execution, sector,
+                       skill_score, exit_quality_tag, mae_pct, mfe_pct,
+                       error_type, bull_case, bear_case,
+                       timestamp
+                FROM ai_learning_events
+                WHERE was_executed = 1
+                  AND recommendation IN ('BUY','TOP_UP')
+                  AND outcome_status IS NOT NULL
+            """
+            params = []
+            if action in ("BUY", "TOP_UP"):
+                sql += " AND recommendation = ?"
+                params.append(action)
+            sql += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
         return jsonify({"ok": True, "events": [dict(r) for r in rows]})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

@@ -234,6 +234,23 @@ _SCHEMA = """
         n             INTEGER,
         prompt_version TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS macro_snapshots (
+        snapshot_date         TEXT PRIMARY KEY,
+        asx200_chg            REAL,
+        aud_usd_chg           REAL,
+        gold_chg              REAL,
+        oil_chg               REAL,
+        iron_ore_chg          REAL,
+        spi200_futures_chg    REAL,
+        asx_vol_20d           REAL,
+        advance_decline_ratio REAL,
+        vix_level             REAL,
+        sp500_chg             REAL,
+        copper_chg            REAL,
+        us10y_level           REAL,
+        created_at            TEXT DEFAULT (datetime('now','localtime'))
+    );
 """
 
 

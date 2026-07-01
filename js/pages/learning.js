@@ -190,6 +190,8 @@ async function renderLearningPage(gen) {
   renderCalibrationTrendCard().catch(() => {});
   // Async: load sell decision tracker card (Gap 3 + Gap 7)
   renderSellOutcomesCard().catch(() => {});
+  // Async: load buy/top-up decision tracker card (entry-side complement)
+  renderBuyOutcomesCard().catch(() => {});
   // Async: load thesis drift analytics card (Sprint 45)
   renderThesisDriftCard().catch(() => {});
   // Async: load thesis accuracy matrix card (Phase 2+3)
@@ -1066,8 +1068,15 @@ function _renderLearningContent(d, brier) {
     <div class="card section-gap" id="postmortem-digest-card">
       <div class="flex-between" style="margin-bottom:6px">
         <div class="card-title" style="margin:0">AI Postmortem Digest</div>
-        <button class="btn btn-sm btn-primary" onclick="generatePostmortemDigest()"
-          id="digest-btn">Generate Digest</button>
+        <div style="display:flex;gap:6px;align-items:center">
+          <label class="text-xs text-muted" style="display:flex;align-items:center;gap:4px">
+            max tokens
+            <input id="digest-max-tokens" type="number" min="300" max="4000" step="100" value="700"
+              style="width:68px;padding:2px 4px" title="Max tokens for the digest response (300–4000)">
+          </label>
+          <button class="btn btn-sm btn-primary" onclick="generatePostmortemDigest()"
+            id="digest-btn">Generate Digest</button>
+        </div>
       </div>
       <p class="text-xs text-muted">
         Claude analyses your recent losses and failure patterns to extract actionable lessons.
@@ -1092,6 +1101,11 @@ function _renderLearningContent(d, brier) {
             <input id="lesson-gen-n" type="number" min="30" max="200" step="10" value="100"
               style="width:62px;padding:2px 4px" title="How many recent closed trades to learn from (30-200)">
           </label>
+          <label class="text-xs text-muted" style="display:flex;align-items:center;gap:4px">
+            max tokens
+            <input id="lesson-gen-max-tokens" type="number" min="300" max="4000" step="100" value="900"
+              style="width:68px;padding:2px 4px" title="Max tokens for the lessons response (300–4000)">
+          </label>
           <button class="btn btn-sm btn-primary" onclick="generateTradingLessons()"
             id="lesson-gen-btn">Generate Lessons</button>
         </div>
@@ -1109,6 +1123,9 @@ function _renderLearningContent(d, brier) {
 
   // ── Sell Decision Tracker card (async — filled by renderSellOutcomesCard()) ──
   const sellOutcomesPlaceholder = `<div id="ll-sell-outcomes-card" class="card section-gap" style="min-height:60px"></div>`;
+
+  // ── Buy/Top-Up Decision Tracker card (async — filled by renderBuyOutcomesCard()) ──
+  const buyOutcomesPlaceholder = `<div id="ll-buy-outcomes-card" class="card section-gap" style="min-height:60px"></div>`;
 
   // ── Thesis Drift card (async — filled by renderThesisDriftCard()) ──
   const thesisDriftPlaceholder = `<div id="ll-thesis-drift-card"></div>`;
@@ -1147,7 +1164,7 @@ function _renderLearningContent(d, brier) {
     buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
     `<div id="ll-factor-winrates-card" style="display:none"></div>` +
     recentCard + failedCard + debateInsightsCard +
-    digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + thesisDriftPlaceholder +
+    digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + thesisDriftPlaceholder +
     thesisMatrixPlaceholder + execAlphaPlaceholder + debateCollapsible;
 }
 
@@ -1237,7 +1254,8 @@ Please write a concise postmortem digest (under 320 words) in plain text. Struct
    are flagged, say so plainly rather than inventing one).
 4. One or two concrete, specific rule/threshold changes to make — no generic advice.`;
 
-    const text = await callClaude('assistant', prompt, { maxTokens: 700, noCache: true });
+    const _digestTokens = Math.max(300, Math.min(4000, parseInt(document.getElementById('digest-max-tokens')?.value, 10) || 700));
+    const text = await callClaude('assistant', prompt, { maxTokens: _digestTokens, noCache: true });
     const dateStr = new Date().toLocaleDateString('en-AU');
     out.innerHTML = `
       <div style="border-top:1px solid var(--border);padding-top:10px">
@@ -1334,6 +1352,36 @@ async function generateTradingLessons() {
       .map(b => `${b.bucket}: ${b.win_rate}% (n=${b.n})${b.flagged ? ' ⚑' : ''}`).join('; ');
     const exemplarBlock = (d.exemplars || []).join('\n');
 
+    // 4. Historical macro context block (last 60 sessions from macro_snapshots table)
+    const histRows = (d.macro_history || []);
+    let macroHistoryBlock = '';
+    if (histRows.length >= 2) {
+      const n = histRows.length;
+      const _avg = (key) => {
+        const vals = histRows.map(r => r[key]).filter(v => typeof v === 'number');
+        return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+      };
+      const avgVix   = _avg('vix_level');
+      const avgVol   = _avg('asx_vol_20d');
+      const avgBreadth = _avg('advance_decline_ratio');
+      const riskOffDays = histRows.filter(r => typeof r.asx200_chg === 'number' && r.asx200_chg < -0.5).length;
+      const riskOnDays  = histRows.filter(r => typeof r.asx200_chg === 'number' && r.asx200_chg > 0.5).length;
+      const highVolDays = histRows.filter(r => typeof r.asx_vol_20d === 'number' && r.asx_vol_20d > 15).length;
+      const _f = (v, dp=1) => v != null ? `${v > 0 ? '+' : ''}${v.toFixed(dp)}` : 'n/a';
+      const recent14 = histRows.slice(0, 14).reverse();
+      const tableRows = recent14.map(r =>
+        `${r.snapshot_date}: ASX${_f(r.asx200_chg)}% VIX${r.vix_level?.toFixed(1) ?? '?'} ` +
+        `vol${r.asx_vol_20d?.toFixed(1) ?? '?'} breadth${r.advance_decline_ratio?.toFixed(2) ?? '?'} ` +
+        `gold${_f(r.gold_chg)}% AUD${_f(r.aud_usd_chg)}% oil${_f(r.oil_chg)}%`
+      ).join('\n');
+      macroHistoryBlock =
+`\nMacro history (last ${n} recorded sessions):
+Avg VIX: ${avgVix?.toFixed(1) ?? 'n/a'}, Avg ASX realised vol: ${avgVol?.toFixed(1) ?? 'n/a'}%, Avg breadth: ${avgBreadth?.toFixed(2) ?? 'n/a'}
+Risk-on sessions (ASX >+0.5%): ${riskOnDays}/${n}, Risk-off sessions (ASX <-0.5%): ${riskOffDays}/${n}, High-vol sessions (vol>15%): ${highVolDays}/${n}
+Recent 14 sessions (oldest→newest, for trend direction):
+${tableRows}`;
+    }
+
     const prompt =
 `You are distilling durable trading lessons for an ASX equity decision system. These
 lessons will be stored and injected verbatim into FUTURE recommendation prompts for you
@@ -1352,7 +1400,7 @@ Curated examples (worst losses, best wins, process failures — entry→exit tec
 macro tape, and my own bull/bear case at the time):
 ${exemplarBlock || 'No exemplars available yet.'}
 
-${macroBlock}${briefNarrative}
+${macroBlock}${briefNarrative}${macroHistoryBlock}
 
 Write 3 to 6 lessons. Each lesson MUST:
 - be ONE sentence, <= 200 characters, concrete and testable (cite a number/threshold/tag
@@ -1364,7 +1412,8 @@ Return ONLY a JSON object, no prose, no markdown fences, in exactly this shape:
 {"lessons":[{"lesson_text":"...","regime":null|"riskOn"|"riskOff"|"highVol"|"panic"|"trend"|"sideways","sector":null|"Materials"|"Financials"|"Healthcare"|"Energy"|"RealEstate"|"Technology"|"Consumer"|"Industrials"|"Utilities"|"Communication","breadth_scope":null|"high_vol"|"low_vol"|"adl_below_0.3"|"adl_above_0.7"|"earnings_season"|"cgt_window"}]}
 Use null for any scope that does not apply (a broadly-true lesson has all three null).`;
 
-    const text = await callClaude('assistant', prompt, { maxTokens: 900, noCache: true });
+    const _lessonTokens = Math.max(300, Math.min(4000, parseInt(document.getElementById('lesson-gen-max-tokens')?.value, 10) || 900));
+    const text = await callClaude('assistant', prompt, { maxTokens: _lessonTokens, noCache: true });
 
     // 4. Parse the JSON (tolerate stray prose / code fences)
     let parsed = null;
@@ -3079,6 +3128,107 @@ async function renderFactorWinRatesCard() {
   } catch (_) { el.style.display = 'none'; }
 }
 
+// ── Decision Tracker shared helpers (Sell + Buy/Top-Up) ──────────────────────
+// Both trackers show one row per executed trade with deterministic (non-LLM)
+// outcome context pulled straight from ai_learning_events — action badge,
+// thesis/verify verdict, exit-timing quality, skill score, MAE/MFE path, and
+// an expandable detail row for the rest (sector, regime, price levels,
+// secondary factors, urgency, bull/bear case text).
+const _DT_ACTION_STYLE = {
+  SELL:   { bg: '#fee2e2', fg: '#dc2626' },
+  TRIM:   { bg: '#fef3c7', fg: '#b45309' },
+  BUY:    { bg: '#dcfce7', fg: '#15803d' },
+  TOP_UP: { bg: '#dbeafe', fg: '#1d4ed8' },
+};
+function _dtActionBadge(action) {
+  const s = _DT_ACTION_STYLE[action] || { bg: '#f3f4f6', fg: '#6b7280' };
+  return `<span style="padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:${s.bg};color:${s.fg}">${escapeHTML(action || '—')}</span>`;
+}
+
+// thesis_verdict has 5 states (gotcha #59) — validated/partially_validated/invalidated/reversed/irrelevant.
+const _DT_THESIS_STYLE = {
+  validated:           { bg: '#dcfce7', fg: '#15803d', icon: '✓' },
+  partially_validated: { bg: '#ecfccb', fg: '#4d7c0f', icon: '≈' },
+  invalidated:         { bg: '#fee2e2', fg: '#dc2626', icon: '✗' },
+  reversed:            { bg: '#fecaca', fg: '#991b1b', icon: '⇄' },
+  irrelevant:          { bg: '#f3f4f6', fg: '#6b7280', icon: '—' },
+};
+function _dtThesisChip(verdict) {
+  if (!verdict) return '<span class="text-xs text-muted">—</span>';
+  const s = _DT_THESIS_STYLE[verdict] || _DT_THESIS_STYLE.irrelevant;
+  return `<span style="padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;background:${s.bg};color:${s.fg}">${s.icon} ${escapeHTML(verdict.replace(/_/g, ' '))}</span>`;
+}
+
+// exit_quality_tag (gotcha #64) — deterministic exit-timing read from RSI/BB%b/MACD at exit.
+const _DT_EXIT_Q_STYLE = {
+  exit_into_strength:            { bg: '#fef3c7', fg: '#b45309', icon: '⚠', label: 'Cut winner early' },
+  exit_after_reversal_confirmed: { bg: '#dcfce7', fg: '#15803d', icon: '✓', label: 'Reversal confirmed' },
+  exit_into_weakness:            { bg: '#fee2e2', fg: '#dc2626', icon: '⚠', label: 'Panic-risk exit' },
+  exit_neutral:                  { bg: '#f3f4f6', fg: '#6b7280', icon: '—', label: 'Neutral' },
+};
+function _dtExitQualityChip(tag) {
+  if (!tag) return '<span class="text-xs text-muted">—</span>';
+  const s = _DT_EXIT_Q_STYLE[tag] || _DT_EXIT_Q_STYLE.exit_neutral;
+  return `<span title="${s.label}" style="padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;background:${s.bg};color:${s.fg}">${s.icon} ${s.label}</span>`;
+}
+
+function _dtSkillChip(score) {
+  if (score == null) return '<span class="text-xs text-muted">—</span>';
+  const v = Number(score);
+  const color = v >= 7 ? '#15803d' : v >= 4 ? '#b45309' : '#dc2626';
+  return `<span style="font-weight:700;color:${color}" title="Skill score (0-10, thesis_verdict × outcome quadrant)">${v.toFixed(1)}</span>`;
+}
+
+function _dtPnlCell(pct) {
+  const pnl = pct != null ? `${pct > 0 ? '+' : ''}${pct.toFixed(1)}%` : '—';
+  const color = pct > 0 ? '#16a34a' : pct < 0 ? '#dc2626' : 'var(--text-muted)';
+  return `<span style="color:${color};font-weight:600">${pnl}</span>`;
+}
+
+// Expandable detail row content — whichever fields are present on the event.
+function _dtDetailHTML(e) {
+  const rows = [];
+  const push = (label, val) => { if (val != null && val !== '') rows.push(
+    `<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0"><span class="text-muted">${label}</span><strong>${val}</strong></div>`); };
+  push('Sector', e.sector ? escapeHTML(e.sector) : null);
+  push('Regime (generated)', e.regime || null);
+  push('Regime (executed)', e.regime_at_execution || null);
+  push('Hold period', e.holding_period_days != null ? `${e.holding_period_days}d` : null);
+  push('Entry price', e.actual_entry_price != null ? `$${fmt(e.actual_entry_price)}` : null);
+  push('Exit price', e.actual_exit_price != null ? `$${fmt(e.actual_exit_price)}` : null);
+  push('MAE / MFE', (e.mae_pct != null || e.mfe_pct != null)
+    ? `${e.mae_pct != null ? e.mae_pct.toFixed(1) + '%' : '—'} / ${e.mfe_pct != null ? '+' + e.mfe_pct.toFixed(1) + '%' : '—'}` : null);
+  push('Error tag', e.error_type && e.error_type !== 'none' ? escapeHTML(e.error_type.replace(/,/g, ', ')) : null);
+  if (e.sell_secondary_factors) push('Secondary factors', escapeHTML(e.sell_secondary_factors.replace(/,/g, ', ')));
+  if (e.sell_urgency) push('Urgency', escapeHTML(e.sell_urgency));
+  if (e.bull_case) push('Bull case', escapeHTML(e.bull_case));
+  if (e.bear_case) push('Bear case', escapeHTML(e.bear_case));
+  if (!rows.length) return '<span class="text-xs text-muted">No further detail captured.</span>';
+  return rows.join('');
+}
+
+function toggleDtRow(rowId) {
+  const row = document.getElementById(rowId);
+  const btn = document.getElementById(rowId + '-btn');
+  if (!row) return;
+  const open = row.style.display !== 'none';
+  row.style.display = open ? 'none' : '';
+  if (btn) btn.textContent = open ? '▸' : '▾';
+}
+
+function _dtFilterBar(prefix, current, options) {
+  return options.map(([val, label]) =>
+    `<button class="btn btn-sm ${current === val ? 'btn-primary' : ''}" onclick="setDtFilter('${prefix}','${val}')">${label}</button>`
+  ).join(' ');
+}
+
+let _sellOutcomesFilter = 'all';
+let _buyOutcomesFilter  = 'all';
+function setDtFilter(prefix, val) {
+  if (prefix === 'sell') { _sellOutcomesFilter = val; renderSellOutcomesCard().catch(() => {}); }
+  else                   { _buyOutcomesFilter  = val; renderBuyOutcomesCard().catch(() => {}); }
+}
+
 // ── Sell Decision Tracker card (Gap 3 + Gap 7) ───────────────────────────────
 // Shows executed SELL/TRIM events with sell_primary_driver set, and their
 // 30-day price-based outcome verification once enough time has passed.
@@ -3088,13 +3238,15 @@ async function renderSellOutcomesCard() {
 
   let data;
   try {
-    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=20`);
+    const qs = _sellOutcomesFilter !== 'all' ? `&action=${_sellOutcomesFilter}` : '';
+    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=25${qs}`);
     if (!r.ok) return;
     data = await r.json();
   } catch { return; }
 
   const events = (data.events || []);
-  if (!events.length) { el.style.display = 'none'; return; }
+  if (!events.length && _sellOutcomesFilter === 'all') { el.style.display = 'none'; return; }
+  el.style.display = '';
 
   const DRIVER_LABEL = {
     target_reached:      'Target Reached',
@@ -3117,8 +3269,7 @@ async function renderSellOutcomesCard() {
   const rows = events.map(e => {
     const driver = DRIVER_LABEL[e.sell_primary_driver] || e.sell_primary_driver || '—';
     const date   = (e.timestamp || '').slice(0, 10);
-    const pnl    = e.realized_pnl_pct != null ? `${e.realized_pnl_pct > 0 ? '+' : ''}${e.realized_pnl_pct.toFixed(1)}%` : '—';
-    const pnlColor = e.realized_pnl_pct > 0 ? '#16a34a' : e.realized_pnl_pct < 0 ? '#dc2626' : 'var(--text-muted)';
+    const rowId  = `dt-sell-${e.id}`;
 
     let verifyCell;
     if (!e.sell_verify_date) {
@@ -3138,9 +3289,18 @@ async function renderSellOutcomesCard() {
     return `<tr style="border-bottom:1px solid var(--border-light);font-size:12px">
       <td style="padding:5px 8px;color:var(--text-muted)">${date}</td>
       <td style="padding:5px 8px;font-weight:600">${escapeHTML(e.ticker || '—')}</td>
+      <td style="padding:5px 8px">${_dtActionBadge(e.recommendation)}</td>
       <td style="padding:5px 8px">${driver}${altBadge}</td>
-      <td style="padding:5px 8px;color:${pnlColor};font-weight:600">${pnl}</td>
+      <td style="padding:5px 8px;white-space:nowrap">${e.holding_period_days != null ? e.holding_period_days + 'd' : '—'}</td>
+      <td style="padding:5px 8px;font-size:11px;color:var(--text-muted)">${e.regime || '—'}</td>
+      <td style="padding:5px 8px">${_dtPnlCell(e.realized_pnl_pct)}</td>
+      <td style="padding:5px 8px">${_dtExitQualityChip(e.exit_quality_tag)}</td>
+      <td style="padding:5px 8px">${_dtSkillChip(e.skill_score)}</td>
       <td style="padding:5px 8px">${verifyCell}</td>
+      <td style="padding:5px 8px"><button class="btn btn-sm" id="${rowId}-btn" onclick="toggleDtRow('${rowId}')" title="Show more detail">▸</button></td>
+    </tr>
+    <tr id="${rowId}" style="display:none">
+      <td colspan="11" style="background:var(--bg-inset);padding:8px 12px;font-size:12px">${_dtDetailHTML(e)}</td>
     </tr>`;
   }).join('');
 
@@ -3148,42 +3308,159 @@ async function renderSellOutcomesCard() {
   const verified = events.length - pending;
   const nVal     = events.filter(e => e.sell_verify_verdict === 'validated').length;
   const nInval   = events.filter(e => e.sell_verify_verdict === 'invalidated').length;
+  const nTrim    = events.filter(e => e.recommendation === 'TRIM').length;
 
   el.innerHTML = `
     <div class="flex-between" style="margin-bottom:8px">
       <div class="card-title" style="margin:0">📤 Sell Decision Tracker (${events.length})</div>
-      <button class="btn btn-sm" onclick="refreshSellOutcomes()" title="Re-check outcomes now">↺ Check Now</button>
+      <div style="display:flex;gap:4px;align-items:center">
+        ${_dtFilterBar('sell', _sellOutcomesFilter, [['all','All'],['SELL','Sell'],['TRIM','Trim']])}
+        <button class="btn btn-sm" onclick="refreshSellOutcomes()" title="Re-check outcomes now">↺ Check Now</button>
+      </div>
     </div>
     <p class="text-xs text-muted" style="margin-bottom:8px">
-      Validates executed SELL/TRIM drivers against price outcome ~30 days post-sell.
+      Validates executed SELL/TRIM drivers against price outcome ~30 days post-sell. Includes both full sells and trims (${nTrim} trim${nTrim !== 1 ? 's' : ''} in this view).
       ${verified > 0 ? `<strong>${nVal} validated · ${nInval} invalidated</strong> of ${verified} checked.` : ''}
       ${pending > 0  ? `${pending} pending (need ≥25 days).` : ''}
     </p>
+    ${!events.length ? '<p class="text-xs text-muted">No events match this filter.</p>' : `
     <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse">
         <thead>
           <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
             <th style="text-align:left;padding:4px 8px">Date</th>
             <th style="text-align:left;padding:4px 8px">Ticker</th>
+            <th style="text-align:left;padding:4px 8px">Action</th>
             <th style="text-align:left;padding:4px 8px">Driver</th>
+            <th style="text-align:left;padding:4px 8px">Hold</th>
+            <th style="text-align:left;padding:4px 8px">Regime</th>
             <th style="text-align:left;padding:4px 8px">P&amp;L</th>
+            <th style="text-align:left;padding:4px 8px">Exit Quality</th>
+            <th style="text-align:left;padding:4px 8px">Skill</th>
             <th style="text-align:left;padding:4px 8px">30d Verdict</th>
+            <th style="text-align:left;padding:4px 8px"></th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
       </table>
-    </div>`;
+    </div>`}`;
 }
 
 async function refreshSellOutcomes() {
   const el = document.getElementById('ll-sell-outcomes-card');
   if (!el || !state.serverOk) return;
   try {
-    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=20&force=1`);
+    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=25&force=1`);
     if (!r.ok) return;
     await renderSellOutcomesCard();
     toast('Sell outcomes refreshed', 'success');
   } catch { toast('Error refreshing sell outcomes', 'error'); }
+}
+
+// ── Buy/Top-Up Decision Tracker card ──────────────────────────────────────────
+// Per-trade complement to the sell tracker for entry decisions. Existing
+// BUY/TOP_UP analytics (Thesis Accuracy Matrix, factor-win-rates) are
+// aggregate cross-tabs only — this is the first row-level view: entry driver,
+// whether the entry thesis held up to exit, skill score, and MAE/MFE path.
+async function renderBuyOutcomesCard() {
+  const el = document.getElementById('ll-buy-outcomes-card');
+  if (!el || !state.serverOk) return;
+
+  let data;
+  try {
+    const qs = _buyOutcomesFilter !== 'all' ? `&action=${_buyOutcomesFilter}` : '';
+    const r = await fetch(`${API}/api/learning/buy-outcomes?limit=25${qs}`);
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  const events = (data.events || []);
+  if (!events.length && _buyOutcomesFilter === 'all') { el.style.display = 'none'; return; }
+  el.style.display = '';
+
+  const ENTRY_DRIVER_LABEL = {
+    mean_reversion:    'Mean Reversion',
+    momentum_breakout: 'Momentum Breakout',
+    trend_pullback:    'Trend Pullback',
+    fundamental_value: 'Fundamental Value',
+    macro_tailwind:    'Macro Tailwind',
+  };
+
+  const rows = events.map(e => {
+    const driver = ENTRY_DRIVER_LABEL[e.primary_entry_driver] || e.primary_entry_driver || '—';
+    const date   = (e.timestamp || '').slice(0, 10);
+    const rowId  = `dt-buy-${e.id}`;
+    const outcomeChip = e.outcome_status
+      ? `<span style="font-size:10px;text-transform:capitalize;color:var(--text-muted)">${e.outcome_status}</span>`
+      : '<span class="text-xs text-muted">open</span>';
+
+    return `<tr style="border-bottom:1px solid var(--border-light);font-size:12px">
+      <td style="padding:5px 8px;color:var(--text-muted)">${date}</td>
+      <td style="padding:5px 8px;font-weight:600">${escapeHTML(e.ticker || '—')}</td>
+      <td style="padding:5px 8px">${_dtActionBadge(e.recommendation)}</td>
+      <td style="padding:5px 8px">${driver}</td>
+      <td style="padding:5px 8px;white-space:nowrap">${e.holding_period_days != null ? e.holding_period_days + 'd' : '—'}</td>
+      <td style="padding:5px 8px;font-size:11px;color:var(--text-muted)">${e.regime || '—'}</td>
+      <td style="padding:5px 8px">${_dtPnlCell(e.realized_pnl_pct)} ${outcomeChip}</td>
+      <td style="padding:5px 8px">${_dtThesisChip(e.thesis_verdict)}</td>
+      <td style="padding:5px 8px">${_dtExitQualityChip(e.exit_quality_tag)}</td>
+      <td style="padding:5px 8px">${_dtSkillChip(e.skill_score)}</td>
+      <td style="padding:5px 8px"><button class="btn btn-sm" id="${rowId}-btn" onclick="toggleDtRow('${rowId}')" title="Show more detail">▸</button></td>
+    </tr>
+    <tr id="${rowId}" style="display:none">
+      <td colspan="11" style="background:var(--bg-inset);padding:8px 12px;font-size:12px">${_dtDetailHTML(e)}</td>
+    </tr>`;
+  }).join('');
+
+  const nTopUp = events.filter(e => e.recommendation === 'TOP_UP').length;
+  const withThesis = events.filter(e => e.thesis_verdict).length;
+  const nValidated  = events.filter(e => e.thesis_verdict === 'validated' || e.thesis_verdict === 'partially_validated').length;
+
+  el.innerHTML = `
+    <div class="flex-between" style="margin-bottom:8px">
+      <div class="card-title" style="margin:0">📥 Buy / Top-Up Decision Tracker (${events.length})</div>
+      <div style="display:flex;gap:4px;align-items:center">
+        ${_dtFilterBar('buy', _buyOutcomesFilter, [['all','All'],['BUY','Buy'],['TOP_UP','Top-Up']])}
+        <button class="btn btn-sm" onclick="refreshBuyOutcomes()" title="Re-check outcomes now">↺ Check Now</button>
+      </div>
+    </div>
+    <p class="text-xs text-muted" style="margin-bottom:8px">
+      Per-trade entry decisions with skill score, exit-timing quality, and thesis-held-up verdict once a position closes.
+      ${nTopUp} top-up${nTopUp !== 1 ? 's' : ''} of ${events.length} shown.
+      ${withThesis > 0 ? `Thesis held (fully/partially) on <strong>${nValidated}/${withThesis}</strong> closed trades.` : ''}
+    </p>
+    ${!events.length ? '<p class="text-xs text-muted">No events match this filter.</p>' : `
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
+            <th style="text-align:left;padding:4px 8px">Date</th>
+            <th style="text-align:left;padding:4px 8px">Ticker</th>
+            <th style="text-align:left;padding:4px 8px">Action</th>
+            <th style="text-align:left;padding:4px 8px">Entry Driver</th>
+            <th style="text-align:left;padding:4px 8px">Hold</th>
+            <th style="text-align:left;padding:4px 8px">Regime</th>
+            <th style="text-align:left;padding:4px 8px">P&amp;L</th>
+            <th style="text-align:left;padding:4px 8px">Thesis Held?</th>
+            <th style="text-align:left;padding:4px 8px">Exit Quality</th>
+            <th style="text-align:left;padding:4px 8px">Skill</th>
+            <th style="text-align:left;padding:4px 8px"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`}`;
+}
+
+async function refreshBuyOutcomes() {
+  const el = document.getElementById('ll-buy-outcomes-card');
+  if (!el || !state.serverOk) return;
+  try {
+    const r = await fetch(`${API}/api/learning/buy-outcomes?limit=25&force=1`);
+    if (!r.ok) return;
+    await renderBuyOutcomesCard();
+    toast('Buy/top-up outcomes refreshed', 'success');
+  } catch { toast('Error refreshing buy outcomes', 'error'); }
 }
 
 // ── Toggle a single tag on/off within the multi-tag set ───────────────────────

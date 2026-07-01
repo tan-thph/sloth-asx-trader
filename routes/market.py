@@ -392,6 +392,30 @@ def _macro_payload() -> dict:
     else:
         macro_data["spi200_futures_chg"] = None
 
+    # Lazy daily snapshot for AI Lesson Generator macro history.
+    # INSERT OR IGNORE: only the first cache-miss per day writes a row.
+    try:
+        _today_str = datetime.now().date().isoformat()
+        _chg = lambda k: (macro_data.get(k) or {}).get("change_pct")
+        _lvl = lambda k: (macro_data.get(k) or {}).get("value")
+        with get_db() as _conn:
+            _conn.execute(
+                "INSERT OR IGNORE INTO macro_snapshots "
+                "(snapshot_date, asx200_chg, aud_usd_chg, gold_chg, oil_chg, "
+                "iron_ore_chg, spi200_futures_chg, asx_vol_20d, advance_decline_ratio, "
+                "vix_level, sp500_chg, copper_chg, us10y_level) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (_today_str,
+                 _chg("asx200"), _chg("aud_usd"), _chg("gold"), _chg("oil"),
+                 _chg("iron_ore"),
+                 macro_data.get("spi200_futures_chg"),
+                 macro_data.get("asx_vol_20d"),
+                 macro_data.get("advance_decline_ratio"),
+                 _lvl("vix"), _chg("sp500"), _chg("copper"), _lvl("us10y"))
+            )
+    except Exception:
+        pass
+
     return macro_data
 
 
