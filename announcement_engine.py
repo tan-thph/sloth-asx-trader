@@ -2421,7 +2421,15 @@ def run_sync(
                 pdf_text = ""
                 if ann.get("pdf_url") or ann.get("doc_key"):
                     ann_date = ann.get("date", "")
-                    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+                    # Sydney date, not UTC — ASX announcement dates are Sydney-local.
+                    # UTC is behind Sydney by 10-11h, so for roughly the first 10 hours
+                    # of each Sydney day (midnight through mid-morning — exactly
+                    # pre-market through market open, when most announcements land)
+                    # datetime.utcnow() is still on yesterday's UTC date. That made this
+                    # equality check silently miss today's own announcements during
+                    # exactly the hours they matter most, skipping the todayAnns.do
+                    # resolution below and leaving them on the unreliable numeric URL.
+                    today_str = _sydney_now().strftime("%Y-%m-%d")
 
                     # For today's announcements whose stored URL is the Markit-derived
                     # numeric CDN URL, proactively resolve the real URL via todayAnns.do.

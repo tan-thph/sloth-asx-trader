@@ -1684,6 +1684,147 @@ class TestSprint5(unittest.TestCase):
         d = json.loads(self.client.get("/api/learning/lesson-source?n=100").data)
         self.assertGreaterEqual(d["n_sample"], 1)
 
+    def test_local_scrutiny_json_column_exists(self):
+        """local_scrutiny_json must exist on ai_learning_events (db.py migration)."""
+        cols = {r[1] for r in _get_shared_conn().execute(
+            "PRAGMA table_info(ai_learning_events)").fetchall()}
+        self.assertIn("local_scrutiny_json", cols)
+
+    def test_local_scrutiny_json_patchable_via_outcome(self):
+        """local_scrutiny_json must be in _ALLOWED_OUTCOME_COLS and actually
+        patchable through POST /api/learning/outcome."""
+        from routes.learning import _ALLOWED_OUTCOME_COLS
+        self.assertIn("local_scrutiny_json", _ALLOWED_OUTCOME_COLS)
+
+        self.client.post(
+            "/api/learning/log",
+            data=json.dumps({"ticker": "SCRUT.AX", "event_type": "recommendation",
+                             "recommendation": "BUY", "ai_confidence": 0.6}),
+            content_type="application/json",
+        )
+        row = _get_shared_conn().execute(
+            "SELECT id FROM ai_learning_events WHERE ticker='SCRUT.AX'"
+        ).fetchone()
+        blob = json.dumps({"verdict": "disagree", "concerns": "RSI overbought",
+                           "confidence_adj": -0.1, "model": "qwen2.5:24b"})
+        resp = self.client.post(
+            "/api/learning/outcome",
+            data=json.dumps({"id": row["id"], "local_scrutiny_json": blob}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        saved = _get_shared_conn().execute(
+            "SELECT local_scrutiny_json FROM ai_learning_events WHERE id=?", (row["id"],)
+        ).fetchone()
+        self.assertEqual(json.loads(saved["local_scrutiny_json"])["verdict"], "disagree")
+
+    def test_scrutiny_stats_endpoint_shape(self):
+        """GET /api/learning/scrutiny-stats must return the aggregate shape."""
+        resp = self.client.get("/api/learning/scrutiny-stats")
+        self.assertEqual(resp.status_code, 200)
+        d = json.loads(resp.data)
+        self.assertTrue(d["ok"])
+        for k in ("n_scrutinized", "n_agree", "n_disagree", "disagree_rate",
+                  "n_disagree_resolved", "disagree_accuracy",
+                  "n_agree_resolved", "agree_accuracy", "exemplars"):
+            self.assertIn(k, d)
+        self.assertIsInstance(d["exemplars"], list)
+
+    def test_compute_scrutiny_stats_accuracy_and_gating(self):
+        """_compute_scrutiny_stats must classify disagree+loss as the critic
+        being 'right', and must withhold an accuracy % below _DIGEST_MIN_N."""
+        from routes.learning import _compute_scrutiny_stats, _DIGEST_MIN_N
+
+        conn = _get_shared_conn()
+        # One resolved disagreement where the critic was right (rec lost).
+        conn.execute(
+            "INSERT INTO ai_learning_events (ticker, recommendation, outcome_status, "
+            "realized_pnl_pct, local_scrutiny_json) VALUES (?,?,?,?,?)",
+            ("SCRUTSTAT.AX", "BUY", "loss", -4.2,
+             json.dumps({"verdict": "disagree", "concerns": "weak setup"}))
+        )
+        conn.commit()
+
+        stats = _compute_scrutiny_stats(conn)
+        self.assertGreaterEqual(stats["n_disagree"], 1)
+        self.assertGreaterEqual(stats["n_disagree_resolved"], 1)
+        # Below _DIGEST_MIN_N (only 1 resolved disagreement) — accuracy withheld.
+        self.assertLess(stats["n_disagree_resolved"], _DIGEST_MIN_N)
+        self.assertIsNone(stats["disagree_accuracy"])
+        exemplar_tickers = [e["ticker"] for e in stats["exemplars"]]
+        self.assertIn("SCRUTSTAT.AX", exemplar_tickers)
+        matched = next(e for e in stats["exemplars"] if e["ticker"] == "SCRUTSTAT.AX")
+        self.assertTrue(matched["critic_right"])  # disagreed and the rec lost
+
+    def test_debate_scrutinize_requires_id(self):
+        """POST /api/debate/scrutinize must 400 without an id, before any Ollama call."""
+        resp = self.client.post(
+            "/api/debate/scrutinize", data=json.dumps({}), content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_debate_scrutinize_404_on_missing_event(self):
+        """POST /api/debate/scrutinize must 404 for a nonexistent learning event id."""
+        resp = self.client.post(
+            "/api/debate/scrutinize", data=json.dumps({"id": 999999999}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_flatten_market_context_helper(self):
+        """_flatten_market_context must render the widened macro snapshot fields
+        used by the scrutinize prompt, and return '' for empty/bad input."""
+        from routes.debate import _flatten_market_context
+        blob = json.dumps({"asx200_chg": 1.2, "vix": 18.4, "vix_chg": -3.1,
+                           "sp500_chg": 0.5, "gold_chg": -0.2})
+        out = _flatten_market_context(blob)
+        self.assertIn("asx200=", out)
+        self.assertIn("vix=", out)
+        self.assertIn("sp500=", out)
+        self.assertEqual(_flatten_market_context(""), "")
+        self.assertEqual(_flatten_market_context("not json"), "")
+
+    def test_pm_build_prompt_includes_macro_context(self):
+        """_pm_build_prompt must fold market_context_str into the postmortem
+        prompt when provided, and omit the line entirely when it's empty."""
+        from routes.debate import _pm_build_prompt
+        with_macro = _pm_build_prompt(
+            "SELL BHP.AX LOSS", "rationale", "", "rsi=25",
+            action="SELL", pnl_pct=-4.0, exit_reason="stop_hit",
+            market_context_str="asx200=+1.2% | vix=18.4",
+        )
+        self.assertIn("Macro tape at the time: asx200=+1.2% | vix=18.4", with_macro)
+
+        without_macro = _pm_build_prompt(
+            "SELL BHP.AX LOSS", "rationale", "", "rsi=25",
+            action="SELL", pnl_pct=-4.0, exit_reason="stop_hit",
+        )
+        self.assertNotIn("Macro tape at the time", without_macro)
+
+    def test_debate_postmortem_endpoints_pass_market_context(self):
+        """Both postmortem call sites (single-model + adversarial debate) must
+        fetch and forward market_context_str, not just entry_signals_str —
+        the Recent Events 'Scrutinize' button now gets the same technical +
+        macro picture as the pending-rec scrutinize endpoint."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertEqual(
+            src.count("market_context_str = _flatten_market_context(row[\"market_context\"] or \"\")"),
+            2, "both debate_postmortem() and debate_postmortem_debate() must compute market_context_str",
+        )
+        self.assertIn("market_context_str=market_context_str", src)
+
+    def test_recent_events_scrutinize_button_renamed(self):
+        """The Recent Events row action button (routes/debate.py postmortem
+        tagging pipeline, unchanged) must be relabelled 'Scrutinize' — same
+        error_type tagging endpoint, not the separate verdict-based
+        /api/debate/scrutinize used on pending recs."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_iconBtn(`pm-btn-${ev.id}`, `triggerDebatePostmortem(${ev.id})`, pmTitle, '🔍', 'Scrut')", src)
+        self.assertIn("Scrutinize with local model", src)
+        # triggerDebatePostmortem() must still hit the tagging endpoint (not the
+        # separate verdict-based /api/debate/scrutinize used on pending recs).
+        self.assertIn("${API}/api/debate/postmortem`", src)
+
     def test_digest_aggregates_macro_bucket_gated_by_min_n(self):
         """Macro-bucket cells with fewer than _DIGEST_MIN_N trades must not
         appear in aggregates — a 2-trade 'pattern' is noise, not signal."""
@@ -1911,6 +2052,51 @@ class TestSprint5(unittest.TestCase):
         # channel) — otherwise Claude never studies them next time.
         self.assertIn("/api/learning/lessons", src)
         self.assertIn("ai_digest", src)
+
+    def test_generate_trading_lessons_includes_scrutiny_feedback(self):
+        """The AI Lesson Generator must fold in the local-LLM critic's second-
+        opinion track record (aggregate, not a raw event dump) alongside the
+        trade-data and macro context already fed to the prompt."""
+        with open(os.path.join(ROOT, "js/pages/learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("/api/learning/scrutiny-stats", src)
+        self.assertIn("scrutinyBlock", src)
+
+    def test_scrutinize_rec_button_and_handler(self):
+        """recommendations.js must render a manual 'Scrutinize' button on pending
+        recs (never auto-fired) and define the handler + badge renderer."""
+        with open(os.path.join(ROOT, "js/pages/recommendations.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function scrutinizeRec(recId)", src)
+        self.assertIn("function _scrutinyBadge(r)", src)
+        self.assertIn("scrutinizeRec('${r.id}')", src)
+        self.assertIn("Scrutinize", src)
+
+    def test_trigger_scrutiny_client_helper(self):
+        """debate-client.js must define triggerScrutiny() as a HIGH-priority
+        (manual, never auto-fired) queued call to /api/debate/scrutinize."""
+        with open(os.path.join(ROOT, "js/debate-client.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("async function triggerScrutiny(eventId, opts = {})", src)
+        self.assertIn("/api/debate/scrutinize", src)
+        self.assertIn("opts.priority || 'HIGH'", src)
+
+    def test_settings_backend_proxy_ui(self):
+        """settings.js must expose a UI for saving/clearing the server-side
+        (Tailscale-shared) proxy key and toggling useBackendProxy — the backend
+        endpoint existed but had no way to reach it from the app before this."""
+        with open(os.path.join(ROOT, "js/pages/settings.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function settingsToggleBackendProxy(val)", src)
+        self.assertIn("async function settingsSaveProxyKey()", src)
+        self.assertIn("async function settingsClearProxyKey()", src)
+        self.assertIn("async function loadProxyKeyStatus()", src)
+        self.assertIn("/api/claude/settings", src)
+        self.assertIn("useBackendProxy", src)
+
+        with open(os.path.join(ROOT, "js/navigation.js"), encoding="utf-8") as f:
+            nav_src = f.read()
+        self.assertIn("loadProxyKeyStatus()", nav_src)
 
     def test_macro_snapshot_captures_us_and_risk_fields(self):
         """logRecsToLearningLoop()'s per-rec market_context must capture US market /
@@ -9871,6 +10057,34 @@ class TestLearningLoopImprovements(unittest.TestCase):
             data = r.get_json()
             self.assertTrue(data.get('ok'))
             self.assertIn('cells', data)
+
+
+class TestAnnouncementScanTimezone(unittest.TestCase):
+    """run_sync()'s today-announcement PDF resolution must use Sydney date, not
+    UTC. ASX announcement dates are Sydney-local; UTC trails Sydney by 10-11h,
+    so for roughly the first 10 hours of each Sydney day (midnight through
+    mid-morning — pre-market through market open, when most announcements
+    land) `datetime.utcnow().date()` is still on yesterday's date. An exact
+    equality check (`ann_date == today_str`) against that stale UTC date
+    silently failed for today's own announcements during exactly those hours,
+    skipping the todayAnns.do PDF resolution step (needed for MAP-system
+    hex-filename PDFs the numeric Markit URL can't resolve)."""
+
+    def test_run_sync_uses_sydney_date_for_today_check(self):
+        with open(os.path.join(ROOT, "announcement_engine.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('today_str = _sydney_now().strftime("%Y-%m-%d")', src)
+        self.assertNotIn('today_str = datetime.utcnow().strftime("%Y-%m-%d")', src)
+
+    def test_sydney_now_returns_sydney_local_date(self):
+        import announcement_engine as ae
+        now = ae._sydney_now()
+        if ae._SYDNEY_TZ is not None:
+            self.assertEqual(str(now.tzinfo), "Australia/Sydney")
+        # Sydney is always >= UTC (never behind) — a basic sanity floor
+        # regardless of which branch (zoneinfo vs naive UTC+10 fallback) ran.
+        from datetime import datetime as _dt
+        self.assertGreaterEqual(now.replace(tzinfo=None), _dt.utcnow())
 
 
 if __name__ == "__main__":

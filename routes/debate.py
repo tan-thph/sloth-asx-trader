@@ -14,6 +14,7 @@ Endpoints:
   /api/debate/adjudicator-status     GET    — is a cloud adjudicator configured?
   /api/debate/staleness              POST   — re-check pending recs for invalidation
   /api/debate/skill                  POST   — 0-10 quality score for an event
+  /api/debate/scrutinize             POST   — local-LLM second opinion on an existing rec
   /api/debate/calib-quality          GET    — Phase 6: calibration quality debate card
 """
 
@@ -95,6 +96,16 @@ _SCHEMA_SKILL = {
         "success_tags": {"type": "string"},   # only populated for wins; empty string for losses/breakeven
     },
     "required": ["score", "reason"],
+}
+
+_SCHEMA_SCRUTINY = {
+    "type": "object",
+    "properties": {
+        "verdict":         {"type": "string", "enum": ["agree", "disagree", "uncertain"]},
+        "concerns":        {"type": "string"},
+        "confidence_adj":  {"type": "number"},
+    },
+    "required": ["verdict", "concerns"],
 }
 
 _SCHEMA_CALIB_QUALITY = {
@@ -486,6 +497,58 @@ def _flatten_entry_signals(entry_signals_json: str) -> str:
     return "[Signals] " + " | ".join(parts) if parts else ""
 
 
+def _flatten_market_context(market_context_json: str) -> str:
+    """
+    Produce a compact, flat key=value string from the stored market_context
+    JSON — the macro snapshot captured at rec-generation time (Sprint 71:
+    logRecsToLearningLoop() in js/analysis.js). Same filter/format philosophy
+    as _flatten_entry_signals(): only meaningful fields, tight number formats,
+    drop None/NaN. Feeds the scrutinize endpoint's macro context so the local
+    critic sees the same regime-level picture Claude did, not just per-ticker
+    technicals.
+
+    Returns '' if input is empty/unparseable.
+    """
+    if not market_context_json:
+        return ""
+    try:
+        mc = json.loads(market_context_json)
+    except Exception:
+        return ""
+
+    _KEY_MAP = [
+        ("asx200_chg",            "asx200",     lambda v: f"{v:+.1f}%"),
+        ("spi200_futures_chg",    "spi200_fut", lambda v: f"{v:+.1f}%"),
+        ("advance_decline_ratio", "breadth",    lambda v: f"{v:.0%}"),
+        ("asx_vol_20d",           "asx_vol20d", lambda v: f"{v:.1f}%"),
+        ("sp500_chg",             "sp500",      lambda v: f"{v:+.1f}%"),
+        ("nasdaq_chg",            "nasdaq",     lambda v: f"{v:+.1f}%"),
+        ("vix",                   "vix",        lambda v: f"{v:.1f}"),
+        ("vix_chg",               "vix_chg",    lambda v: f"{v:+.1f}%"),
+        ("aud_usd_chg",           "audusd",     lambda v: f"{v:+.1f}%"),
+        ("gold_chg",              "gold",       lambda v: f"{v:+.1f}%"),
+        ("oil_chg",               "oil",        lambda v: f"{v:+.1f}%"),
+        ("copper_chg",            "copper",     lambda v: f"{v:+.1f}%"),
+        ("iron_ore_chg",          "iron_ore",   lambda v: f"{v:+.1f}%"),
+        ("rba_rate",              "rba",        lambda v: f"{v:.2f}%"),
+        ("max_corr_to_holdings",  "max_corr",   lambda v: f"{v:.2f}"),
+    ]
+    parts = []
+    for src_key, label, fmt in _KEY_MAP:
+        val = mc.get(src_key)
+        if val is None:
+            continue
+        try:
+            f = float(val)
+            if math.isnan(f) or math.isinf(f):
+                continue
+            parts.append(f"{label}={fmt(f)}")
+        except (TypeError, ValueError):
+            continue
+
+    return "[Macro] " + " | ".join(parts) if parts else ""
+
+
 def _pm_build_summary(row) -> str:
     """
     Compact trade summary for postmortem classification.
@@ -540,8 +603,13 @@ def _pm_exit_hint(exit_reason: str) -> str:
 def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
                      entry_signals_str: str = "", action: str = "BUY",
                      pnl_pct: float | None = None,
-                     exit_reason: str = "") -> str:
-    """Full postmortem classification prompt. D5: entry_signals_str. D6: action + pnl_pct + exit_reason."""
+                     exit_reason: str = "",
+                     market_context_str: str = "") -> str:
+    """Full postmortem classification prompt. D5: entry_signals_str. D6: action + pnl_pct + exit_reason.
+    market_context_str (current session): the macro snapshot captured at rec-generation
+    time (_flatten_market_context), added alongside entry_signals_str so regime_mismatch
+    can be judged against the actual macro tape at entry, not just the stored 'regime'
+    label in the summary line."""
     is_exit = action.upper() in ("SELL", "TRIM")
 
     # Direction preamble — prevents models from defaulting to BUY framing on SELL/TRIM trades.
@@ -617,10 +685,11 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         + (f"Original AI reasoning at entry: {rationale}\n" if rationale else "No original rationale stored.\n")
         + (f"Exit context: {exit_hint}\n" if exit_hint else "")
         + (f"Entry signals at the time: {entry_signals_str}\n" if entry_signals_str else "")
+        + (f"Macro tape at the time: {market_context_str}\n" if market_context_str else "")
         + "\n"
         "Classify the PRIMARY reason this trade failed. Use the P&L, holding period, "
-        "confidence level, R:R ratio, entry/stop/target prices, and entry signals to reason — "
-        "do NOT base the tag solely on the exit method.\n"
+        "confidence level, R:R ratio, entry/stop/target prices, entry signals, and macro tape "
+        "to reason — do NOT base the tag solely on the exit method.\n"
         "\n"
         "Select 1-2 error tags (STRICT criteria — only assign if the evidence clearly supports it):\n"
         "\n"
@@ -1263,10 +1332,12 @@ def debate_postmortem():
     rationale = (row["rationale_summary"] or "").strip()[:250]
     exit_hint = _pm_exit_hint(row["exit_reason"] or "")
     entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
+    market_context_str = _flatten_market_context(row["market_context"] or "")
     action = (row["recommendation"] or "BUY").upper()
     prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str,
                              action=action, pnl_pct=row["realized_pnl_pct"],
-                             exit_reason=row["exit_reason"] or "")
+                             exit_reason=row["exit_reason"] or "",
+                             market_context_str=market_context_str)
 
     # Default 1024 num_predict (set in _call_model_any) and timeout=60 give the model
     # enough room to think and produce a complete JSON reason without truncation.
@@ -1396,10 +1467,12 @@ def debate_postmortem_debate():
     rationale   = (row["rationale_summary"] or "").strip()[:250]
     exit_hint         = _pm_exit_hint(row["exit_reason"] or "")
     entry_signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
+    market_context_str = _flatten_market_context(row["market_context"] or "")
     action      = (row["recommendation"] or "BUY").upper()
     base_prompt = _pm_build_prompt(summary, rationale, exit_hint, entry_signals_str,
                                   action=action, pnl_pct=row["realized_pnl_pct"],
-                                  exit_reason=row["exit_reason"] or "")
+                                  exit_reason=row["exit_reason"] or "",
+                                  market_context_str=market_context_str)
 
     # ── Phase 1: Independent classification ───────────────────────────────────
     t0    = time.time()
@@ -2131,6 +2204,147 @@ def debate_skill():
         "success_tags": success_tags_str or "",
         "model":        model,
     })
+
+
+@bp.route("/api/debate/scrutinize", methods=["POST"])
+def debate_scrutinize():
+    """
+    Local-LLM (e.g. a 24B Ollama model) second opinion on an already-generated
+    Claude rec — a skeptical risk-manager critique, not a fresh bull/bear debate.
+
+    Manually triggered per-rec via the 🔍 Scrutinize button on the rec card —
+    mirrors the manual-only pattern already established for postmortem/skill
+    scoring (auto-trigger was deliberately removed, hotfix a888eec, to avoid
+    firing local-LLM calls on every event). Works on PENDING recs, not just
+    closed trades: it reads the same entry_signals_json / market_context /
+    bull_case / bear_case snapshots captured at rec-generation time
+    (js/analysis.js logRecsToLearningLoop()), so the critic sees the exact
+    technical + macro picture Claude itself saw — no separate context-assembly
+    path in the frontend to keep in sync.
+
+    Request:  { id, model, timeout }
+    Response: { ok, id, verdict, concerns, confidence_adj, model, elapsed_ms }
+    Persists to ai_learning_events.local_scrutiny_json (aggregated by
+    _compute_scrutiny_stats() in routes/learning.py for the AI Lesson Generator).
+    """
+    data  = request.get_json() or {}
+    ev_id = data.get("id")
+    if not ev_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+
+    model = data.get("model", "qwen3:9b")
+    tout  = min(int(data.get("timeout", 60)), 120)
+
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT ticker, recommendation, ai_confidence, suggested_stop,
+                      suggested_target, rr_ratio, sector, regime,
+                      rationale_summary, trade_thesis, bull_case, bear_case,
+                      primary_entry_driver, sell_primary_driver,
+                      entry_signals_json, market_context
+               FROM ai_learning_events WHERE id=?""",
+            (ev_id,)
+        ).fetchone()
+
+    if not row:
+        return jsonify({"ok": False, "error": "Event not found"}), 404
+
+    action   = (row["recommendation"] or "BUY").upper()
+    is_exit  = action in ("SELL", "TRIM")
+    conf_str = f"{row['ai_confidence']:.0%}" if row["ai_confidence"] is not None else "?"
+    driver   = row["sell_primary_driver"] if is_exit else row["primary_entry_driver"]
+    thesis   = (row["trade_thesis"] or "").strip()[:200]
+    steelman = ((row["bear_case"] if is_exit else row["bull_case"]) or "").strip()[:200]
+
+    signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
+    macro_str   = _flatten_market_context(row["market_context"] or "")
+
+    summary = (
+        f"{action} {row['ticker']} ({row['sector'] or 'unknown sector'}), "
+        f"confidence {conf_str}, regime {row['regime'] or '?'}"
+        + (f", driver={driver}" if driver else "")
+        + (f", target={row['suggested_target']}" if row["suggested_target"] is not None else "")
+        + (f", stop={row['suggested_stop']}" if row["suggested_stop"] is not None else "")
+        + (f", R:R={row['rr_ratio']:.2f}" if row["rr_ratio"] is not None else "")
+    )
+
+    prompt = (
+        "You are a skeptical risk manager reviewing another analyst's ASX trade "
+        "recommendation before it is acted on.\n\n"
+        f"Recommendation: {summary}\n"
+        + (f"Rationale: {row['rationale_summary']}\n" if row["rationale_summary"] else "")
+        + (f"Thesis: {thesis}\n" if thesis else "")
+        + (f"Steelman (the analyst's own case for the opposing view): {steelman}\n" if steelman else "")
+        + (f"{signals_str}\n" if signals_str else "")
+        + (f"{macro_str}\n" if macro_str else "")
+        + "\n"
+        "Critique this recommendation on its own terms — does the technical and "
+        "macro data actually support it? Flag any risk the rationale underweights. "
+        "Reply with JSON only:\n"
+        '{"verdict":"agree"|"disagree"|"uncertain",'
+        '"concerns":"1-2 sentences, specific to the numbers above",'
+        '"confidence_adj":-0.15}\n'
+        "confidence_adj is the adjustment (as a decimal, e.g. -0.15 for -15pp) you would "
+        "apply to the analyst's stated confidence. No markdown."
+    )
+
+    t0 = time.time()
+    result = _call_ollama(model, prompt, timeout=tout, retries=0, think=False, num_predict=350,
+                          format_schema=_SCHEMA_SCRUTINY)
+    elapsed_ms = int((time.time() - t0) * 1000)
+    if not result["ok"]:
+        return jsonify({"ok": False, "error": result["error"]})
+
+    raw = _strip_think_tags(result["text"].strip())
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+    parsed = None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        for m in reversed(list(re.finditer(r'\{[^{}]*\}', raw, re.DOTALL))):
+            try:
+                parsed = json.loads(m.group())
+                break
+            except Exception:
+                continue
+
+    if not parsed or parsed.get("verdict") not in ("agree", "disagree", "uncertain"):
+        current_app.logger.warning(
+            f"[Scrutiny] parse failure for event#{ev_id} via {model} — raw: {repr(raw[:200])}"
+        )
+        return jsonify({"ok": False,
+                        "error": f"Could not parse scrutiny verdict from model output: {raw[:120]!r}"})
+
+    verdict  = parsed["verdict"]
+    concerns = (parsed.get("concerns") or "").strip()[:400]
+    try:
+        confidence_adj = round(float(parsed.get("confidence_adj", 0) or 0), 3)
+    except (TypeError, ValueError):
+        confidence_adj = 0.0
+
+    scrutiny = {
+        "verdict":        verdict,
+        "concerns":       concerns,
+        "confidence_adj": confidence_adj,
+        "model":          model,
+        "elapsed_ms":     elapsed_ms,
+        "scrutinized_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE ai_learning_events SET local_scrutiny_json=? WHERE id=?",
+                (json.dumps(scrutiny), ev_id)
+            )
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+    current_app.logger.info(
+        f"[Scrutiny] event#{ev_id} ({row['ticker']}) → {verdict} via {model} ({elapsed_ms}ms)"
+    )
+    return jsonify({"ok": True, "id": ev_id, **scrutiny})
 
 
 # ── Claude API proxy lives in routes/claude.py (registered below) ─────────────

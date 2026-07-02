@@ -20,6 +20,23 @@ function renderSettings() {
 
         <div style="margin-top:14px;padding-top:12px;border-top:0.5px solid var(--border-light)">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <div class="form-label" style="margin:0">Remote access (Tailscale) — server-side key</div>
+            <span id="proxy-key-status" style="font-size:10px;padding:1px 7px;border-radius:9px;background:var(--bg-secondary);color:var(--text-muted)">checking…</span>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px">
+            <input type="checkbox" ${state.settings.useBackendProxy ? 'checked' : ''} onchange="settingsToggleBackendProxy(this.checked)">
+            Route AI calls through the backend proxy instead of this browser's key
+          </label>
+          <div style="display:flex;gap:6px">
+            <input type="password" id="proxy-api-key-input" placeholder="sk-ant-..." style="flex:1">
+            <button class="btn btn-sm btn-primary" onclick="settingsSaveProxyKey()">Save to server</button>
+            <button class="btn btn-sm" onclick="settingsClearProxyKey()">Clear</button>
+          </div>
+          <div class="text-xs text-muted mt-1">The Anthropic key above is stored in this browser's localStorage only — it won't follow you to another device or a different Tailscale address. Saving a key here stores it server-side (<code>claude-api.txt</code>, git-ignored) so every device on your tailnet shares one key.</div>
+        </div>
+
+        <div style="margin-top:14px;padding-top:12px;border-top:0.5px solid var(--border-light)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
             <div class="form-label" style="margin:0">Groq API Key</div>
             ${state.news.settings.groq_api_key
               ? '<span style="font-size:10px;background:#dcfce7;color:#16a34a;padding:1px 7px;border-radius:9px">&#10003; Key saved</span>'
@@ -466,6 +483,53 @@ async function testApiKey() {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '🔍 Test Key'; }
   }
+}
+
+function settingsToggleBackendProxy(val) {
+  state.settings.useBackendProxy = !!val;
+  scheduleSave();
+  toast(val
+    ? "Backend proxy enabled — AI calls now route through the server's saved key"
+    : "Backend proxy disabled — using this browser's local key", 'info');
+}
+
+async function settingsSaveProxyKey() {
+  const val = (document.getElementById('proxy-api-key-input')?.value || '').trim();
+  if (!val) { toast('Enter a valid API key', 'error'); return; }
+  try {
+    const r = await fetch(`${API}/api/claude/settings`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: val }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { toast(d.error || 'Failed to save key', 'error'); return; }
+    document.getElementById('proxy-api-key-input').value = '';
+    toast('Server-side API key saved — available to every device on your tailnet', 'success');
+    loadProxyKeyStatus();
+  } catch (e) { toast('Failed to reach server: ' + e.message, 'error'); }
+}
+
+async function settingsClearProxyKey() {
+  try {
+    const r = await fetch(`${API}/api/claude/settings`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: '' }),
+    });
+    const d = await r.json();
+    if (d.ok) { toast('Server-side API key cleared', 'success'); loadProxyKeyStatus(); }
+  } catch (e) { toast('Failed to reach server: ' + e.message, 'error'); }
+}
+
+async function loadProxyKeyStatus() {
+  const el = document.getElementById('proxy-key-status');
+  if (!el) return;
+  try {
+    const r = await fetch(`${API}/api/claude/settings`);
+    const d = await r.json();
+    el.textContent = d.has_key ? '✓ Key saved on server' : 'No server key set';
+    el.style.background = d.has_key ? '#dcfce7' : '#fef9c3';
+    el.style.color      = d.has_key ? '#16a34a' : '#92400e';
+  } catch { el.textContent = 'Unable to check'; }
 }
 
 async function settingsSaveGroqKey() {

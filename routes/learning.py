@@ -32,6 +32,7 @@ _ALLOWED_OUTCOME_COLS = (
     "thesis_verdict", "exit_signals_json",
     "regime_at_execution",
     "bull_case", "bear_case",
+    "local_scrutiny_json",
 )
 
 # ── Calibration TTL cache (L4) ────────────────────────────────────────────────
@@ -2287,6 +2288,98 @@ def learning_lesson_source():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _compute_scrutiny_stats(conn, cap_exemplars: int = 3) -> dict:
+    """Aggregate local-LLM (24B Ollama) scrutiny verdicts vs eventual outcomes.
+
+    Each scrutiny event (written by POST /api/debate/scrutinize, manually
+    triggered per-rec) records whether the local critic *agreed* or
+    *disagreed* with Claude's rec at generation time. Once the rec eventually
+    closes (outcome_status win/loss), score whether the critic's skepticism
+    was warranted: disagree+loss or agree+win = critic "right"; the inverse =
+    "wrong". Breakevens/open positions are excluded — no clear right/wrong
+    signal yet. Accuracy is n-gated at _DIGEST_MIN_N (same small-n suppression
+    philosophy as the rest of this module) so a handful of scrutinized trades
+    can't produce a misleadingly confident percentage.
+    """
+    rows = conn.execute("""
+        SELECT ticker, recommendation, local_scrutiny_json,
+               outcome_status, realized_pnl_pct
+        FROM ai_learning_events
+        WHERE local_scrutiny_json IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT 300
+    """).fetchall()
+
+    n_scrutinized, n_agree, n_disagree = 0, 0, 0
+    n_disagree_resolved, n_disagree_right = 0, 0
+    n_agree_resolved, n_agree_right = 0, 0
+    exemplars = []
+
+    for r in rows:
+        try:
+            sc = json.loads(r["local_scrutiny_json"] or "{}")
+        except Exception:
+            continue
+        verdict = sc.get("verdict")
+        if verdict not in ("agree", "disagree", "uncertain"):
+            continue
+        n_scrutinized += 1
+        if verdict == "agree":
+            n_agree += 1
+        elif verdict == "disagree":
+            n_disagree += 1
+
+        outcome = r["outcome_status"]
+        if outcome not in ("win", "loss") or verdict == "uncertain":
+            continue
+        was_win = outcome == "win"
+        if verdict == "disagree":
+            n_disagree_resolved += 1
+            critic_right = not was_win
+            if critic_right:
+                n_disagree_right += 1
+            if len(exemplars) < cap_exemplars:
+                exemplars.append({
+                    "ticker":           r["ticker"],
+                    "action":           r["recommendation"],
+                    "concerns":         sc.get("concerns"),
+                    "outcome":          outcome,
+                    "realized_pnl_pct": r["realized_pnl_pct"],
+                    "critic_right":     critic_right,
+                })
+        elif verdict == "agree":
+            n_agree_resolved += 1
+            if was_win:
+                n_agree_right += 1
+
+    return {
+        "n_scrutinized":       n_scrutinized,
+        "n_agree":             n_agree,
+        "n_disagree":          n_disagree,
+        "disagree_rate":       round(n_disagree / n_scrutinized * 100, 1) if n_scrutinized else None,
+        "n_disagree_resolved": n_disagree_resolved,
+        "disagree_accuracy":   round(n_disagree_right / n_disagree_resolved * 100, 1) if n_disagree_resolved >= _DIGEST_MIN_N else None,
+        "n_agree_resolved":    n_agree_resolved,
+        "agree_accuracy":      round(n_agree_right / n_agree_resolved * 100, 1) if n_agree_resolved >= _DIGEST_MIN_N else None,
+        "exemplars":           exemplars,
+    }
+
+
+@bp.route("/api/learning/scrutiny-stats", methods=["GET"])
+def learning_scrutiny_stats():
+    """Read-only rollup of local-LLM scrutiny verdicts vs eventual outcomes.
+
+    Powers the 'Local critic feedback' summary consumed by the AI Lesson
+    Generator (js/pages/learning.js generateTradingLessons()) so Claude gets a
+    second opinion's track record, not a raw dump of every scrutiny event.
+    """
+    try:
+        with get_db() as conn:
+            return jsonify({"ok": True, **_compute_scrutiny_stats(conn)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @bp.route("/api/learning/calibration-stats")

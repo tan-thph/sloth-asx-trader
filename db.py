@@ -369,6 +369,12 @@ _LE_MIGRATIONS = [
     # entry signature. Sent from logRecsToLearningLoop() (js/analysis.js).
     ("bull_case", "TEXT"),
     ("bear_case", "TEXT"),
+    # Local-LLM scrutiny: a 24B Ollama model's independent critique of this rec,
+    # manually triggered from the rec card (routes/debate.py POST /api/debate/scrutinize).
+    # JSON: {verdict: agree|disagree|uncertain, concerns, confidence_adj, model,
+    # elapsed_ms, scrutinized_at}. Patchable via /api/learning/outcome. Aggregated by
+    # _compute_scrutiny_stats() (routes/learning.py) for the AI Lesson Generator feed.
+    ("local_scrutiny_json", "TEXT"),
 ]
 
 

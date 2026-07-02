@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 
 import os
@@ -193,6 +193,7 @@ from routes.import_csv    import bp as _import_csv_bp
 from routes.intraday      import bp as _intraday_bp
 from routes.notifications       import bp as _notifications_bp
 from routes.day_trade_training  import bp as _dt_training_bp
+from routes.auth import bp as _auth_bp, resolve_webapp_password, check_basic_auth
 app.register_blueprint(_claude_bp)
 app.register_blueprint(_portfolio_bp)
 app.register_blueprint(_dividends_bp)
@@ -207,6 +208,26 @@ app.register_blueprint(_import_csv_bp)
 app.register_blueprint(_intraday_bp)
 app.register_blueprint(_notifications_bp)
 app.register_blueprint(_dt_training_bp)
+app.register_blueprint(_auth_bp)
+
+
+# ── Optional shared-password gate (routes/auth.py) ──────────────────────────
+# Disabled by default (no webapp-auth.txt) — the app's normal trust model is
+# "reachable only on your LAN/tailnet". Set a password via POST
+# /api/auth/password before exposing the app publicly (e.g. Tailscale
+# Funnel) so it isn't wide open on the internet.
+@app.before_request
+def _webapp_auth_gate():
+    pw = resolve_webapp_password()
+    if not pw:
+        return None
+    auth = request.authorization
+    if not check_basic_auth(auth, pw):
+        return Response(
+            "Authentication required.", 401,
+            {"WWW-Authenticate": 'Basic realm="Sloth ASX Trader"'},
+        )
+    return None
 
 if _AE_OK:
     app.register_blueprint(ann_bp, url_prefix='/api/announcements')
@@ -224,7 +245,7 @@ from indicators import (
 
 # ── Flask routes ────────────────────────────────────────────────────────────────
 
-# ── App HTML + assets (served from Flask so a single ngrok tunnel covers UI + API) ──
+# ── App HTML + assets (served from Flask so a single origin covers UI + API) ──
 @app.route('/')
 def serve_index():
     return send_from_directory('.', 'asx_trading.html')

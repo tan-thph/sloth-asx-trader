@@ -357,6 +357,45 @@ async function fetchStaleness(ticker, signals, action, confidence, daysAgo, opts
 }
 
 /**
+ * Local-LLM second opinion on an already-generated Claude rec (BUY/SELL/
+ * TRIM/TOP_UP). Manual-only (🔍 Scrutinize button on the rec card) —
+ * mirrors the manual-only pattern for postmortem/skill scoring (auto-trigger
+ * was deliberately removed, hotfix a888eec). The server reads the technical
+ * (entry_signals_json) and macro (market_context) snapshots already captured
+ * at rec-generation time — no context needs to be re-assembled client-side.
+ *
+ * @param {number} eventId   ai_learning_events.id (rec._learningId)
+ * @param {object} [opts]    { model, timeout, priority } — priority defaults
+ *                           to HIGH since this is always a manual button press.
+ * @returns {Promise<{ok:boolean, verdict:string, concerns:string,
+ *                    confidence_adj:number, model:string, elapsed_ms:number}|null>}
+ */
+async function triggerScrutiny(eventId, opts = {}) {
+  if (!state.serverOk) return null;
+
+  const status = await debateStatus();
+  if (!status.available) return null;
+
+  const model    = opts.model || preferredDebateModel(status.models);
+  const priority = opts.priority || 'HIGH';  // always a manual button press
+
+  return _oqEnqueue(async () => {
+    try {
+      const r = await fetch(`${API}/api/debate/scrutinize`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ id: eventId, model, timeout: opts.timeout || 60 }),
+        signal:  AbortSignal.timeout(130_000),
+      });
+      if (r.ok) return await r.json();
+      try { return await r.json(); } catch { return null; }
+    } catch {
+      return null;
+    }
+  }, priority);
+}
+
+/**
  * Score a closed trade's outcome quality (skill vs luck) and persist to DB.
  *
  * @param {number} eventId   ai_learning_events.id

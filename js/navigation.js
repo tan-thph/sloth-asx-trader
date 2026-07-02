@@ -354,6 +354,6 @@ function _renderPageUnsafe() {
     case 'watchlist':       renderWatchlistPage(gen); break;
     case 'compare':         if (typeof _scannerTab !== 'undefined') _scannerTab = 'compare'; renderScannerPage(gen); break;
     case 'learning':        renderLearningPage(gen); break;
-    case 'settings':        el.innerHTML = renderSettings(); setTimeout(() => { if(state._renderGen !== gen) return; renderSchedulerLog(); loadAICallLog(); loadSettingsAppInfo(); }, 0); break;
+    case 'settings':        el.innerHTML = renderSettings(); setTimeout(() => { if(state._renderGen !== gen) return; renderSchedulerLog(); loadAICallLog(); loadSettingsAppInfo(); loadProxyKeyStatus(); }, 0); break;
   }
 }

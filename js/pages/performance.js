@@ -227,8 +227,8 @@ function renderPerformance() {
   const losses=closedTrades.filter(t=>t.pnl<0).length;
   const total=wins+losses;
   const winRate=total?wins/total*100:0;
-  const execRecs=state.tradeJournal.filter(t=>t.recId != null);
-  const execRate=state.recHistory.length?execRecs.length/state.recHistory.length*100:0;
+  const execRecIds=new Set(state.tradeJournal.filter(t=>t.recId != null).map(t=>t.recId));
+  const execRate=state.recHistory.length?execRecIds.size/state.recHistory.length*100:0;
   const totalFees=state.tradeJournal.reduce((s,t)=>s+(Number(t.fees)||0),0);
   const realised=closedTrades.reduce((s,t)=>s+(Number(t.pnl)||0),0);
   const skipped=state.recHistory.filter(r=>!r.executed);
@@ -332,7 +332,7 @@ function renderPerformance() {
 
     <div class="metrics-grid">
       <div class="metric-card"><div class="metric-label">Win Rate</div><div class="metric-value ${winRate>=50?'up':'down'}">${fmt(winRate,0)}%</div><div class="metric-sub">${wins}W / ${losses}L</div></div>
-      <div class="metric-card"><div class="metric-label">Execution Rate</div><div class="metric-value">${fmt(execRate,0)}%</div><div class="metric-sub">${execRecs.length} of ${state.recHistory.length} recs</div></div>
+      <div class="metric-card"><div class="metric-label">Execution Rate</div><div class="metric-value">${fmt(execRate,0)}%</div><div class="metric-sub">${execRecIds.size} of ${state.recHistory.length} recs</div></div>
       <div class="metric-card"><div class="metric-label">Realised P&L</div><div class="metric-value ${realised>=0?'up':'down'}">${sign(realised)}$${fmt(Math.abs(realised))}</div></div>
       <div class="metric-card"><div class="metric-label">Fees Paid</div><div class="metric-value">$${fmt(totalFees)}</div></div>
       ${ph.length > 1 ? `

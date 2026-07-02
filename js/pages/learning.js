@@ -44,7 +44,7 @@ const _LL_ERROR_TYPE_LABELS = {
 
 // Tag buttons — LOSS and BREAKEVEN only; wins don't get error tags (errors on wins = luck, not failure).
 // Multiple tags supported — stored as comma-separated string ("overconfident,regime_mismatch").
-// Each button toggles independently; auto-tagged buttons show 🤖 prefix + dashed border.
+// Each button toggles independently; auto-tagged buttons show 🔍 prefix + dashed border.
 const _LL_TAG_STATUSES    = new Set(['loss', 'breakeven']);
 const _LL_CLOSED_STATUSES = new Set(['win', 'loss', 'breakeven']); // kept for postmortem compat
 
@@ -78,7 +78,7 @@ function _llTagButtons(evId, currentTagStr, tagSource) {
                border:${border};font-weight:${active ? 700 : 500};
                background:${active ? meta.color : 'transparent'};
                color:${active ? '#fff' : meta.color}"
-      >${isAuto && active ? '🤖 ' : ''}${short}</button>`;
+      >${isAuto && active ? '🔍 ' : ''}${short}</button>`;
     }).join('') +
   `</div>`;
 }
@@ -784,7 +784,7 @@ function _renderLearningContent(d, brier) {
                 <th style="text-align:left;padding:4px 6px">Regime</th>
                 <th style="text-align:left;padding:4px 6px">Outcome</th>
                 <th style="text-align:right;padding:4px 6px">P&amp;L%</th>
-                <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, 🤖 = auto-tagged">Error tags ℹ</th>
+                <th style="text-align:left;padding:4px 6px" title="Loss/Breakeven only · OC=Overconfident · MC=Missed catalyst · RM=Regime mismatch · PE=Poor entry · ST=Stop too tight · PR=Poor R:R · ES=External shock · TB=Thesis broken · Multiple tags allowed — click to toggle, 🔍 = auto-tagged">Error tags ℹ</th>
                 <th style="text-align:left;padding:4px 6px" title="Claude's generation-time tags — entry driver for BUY/TOP_UP; exit driver + urgency for SELL/TRIM; win pattern tags for wins">Claude ℹ</th>
                 <th style="padding:4px 6px" title="Skill score (0–10): analysis quality vs luck. Sk = trigger Ollama scoring">
                   <div style="display:inline-flex;align-items:center;gap:2px">
@@ -827,11 +827,14 @@ function _renderLearningContent(d, brier) {
                       : '')
                   : '';
 
-                // 🤖 post-mortem — always show for loss/breakeven so re-runs are possible
+                // 🔍 post-mortem — always show for loss/breakeven so re-runs are possible.
+                // Relabelled "Scrutinize" (current session) — same error_type tagging
+                // endpoint/pipeline as before, just enriched with macro context
+                // (_flatten_market_context) alongside the existing technical signals.
                 const showPm = TAG_STATUSES.has(ev.outcome_status);
                 const pmTitle = ev.error_type
-                  ? 'Re-run auto-tag (will overwrite existing tag)'
-                  : 'Auto-tag with local model (Ollama)';
+                  ? 'Re-run scrutiny (will overwrite existing tag)'
+                  : 'Scrutinize with local model — technical + macro context';
                 // 🔬 skill score — badge (if scored) + button always shown for closed trades
                 const skillScore = ev.skill_score;
                 const skillBadgeContent = skillScore != null
@@ -956,7 +959,7 @@ function _renderLearningContent(d, brier) {
                             ev.success_tags ? 'Re-tag winning trade' : 'Tag win: identify why this trade succeeded',
                             '&#127942;', 'Tag', ';color:var(--text-secondary)')
                         : (showPm
-                            ? _iconBtn(`pm-btn-${ev.id}`, `triggerDebatePostmortem(${ev.id})`, pmTitle, '🤖', 'PM')
+                            ? _iconBtn(`pm-btn-${ev.id}`, `triggerDebatePostmortem(${ev.id})`, pmTitle, '🔍', 'Scrut')
                             : ''))}
                       ${_slot(26, showPm
                         ? _iconBtn(`adv-btn-${ev.id}`, `triggerAdversarialPostmortem(${ev.id})`,
@@ -1382,6 +1385,29 @@ Recent 14 sessions (oldest→newest, for trend direction):
 ${tableRows}`;
     }
 
+    // 3.5. Local-LLM critic feedback — a separate 24B Ollama model's manually-run
+    //      second opinion on past recs (routes/debate.py /api/debate/scrutinize).
+    //      Aggregate track record only, not a raw dump — see routes/learning.py
+    //      _compute_scrutiny_stats() for the accuracy-vs-outcome methodology.
+    let scrutinyBlock = '';
+    try {
+      const sr = await fetch(`${API}/api/learning/scrutiny-stats`);
+      if (sr.ok) {
+        const s = await sr.json();
+        if (s.ok && s.n_scrutinized > 0) {
+          const disagreeExemplars = (s.exemplars || []).map(e =>
+            `${e.action} ${e.ticker} → ${e.outcome}${e.realized_pnl_pct != null ? ' (' + e.realized_pnl_pct.toFixed(1) + '%)' : ''}, ` +
+            `critic said: "${e.concerns || ''}" (critic was ${e.critic_right ? 'right' : 'wrong'})`
+          ).join('\n');
+          scrutinyBlock =
+`\nLocal critic second opinion (a separate 24B model, manually run on ${s.n_scrutinized} past recs — treat as one more data point, not ground truth):
+- Disagreed with ${s.n_disagree}/${s.n_scrutinized} recs (${s.disagree_rate ?? '?'}%)${s.disagree_accuracy != null ? `; when it disagreed, it was later proven right ${s.disagree_accuracy}% of the time (n=${s.n_disagree_resolved})` : ' — not enough resolved disagreements yet to judge its accuracy'}
+${s.agree_accuracy != null ? `- When it agreed with the rec, the rec went on to win ${s.agree_accuracy}% of the time (n=${s.n_agree_resolved})` : ''}
+${disagreeExemplars ? `Recent disagreements:\n${disagreeExemplars}` : ''}`;
+        }
+      }
+    } catch (_) { /* best-effort — proceed without it */ }
+
     const prompt =
 `You are distilling durable trading lessons for an ASX equity decision system. These
 lessons will be stored and injected verbatim into FUTURE recommendation prompts for you
@@ -1400,7 +1426,7 @@ Curated examples (worst losses, best wins, process failures — entry→exit tec
 macro tape, and my own bull/bear case at the time):
 ${exemplarBlock || 'No exemplars available yet.'}
 
-${macroBlock}${briefNarrative}${macroHistoryBlock}
+${macroBlock}${briefNarrative}${macroHistoryBlock}${scrutinyBlock}
 
 Write 3 to 6 lessons. Each lesson MUST:
 - be ONE sentence, <= 200 characters, concrete and testable (cite a number/threshold/tag
@@ -1746,7 +1772,11 @@ async function startOllamaAndRefreshDebateCard() {
   }
 }
 
-// ── Auto-tag a closed learning event using local model post-mortem ─────────────
+// ── Scrutinize (auto-tag) a closed learning event using local model post-mortem ──
+// Same /api/debate/postmortem endpoint and error_type tagging pipeline as before —
+// current session enriched its context with macro data (_flatten_market_context)
+// alongside the existing technical entry signals, and relabelled the button/toasts
+// from "Auto-tag" to "Scrutinize" for consistency with the pending-rec scrutiny feature.
 async function triggerDebatePostmortem(eventId) {
   if (!state.serverOk) { toast('Backend not running', 'error'); return; }
   const btn = document.getElementById(`pm-btn-${eventId}`);
@@ -1756,13 +1786,13 @@ async function triggerDebatePostmortem(eventId) {
     const status = await debateStatus();
     if (!status.available) {
       toast('Ollama is not running — start it first', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
+      if (btn) { btn.disabled = false; btn.textContent = '🔍'; btn.title = 'Scrutinize with local model — technical + macro context'; }
       return;
     }
     const model = typeof preferredDebateModel === 'function'
       ? preferredDebateModel(status.models) : 'qwen3:9b';
 
-    toast(`🤖 Asking ${model} for post-mortem on event #${eventId}… (up to 60 s)`, 'info');
+    toast(`🔍 Asking ${model} to scrutinize event #${eventId}… (up to 60 s)`, 'info');
     const t0 = Date.now();
 
     const r = await fetch(`${API}/api/debate/postmortem`, {
@@ -1777,21 +1807,21 @@ async function triggerDebatePostmortem(eventId) {
     if (result.ok) {
       const tag = result.error_type !== 'none' ? result.error_type : null;
       if (tag) {
-        toast(`🤖 Tagged as "${tag}" in ${elapsed}s — ${(result.reason || '').slice(0, 70)}`, 'success');
+        toast(`🔍 Tagged as "${tag}" in ${elapsed}s — ${(result.reason || '').slice(0, 70)}`, 'success');
         showPage('learning');
       } else {
-        toast(`🤖 No clear error found (${elapsed}s) — tag manually if needed`, 'info');
-        if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
+        toast(`🔍 No clear error found (${elapsed}s) — tag manually if needed`, 'info');
+        if (btn) { btn.disabled = false; btn.textContent = '🔍'; btn.title = 'Scrutinize with local model — technical + macro context'; }
       }
     } else {
       const isTimeout = (result.error || '').includes('timeout');
       const hint = isTimeout ? ' Try a smaller model (qwen3:0.6b).' : '';
-      toast(`Post-mortem failed (${elapsed}s): ${result.error || 'unknown'}${hint}`, 'error');
-      if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
+      toast(`Scrutiny failed (${elapsed}s): ${result.error || 'unknown'}${hint}`, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🔍'; btn.title = 'Scrutinize with local model — technical + macro context'; }
     }
   } catch (e) {
-    toast('Post-mortem error: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = '🤖'; btn.title = 'Auto-tag with local model (Ollama)'; }
+    toast('Scrutiny error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '🔍'; btn.title = 'Scrutinize with local model — technical + macro context'; }
   }
 }
 

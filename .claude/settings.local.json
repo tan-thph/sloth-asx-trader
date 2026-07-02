@@ -143,7 +143,9 @@
       "PowerShell(node --check js/prompts.js; node --check js/claude-client.js; node --check js/response-validator.js)",
       "PowerShell(npm *)",
       "Bash(gh api *)",
-      "Bash(ps -p 3034855 -o pid,ppid,etime,cmd)"
+      "Bash(ps -p 3034855 -o pid,ppid,etime,cmd)",
+      "Skill(claude-api)",
+      "Bash(echo \"exit:$?\")"
     ]
   }
 }
