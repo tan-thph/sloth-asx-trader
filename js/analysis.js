@@ -92,7 +92,8 @@ function _applyHeatBudget(recs, budgetAUD, consumed, source) {
 async function runAnalysis() {
   if(state.analysisRunning){toast('Analysis already running','info');return;}
   const key=getApiKey();
-  if(!key){toast('Add API key in Settings','error');showPage('settings');return;}
+  // Proxy mode has no browser-side key — callClaude() routes via the backend.
+  if(!key && !state.settings?.useBackendProxy){toast('Add API key in Settings','error');showPage('settings');return;}
   state.analysisRunning=true;
   toast('Running analysis — refreshing live prices first...','info');
 
@@ -1965,6 +1966,11 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         // model, so feeding back engine-adjusted values would compound the nudges.
         ai_confidence:       (r._calibApplied && r._calibApplied.orig != null)
                                ? r._calibApplied.orig : (r.confidence ?? null),
+        // Calibration efficacy scoreboard: the POST-nudge confidence actually used
+        // for sizing. NULL when no nudge fired (adjusted == original) so the Brier
+        // orig-vs-adjusted comparison only scores recs the calibration layer touched.
+        calibrated_confidence: (r._calibApplied && r._calibApplied.orig != null)
+                                 ? (r.confidence ?? null) : null,
         ensemble_confidence: r.ensembleConfidence ?? null,
         recommendation:      r.action,
         rationale_summary:   r.reasoning ? reasoningText(r.reasoning).slice(0, 400) : null,

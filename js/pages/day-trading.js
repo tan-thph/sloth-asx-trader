@@ -252,7 +252,7 @@ function _renderDtSwingMain() {
 
     ${executed.length ? `
       <div style="margin:16px 0 6px;font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">
-        Executed Today (${executed.length})
+        Executed Trades (${executed.length})
       </div>
       <div style="display:flex;flex-direction:column;gap:8px">
         ${executed.map(r => _renderDtRec(r, true)).join('')}
@@ -527,6 +527,42 @@ function resetDtRules() {
   toast('Swing scanner rules reset to defaults', 'success');
 }
 
+// Actual fill price for an executed swing rec. Two creation paths, two sources:
+// executeDayTrade() (js/day-trading-analysis.js) never stores the fill price on
+// the rec itself (only _execQty) — the real entryPrice lives on the paired
+// state.tradeJournal BUY row (recId === r.id). _openSwingPositionFromParcel()
+// (a lot reassigned into 'trading', not a new transaction) has no paired
+// journal row but sets r.entryPrice directly. Check the rec field first since
+// it's cheaper, then fall back to the journal lookup.
+function _dtExecEntryPrice(r) {
+  if (r.entryPrice != null) return r.entryPrice;
+  const j = (state.tradeJournal || []).find(t => t.recId === r.id && t.action === 'BUY');
+  return j ? j.entryPrice : null;
+}
+
+// Live (unrealised) P&L for an executed-but-not-yet-closed swing trade card.
+// Same live-price fallback chain used elsewhere on this page (liveSignals
+// first, mergedPortfolio's currentPrice as backup). Returns '' when either
+// side of the calc is unavailable (no live price yet, or entry price unknown).
+function _dtLivePnlHtml(r) {
+  const entryPx = _dtExecEntryPrice(r);
+  const qty = r._execQty != null ? r._execQty : r.qty;
+  const livePx = state.liveSignals?.[r.ticker]?.current_price
+    ?? mergedPortfolio().find(h => h.ticker === r.ticker)?.currentPrice ?? null;
+  if (entryPx == null || livePx == null || !qty) return '';
+
+  const pnl = (livePx - entryPx) * qty;
+  const pnlPct = ((livePx - entryPx) / entryPx) * 100;
+  const up = pnl >= 0;
+  const color = up ? '#10b981' : '#ef4444';
+  const sign = up ? '+' : '-';
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding:6px 8px;background:${up ? 'rgba(16,185,129,.08)' : 'rgba(239,68,68,.08)'};border:0.5px solid ${color}44;border-radius:6px;font-size:12px">
+      <span style="color:var(--text-muted)">Live P&amp;L <span style="font-size:10px">@ $${livePx.toFixed(3)}</span></span>
+      <span style="color:${color};font-weight:700">${sign}$${Math.abs(pnl).toFixed(2)} (${sign}${Math.abs(pnlPct).toFixed(1)}%)</span>
+    </div>`;
+}
+
 function _renderDtRec(r, compact = false) {
   const signalsHit = r.signalsHit || [];
   const filtersPass = r.filtersPass || {};
@@ -625,6 +661,7 @@ function _renderDtRec(r, compact = false) {
               <button class="btn btn-primary btn-sm" onclick="executeDayTrade('${r.id}')" style="flex:1">✓ Execute</button>
               <button class="btn btn-sm btn-danger" onclick="dismissDayTradeRec('${r.id}')">Dismiss</button>
             </div>` : ''}
+          ${isExecuted ? _dtLivePnlHtml(r) : ''}
           ${isExecuted ? `
             <div class="flex-row" style="gap:7px;margin-top:8px">
               <button class="btn btn-sm" onclick="_closeDayTrade('${r.id}')"

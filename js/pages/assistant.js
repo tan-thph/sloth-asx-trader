@@ -3,10 +3,12 @@
 // ============================================================
 function renderAssistant() {
   const key=getApiKey();
+  // Proxy mode has no browser-side key — callClaude() routes via the backend.
+  const hasAccess = key || state.settings?.useBackendProxy;
   return `
     <div class="card chat-wrap">
       <div class="card-title">AI Trading Assistant &mdash; Powered by Claude</div>
-      ${!key?`<div class="info-banner">⚠ Enter your Anthropic API key in <button onclick="showPage('settings')" style="background:none;border:none;color:inherit;cursor:pointer;font-weight:600;text-decoration:underline">Settings</button> to enable AI analysis.</div>`:''}
+      ${!hasAccess?`<div class="info-banner">⚠ Enter your Anthropic API key in <button onclick="showPage('settings')" style="background:none;border:none;color:inherit;cursor:pointer;font-weight:600;text-decoration:underline">Settings</button> to enable AI analysis.</div>`:''}
       <div id="chat-messages" class="chat-messages">
         <div class="msg msg-ai">Hello! I'm your ASX trading assistant. I have access to real-time technical indicators for your portfolio via yfinance.<br><br>Try: <em>"Analyse my TLS position with the latest indicators"</em> or <em>"What does the RSI and MACD say about CBA?"</em></div>
         ${state.chatHistory.map(m=>`<div class="msg msg-${m.role}">${m.content}</div>`).join('')}
@@ -22,7 +24,7 @@ async function sendChat() {
   const input=document.getElementById('chat-input');
   const msg=input.value.trim(); if(!msg) return;
   const key=getApiKey();
-  if(!key) { toast('Add API key in Settings','error'); return; }
+  if(!key && !state.settings?.useBackendProxy) { toast('Add API key in Settings','error'); return; }
   input.value='';
   state.chatHistory.push({role:'user',content:msg});
   const msgs=document.getElementById('chat-messages');

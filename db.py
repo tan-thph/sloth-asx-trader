@@ -375,6 +375,15 @@ _LE_MIGRATIONS = [
     # elapsed_ms, scrutinized_at}. Patchable via /api/learning/outcome. Aggregated by
     # _compute_scrutiny_stats() (routes/learning.py) for the AI Lesson Generator feed.
     ("local_scrutiny_json", "TEXT"),
+    # Calibration efficacy scoreboard: the POST-nudge confidence actually shown/used
+    # for sizing, after the deterministic calibration adjustments (analysis.js §8.3)
+    # were applied. `ai_confidence` deliberately stores the ORIGINAL (pre-nudge) value
+    # so calibration stats never compound on already-adjusted numbers; this column
+    # stores the adjusted value alongside it. With both persisted, the Brier
+    # orig-vs-adjusted comparison (GET /api/learning/calibration-efficacy) can measure
+    # whether the calibration layer actually improves prediction, rather than just
+    # assuming it does. NULL when no nudge was applied (adjusted == original).
+    ("calibrated_confidence", "REAL"),
 ]
 
 

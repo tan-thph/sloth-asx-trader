@@ -1569,6 +1569,84 @@ class TestLearningImprovements(unittest.TestCase):
         self.assertIn("_debate?.synthesis?.winner", src)
 
 
+class TestCalibrationEfficacy(unittest.TestCase):
+    """Calibration-efficacy scoreboard: Brier(original) vs Brier(adjusted)."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_calibrated_confidence_in_db_migrations(self):
+        import db as _db
+        col_names = [col for col, _ in _db._LE_MIGRATIONS]
+        self.assertIn("calibrated_confidence", col_names)
+
+    def test_log_accepts_calibrated_confidence(self):
+        resp = self.client.post(
+            "/api/learning/log",
+            data=json.dumps({
+                "ticker": "CBA.AX", "recommendation": "BUY",
+                "ai_confidence": 0.85, "calibrated_confidence": 0.72,
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.data).get("ok"))
+
+    def test_analysis_logs_calibrated_confidence(self):
+        """analysis.js must persist the post-nudge confidence separately."""
+        with open(os.path.join(ROOT, "js/analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("calibrated_confidence:", src)
+
+    def test_efficacy_endpoint_empty(self):
+        """Endpoint returns a well-formed no_data shape when no nudged trades exist."""
+        with _test_get_db() as conn:
+            conn.execute("DELETE FROM ai_learning_events")
+        resp = self.client.get("/api/learning/calibration-efficacy")
+        self.assertEqual(resp.status_code, 200)
+        d = json.loads(resp.data)
+        self.assertTrue(d.get("ok"))
+        self.assertEqual(d.get("n"), 0)
+        self.assertEqual(d.get("verdict"), "no_data")
+
+    def test_efficacy_endpoint_computes_improvement(self):
+        """Overconfident originals nudged toward a low win rate must score 'helping'."""
+        # 8 nudged closed trades: 3 wins / 8 = 37.5% actual. Original conf 0.85
+        # (badly overconfident), adjusted 0.55 (closer to reality) → adj Brier lower.
+        with _test_get_db() as conn:
+            for i in range(8):
+                conn.execute(
+                    "INSERT INTO ai_learning_events "
+                    "(ticker, ai_confidence, calibrated_confidence, outcome_status) "
+                    "VALUES (?,?,?,?)",
+                    (f"EFF{i}", 0.85, 0.55, "win" if i < 3 else "loss"),
+                )
+        resp = self.client.get("/api/learning/calibration-efficacy")
+        d = json.loads(resp.data)
+        self.assertEqual(d["n"], 8)
+        self.assertGreater(d["orig_brier"], d["adj_brier"])
+        self.assertGreater(d["improvement"], 0)
+        self.assertEqual(d["verdict"], "helping")
+
+    def test_efficacy_ignores_unnudged_rows(self):
+        """Rows where original == adjusted contribute nothing (n counts only nudged)."""
+        with _test_get_db() as conn:
+            conn.execute("DELETE FROM ai_learning_events")
+            # identical orig/adj → not a nudge
+            conn.execute(
+                "INSERT INTO ai_learning_events "
+                "(ticker, ai_confidence, calibrated_confidence, outcome_status) "
+                "VALUES ('SAME', 0.70, 0.70, 'win')",
+            )
+        resp = self.client.get("/api/learning/calibration-efficacy")
+        d = json.loads(resp.data)
+        self.assertEqual(d["n"], 0)
+
+
 class TestSprint5(unittest.TestCase):
     """Tests for Sprint 5 features: postmortem digest, EOFY tax pack, persistence fixes."""
 
@@ -3403,6 +3481,39 @@ class TestIntradayStrategy(unittest.TestCase):
             capture_output=True, text=True
         )
         self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+
+class TestSwingDayTradingExecutedCards(unittest.TestCase):
+    """Swing day-trading executed-rec cards: 'Executed Trades' label (was
+    'Executed Today' — the filter was always status==='executed' with no date
+    check, so the old label was inaccurate) + live unrealised P&L section."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "js/pages/day-trading.js"), encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_executed_today_label_renamed(self):
+        self.assertIn("Executed Trades (${executed.length})", self.src)
+        self.assertNotIn("Executed Today", self.src)
+
+    def test_dt_exec_entry_price_helper(self):
+        """_dtExecEntryPrice must check the reclassified-lot's own r.entryPrice
+        first, then fall back to the paired trade_journal BUY row (recId
+        match) for normally-executed trades, which never store the fill price
+        on the rec itself (only _execQty)."""
+        self.assertIn("function _dtExecEntryPrice(r)", self.src)
+        self.assertIn("r.entryPrice != null", self.src)
+        self.assertIn("t.recId === r.id && t.action === 'BUY'", self.src)
+
+    def test_dt_live_pnl_helper_and_wiring(self):
+        """_dtLivePnlHtml must be defined and rendered for executed (not
+        pending/closed) cards, using the same live-price fallback chain
+        (liveSignals -> mergedPortfolio currentPrice) used elsewhere on this page."""
+        self.assertIn("function _dtLivePnlHtml(r)", self.src)
+        self.assertIn("state.liveSignals?.[r.ticker]?.current_price", self.src)
+        self.assertIn("mergedPortfolio().find(h => h.ticker === r.ticker)?.currentPrice", self.src)
+        self.assertIn("${isExecuted ? _dtLivePnlHtml(r) : ''}", self.src)
 
 
 class TestSprint18Frontend(unittest.TestCase):
@@ -8906,6 +9017,7 @@ class TestSprint65MacroBriefPersistence(unittest.TestCase):
         cls.config_js    = _read("js", "config.js")
         cls.settings_js  = _read("js", "pages", "settings.js")
         cls.init_js      = _read("js", "init.js")
+        cls.assistant_js = _read("js", "pages", "assistant.js")
 
     def test_merge_helper_exists_and_preserves_ai_fields(self):
         self.assertIn("function mergeLiveMacro", self.utils_js)
@@ -8938,6 +9050,27 @@ class TestSprint65MacroBriefPersistence(unittest.TestCase):
         """runMacroAnalysis must not navigate to Settings when proxy mode supplies
         the key server-side (auto-run from a timer must never change pages)."""
         self.assertIn("if(!key && !state.settings?.useBackendProxy)", self.macro_js)
+
+    def test_run_analysis_honours_proxy_mode(self):
+        """runAnalysis() (the main 'Run Analysis' button) must not block with
+        'Add API key in Settings' when proxy mode supplies the key server-side —
+        a bare `if(!key)` gate here toasted 'key missing' even after the user
+        saved a key server-side and the UI showed 'Key saved on server', because
+        this check runs before callClaude() ever sees useBackendProxy."""
+        self.assertIn("if(!key && !state.settings?.useBackendProxy)", self.analysis_js)
+
+    def test_scheduler_tick_honours_proxy_mode(self):
+        """schedulerTick() (the periodic auto-run, distinct from
+        checkMacroBriefSchedule) must also check useBackendProxy — a bare
+        `if(!getApiKey()) return;` silently skipped every scheduled run for
+        proxy-mode-only installs with no error surfaced anywhere."""
+        self.assertIn("if(!getApiKey() && !s.useBackendProxy) return;", self.scheduler_js)
+
+    def test_assistant_chat_honours_proxy_mode(self):
+        """The AI Assistant chat page must not show the 'no key' warning banner
+        or block sendChat() when proxy mode supplies the key server-side."""
+        self.assertIn("const hasAccess = key || state.settings?.useBackendProxy;", self.assistant_js)
+        self.assertIn("if(!key && !state.settings?.useBackendProxy)", self.assistant_js)
 
     def test_brief_shows_its_date_until_replaced(self):
         """The AI Macro Analysis card carries a date badge: green 'Today' or amber

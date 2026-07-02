@@ -114,7 +114,7 @@ function isInWindow() {
 async function schedulerTick() {
   const s = state.settings;
   if(!s.scheduleEnabled) return;
-  if(!getApiKey()) return;
+  if(!getApiKey() && !s.useBackendProxy) return;
   if(s.scheduleWeekdaysOnly && !isWeekday()) return;
   if(!isInWindow()) return;
   if(state.analysisRunning) { schedulerLog('skip','Skipped — analysis already running'); return; }

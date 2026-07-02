@@ -972,8 +972,8 @@ def learning_log():
                      tags, trade_thesis,
                      sell_primary_driver, sell_secondary_factors, sell_urgency,
                      alternative_ticker, primary_entry_driver, thesis_verdict,
-                     bull_case, bear_case)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     bull_case, bear_case, calibrated_confidence)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -1015,6 +1015,7 @@ def learning_log():
                 data.get("thesis_verdict"),
                 data.get("bull_case"),
                 data.get("bear_case"),
+                data.get("calibrated_confidence"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -2469,6 +2470,74 @@ def learning_calibration_trend():
             """).fetchall()
         snapshots = [dict(r) for r in rows][::-1]  # chronological order for charting
         return jsonify({"ok": True, "snapshots": snapshots})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/calibration-efficacy")
+def learning_calibration_efficacy():
+    """Calibration-layer scoreboard: does the deterministic confidence nudge
+    actually improve prediction, or is it noise we pay tokens for?
+
+    `ai_confidence` stores the ORIGINAL (pre-nudge) confidence; `calibrated_
+    confidence` stores the POST-nudge value actually used for sizing (NULL when no
+    nudge fired). For every closed win/loss rec where BOTH are present and differ,
+    we compute the Brier score twice — once on the original confidence, once on
+    the adjusted — and compare. Lower Brier is better (perfect=0, random=0.25).
+
+    A positive `improvement` (orig_brier − adj_brier > 0) means the nudges moved
+    confidence toward reality; negative means they made calibration worse and the
+    adjustment logic should be re-tuned or disabled. n-gated at _DIGEST_MIN_N so a
+    handful of nudged trades can't produce a spurious verdict.
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT ai_confidence, calibrated_confidence, outcome_status
+                FROM ai_learning_events
+                WHERE outcome_status IN ('win','loss')
+                  AND ai_confidence IS NOT NULL
+                  AND calibrated_confidence IS NOT NULL
+            """).fetchall()
+
+        # Only rows where the nudge actually changed the value are informative —
+        # identical orig/adj contribute 0 to the DIFFERENCE and just dilute n.
+        nudged = [r for r in rows
+                  if abs(float(r["ai_confidence"]) - float(r["calibrated_confidence"])) > 1e-9]
+        n = len(nudged)
+        if n == 0:
+            return jsonify({
+                "ok": True, "n": 0,
+                "orig_brier": None, "adj_brier": None, "improvement": None,
+                "verdict": "no_data",
+                "note": "No closed trades yet where a calibration nudge changed the confidence.",
+            })
+
+        def _brier(key):
+            return sum(
+                (float(r[key]) - (1.0 if r["outcome_status"] == "win" else 0.0)) ** 2
+                for r in nudged
+            ) / n
+
+        orig_brier = round(_brier("ai_confidence"), 4)
+        adj_brier  = round(_brier("calibrated_confidence"), 4)
+        improvement = round(orig_brier - adj_brier, 4)  # >0 ⇒ nudges helped
+
+        if n < _DIGEST_MIN_N:
+            verdict = "insufficient_n"
+        elif improvement > 0.002:
+            verdict = "helping"
+        elif improvement < -0.002:
+            verdict = "hurting"
+        else:
+            verdict = "neutral"
+
+        return jsonify({
+            "ok": True, "n": n,
+            "orig_brier": orig_brier, "adj_brier": adj_brier,
+            "improvement": improvement, "verdict": verdict,
+            "min_n": _DIGEST_MIN_N,
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

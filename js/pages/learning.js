@@ -188,6 +188,7 @@ async function renderLearningPage(gen) {
   renderLessonsCard().catch(() => {});
   // Async: load calibration trend card (Learning Loop improvement E)
   renderCalibrationTrendCard().catch(() => {});
+  renderCalibrationEfficacyCard().catch(() => {});
   // Async: load sell decision tracker card (Gap 3 + Gap 7)
   renderSellOutcomesCard().catch(() => {});
   // Async: load buy/top-up decision tracker card (entry-side complement)
@@ -439,7 +440,8 @@ function _renderLearningContent(d, brier) {
         <div style="font-size:9px;color:var(--text-muted);margin-top:2px">Dashed line = predicted confidence · Bar = actual win rate</div>
       </div>` : ''}
     </div>
-    <div id="ll-calib-trend-card" style="display:none"></div>`;
+    <div id="ll-calib-trend-card" style="display:none"></div>
+    <div id="ll-calib-efficacy-card" style="display:none"></div>`;
 
   // ── Regime performance ─────────────────────────────────────────────────────
   const regimeCard = `
@@ -2716,6 +2718,56 @@ async function renderCalibrationTrendCard() {
   if (typeof drawCalibrationTrendChart === 'function') {
     drawCalibrationTrendChart('ll-calib-trend-canvas', snapshots);
   }
+}
+
+// ── Calibration efficacy card ─────────────────────────────────────────────────
+// Answers the one question the whole calibration layer never measured: do the
+// deterministic confidence nudges actually beat Claude's raw confidence? Compares
+// the Brier score of the original vs the post-nudge confidence over closed trades
+// the nudge actually touched. If it's "hurting", the adjustment logic is net-
+// negative and should be re-tuned or disabled. Pure read via
+// GET /api/learning/calibration-efficacy.
+async function renderCalibrationEfficacyCard() {
+  const el = document.getElementById('ll-calib-efficacy-card');
+  if (!el || !state.serverOk) return;
+
+  let d;
+  try {
+    const r = await fetch(`${API}/api/learning/calibration-efficacy`);
+    if (!r.ok) return;
+    d = await r.json();
+  } catch { return; }
+
+  if (!d.ok || !d.n) return;  // nothing to show until a nudge has closed a trade
+
+  const verdictMeta = {
+    helping:        { label: '✓ Nudges are helping',      color: 'var(--up)' },
+    hurting:        { label: '⚠ Nudges are hurting',      color: 'var(--down)' },
+    neutral:        { label: '≈ Nudges are neutral',      color: 'var(--text-secondary)' },
+    insufficient_n: { label: `Gathering data (need n≥${d.min_n})`, color: 'var(--text-muted)' },
+  }[d.verdict] || { label: d.verdict, color: 'var(--text-muted)' };
+
+  const impPp = d.improvement != null ? (d.improvement > 0 ? '+' : '') + d.improvement.toFixed(4) : '—';
+
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="card section-gap">
+      <div class="card-title">Calibration Efficacy</div>
+      <p class="text-xs text-muted mb-1">
+        Does the deterministic confidence nudge actually beat Claude's raw confidence?
+        Brier score (lower = better) of original vs post-nudge confidence, over the
+        ${d.n} closed trade${d.n === 1 ? '' : 's'} a nudge changed.
+      </p>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:baseline">
+        <div><span class="text-xs text-muted">Original</span>
+             <div style="font-size:18px;font-weight:600">${d.orig_brier ?? '—'}</div></div>
+        <div><span class="text-xs text-muted">Adjusted</span>
+             <div style="font-size:18px;font-weight:600">${d.adj_brier ?? '—'}</div></div>
+        <div><span class="text-xs text-muted">Improvement</span>
+             <div style="font-size:18px;font-weight:600;color:${verdictMeta.color}">${impPp}</div></div>
+        <div style="align-self:center;color:${verdictMeta.color};font-weight:600">${verdictMeta.label}</div>
+      </div>
+    </div>`;
 }
 
 // ── Trading Lessons card ──────────────────────────────────────────────────────
