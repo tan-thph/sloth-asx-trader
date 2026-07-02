@@ -1292,6 +1292,7 @@ async function _openIntradayPositionFromParcel(parcel) {
     entryFees:  0,            // no new transaction — original cost already in parcel.fees
     target, stop,
     enteredAt:  nowSydney(),
+    mode:       parcel.mode || 'paper',   // inherit the lot's mode (gotcha #88)
     _journalId: null,         // no paired journal row — reclassification, not a buy
   });
   scheduleSave();
@@ -1314,10 +1315,15 @@ function executeIntradayTrade(recId) {
     qty:    rec.qty,
     defaultPrice: rec.priceRange[0],
   }, async (entryPrice, brokerage, actualQty) => {
+    // Paper/real firewall (gotcha #88): choose mode before any state mutation.
+    const mode = await askTradeMode(`BUY ${rec.ticker} (intraday)`);
+    if (mode == null) return;   // cancelled
     // actualQty is the user-entered value (may differ from AI-suggested rec.qty)
     const qty  = actualQty || rec.qty;
     const cost = qty * entryPrice + brokerage;
-    if (cost > state.cash) { toast('Insufficient cash for this trade', 'error'); return; }
+    if (!isRealTrade(mode)) ensurePaperCashSeeded();
+    const _pool = isRealTrade(mode) ? state.cash : state.paperCash;
+    if (cost > _pool) { toast(`Insufficient ${isRealTrade(mode) ? 'cash' : 'paper cash'} for this trade`, 'error'); return; }
 
     // Ensure daily-timeframe live signals are available — intraday scan candidates
     // are rarely in state.liveSignals (that cache is populated by the Live Signals
@@ -1348,13 +1354,14 @@ function executeIntradayTrade(recId) {
       target:     rec.target,
       stop:       rec.stopLoss,
       enteredAt:  nowSydney(),
+      mode,       // paper/real firewall (gotcha #88)
     };
     state.intraday.openPositions.push(newPos);
 
     // Add a 'trading' account portfolio holding so the position appears on the Portfolio page
     // and is included in NAV / price refresh cycles (refreshPrices loops state.portfolio).
     const sector = (state.liveSignals?.[rec.ticker] || {}).sector || 'Other';
-    applyBuyToPortfolio(rec.ticker, qty, entryPrice, todayStr(), brokerage, sector, 'trading');
+    applyBuyToPortfolio(rec.ticker, qty, entryPrice, todayStr(), brokerage, sector, 'trading', mode);
     const newParcel = (state.cgtParcels || []).length
       ? state.cgtParcels[state.cgtParcels.length - 1]
       : null;
@@ -1386,6 +1393,7 @@ function executeIntradayTrade(recId) {
       status:      'open',
       sector,
       account:     'trading',
+      mode,        // paper/real firewall (gotcha #88)
       parcelId:    newParcel ? newParcel.id : null,
       recId:       rec.id,
       recExecuted: true,
@@ -1404,12 +1412,13 @@ function executeIntradayTrade(recId) {
     state.tradeJournal.unshift(intradayBuyEntry);
     newPos._journalId = intradayBuyEntry.id;   // link so close can patch the entry
 
-    state.cash -= cost;
+    adjustCashForMode(-cost, mode);   // paper buys draw simulated cash (gotcha #88)
     rec.status   = 'executed';
+    rec.mode     = mode;
     rec._execQty = qty;          // remember actual qty for display / close dialog
 
     scheduleSave();
-    if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
+    if (isRealTrade(mode) && typeof pushCashToDb === 'function') pushCashToDb(state.cash);
     toast(`⚡ Intraday BUY: ${rec.ticker} × ${qty} @ $${entryPrice.toFixed(3)} (fee $${brokerage})`, 'success');
 
     // Record ML training snapshot for intraday trade
@@ -1463,14 +1472,17 @@ async function closeIntradayPosition(posId, closePrice, brokerage) {
   state.intraday.todayPnl += net;
   state.intraday.pnlDate   = todayStr();   // stamp date so day-change reset works
 
+  // Paper/real firewall (gotcha #88): a position carries its own mode; legacy
+  // positions opened before the feature have none ⇒ paper.
+  const posMode = pos.mode || 'paper';
   // Remove the 'trading' portfolio holding and write a CGT disposal.
-  // applySellToPortfolio also credits cash internally — do not credit manually.
+  // applySellToPortfolio credits the correct cash pool internally — don't credit manually.
   const { ok: soldOk } = applySellToPortfolio(
     pos.ticker, pos.qty, closePrice, sellFee, todayStr(),
-    state.cgtMethod || 'FIFO', 'trading'
+    state.cgtMethod || 'FIFO', 'trading', posMode
   );
   // Fallback cash credit for positions opened before the portfolio fix was deployed.
-  if (!soldOk) state.cash += pos.qty * closePrice - sellFee;
+  if (!soldOk) adjustCashForMode(pos.qty * closePrice - sellFee, posMode);
 
   // Exit-signals capture: same fallback-fetch pattern as the entry side
   // (executeIntradayTrade) — without this, _snapshotLiveTechnicals() silently
@@ -1518,6 +1530,7 @@ async function closeIntradayPosition(posId, closePrice, brokerage) {
       status:      'closed',
       sector,
       account:     'trading',
+      mode:        posMode,
       notes:       'Intraday same-day close',
       closeDate:   todayStr(),
       exitSignals,
@@ -1544,7 +1557,7 @@ async function closeIntradayPosition(posId, closePrice, brokerage) {
   }
 
   scheduleSave();
-  if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
+  if (isRealTrade(posMode) && typeof pushCashToDb === 'function') pushCashToDb(state.cash);
   const sign = net >= 0 ? '+' : '';
   toast(`Closed ${pos.ticker}: ${sign}$${net.toFixed(2)} (buy $${buyFee} + sell $${sellFee} fees)`, net >= 0 ? 'success' : 'warning');
   renderPage();
@@ -1575,12 +1588,15 @@ function _closeDayTrade(recId) {
     defaultPrice: suggestedClose,
     readOnlyQty: true,   // closing the full (executed) position; qty is not editable here
   }, async (closePrice, sellFee) => {
+    // Paper/real firewall (gotcha #88): the rec carries its own mode; legacy
+    // recs executed before the feature have none ⇒ paper.
+    const recMode = rec.mode || 'paper';
     // Use the canonical helper so the CGT page sees the disposal and portfolio
-    // holding is removed.  applySellToPortfolio also credits cash internally.
+    // holding is removed. applySellToPortfolio credits the correct pool internally.
     const prevDisposalLen = (state.cgtDisposals || []).length;
     const { ok: soldOk, disposals } = applySellToPortfolio(
       rec.ticker, execQty, closePrice, sellFee, todayStr(),
-      state.cgtMethod || 'FIFO', 'trading'
+      state.cgtMethod || 'FIFO', 'trading', recMode
     );
 
     // Exit-signals capture: same fallback-fetch pattern as the entry side and
@@ -1610,7 +1626,7 @@ function _closeDayTrade(recId) {
       // Fall back to manual arithmetic and credit cash the old way.
       const gross = (closePrice - entryPrice) * execQty;
       net = gross - sellFee - buyFee;
-      state.cash += execQty * closePrice - sellFee;
+      adjustCashForMode(execQty * closePrice - sellFee, recMode);
     }
 
     // Update or create journal entry
@@ -1638,6 +1654,7 @@ function _closeDayTrade(recId) {
         pnl:         net,
         status:      'closed',
         recId:       rec.id,
+        mode:        recMode,
         closeDate:   todayStr(),
         disposalIds: soldOk && disposals.length
           ? disposals.map((_, i) => prevDisposalLen + i)
@@ -1672,7 +1689,7 @@ function _closeDayTrade(recId) {
     }
 
     scheduleSave();
-    if (typeof pushCashToDb === 'function') pushCashToDb(state.cash);
+    if (isRealTrade(recMode) && typeof pushCashToDb === 'function') pushCashToDb(state.cash);
     const sign = net >= 0 ? '+' : '';
     toast(`Closed swing ${rec.ticker}: ${sign}$${net.toFixed(2)} (buy $${buyFee} + sell $${sellFee} fees)`, net >= 0 ? 'success' : 'warning');
     renderPage();

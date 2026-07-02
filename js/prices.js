@@ -213,8 +213,12 @@ function checkEarningsReminders() {
 // ============================================================
 function recordPortfolioSnapshot() {
   const today = todayStr();
-  const nw = totalNetWorth();
-  const pv = portfolioValue();
+  // Real-only (gotcha #88 Phase D): the persisted NAV series must track real net
+  // worth regardless of the current display view mode, so simulated paper positions
+  // / paper cash never pollute the real performance chart. Uses realNetWorth/
+  // realPortfolioValue + real state.cash, NOT the view-mode-aware totals.
+  const nw = realNetWorth();
+  const pv = realPortfolioValue();
   const last = state.portfolioHistory[state.portfolioHistory.length - 1];
   // Only record one snapshot per day (overwrite if same day)
   if (last && last.date === today) {

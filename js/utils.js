@@ -121,25 +121,67 @@ function entrySignature(sig) {
 const fmt = (n, d=2) => (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString('en-AU',{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtp = (n, d=2) => (n==null||isNaN(n)) ? '—' : (n>=0?'+':'') + fmt(Math.abs(n),d) + '%';
 
-const portfolioValue = () => state.portfolio.reduce((s,h)=>s+h.shares*h.currentPrice, 0);
-const totalCost      = () => state.portfolio.reduce((s,h)=>s+h.shares*h.avgPrice, 0);
+// ── Paper/real view mode (gotcha #88, Phase D) ───────────────────────────────
+// The DISPLAY view mode: 'all' (default — real + paper together, distinguished by
+// badges), 'real', or 'paper'. Narrows which holdings the on-screen aggregations
+// and holdings table show. NAV history + tax stay real-only regardless (see the
+// real* variants below) so the play-money paper book never pollutes them.
+function _viewModeHoldings() {
+  const vm = state.portfolioViewMode || 'all';
+  if (vm === 'all') return state.portfolio;
+  return state.portfolio.filter(h => (h.mode || 'paper') === vm);
+}
+// Cash matching the active view: real→cash, paper→paperCash, all→both (the paper
+// book's simulated cash is part of the combined 'all' picture, and paperCash is
+// lazily seeded from settings.paperStartCash the first time paper mode is used).
+function viewCash() {
+  const vm = state.portfolioViewMode || 'all';
+  if (vm === 'real')  return Number(state.cash) || 0;
+  if (vm === 'paper') { ensurePaperCashSeeded(); return Number(state.paperCash) || 0; }
+  return (Number(state.cash) || 0) + (Number(state.paperCash) || 0);
+}
+const portfolioValue = () => _viewModeHoldings().reduce((s,h)=>s+h.shares*h.currentPrice, 0);
+const totalCost      = () => _viewModeHoldings().reduce((s,h)=>s+h.shares*h.avgPrice, 0);
 const totalGain      = () => portfolioValue() - totalCost();
-const totalNetWorth  = () => portfolioValue() + state.cash;
+const totalNetWorth  = () => portfolioValue() + viewCash();
+
+// Real-only variants — NEVER follow the view toggle. Used for the persisted NAV
+// history snapshot and anywhere real net worth must be tracked independently of
+// what the user is currently looking at.
+const realPortfolioValue = () => state.portfolio
+  .filter(h => isRealTrade(h)).reduce((s,h)=>s+h.shares*h.currentPrice, 0);
+const realNetWorth       = () => realPortfolioValue() + (Number(state.cash) || 0);
+
+// Seed the simulated paper-cash pool from settings.paperStartCash the first time
+// paper mode is used (guarded by a one-shot flag so a genuine spend-down to 0
+// never re-seeds). Without this, paperCash starts at 0 and every paper buy fails
+// its cash-sufficiency check. Called by adjustCashForMode + the day-trade checks.
+function ensurePaperCashSeeded() {
+  if (!state._paperCashSeeded && (state.paperCash == null || state.paperCash === 0)) {
+    state.paperCash = Number(state.settings?.paperStartCash) || 100000;
+  }
+  state._paperCashSeeded = true;
+}
 
 // Deduplicates portfolio by ticker for display (weighted avg cost, summed shares)
 function mergedPortfolio() {
   const acct = state.activeAccount || 'all';
+  // Start from the view-mode-filtered set (gotcha #88 Phase D) so real/paper/all
+  // toggling narrows the holdings table, then apply the account filter on top.
+  const base = _viewModeHoldings();
   const holdings = acct === 'all'
-    ? state.portfolio
-    : state.portfolio.filter(h => (h.account || 'personal') === acct);
+    ? base
+    : base.filter(h => (h.account || 'personal') === acct);
   const map = {};
   for (const h of holdings) {
-    // Key by ticker+account so that e.g. WES held personally and WES bought as a
-    // day-trade (account='trading') appear as two separate rows, not one combined row.
+    // Key by ticker+account+mode so a real and a paper lot of the same ticker in
+    // the same account stay separate rows (and each carries its own LIVE/PAPER
+    // badge) — mirrors the account split already keyed here.
     const hAcct = h.account || 'personal';
-    const key = h.ticker + '|' + hAcct;
+    const hMode = (h.mode || 'paper');
+    const key = h.ticker + '|' + hAcct + '|' + hMode;
     if (!map[key]) {
-      map[key] = { ticker: h.ticker, shares: 0, _totalCost: 0, currentPrice: h.currentPrice, sector: h.sector || 'Other', account: hAcct };
+      map[key] = { ticker: h.ticker, shares: 0, _totalCost: 0, currentPrice: h.currentPrice, sector: h.sector || 'Other', account: hAcct, mode: hMode };
     }
     map[key]._totalCost += h.shares * h.avgPrice;
     map[key].shares += h.shares;
@@ -207,12 +249,32 @@ function statusBadge(s) {
 // account param (optional) — when provided, only matches the holding in that
 // account. When omitted, behavior is unchanged: first ticker match wins
 // regardless of account (existing callers continue to work as before).
-function getPortfolioHolding(ticker, account) {
+// mode param (optional) — 'real'|'paper' (gotcha #88); when provided, also scopes
+// to that trade mode (missing holding.mode ⇒ 'paper'). A real sell must pass
+// mode='real' so it never resolves a paper holding as its cost basis.
+function getPortfolioHolding(ticker, account, mode) {
   const symbol = ticker.toUpperCase();
-  if (account) {
-    return state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === account);
+  return state.portfolio.find(h => {
+    if (h.ticker !== symbol) return false;
+    if (account && (h.account || 'personal') !== account) return false;
+    if (mode && (h.mode || 'paper') !== mode) return false;
+    return true;
+  });
+}
+
+// ── Cash routing (paper/real firewall, gotcha #88) ───────────────────────────
+// Credit (positive delta) or debit (negative) the correct cash pool for a trade
+// mode. Real trades move real `state.cash`; paper trades move the separate
+// simulated `state.paperCash` pool so the real cash figure stays accurate even
+// while paper-trading. Missing mode ⇒ paper (isRealTrade invariant).
+function adjustCashForMode(delta, mode) {
+  const d = Number(delta) || 0;
+  if (isRealTrade(mode)) {
+    state.cash = (Number(state.cash) || 0) + d;
+  } else {
+    ensurePaperCashSeeded();
+    state.paperCash = (Number(state.paperCash) || 0) + d;
   }
-  return state.portfolio.find(h => h.ticker === symbol);
 }
 
 // ── mergeLiveMacro ────────────────────────────────────────────────────────────

@@ -31,6 +31,10 @@ _ALLOWED_OUTCOME_COLS = (
     "success_tags", "checklist_bypasses",
     "thesis_verdict", "exit_signals_json",
     "regime_at_execution",
+    # Paper/real firewall (gotcha #88): recs are logged at GENERATION time (before
+    # the user picks paper vs real), so trade_mode defaults to 'paper' at INSERT and
+    # is upgraded here at EXECUTION time when the lodge gatekeeper's choice is known.
+    "trade_mode",
     "bull_case", "bear_case",
     "local_scrutiny_json",
 )

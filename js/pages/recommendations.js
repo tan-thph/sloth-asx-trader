@@ -1678,8 +1678,18 @@ function _snapshotLiveTechnicals(ticker, tradePrice) {
   };
 }
 
-async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
+async function markExecuted(id, execPrice, execFee, execQty, execAccount, execMode) {
   const rec = state.recommendations.find(r => r.id === id); if(!rec) return;
+
+  // Paper/real firewall (gotcha #88): decide the trade mode BEFORE any state
+  // mutation. execMode may be passed by the caller (checklist flow); otherwise
+  // ask via the blocking gatekeeper. Cancel (null) aborts the whole lodge — no
+  // portfolio/journal/learning writes happen. Re-enable the button on abort.
+  let mode = execMode;
+  if (mode !== 'real' && mode !== 'paper') {
+    mode = await askTradeMode(`${rec.action} ${rec.ticker}`);
+  }
+  if (mode == null) { renderPage(); return; }
 
   // Immediately mark button as executed so the card looks settled before renderPage fires
   const _execBtn = document.querySelector(`button[onclick="confirmExecute('${id}')"]`);
@@ -1771,10 +1781,10 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
   let _saleDisposals = null;     // raw disposals — used below for blended entryPrice/holdDays on the learning-loop payload
   let _executionFailed = false;  // true when SELL/TRIM couldn't execute (no holding found)
   if (isReducing) {
-    const holding = getPortfolioHolding(rec.ticker, _distinctAccts.length === 1 ? sellAccount : undefined);
+    const holding = getPortfolioHolding(rec.ticker, _distinctAccts.length === 1 ? sellAccount : undefined, mode);
     if (holding && holding.shares >= qty) {
       const prevDisposalLen = state.cgtDisposals.length;
-      const { disposals } = applySellToPortfolio(rec.ticker, qty, tradePrice, fees, today, undefined, sellAccount);
+      const { disposals } = applySellToPortfolio(rec.ticker, qty, tradePrice, fees, today, undefined, sellAccount, mode);
       _saleDisposals = disposals;
       realizedPnl = disposalsToPnl(disposals);
       // Snapshot live technicals at exit fill time (mirrors entrySignals on the
@@ -1793,6 +1803,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
         ticker: rec.ticker, account: sellAccount, disposals, tradePrice, action: rec.action,
         recId: rec.id, recExecuted: true, timestamp: time, date: today,
         regime: execRegime, exitSignals: execExitSignals, disposalIdBase: prevDisposalLen,
+        mode,
       });
       tradeEntry = _disposalEntries[0] || null;
     } else {
@@ -1806,9 +1817,10 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
     }
   } else {
     // BUY or TOP_UP — open/add to a position
-    applyBuyToPortfolio(rec.ticker, qty, tradePrice, today, fees, rec.sector);
+    applyBuyToPortfolio(rec.ticker, qty, tradePrice, today, fees, rec.sector, undefined, mode);
     const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
-    state.cash -= qty * tradePrice + fees;
+    // Paper buys draw from the simulated pool, not real cash (gotcha #88).
+    adjustCashForMode(-(qty * tradePrice + fees), mode);
     // Snapshot live technicals at execution time so the journal drawer can show
     // what the chart looked like when the trade was filled (not just when Claude
     // generated the rec, which may have been hours earlier).
@@ -1820,6 +1832,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
       parcelId: newParcel ? newParcel.id : null,
       recId: rec.id, recExecuted: true, timestamp: time,
       entrySignals: execEntrySignals, regime: execRegime,
+      mode,
     };
   }
 
@@ -1855,7 +1868,8 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
   // trading-account shares no longer force-closes the day-trade record.
   if (isReducing) {
     const _tradingHolding = state.portfolio.find(h =>
-      _normTicker(h.ticker) === _normTicker(rec.ticker) && (h.account || 'personal') === 'trading');
+      _normTicker(h.ticker) === _normTicker(rec.ticker) && (h.account || 'personal') === 'trading'
+      && (h.mode || 'paper') === mode);
     const _tradingSharesLeft = _tradingHolding ? (_tradingHolding.shares || 0) : 0;
     if (_tradingSharesLeft <= 0) {
       const dtRec = (state.dayTrading && state.dayTrading.recommendations || [])
@@ -1901,6 +1915,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
     _learningId: rec._learningId || null,
     _thesis: rec._thesis || null,
     regime: rec._genRegime || rec.regime || null,
+    mode,   // paper/real firewall (gotcha #88)
   };
   state.recHistory.unshift(histEntry);
 
@@ -1941,6 +1956,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
         actual_exit_price:  exitP  ?? null,
         sector,
         regime_at_execution: currentRegime,
+        trade_mode: mode,   // upgrade generation-time 'paper' default to the chosen mode (gotcha #88)
         ...(rec._tags   ? { tags:         rec._tags   } : {}),
         ...(rec._thesis ? { trade_thesis: rec._thesis } : {}),
       };
@@ -1967,7 +1983,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
         // fully closing the position in ONE account (e.g. 'trading') could
         // false-negative as "still open" just because a DIFFERENT account
         // (e.g. 'personal') still holds shares of the same ticker.
-        const remaining = getPortfolioHolding(rec.ticker, sellAccount);
+        const remaining = getPortfolioHolding(rec.ticker, sellAccount, mode);
         const positionClosed = !remaining || (remaining.shares || 0) <= 0;
         if (positionClosed && _distinctAccts.length <= 1) {
           const parentRecs = (state.recHistory || []).filter(r =>
@@ -1975,7 +1991,8 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
             r._learningId &&
             r._learningId !== rec._learningId &&
             r.outcome === 'open' &&
-            (r.action === 'BUY' || r.action === 'TOP_UP')
+            (r.action === 'BUY' || r.action === 'TOP_UP') &&
+            (r.mode || 'paper') === mode   // only reconcile same-mode parents (gotcha #88)
           );
           for (const pr of parentRecs) {
             // Compute per-entry outcome so a TOP_UP at a higher price than exit
@@ -2057,6 +2074,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount) {
           actual_entry_price:  entryP ?? null,
           actual_exit_price:   exitP  ?? null,
           sector,
+          trade_mode:          mode,   // paper/real firewall (gotcha #88)
           tags:                rec._tags   || null,
           trade_thesis:        rec._thesis || null,
           ...(tradeEntry.exitSignals ? { exit_signals_json: JSON.stringify(tradeEntry.exitSignals) } : {}),

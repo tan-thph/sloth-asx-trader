@@ -24,7 +24,15 @@ function renderPortfolio() {
       <div class="metric-card"><div class="metric-label">Total Invested</div><div class="metric-value">$${fmt(totalCost())}</div></div>
       <div class="metric-card"><div class="metric-label">Market Value</div><div class="metric-value">$${fmt(pv)}</div></div>
       <div class="metric-card"><div class="metric-label">Unrealised P&L</div><div class="metric-value ${totalGain()>=0?'up':'down'}">${sign(totalGain())}$${fmt(Math.abs(totalGain()))}</div></div>
-      <div class="metric-card"><div class="metric-label">Cash Available</div><div class="metric-value">$${fmt(state.cash)}</div></div>
+      <div class="metric-card"><div class="metric-label">Cash Available</div><div class="metric-value">$${fmt(viewCash())}</div>${(()=>{
+        // Show the real/paper split under Cash when both pools are in play (gotcha #88 Phase D).
+        const vm = state.portfolioViewMode || 'all';
+        const pc = Number(state.paperCash) || 0;
+        if (vm === 'all' && pc > 0) return `<div class="text-xs text-muted">$${fmt(state.cash)} live · $${fmt(pc)} paper</div>`;
+        if (vm === 'paper') return `<div class="text-xs text-muted">paper cash</div>`;
+        if (vm === 'real')  return `<div class="text-xs text-muted">live cash</div>`;
+        return '';
+      })()}</div>
       ${(()=>{
         const annualIncome = merged.reduce((sum, h) => {
           const d = state.dividendData[h.ticker];
@@ -100,6 +108,25 @@ function renderPortfolio() {
       </div>`;
     })()}
 
+    ${(()=>{
+      // Paper/real view-mode toggle (gotcha #88 Phase D). Default 'all' shows both,
+      // distinguished by per-row LIVE/PAPER badges. NAV history + tax stay real-only
+      // regardless. Only surfaced once a paper position/cash actually exists, so a
+      // pure-real user never sees clutter.
+      const hasPaper = (state.portfolio || []).some(h => (h.mode||'paper') !== 'real')
+        || (Number(state.paperCash) || 0) > 0;
+      if (!hasPaper) return '';
+      const _VM_LABELS = { all:'All', real:'● Live only', paper:'◦ Paper only' };
+      const vm = state.portfolioViewMode || 'all';
+      return `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
+        <span class="text-xs text-muted" style="margin-right:2px">Trade mode:</span>
+        ${['all','real','paper'].map(m => `
+          <button class="btn btn-sm" style="${m===vm?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="state.portfolioViewMode='${m}';renderPage()">${_VM_LABELS[m]}</button>
+        `).join('')}
+        <span class="text-xs text-muted" style="align-self:center;margin-left:4px">Paper trades are simulated — excluded from CGT/EOFY, real cash &amp; real performance.</span>
+      </div>`;
+    })()}
+
     <div style="display:grid;grid-template-columns:1fr 220px;gap:12px;align-items:start;margin-bottom:12px">
     <div class="card">
       <div class="flex-between" style="margin-bottom:10px">
@@ -123,12 +150,13 @@ function renderPortfolio() {
               // Find state.portfolio entries for this ticker in the same account only —
               // WES personal and WES trading are separate rows and must not share an index.
               const hAcct = h.account || 'personal';
-              // Filter parcels by account so WES trading only counts/shows its own parcels,
-              // not the personal account's parcels.
-              const openParcels = state.cgtParcels.filter(p => p.ticker === h.ticker && p.remainingQty > 0 && (p.account || 'personal') === hAcct);
+              const hMode = h.mode || 'paper';
+              // Filter parcels by account AND mode (gotcha #88) so a paper WES row
+              // only counts/shows its own paper parcels, never the real ones.
+              const openParcels = state.cgtParcels.filter(p => p.ticker === h.ticker && p.remainingQty > 0 && (p.account || 'personal') === hAcct && (p.mode || 'paper') === hMode);
               const lots = openParcels.length;
-              const rawEntries = state.portfolio.filter(e => e.ticker === h.ticker && (e.account || 'personal') === hAcct);
-              const portfolioIdx = state.portfolio.findIndex(e => e.ticker === h.ticker && (e.account || 'personal') === hAcct);
+              const rawEntries = state.portfolio.filter(e => e.ticker === h.ticker && (e.account || 'personal') === hAcct && (e.mode || 'paper') === hMode);
+              const portfolioIdx = state.portfolio.findIndex(e => e.ticker === h.ticker && (e.account || 'personal') === hAcct && (e.mode || 'paper') === hMode);
               // Always expandable when there's at least one lot — per-lot account
               // reassignment + split controls live in the expanded row, so even a
               // single-lot holding needs to be reachable (not just multi-lot ones).
@@ -153,11 +181,16 @@ function renderPortfolio() {
               const acctBadge = state.activeAccount === 'all'
                 ? `<td data-label="Account"><span class="text-xs" style="background:${_ACCT_COLORS[acct]}22;color:${_ACCT_COLORS[acct]};padding:1px 5px;border-radius:3px" title="Expand lots below to reassign individual lots">${acct}</span></td>`
                 : '';
-              const _lotsKey = `${h.ticker}-${hAcct}`;
+              const _lotsKey = `${h.ticker}-${hAcct}-${hMode}`;
+              // LIVE/PAPER badge (gotcha #88 Phase D) — always shown so real and
+              // paper rows are unambiguous even in the default 'all' view.
+              const modeBadge = hMode === 'real'
+                ? '<span class="badge" style="margin-left:4px;font-size:9px;background:#16a34a22;color:#16a34a" title="Live/real trade — counts toward CGT, real cash & real performance">● LIVE</span>'
+                : '<span class="badge badge-drp" style="margin-left:4px;font-size:9px" title="Paper trade — simulated; excluded from CGT, real cash & real performance">◦ PAPER</span>';
               return `
                 <tr style="cursor:${hasMulti?'pointer':'default'}" onclick="${hasMulti?`toggleLots('${_lotsKey}')`:''}" title="${hasMulti?'Click to expand lots':''}">
                   <td class="m-hide" style="width:20px;text-align:center;color:var(--text-tertiary)">${hasMulti?`<span id="lots-arrow-${_lotsKey}" style="font-size:10px">▶</span>`:'&nbsp;'}</td>
-                  <td data-label="Ticker"><strong>${h.ticker}</strong></td>
+                  <td data-label="Ticker"><strong>${h.ticker}</strong>${modeBadge}</td>
                   <td data-label="Sector"><span class="text-xs">${h.sector}</span></td>
                   ${acctBadge}
                   <td data-label="Lots" class="text-xs text-muted">${lots > 0 ? `${lots} lot${lots!==1?'s':''}` : '—'}</td>
@@ -537,7 +570,7 @@ function handleCSV(e) {
   // Reset input so same file can be re-imported if needed
   e.target.value = '';
   const reader = new FileReader();
-  reader.onload = ev => {
+  reader.onload = async ev => {
     const lines = ev.target.result.trim().split('\n');
     const header = lines[0].toLowerCase().replace(/\s/g,'');
 
@@ -598,21 +631,26 @@ function handleCSV(e) {
     const importAccount = (state.activeAccount && state.activeAccount !== 'all')
       ? state.activeAccount : 'personal';
 
+    // Paper/real firewall (gotcha #88): ask once for the whole import batch.
+    const mode = await askTradeMode(`Import ${parsedRows.length} holding row(s)`);
+    if (mode == null) { toast('Import cancelled', 'info'); return; }
+
     let added = 0, updated = 0, parcelsCreated = 0;
 
     for (const row of parsedRows) {
       const { ticker, shares, price, date, sector, fees } = row;
 
-      // Check for exact duplicate parcel (same ticker + date + qty + price + account) — skip
+      // Check for exact duplicate parcel (same ticker + date + qty + price + account + mode) — skip
       const dupParcel = state.cgtParcels.find(p =>
         p.ticker === ticker && p.date === date &&
         p.qty === shares && Math.abs(p.costPerShare - price) < 0.005 &&
-        (p.account || 'personal') === importAccount
+        (p.account || 'personal') === importAccount && (p.mode || 'paper') === mode
       );
       if (dupParcel) continue;
 
-      // Update portfolio holding (weighted avg across all lots), scoped to this account
-      const existing = state.portfolio.find(h => h.ticker === ticker && (h.account || 'personal') === importAccount);
+      // Update portfolio holding (weighted avg across all lots), scoped to account+mode
+      const existing = state.portfolio.find(h =>
+        h.ticker === ticker && (h.account || 'personal') === importAccount && (h.mode || 'paper') === mode);
       if (existing) {
         const totalCostVal = existing.shares * existing.avgPrice + shares * price;
         existing.shares += shares;
@@ -620,12 +658,12 @@ function handleCSV(e) {
         if (sector !== 'Other') existing.sector = sector;
         updated++;
       } else {
-        state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector, account: importAccount });
+        state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector, account: importAccount, mode });
         added++;
       }
 
       // Create CGT parcel
-      addParcel(ticker, date, shares, price, fees, sector, importAccount);
+      addParcel(ticker, date, shares, price, fees, sector, importAccount, mode);
       const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
       parcelsCreated++;
 
@@ -647,6 +685,7 @@ function handleCSV(e) {
         timestamp: `${date} (imported)`,
         imported: true,
         account: importAccount,
+        mode,
       });
     }
 
@@ -699,27 +738,32 @@ async function handleBrokerCSV(e) {
   const importAccount = (state.activeAccount && state.activeAccount !== 'all')
     ? state.activeAccount : 'personal';
 
+  // Paper/real firewall (gotcha #88): ask once for the whole broker import batch.
+  const mode = await askTradeMode(`Import broker CSV (${rows.length} buy row(s))`);
+  if (mode == null) { toast('Import cancelled', 'info'); return; }
+
   let added = 0, updated = 0, parcelsCreated = 0;
   for (const row of rows) {
     const { ticker, shares, price, date, brokerage } = row;
     const dupParcel = state.cgtParcels.find(p =>
       p.ticker === ticker && p.date === date &&
       p.qty === shares && Math.abs(p.costPerShare - price) < 0.005 &&
-      (p.account || 'personal') === importAccount
+      (p.account || 'personal') === importAccount && (p.mode || 'paper') === mode
     );
     if (dupParcel) continue;
 
-    const existing = state.portfolio.find(h => h.ticker === ticker && (h.account || 'personal') === importAccount);
+    const existing = state.portfolio.find(h =>
+      h.ticker === ticker && (h.account || 'personal') === importAccount && (h.mode || 'paper') === mode);
     if (existing) {
       const totalCostVal = existing.shares * existing.avgPrice + shares * price;
       existing.shares += shares;
       existing.avgPrice = totalCostVal / existing.shares;
       updated++;
     } else {
-      state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector: 'Other', account: importAccount });
+      state.portfolio.push({ ticker, shares, avgPrice: price, currentPrice: price, sector: 'Other', account: importAccount, mode });
       added++;
     }
-    addParcel(ticker, date, shares, price, brokerage || 0, 'Other', importAccount);
+    addParcel(ticker, date, shares, price, brokerage || 0, 'Other', importAccount, mode);
     const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
     parcelsCreated++;
     state.tradeJournal.push({
@@ -728,7 +772,7 @@ async function handleBrokerCSV(e) {
       exitPrice: null, fees: brokerage || 0, status: 'open', pnl: null,
       parcelId: newParcel.id, recId: null, recExecuted: false,
       timestamp: `${date} (broker import)`, imported: true,
-      account: importAccount,
+      account: importAccount, mode,
     });
   }
   const _brokerISO = d => { const p = (d||'').split('-'); return p.length===3 ? `${p[2]}-${p[1]}-${p[0]}` : (d||''); };
@@ -745,17 +789,18 @@ async function handleBrokerCSV(e) {
   if (sells.length > 0) {
     scheduleSave();
     renderPage();
-    _showSellImportConfirmation(sells, result.broker, importAccount);
+    _showSellImportConfirmation(sells, result.broker, importAccount, mode);
     return;
   }
   scheduleSave();
   renderPage();
 }
 
-function _computeSellPreview(ticker, shares, price, date, brokerage, importAccount) {
+function _computeSellPreview(ticker, shares, price, date, brokerage, importAccount, mode) {
   const acct = importAccount || 'personal';
+  const md   = mode || 'paper';
   const openParcels = (state.cgtParcels || [])
-    .filter(p => p.ticker === ticker && p.remainingQty > 0 && (p.account || 'personal') === acct)
+    .filter(p => p.ticker === ticker && p.remainingQty > 0 && (p.account || 'personal') === acct && (p.mode || 'paper') === md)
     .slice()
     .sort((a, b) => {
       // Parse DD-MM-YYYY for correct chronological ordering
@@ -788,11 +833,11 @@ function _computeSellPreview(ticker, shares, price, date, brokerage, importAccou
   return { totalCost, gain, cgtDiscount, cgtWarning, unmatched: remaining };
 }
 
-function _showSellImportConfirmation(sells, broker, importAccount) {
+function _showSellImportConfirmation(sells, broker, importAccount, mode) {
   document.getElementById('sell-import-dialog')?.remove();
 
   const rows = sells.map(s => {
-    const preview = _computeSellPreview(s.ticker, s.shares, s.price, s.date, s.brokerage, importAccount);
+    const preview = _computeSellPreview(s.ticker, s.shares, s.price, s.date, s.brokerage, importAccount, mode);
     const noParcel = !preview;
     const gainClass = !preview ? '' : preview.gain >= 0 ? 'color:#16a34a' : 'color:#dc2626';
     const gainStr   = !preview ? '—' : `${preview.gain >= 0 ? '+' : ''}$${Math.abs(preview.gain).toFixed(2)}`;
@@ -841,7 +886,7 @@ function _showSellImportConfirmation(sells, broker, importAccount) {
       </div>
       <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">
         <button class="btn btn-sm" onclick="document.getElementById('sell-import-dialog')?.remove()">Cancel</button>
-        <button class="btn btn-primary btn-sm" onclick="_applyImportedSells(${JSON.stringify(sells).replace(/"/g, '&quot;')}, ${JSON.stringify(importAccount || 'personal').replace(/"/g, '&quot;')});document.getElementById('sell-import-dialog')?.remove()">Apply SELL imports</button>
+        <button class="btn btn-primary btn-sm" onclick="_applyImportedSells(${JSON.stringify(sells).replace(/"/g, '&quot;')}, ${JSON.stringify(importAccount || 'personal').replace(/"/g, '&quot;')}, ${JSON.stringify(mode || 'paper').replace(/"/g, '&quot;')});document.getElementById('sell-import-dialog')?.remove()">Apply SELL imports</button>
       </div>
     </div>`;
   document.body.appendChild(dialog);
@@ -849,35 +894,40 @@ function _showSellImportConfirmation(sells, broker, importAccount) {
   dialog.showModal();
 }
 
-function _applyImportedSells(sells, importAccount) {
+function _applyImportedSells(sells, importAccount, mode) {
   // Audit fix #3: scope every lookup by account — matchSaleAgainstParcels already
   // accepts an account param (via getParcelsForTicker), it just wasn't being passed.
+  // Paper/real firewall (gotcha #88): also scope by mode so an imported sell only
+  // consumes same-mode parcels/holdings.
   const acct = importAccount || 'personal';
+  const md   = mode || 'paper';
   let applied = 0, skipped = 0;
   for (const s of sells) {
     const { ticker, shares, price, date, brokerage } = s;
     if (!shares || shares <= 0) continue;
     const openParcels = (state.cgtParcels || []).filter(p =>
-      p.ticker === ticker && p.remainingQty > 0 && (p.account || 'personal') === acct
+      p.ticker === ticker && p.remainingQty > 0 && (p.account || 'personal') === acct && (p.mode || 'paper') === md
     );
     if (!openParcels.length) {
-      console.warn(`[SellImport] No open parcels for ${ticker} in account ${acct} — skipped`);
+      console.warn(`[SellImport] No open ${md} parcels for ${ticker} in account ${acct} — skipped`);
       skipped++;
       continue;
     }
 
     // FIFO parcel matching via existing helper (mutates parcel.remainingQty, pushes to cgtDisposals)
-    const disposals = matchSaleAgainstParcels(ticker, shares, price, date, brokerage, state.cgtMethod || 'fifo', acct);
+    const disposals = matchSaleAgainstParcels(ticker, shares, price, date, brokerage, state.cgtMethod || 'fifo', acct, md);
     state.cgtDisposals.push(...disposals);
 
     // Update portfolio holding. Audit fix #11: round to 4dp + epsilon zero-check
     // (mirrors applySellToPortfolio in portfolio-helpers.js) so a phantom near-zero
     // residual from floating-point drift doesn't survive as a leftover holding.
-    const holding = state.portfolio.find(h => h.ticker === ticker && (h.account || 'personal') === acct);
+    const holding = state.portfolio.find(h =>
+      h.ticker === ticker && (h.account || 'personal') === acct && (h.mode || 'paper') === md);
     if (holding) {
       holding.shares = Math.round((holding.shares - shares) * 10000) / 10000;
       if (Math.abs(holding.shares) < _SHARE_EPSILON) {
-        state.portfolio = state.portfolio.filter(h => !(h.ticker === ticker && (h.account || 'personal') === acct));
+        state.portfolio = state.portfolio.filter(h =>
+          !(h.ticker === ticker && (h.account || 'personal') === acct && (h.mode || 'paper') === md));
       }
     }
 
@@ -891,7 +941,7 @@ function _applyImportedSells(sells, importAccount) {
     const newEntries = buildDisposalJournalEntries({
       ticker, account: acct, disposals, tradePrice: price, action: 'SELL',
       recId: null, recExecuted: false, timestamp: nowSydney(), date,
-      regime: null, exitSignals: null,
+      regime: null, exitSignals: null, mode: md,
     });
     // buildDisposalJournalEntries already sets each entry's `fees` from the
     // disposal's own proportionally-allocated saleFee (matchSaleAgainstParcels
@@ -1209,18 +1259,21 @@ function applyDrpEvent(ticker) {
   // parcel previously had no account field at all — it would silently default to
   // 'personal' everywhere parcels are read (p.account || 'personal'), even when
   // the actual holding being reinvested into is 'trading'/'super'.
+  // Paper/real firewall (gotcha #88): a DRP is a reinvestment of an existing
+  // position — it inherits that holding's mode, no separate gatekeeper prompt.
+  const drpMode = holding.mode || 'paper';
   const parcelId = nextParcelId();
   (state.cgtParcels = state.cgtParcels || []).push({
     id: parcelId, ticker, action: 'DRP', qty: drpShares, costPerShare: drpPrice,
     date, remainingQty: drpShares, fees: 0, notes: 'DRP — dividend reinvestment',
-    account: holding.account || 'personal',
+    account: holding.account || 'personal', mode: drpMode,
   });
 
   state.tradeJournal.push({
     id: nextJournalId(), date, ticker, action: 'DRP', qty: drpShares,
     entryPrice: drpPrice, exitPrice: null, fees: 0, pnl: 0,
     status: 'open', recId: null, recExecuted: false, closeDate: null,
-    parcelId, account: holding.account || 'personal',
+    parcelId, account: holding.account || 'personal', mode: drpMode,
     // Only stamp today's regime when the DRP date is actually today — a
     // backdated settlement date shouldn't carry today's market regime.
     regime: (date === todayStr()) ? ((state.currentRegime && state.currentRegime.regime) || null) : null,

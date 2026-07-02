@@ -568,10 +568,14 @@ async function addManualTrade() {
   const fees = state.settings.brokerage;
   const symbol = ticker.toUpperCase();
 
+  // Paper/real firewall (gotcha #88): choose mode before any state mutation.
+  const mode = await askTradeMode(`${action} ${symbol} (manual)`);
+  if (mode == null) return;   // cancelled — no writes
+
   // Resolve target account — mirrors markExecuted() (gotcha #67):
   // single-account holdings are unambiguous; multi-account prompts the user;
   // BUY into a new position uses activeAccount (or 'personal').
-  const _holdingRows = state.portfolio.filter(h => h.ticker === symbol);
+  const _holdingRows = state.portfolio.filter(h => h.ticker === symbol && (h.mode || 'paper') === mode);
   const _accts = [...new Set(_holdingRows.map(h => h.account || 'personal'))];
   let acct;
   if (_accts.length === 1) {
@@ -595,10 +599,10 @@ async function addManualTrade() {
   let _disposalEntries = null;
 
   if(action === 'SELL') {
-    const holding = getPortfolioHolding(symbol, acct);
+    const holding = getPortfolioHolding(symbol, acct, mode);
     if(holding && holding.shares >= qty) {
       const prevLen = state.cgtDisposals.length;
-      const { disposals } = applySellToPortfolio(symbol, qty, price, fees, tradeDate, null, acct);
+      const { disposals } = applySellToPortfolio(symbol, qty, price, fees, tradeDate, null, acct, mode);
       // One Trade Journal row per parcel matched (mirrors markExecuted()) —
       // a manual sell spanning multiple lots shows as separate rows, each
       // labelled with its originating parcel, and the original BUY/TOP_UP
@@ -606,7 +610,7 @@ async function addManualTrade() {
       _disposalEntries = buildDisposalJournalEntries({
         ticker: symbol, account: acct, disposals, tradePrice: price, action,
         recId: null, recExecuted: false, timestamp: nowSydney(), date: tradeDate,
-        regime, exitSignals: entrySignals, disposalIdBase: prevLen,
+        regime, exitSignals: entrySignals, disposalIdBase: prevLen, mode,
       });
       // Manual trades carry a free-text thesis the disposal helper doesn't
       // know about — attach it to each row created for this sale.
@@ -617,15 +621,15 @@ async function addManualTrade() {
         id: nextJournalId(), date: tradeDate, ticker: symbol, action,
         qty, entryPrice: price, exitPrice: null, fees,
         status: 'open', pnl: null, recId: null, recExecuted: false, timestamp: nowSydney(),
-        entrySignals, thesis, regime
+        entrySignals, thesis, regime, mode
       };
       toast('Sell logged — no matching portfolio position found. Portfolio unchanged.', 'warn');
     }
   } else {
     const sector = prompt('Sector (optional, e.g. Banking):') || 'Other';
-    applyBuyToPortfolio(symbol, qty, price, tradeDate, fees, sector, acct);
+    applyBuyToPortfolio(symbol, qty, price, tradeDate, fees, sector, acct, mode);
     const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
-    state.cash -= qty * price + fees;
+    adjustCashForMode(-(qty * price + fees), mode);   // paper buys draw simulated cash (gotcha #88)
     tradeEntry = {
       id: nextJournalId(), date: tradeDate, ticker: symbol, action,
       qty, entryPrice: price, exitPrice: null, fees,
@@ -633,7 +637,7 @@ async function addManualTrade() {
       account: acct,
       parcelId: newParcel ? newParcel.id : null,
       recId: null, recExecuted: false, timestamp: nowSydney(),
-      entrySignals, thesis, regime
+      entrySignals, thesis, regime, mode
     };
   }
 

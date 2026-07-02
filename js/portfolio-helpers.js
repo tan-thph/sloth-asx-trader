@@ -193,7 +193,7 @@ function nextJournalId() {
   return max + 1;
 }
 
-function addParcel(ticker, date, qty, costPerShare, fees, sector, account) {
+function addParcel(ticker, date, qty, costPerShare, fees, sector, account, mode) {
   state.cgtParcels.push({
     id: nextParcelId(),
     ticker: ticker.toUpperCase(),
@@ -204,16 +204,24 @@ function addParcel(ticker, date, qty, costPerShare, fees, sector, account) {
     fees,          // buy brokerage for this lot
     sector: sector || 'Other',
     account: account || 'personal',   // track which account owns this parcel
+    // Paper/real firewall (gotcha #88): a parcel is REAL only when mode==='real'.
+    // Missing/undefined ⇒ paper, per the isRealTrade() invariant. Paper parcels
+    // are excluded from CGT/EOFY and never matched by a real sell (and vice versa).
+    mode: mode || 'paper',
   });
 }
 
 // Returns parcels for a ticker ordered by the chosen CGT method.
 // account (optional): when provided, restricts to parcels from that account only.
+// mode (optional): when provided ('real'|'paper'), restricts to parcels of that
+//   trade mode (missing parcel.mode ⇒ 'paper', per gotcha #88). A real sell must
+//   pass mode='real' so it never consumes paper parcels, and vice versa.
 // Parcels created before this fix have no account field and default to 'personal'.
-function getParcelsForTicker(ticker, method, account) {
+function getParcelsForTicker(ticker, method, account, mode) {
   const open = state.cgtParcels.filter(p => {
     if (p.ticker !== ticker.toUpperCase() || p.remainingQty <= 0) return false;
-    if (account) return (p.account || 'personal') === account;
+    if (account && (p.account || 'personal') !== account) return false;
+    if (mode && (p.mode || 'paper') !== mode) return false;
     return true;
   });
   method = method || state.cgtMethod || 'fifo';
@@ -514,7 +522,7 @@ function daysBetween(dateStr1, dateStr2) {
 // Match qty against parcels (FIFO/LIFO/etc), record disposals, return {disposals, totalCostBase, totalGrossGain}
 // account (optional): when provided, only consumes parcels from that account —
 // prevents a trading-account sell from consuming personal-account parcels.
-function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees, method, account) {
+function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees, method, account, mode) {
   // Fix #31: guard against saleQty=0 which would produce feePerShare=Infinity and corrupt
   // all downstream CGT disposal records (grossGain/netGain become Infinity or NaN).
   // Fix #31: guard against saleQty=0 — "Invalid sale qty" returns [] (not an error object)
@@ -522,7 +530,7 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
   if (!saleQty || saleQty <= 0) {
     return [];
   }
-  const parcels = getParcelsForTicker(ticker, method, account);
+  const parcels = getParcelsForTicker(ticker, method, account, mode);
   let remaining = saleQty;
   const disposals = [];
   // Split fees proportionally across parcels by qty
@@ -561,6 +569,9 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
       grossGain,
       discount,
       netGain,
+      // Paper/real firewall (gotcha #88): a disposal inherits the parcel's mode.
+      // CGT/EOFY exports are real-only — a paper disposal must never surface there.
+      mode: (parcel.mode || 'paper'),
     });
 
     parcel.remainingQty -= matched;
@@ -572,7 +583,7 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
   // account's avgPrice as the cost basis when the same ticker is held in
   // more than one account, producing a wrong grossGain/netGain.
   if (remaining > 0) {
-    const holding = getPortfolioHolding(ticker, account);
+    const holding = getPortfolioHolding(ticker, account, mode);
     const costPerShare = holding ? holding.avgPrice : salePrice;
     const proceeds = remaining * salePrice;
     const costBase = remaining * costPerShare;
@@ -594,6 +605,7 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
       discount: 0,
       netGain: grossGain,
       note: 'No parcel — used avg cost basis',
+      mode: mode || 'paper',
     });
   }
 
@@ -601,12 +613,18 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
 }
 
 // account param (optional) — 'personal'|'super'|'trading'. Defaults to 'personal'.
-// All callers that don't pass account continue to work unchanged (personal is the default).
-function applyBuyToPortfolio(ticker, qty, price, date, fees, sector, account) {
+// mode param (optional) — 'real'|'paper' (gotcha #88). Defaults to 'paper' so a
+//   mode-less call can never fabricate a real holding. A real buy and a paper buy
+//   of the same ticker+account produce SEPARATE holding rows (keyed by mode), so
+//   simulated positions never merge into the real book.
+// All callers that don't pass account/mode continue to work unchanged.
+function applyBuyToPortfolio(ticker, qty, price, date, fees, sector, account, mode) {
   const symbol = ticker.toUpperCase();
   const acct   = account || 'personal';
-  // Find an existing holding for this ticker in the same account only
-  const existing = state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === acct);
+  const md     = mode || 'paper';
+  // Find an existing holding for this ticker in the same account AND mode only
+  const existing = state.portfolio.find(h =>
+    h.ticker === symbol && (h.account || 'personal') === acct && (h.mode || 'paper') === md);
   if(existing) {
     const totalCostVal = existing.shares * existing.avgPrice + qty * price;
     existing.shares += qty;
@@ -615,11 +633,11 @@ function applyBuyToPortfolio(ticker, qty, price, date, fees, sector, account) {
   } else {
     state.portfolio.push({
       ticker: symbol, shares: qty, avgPrice: price, currentPrice: price,
-      sector: sector || 'Other', account: acct,
+      sector: sector || 'Other', account: acct, mode: md,
     });
   }
-  // Always record a parcel — store the account so the portfolio lots view can separate them
-  addParcel(symbol, date || todayStr(), qty, price, fees || 0, sector, acct);
+  // Always record a parcel — store the account+mode so lots/CGT can separate them
+  addParcel(symbol, date || todayStr(), qty, price, fees || 0, sector, acct, md);
 }
 
 // Audit fix #11: epsilon for share-count zero checks. Exact `<= 0` comparisons
@@ -630,24 +648,31 @@ function applyBuyToPortfolio(ticker, qty, price, date, fees, sector, account) {
 const _SHARE_EPSILON = 1e-6;
 
 // account param (optional) — must match the account used at BUY time.
-function applySellToPortfolio(ticker, qty, sellPrice, fees, date, method, account) {
+// mode param (optional) — 'real'|'paper' (gotcha #88). Must match the mode used at
+//   BUY time: a paper sell only consumes paper parcels/holdings and credits
+//   state.paperCash; a real sell consumes real parcels and credits state.cash.
+function applySellToPortfolio(ticker, qty, sellPrice, fees, date, method, account, mode) {
   const symbol = ticker.toUpperCase();
   const acct   = account || 'personal';
-  const holding = state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === acct);
+  const md     = mode || 'paper';
+  const holding = state.portfolio.find(h =>
+    h.ticker === symbol && (h.account || 'personal') === acct && (h.mode || 'paper') === md);
   if(!holding || holding.shares < qty) return { ok: false, disposals: [] };
   holding.currentPrice = sellPrice;
   holding.shares = Math.round((holding.shares - qty) * 10000) / 10000;
   if(Math.abs(holding.shares) < _SHARE_EPSILON) {
-    // Remove only the matching account holding, not all holdings for this ticker
+    // Remove only the matching account+mode holding, not all holdings for this ticker
     state.portfolio = state.portfolio.filter(
-      h => !(h.ticker === symbol && (h.account || 'personal') === acct)
+      h => !(h.ticker === symbol && (h.account || 'personal') === acct && (h.mode || 'paper') === md)
     );
   }
-  state.cash += qty * sellPrice - Number(fees || 0);
+  // Paper sells credit the simulated pool, not real cash (gotcha #88).
+  adjustCashForMode(qty * sellPrice - Number(fees || 0), md);
 
-  // Match against parcels and record disposals — scoped to this account so a trading-account
-  // sell never consumes personal-account parcels.
-  const disposals = matchSaleAgainstParcels(symbol, qty, sellPrice, date || todayStr(), fees || 0, method, acct);
+  // Match against parcels and record disposals — scoped to this account+mode so a
+  // trading-account sell never consumes personal-account parcels, and a paper sell
+  // never consumes real parcels (and vice versa).
+  const disposals = matchSaleAgainstParcels(symbol, qty, sellPrice, date || todayStr(), fees || 0, method, acct, md);
   state.cgtDisposals.push(...disposals);
   return { ok: true, disposals };
 }
@@ -686,6 +711,10 @@ function buildDisposalJournalEntries(opts) {
   const {
     ticker, account, disposals, tradePrice, action,
     recId, recExecuted, timestamp, date, regime, exitSignals,
+    // mode: paper/real firewall (gotcha #88) — stamped on every disposal row so
+    // a paper SELL never produces a journal row that reads as real. Falls back to
+    // the matched parcel's own mode (below) when the caller omits it.
+    mode,
     // disposalIdBase is deprecated (was positional); kept in destructure for
     // backwards-compat with old call sites that still pass it, but ignored.
     // Stable ids now come from disposal.id assigned in matchSaleAgainstParcels.
@@ -740,6 +769,9 @@ function buildDisposalJournalEntries(opts) {
       parcelId: d.parcelId, parcel: parcelLabel,
       recId, recExecuted, timestamp, account,
       exitSignals, regime,
+      // Row mode: caller-provided, else the matched parcel's mode, else the
+      // disposal's own mode, else paper (isRealTrade invariant).
+      mode: mode || d.mode || (parcel && parcel.mode) || 'paper',
     };
     state.tradeJournal.unshift(entry);   // push immediately so the next iteration's priorDisposalRows count sees it
     entries.push(entry);

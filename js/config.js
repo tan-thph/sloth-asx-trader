@@ -17,6 +17,8 @@ const state = {
   // cash pool so the real `cash` figure above stays accurate.
   paperCash: 0,
   _paperBackfillDone: false,  // one-time: existing pre-feature records → mode:'paper'
+  _paperCashSeeded: false,    // one-time: seed paperCash from settings.paperStartCash on first paper use
+  portfolioViewMode: 'all',   // 'all' | 'real' | 'paper' — display filter (gotcha #88 Phase D); tax/NAV stay real-only
   activeAccount: 'all',   // 'all' | 'personal' | 'super' | 'trading'
   recommendations: [],
   tradeJournal: [],

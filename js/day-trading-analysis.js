@@ -426,10 +426,15 @@ function executeDayTrade(recId) {
     qty:    rec.qty,
     defaultPrice,
   }, async (entryPrice, brokerage, actualQty) => {
+    // Paper/real firewall (gotcha #88): choose mode before any state mutation.
+    const mode = await askTradeMode(`BUY ${rec.ticker} (swing)`);
+    if (mode == null) return;   // cancelled
     // Use user-entered qty; fall back to AI qty if dialog didn't return one
     const qty  = (actualQty && actualQty > 0) ? actualQty : rec.qty;
     const cost = qty * entryPrice + brokerage;
-    if (cost > state.cash) { toast('Insufficient cash', 'error'); return; }
+    if (!isRealTrade(mode)) ensurePaperCashSeeded();
+    const _pool = isRealTrade(mode) ? state.cash : state.paperCash;
+    if (cost > _pool) { toast(`Insufficient ${isRealTrade(mode) ? 'cash' : 'paper cash'}`, 'error'); return; }
 
     // Ensure live signals are available — fetch fresh if the scan cache is stale
     // or this ticker wasn't in the last scan. This is the main gap: without a
@@ -461,7 +466,7 @@ function executeDayTrade(recId) {
 
     // Create portfolio holding and CGT parcel — tagged 'trading' account so it
     // is kept separate from long-term personal/super holdings on the Portfolio page.
-    applyBuyToPortfolio(rec.ticker, qty, parseFloat(entryPrice.toFixed(3)), todayStr(), brokerage, sector, 'trading');
+    applyBuyToPortfolio(rec.ticker, qty, parseFloat(entryPrice.toFixed(3)), todayStr(), brokerage, sector, 'trading', mode);
     const newParcel = (state.cgtParcels || []).length
       ? state.cgtParcels[state.cgtParcels.length - 1]
       : null;
@@ -485,6 +490,7 @@ function executeDayTrade(recId) {
       status:      'open',
       sector,
       account:     'trading',
+      mode,        // paper/real firewall (gotcha #88)
       parcelId:    newParcel ? newParcel.id : null,
       recId:       rec.id,
       recExecuted: true,
@@ -506,11 +512,13 @@ function executeDayTrade(recId) {
       } : null,
     };
     state.tradeJournal.unshift(entry);
-    state.cash -= cost;   // applyBuyToPortfolio does not update cash; deduct manually
+    // applyBuyToPortfolio does not touch cash; deduct from the correct pool.
+    adjustCashForMode(-cost, mode);
     rec.status    = 'executed';
+    rec.mode      = mode;        // remember mode for the close path
     rec._execQty  = qty;         // remember actual qty for close dialog and display
     scheduleSave();
-    pushCashToDb(state.cash);
+    if (isRealTrade(mode)) pushCashToDb(state.cash);   // only real cash lives in the cash table
     const qtyNote = (qty !== rec.qty) ? ` (AI suggested ${rec.qty})` : '';
     toast(`Executed ${rec.ticker} swing trade — ${qty} shares @ $${entryPrice.toFixed(3)} (fee $${brokerage})${qtyNote}`, 'success');
 
@@ -594,6 +602,7 @@ async function _openSwingPositionFromParcel(parcel) {
     _execQty:      parcel.remainingQty,
     entryPrice,
     stopLoss, target, rrRatio,
+    mode:          parcel.mode || 'paper',   // inherit the lot's mode (gotcha #88)
     date:          todayStr(),
     generatedAt:   nowSydney(),
     generatedAtMs: Date.now(),
