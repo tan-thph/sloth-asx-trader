@@ -36,7 +36,7 @@ bp = Blueprint("debate", __name__)
 
 
 # ── Ollama structured output schemas ─────────────────────────────────────────
-# Passed as `format` to /api/generate so the engine constrains token selection
+# Passed as `format` to /api/chat so the engine constrains token selection
 # at the grammar level — guarantees valid JSON without regex fallback parsers.
 # Only used with Ollama local models; cloud callers (Gemini, Groq, Claude)
 # receive the schema description in the prompt text instead.
@@ -146,8 +146,14 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1,
                  think: bool | None = None, num_predict: int = 200,
                  format_schema: dict | None = None) -> dict:
     """
-    Send a prompt to a local Ollama model via /api/generate.
+    Send a prompt to a local Ollama model via /api/chat.
     Returns {"ok": True, "text": "..."} or {"ok": False, "error": "..."}.
+
+    Uses /api/chat (not /api/generate) because newer Ollama models such as
+    qwen3.6:27b and gemma4:26b-a4b return "does not support generate" on the
+    /api/generate endpoint — they require the chat-template-based /api/chat
+    endpoint. /api/chat is supported universally across all Ollama model types
+    and is the current recommended path.
 
     Args:
         think:       None = let Ollama decide (default for debate/analysis calls).
@@ -170,7 +176,7 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1,
         try:
             payload = {
                 "model":      model,
-                "prompt":     prompt,
+                "messages":   [{"role": "user", "content": prompt}],
                 "stream":     False,
                 "keep_alive": "10m",        # keep model in VRAM between calls
                 "options": {
@@ -189,13 +195,14 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1,
                 # to exactly match this schema, eliminating regex fallback parsers.
                 payload["format"] = format_schema
             resp = requests.post(
-                f"{_OLLAMA_BASE}/api/generate",
+                f"{_OLLAMA_BASE}/api/chat",
                 json=payload,
                 timeout=timeout,
             )
             if resp.ok:
                 data = resp.json()
-                return {"ok": True, "text": data.get("response", "").strip()}
+                text = data.get("message", {}).get("content", "").strip()
+                return {"ok": True, "text": text}
             # 503 = Ollama still loading the model weights — worth retrying
             if resp.status_code == 503 and attempt < retries:
                 continue
