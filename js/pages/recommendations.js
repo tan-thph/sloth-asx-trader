@@ -1102,6 +1102,9 @@ function _renderHistoryRecCard(r, realIdx) {
       ${r._confidenceHeld ? '<span class="badge" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;font-weight:700;flex-shrink:0"></span>' : ''}
       <strong style="font-size:14px;white-space:nowrap;flex-shrink:0">${escapeHTML(r.ticker)}</strong>
       ${r._parcelLabel ? `<span style="font-size:10px;padding:1px 5px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:3px;color:#1d4ed8;flex-shrink:0">${escapeHTML(r._parcelLabel)}</span>` : ''}
+      ${r.executed ? (isRealTrade(r)
+        ? '<span class="badge" style="font-size:9px;background:#16a34a22;color:#16a34a;border:none;flex-shrink:0" title="Executed as a LIVE/real trade">● LIVE</span>'
+        : '<span class="badge badge-drp" style="font-size:9px;flex-shrink:0" title="Executed as a PAPER (simulated) trade — excluded from tax & real performance">◦ PAPER</span>') : ''}
       ${outcomeBadge}
       ${actualPnlBadge}
       ${regimeBadge}

@@ -57,7 +57,16 @@ function exportDisposalCSV() {
   const f = window._cgtFilter.disposal;
   const now = new Date();
   const fyStart = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
-  let rows = state.cgtDisposals.slice();
+  // Paper/real firewall (gotcha #88): this is an ATO-facing export — REAL only,
+  // mirroring the server-side EOFY pack. A paper disposal in a file handed to an
+  // accountant would defeat the whole firewall.
+  const _all = state.cgtDisposals.length;
+  let rows = state.cgtDisposals.filter(d => isRealTrade(d));
+  const _paperExcluded = _all - rows.length;
+  if (!rows.length) {
+    toast(`No REAL disposals to export — all ${_all} disposal(s) are paper trades (excluded from tax exports)`, 'warning');
+    return;
+  }
   if (f.ticker) rows = rows.filter(d => d.ticker.includes(f.ticker.toUpperCase()));
   if (f.yearFY !== 'all') {
     const fyS = f.yearFY + '-07-01';
@@ -78,7 +87,7 @@ function exportDisposalCSV() {
   a.href = URL.createObjectURL(blob);
   a.download = `asx_cgt_disposals_${f.yearFY !== 'all' ? 'FY' + f.yearFY : 'all'}_${todayStr()}.csv`;
   a.click();
-  toast(`Exported ${rows.length} disposal record(s)`, 'success');
+  toast(`Exported ${rows.length} REAL disposal record(s)${_paperExcluded ? ` (${_paperExcluded} paper excluded)` : ''}`, 'success');
 }
 
 function setCgtMethod(m) {
@@ -87,7 +96,7 @@ function setCgtMethod(m) {
   renderPage();
 }
 
-function addParcelManually() {
+async function addParcelManually() {
   const ticker = prompt('Ticker (e.g. WDS):'); if(!ticker) return;
   const date = prompt('Buy date (DD-MM-YYYY):');
   if(!date || !date.match(/^\d{2}-\d{2}-\d{4}$/)) { toast('Invalid date format', 'error'); return; }
@@ -95,7 +104,12 @@ function addParcelManually() {
   const cost = Number(prompt('Cost per share ($):')); if(!cost) return;
   const fees = Number(prompt('Brokerage paid ($, e.g. 10):') || state.settings.brokerage);
   const sector = prompt('Sector (optional):') || 'Other';
-  addParcel(ticker, date, qty, cost, fees, sector);
+  // Paper/real firewall (gotcha #88): a CGT parcel is tax data — the user must
+  // say whether it's a real lot. Without this, manually-added parcels were
+  // always paper (mode-less ⇒ 'paper') and could never enter the EOFY pack.
+  const mode = await askTradeMode(`Add CGT parcel ${ticker.toUpperCase()} (${qty} shares)`);
+  if (mode == null) return;   // cancelled — no writes
+  addParcel(ticker, date, qty, cost, fees, sector, undefined, mode);
   scheduleSave();
   renderPage();
   toast(`Parcel added: ${qty} × ${ticker.toUpperCase()} @ $${cost}`, 'success');
@@ -116,9 +130,15 @@ function renderCGT() {
   const disposals = state.cgtDisposals;
   const today = todayStr();
 
-  const totalGrossGain = disposals.reduce((s,d) => s + d.grossGain, 0);
-  const totalDiscount  = disposals.reduce((s,d) => s + d.discount, 0);
-  const totalNetGain   = disposals.reduce((s,d) => s + d.netGain, 0);
+  // Paper/real firewall (gotcha #88): the headline TAX-LIABILITY figures (FY
+  // gain, discount, net CGT) are estimates of what you actually owe the ATO —
+  // they sum REAL disposals only, matching the EOFY pack. The disposals TABLE
+  // below still lists paper rows (with a ◦ PAPER badge) for reference.
+  const realDisposals  = disposals.filter(d => isRealTrade(d));
+  const paperDisposalCount = disposals.length - realDisposals.length;
+  const totalGrossGain = realDisposals.reduce((s,d) => s + d.grossGain, 0);
+  const totalDiscount  = realDisposals.reduce((s,d) => s + d.discount, 0);
+  const totalNetGain   = realDisposals.reduce((s,d) => s + d.netGain, 0);
 
   const tickerMap = {};
   parcels.forEach(p => {
@@ -160,7 +180,8 @@ function renderCGT() {
 
   const now = new Date();
   const fyStart = now.getMonth() >= 6 ? `${now.getFullYear()}-07-01` : `${now.getFullYear()-1}-07-01`;
-  const fyDisposals = disposals.filter(d => d.saleDate >= fyStart);
+  // FY figures: REAL only — see realDisposals comment above.
+  const fyDisposals = realDisposals.filter(d => d.saleDate >= fyStart);
   const fyGross = fyDisposals.reduce((s,d)=>s+d.grossGain,0);
   const fyNet   = fyDisposals.reduce((s,d)=>s+d.netGain,0);
   const fyDisc  = fyDisposals.reduce((s,d)=>s+d.discount,0);
@@ -192,7 +213,7 @@ function renderCGT() {
       <div class="metric-card">
         <div class="metric-label">FY Gross Capital Gain</div>
         <div class="metric-value ${fyGross>=0?'up':'down'}">${fyGross>=0?'+':''}$${fmt(Math.abs(fyGross))}</div>
-        <div class="metric-sub">Current FY (from ${fyStart})</div>
+        <div class="metric-sub">Current FY (from ${fyStart})${paperDisposalCount ? ' · real only' : ''}</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">50% Discount Applied</div>
@@ -207,7 +228,7 @@ function renderCGT() {
       <div class="metric-card">
         <div class="metric-label">All-Time Net Gain</div>
         <div class="metric-value ${totalNetGain>=0?'up':'down'}">${totalNetGain>=0?'+':''}$${fmt(Math.abs(totalNetGain))}</div>
-        <div class="metric-sub">${disposals.length} disposal events</div>
+        <div class="metric-sub">${realDisposals.length} real disposal${realDisposals.length!==1?'s':''}${paperDisposalCount ? ` · ${paperDisposalCount} paper excluded` : ''}</div>
       </div>
     </div>
 
@@ -270,7 +291,11 @@ function renderCGT() {
           + '<tbody>'
           + fDisposals.map(d => '<tr>'
             + '<td data-label="Sale Date" class="text-xs">' + d.saleDate + '</td>'
-            + '<td data-label="Ticker"><strong>' + d.ticker + '</strong></td>'
+            + '<td data-label="Ticker"><strong>' + d.ticker + '</strong>'
+            + (isRealTrade(d)
+                ? ' <span class="badge" style="font-size:9px;padding:1px 5px;background:#16a34a22;color:#16a34a" title="Real disposal — included in tax exports">● LIVE</span>'
+                : ' <span class="badge badge-drp" style="font-size:9px;padding:1px 5px" title="Paper disposal — simulated; EXCLUDED from all tax exports">◦ PAPER</span>')
+            + '</td>'
             + '<td data-label="Qty">' + d.saleQty + '</td>'
             + '<td data-label="Sale Price">$' + fmt(d.salePrice) + '</td>'
             + '<td data-label="Parcel Date" class="text-xs">' + (d.parcelDate || '<span class="text-muted">Unknown</span>') + '</td>'
@@ -384,7 +409,12 @@ function renderCGT() {
                 estNetCgt = grossG - (eligible && grossG > 0 ? grossG * 0.5 : 0);
               }
               html += '<tr>'
-                + '<td data-label="Parcel #" class="text-xs text-muted">#' + p.id + (p.action === 'DRP' ? ' <span class="badge badge-drp" style="font-size:9px;padding:1px 5px">DRP</span>' : '') + '</td>'
+                + '<td data-label="Parcel #" class="text-xs text-muted">#' + p.id
+                + (p.action === 'DRP' ? ' <span class="badge badge-drp" style="font-size:9px;padding:1px 5px">DRP</span>' : '')
+                + (isRealTrade(p)
+                    ? ' <span class="badge" style="font-size:9px;padding:1px 5px;background:#16a34a22;color:#16a34a" title="Real lot — included in tax exports">● LIVE</span>'
+                    : ' <span class="badge badge-drp" style="font-size:9px;padding:1px 5px" title="Paper lot — simulated; EXCLUDED from all tax exports">◦ PAPER</span>')
+                + '</td>'
                 + '<td data-label="Buy Date" class="text-xs">' + p.date + '</td>'
                 + '<td data-label="Held" class="text-xs">' + held + 'd</td>'
                 + '<td data-label="Discount?">' + (eligible ? '<span class="badge badge-executed">50% ✓</span>' : '<span class="badge badge-pending">' + (365-held) + 'd left</span>') + '</td>'

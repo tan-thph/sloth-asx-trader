@@ -272,7 +272,9 @@ function renderJournal() {
               return `<tr>
                 <td class="text-xs">${t.date}</td>
                 <td class="text-xs text-muted">${t.timestamp||'&mdash;'}</td>
-                <td><strong>${t.ticker}</strong>${isRealTrade(t) ? '' : '<span class="badge badge-drp" style="margin-left:4px;font-size:9px" title="Paper trade — excluded from CGT, real cash & real performance; feeds calibration only">PAPER</span>'}</td>
+                <td><strong>${t.ticker}</strong>${isRealTrade(t)
+                  ? '<span class="badge" style="margin-left:4px;font-size:9px;background:#16a34a22;color:#16a34a" title="Live/real trade — counts toward CGT, real cash & real performance">● LIVE</span>'
+                  : '<span class="badge badge-drp" style="margin-left:4px;font-size:9px" title="Paper trade — excluded from CGT, real cash & real performance; feeds calibration only">◦ PAPER</span>'}</td>
                 <td>${actionBadge(t.action)}</td>
                 <td>${t.qty}</td>
                 <td>$${fmt(t.entryPrice)}</td>
@@ -674,21 +676,24 @@ function manualReconcile() {
   else toast('All BUY trades already have parcels — nothing to reconcile', 'info');
 }
 function exportCSV() {
-  // Main journal CSV
-  const h='Date,Time,Ticker,Action,Qty,EntryPrice,ExitPrice,Fees,GrossPnL,Status,ParcelID,RecID,FromRec\n';
+  // Main journal CSV — includes ALL rows (it's a trade log, not a tax document)
+  // but carries an explicit Mode column so paper rows are unambiguous (gotcha #88).
+  const h='Date,Time,Ticker,Action,Qty,EntryPrice,ExitPrice,Fees,GrossPnL,Status,Mode,ParcelID,RecID,FromRec\n';
   const rows=state.tradeJournal.map(t=>[
     t.date, t.timestamp||'', t.ticker, t.action, t.qty,
     t.entryPrice, t.exitPrice||'', t.fees, t.pnl!=null?t.pnl.toFixed(2):'',
-    t.status, t.parcelId||'', t.recId||'', t.recId?(t.recExecuted?'Yes':'No'):'Manual'
+    t.status, isRealTrade(t)?'real':'paper', t.parcelId||'', t.recId||'', t.recId?(t.recExecuted?'Yes':'No'):'Manual'
   ].join(',')).join('\n');
   const blob=new Blob([h+rows],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`asx_trades_${todayStr()}.csv`; a.click();
 
-  // CGT disposals CSV (ATO-ready)
-  if(state.cgtDisposals.length) {
+  // CGT disposals CSV (ATO-ready) — REAL disposals only (gotcha #88), mirroring
+  // the server-side EOFY pack. Paper disposals never enter a tax-facing file.
+  const _realDisposals = state.cgtDisposals.filter(d => isRealTrade(d));
+  if(_realDisposals.length) {
     setTimeout(()=>{
       const h2='SaleDate,Ticker,SalePrice,SaleQty,Proceeds,ParcelDate,CostPerShare,CostBase,SaleFee,GrossGain,CGTDiscount,NetGain,HeldDays,50%Eligible,ParcelID\n';
-      const r2=state.cgtDisposals.map(d=>[
+      const r2=_realDisposals.map(d=>[
         d.saleDate, d.ticker, d.salePrice, d.saleQty,
         d.proceeds.toFixed(2), d.parcelDate||'Unknown', d.parcelCostPerShare.toFixed(4),
         d.costBase.toFixed(2), d.saleFee.toFixed(2), d.grossGain.toFixed(2),
@@ -697,8 +702,10 @@ function exportCSV() {
       ].join(',')).join('\n');
       const b2=new Blob([h2+r2],{type:'text/csv'});
       const a2=document.createElement('a'); a2.href=URL.createObjectURL(b2); a2.download=`asx_cgt_${todayStr()}.csv`; a2.click();
-      toast('CGT disposals CSV also exported','success');
+      toast(`CGT disposals CSV also exported (${_realDisposals.length} REAL; paper excluded)`,'success');
     }, 600);
+  } else if (state.cgtDisposals.length) {
+    toast(`CGT CSV skipped — all ${state.cgtDisposals.length} disposal(s) are paper trades (excluded from tax exports)`, 'info');
   }
   toast('Trade journal CSV exported','success');
 }

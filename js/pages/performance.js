@@ -633,9 +633,16 @@ function _drawEquityCurveChart(d) {
 
 // ── ATO-compatible Trade Journal CSV Export ───────────────────────────────────
 function exportTradeJournalCSV() {
-  const trades = state.tradeJournal || [];
+  // Paper/real firewall (gotcha #88): this export is explicitly ATO-framed
+  // ("drop into your accountant portal"), so it is REAL-ONLY — mirroring the
+  // server-side EOFY pack. The general (all-rows, Mode-columned) trade log
+  // export lives on the Journal page instead.
+  const _allTrades = state.tradeJournal || [];
+  const trades = _allTrades.filter(t => isRealTrade(t));
   if (!trades.length) {
-    alert('No trade journal entries to export.');
+    alert(_allTrades.length
+      ? `No REAL trades to export — all ${_allTrades.length} journal entries are paper trades (excluded from tax exports). Use the Journal page's Export CSV for the full log.`
+      : 'No trade journal entries to export.');
     return;
   }
 

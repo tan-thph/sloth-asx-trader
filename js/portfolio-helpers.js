@@ -264,7 +264,10 @@ function splitParcel(parcelId, splitQty) {
   p.qty -= splitQty;
   p.remainingQty -= splitQty;
   p.fees = (p.fees || 0) - fracFees;
-  addParcel(p.ticker, p.date, splitQty, p.costPerShare, fracFees, p.sector, p.account);
+  // Inherit the parent's mode (gotcha #88) — splitting a LIVE parcel must never
+  // produce a PAPER sibling (that would silently reclassify real shares out of
+  // the tax records; missing mode would default to 'paper' in addParcel).
+  addParcel(p.ticker, p.date, splitQty, p.costPerShare, fracFees, p.sector, p.account, p.mode || 'paper');
   const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
   _splitLinkedPosition(p, newParcel, splitQty);
   _splitParcelJournalRow(p, newParcel, fracFees);
@@ -303,6 +306,7 @@ function _splitParcelJournalRow(parentParcel, newParcel, newParcelFees) {
     qty: newParcel.remainingQty, entryPrice: newParcel.costPerShare,
     exitPrice: null, fees: newParcelFees || 0, pnl: null, status: 'open',
     sector: newParcel.sector, account: newParcel.account,
+    mode: newParcel.mode || 'paper',   // inherit parent's mode (gotcha #88)
     parcel: `P#${newParcel.id}`, parcelId: newParcel.id,
     recId: parentRow?.recId ?? null, recExecuted: parentRow?.recExecuted ?? false,
     entrySignals: parentRow?.entrySignals ?? null,
@@ -354,26 +358,33 @@ function _splitLinkedPosition(parentParcel, newParcel, splitQty) {
 function _recomputeHoldingFromParcels(ticker, account) {
   const symbol = ticker.toUpperCase();
   const acct = account || 'personal';
-  const openParcels = state.cgtParcels.filter(p =>
-    p.ticker === symbol && (p.account || 'personal') === acct && p.remainingQty > 0
-  );
-  const existingIdx = state.portfolio.findIndex(h => h.ticker === symbol && (h.account || 'personal') === acct);
-  const totalQty = openParcels.reduce((s, p) => s + p.remainingQty, 0);
-  if (Math.abs(totalQty) < _SHARE_EPSILON) {
-    if (existingIdx !== -1) state.portfolio.splice(existingIdx, 1);
-    return;
-  }
-  const avgPrice = openParcels.reduce((s, p) => s + p.remainingQty * p.costPerShare, 0) / totalQty;
-  if (existingIdx !== -1) {
-    const existing = state.portfolio[existingIdx];
-    existing.shares = totalQty;
-    existing.avgPrice = avgPrice;
-    if (!existing.currentPrice) existing.currentPrice = avgPrice;
-  } else {
-    state.portfolio.push({
-      ticker: symbol, shares: totalQty, avgPrice, currentPrice: avgPrice,
-      sector: openParcels[0].sector || 'Other', account: acct,
-    });
+  // Paper/real firewall (gotcha #88): rebuild ONE row per mode, never a blended
+  // real+paper row. A mode-blind recompute here used to merge paper parcels into
+  // the real holding's qty/avgPrice whenever a ticker was held in both modes.
+  for (const md of ['real', 'paper']) {
+    const openParcels = state.cgtParcels.filter(p =>
+      p.ticker === symbol && (p.account || 'personal') === acct &&
+      (p.mode || 'paper') === md && p.remainingQty > 0
+    );
+    const existingIdx = state.portfolio.findIndex(h =>
+      h.ticker === symbol && (h.account || 'personal') === acct && (h.mode || 'paper') === md);
+    const totalQty = openParcels.reduce((s, p) => s + p.remainingQty, 0);
+    if (Math.abs(totalQty) < _SHARE_EPSILON) {
+      if (existingIdx !== -1) state.portfolio.splice(existingIdx, 1);
+      continue;
+    }
+    const avgPrice = openParcels.reduce((s, p) => s + p.remainingQty * p.costPerShare, 0) / totalQty;
+    if (existingIdx !== -1) {
+      const existing = state.portfolio[existingIdx];
+      existing.shares = totalQty;
+      existing.avgPrice = avgPrice;
+      if (!existing.currentPrice) existing.currentPrice = avgPrice;
+    } else {
+      state.portfolio.push({
+        ticker: symbol, shares: totalQty, avgPrice, currentPrice: avgPrice,
+        sector: openParcels[0].sector || 'Other', account: acct, mode: md,
+      });
+    }
   }
 }
 
@@ -796,8 +807,12 @@ function rollbackTradeJournalEntry(t) {
   // disposal-slice row(s) that consumed shares from it (a separate, more
   // involved operation). Falls through to a safe no-op for trimmed/closed
   // BUY rows rather than attempting a partial/incorrect rollback.
+  // Paper/real firewall (gotcha #88): every reversal below must stay inside the
+  // row's own mode — a paper rollback must refund paperCash (never real cash)
+  // and only ever touch the paper holding, and vice versa.
+  const tMode = t.mode || 'paper';
   if(action === 'BUY' && t.status === 'open') {
-    const holding = getPortfolioHolding(t.ticker, t.account || 'personal');
+    const holding = getPortfolioHolding(t.ticker, t.account || 'personal', tMode);
     if(!holding || holding.shares < t.qty) return false;
     // Back-calculate avgPrice before this buy/top-up was applied.
     // totalCost_before = totalCost_after - (qty × entryPrice)
@@ -808,8 +823,8 @@ function rollbackTradeJournalEntry(t) {
     if (sharesAfter > _SHARE_EPSILON) {
       holding.avgPrice = (totalCostAfter - topupCost) / sharesAfter;
     }
-    state.cash += t.qty * t.entryPrice + Number(t.fees || 0);
-    if(Math.abs(holding.shares) < _SHARE_EPSILON) state.portfolio = state.portfolio.filter(h => !(h.ticker === holding.ticker && (h.account || 'personal') === (holding.account || 'personal')));
+    adjustCashForMode(t.qty * t.entryPrice + Number(t.fees || 0), tMode);
+    if(Math.abs(holding.shares) < _SHARE_EPSILON) state.portfolio = state.portfolio.filter(h => !(h.ticker === holding.ticker && (h.account || 'personal') === (holding.account || 'personal') && (h.mode || 'paper') === tMode));
     // Remove matching parcel (last added for this ticker matching qty+price)
     if(t.parcelId) {
       state.cgtParcels = state.cgtParcels.filter(p => p.id !== t.parcelId);
@@ -827,16 +842,16 @@ function rollbackTradeJournalEntry(t) {
   }
   if(action === 'SELL' && t.status === 'closed' && t.exitPrice != null) {
     const costBasis = t.entryPrice;
-    const holding = getPortfolioHolding(t.ticker, t.account || 'personal');
+    const holding = getPortfolioHolding(t.ticker, t.account || 'personal', tMode);
     if(holding) {
       const totalCostVal = holding.shares * holding.avgPrice + t.qty * costBasis;
       holding.shares += t.qty;
       holding.avgPrice = totalCostVal / holding.shares;
       holding.currentPrice = t.exitPrice;
     } else {
-      state.portfolio.push({ ticker: t.ticker.toUpperCase(), shares: t.qty, avgPrice: costBasis, currentPrice: t.exitPrice, sector: t.sector || 'Other', account: t.account || 'personal' });
+      state.portfolio.push({ ticker: t.ticker.toUpperCase(), shares: t.qty, avgPrice: costBasis, currentPrice: t.exitPrice, sector: t.sector || 'Other', account: t.account || 'personal', mode: tMode });
     }
-    state.cash -= t.qty * t.exitPrice - Number(t.fees || 0);
+    adjustCashForMode(-(t.qty * t.exitPrice - Number(t.fees || 0)), tMode);
     // Restore parcel remainingQty from disposals that belong to this trade.
     // disposalIds now holds stable disposal.id values (not positional indices),
     // so find by id — safe regardless of what other disposals have been deleted.

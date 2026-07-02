@@ -315,6 +315,13 @@ function renderDashboard() {
   }
 
   const pv=portfolioValue(), nw=totalNetWorth(), gain=totalGain(), gainPct=(gain/totalCost())*100;
+  // Paper/real split (gotcha #88): the Dashboard has no view toggle, so the
+  // combined figures are annotated with the live/paper split whenever any paper
+  // value exists — otherwise seeding paperCash (~$100k simulated) would silently
+  // inflate "Net Worth" with fake money.
+  const _rnw = realNetWorth();
+  const _paperNw = nw - _rnw;
+  const _hasPaperNw = Math.abs(_paperNw) > 0.005;
   const pending=state.recommendations.filter(r=>r.status==='pending').length;
   const execRate=state.recHistory.length ? state.recHistory.filter(r=>r.executed).length/state.recHistory.length : 0;
   // ── Schedule: read from state.settings, not hardcoded ─────────────────────
@@ -356,7 +363,7 @@ function renderDashboard() {
       <div class="metric-card">
         <div class="metric-label">Net Worth</div>
         <div class="metric-value">$${fmt(nw)}</div>
-        <div class="metric-sub">Portfolio + Cash</div>
+        <div class="metric-sub">${_hasPaperNw ? `● live $${fmt(_rnw)} · ◦ paper $${fmt(_paperNw)}` : 'Portfolio + Cash'}</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Portfolio Value</div>
@@ -366,7 +373,7 @@ function renderDashboard() {
       <div class="metric-card">
         <div class="metric-label">Cash Available</div>
         <div class="metric-value">$${fmt(state.cash)}</div>
-        <div class="metric-sub">${fmt((state.cash/nw)*100)}% of net worth · RBA ${state.rbaRate.toFixed(2)}%</div>
+        <div class="metric-sub">${(Number(state.paperCash)||0) > 0 ? `+ $${fmt(state.paperCash)} paper · ` : ''}${fmt((state.cash/nw)*100)}% of net worth · RBA ${state.rbaRate.toFixed(2)}%</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Pending Recs</div>

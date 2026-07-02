@@ -647,6 +647,46 @@ function _renderLearningContent(d, brier) {
       </table>
     </div>` : '';
 
+  // ── REAL vs PAPER performance split (gotcha #88) ──────────────────────────
+  // Does paper performance predict real performance? Only rendered once BOTH
+  // buckets have data — a pure-paper (or pure-real) book has nothing to compare.
+  const realVsPaper = d.real_vs_paper || {};
+  const rvpReal  = realVsPaper['real']  || {};
+  const rvpPaper = realVsPaper['paper'] || {};
+  const realVsPaperCard = (rvpReal.n && rvpPaper.n) ? `
+    <div class="card section-gap">
+      <div class="card-title">Live vs Paper Performance</div>
+      <p class="text-xs text-muted" style="margin-bottom:8px">Whether simulated (paper) results actually predict live results — a persistent gap suggests execution slippage, sizing nerves, or paper over-optimism.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:4px 8px">Mode</th>
+            <th style="text-align:right;padding:4px 8px">Trades</th>
+            <th style="text-align:right;padding:4px 8px">Win Rate</th>
+            <th style="text-align:right;padding:4px 8px">Avg P&amp;L%</th>
+            <th style="text-align:right;padding:4px 8px">Avg Hold</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${[['real','● Live'],['paper','◦ Paper']].map(([key,label]) => {
+            const r = realVsPaper[key];
+            if (!r || !r.n) return `<tr><td colspan="5" style="padding:5px 8px;color:var(--text-muted)">${label}: no data</td></tr>`;
+            const pnlColor = r.avg_pnl == null ? 'var(--text-secondary)' : r.avg_pnl >= 0 ? '#16a34a' : '#dc2626';
+            return `<tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:5px 8px;font-weight:600">${label}${sampleBadge(r.n)}</td>
+              <td style="padding:5px 8px;text-align:right">${r.n}</td>
+              <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(r.win_rate)}">${pct(r.win_rate)}</td>
+              <td style="padding:5px 8px;text-align:right;color:${pnlColor}">${r.avg_pnl != null ? (r.avg_pnl >= 0 ? '+' : '') + r.avg_pnl.toFixed(1) + '%' : '—'}</td>
+              <td style="padding:5px 8px;text-align:right;color:var(--text-secondary)">${r.avg_hold != null ? r.avg_hold.toFixed(0) + 'd' : '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      ${(rvpReal.win_rate != null && rvpPaper.win_rate != null && Math.abs(rvpReal.win_rate - rvpPaper.win_rate) >= 15 && rvpReal.n >= 5 && rvpPaper.n >= 5)
+        ? `<p class="text-xs" style="margin-top:6px;color:#c2410c">⚠ ${Math.abs(rvpReal.win_rate - rvpPaper.win_rate).toFixed(0)}pp win-rate gap between live and paper — treat paper-derived confidence with caution.</p>`
+        : ''}
+    </div>` : '';
+
   // ── Capital efficiency by entry driver ─────────────────────────────────────
   const capitalEffCard = capitalEff.length ? `
     <div class="card section-gap">
@@ -1166,7 +1206,7 @@ function _renderLearningContent(d, brier) {
   return introNote + summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard +
-    buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
+    realVsPaperCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
     `<div id="ll-factor-winrates-card" style="display:none"></div>` +
     recentCard + failedCard + debateInsightsCard +
     digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + thesisDriftPlaceholder +

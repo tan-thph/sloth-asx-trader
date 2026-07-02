@@ -994,21 +994,29 @@ async function addHolding() {
   const account = ['personal','super','trading'].includes(acctRaw) ? acctRaw : 'personal';
   const symbol = ticker.toUpperCase();
 
-  // Update portfolio
-  const existing = state.portfolio.find(h => h.ticker === symbol && (h.account || 'personal') === account);
+  // Paper/real firewall (gotcha #88): choose mode before any state mutation.
+  // Without this, Add Holding could only ever create paper positions (addParcel
+  // defaults mode-less parcels to 'paper') — there was no way to record a real
+  // pre-existing holding through this primary manual-entry path.
+  const mode = await askTradeMode(`Add holding ${symbol} (${shares} shares)`);
+  if (mode == null) return;   // cancelled — no writes
+
+  // Update portfolio (scoped by account AND mode)
+  const existing = state.portfolio.find(h =>
+    h.ticker === symbol && (h.account || 'personal') === account && (h.mode || 'paper') === mode);
   if (existing) {
     const totalCostVal = existing.shares * existing.avgPrice + shares * avg;
     existing.shares += shares;
     existing.avgPrice = totalCostVal / existing.shares;
     if (sector !== 'Other') existing.sector = sector;
   } else {
-    state.portfolio.push({ ticker: symbol, shares, avgPrice: avg, currentPrice: avg, sector, account });
+    state.portfolio.push({ ticker: symbol, shares, avgPrice: avg, currentPrice: avg, sector, account, mode });
   }
 
   // Create CGT parcel — account MUST match the portfolio row above, or
   // getParcelsForTicker(ticker, method, 'trading'/'super') finds zero
   // parcels for this holding (it always defaulted to 'personal' here).
-  addParcel(symbol, dateRaw, shares, avg, fees, sector, account);
+  addParcel(symbol, dateRaw, shares, avg, fees, sector, account, mode);
   const newParcel = state.cgtParcels[state.cgtParcels.length - 1];
 
   // Snapshot live technicals when the buy is dated today — same helper and
@@ -1038,6 +1046,7 @@ async function addHolding() {
     recExecuted: false,
     timestamp: `${dateRaw} (manual)`,
     account,
+    mode,
     sector,
     entrySignals,
   });

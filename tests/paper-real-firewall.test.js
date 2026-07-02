@@ -9,6 +9,15 @@
  * filters holdings/cash without touching the real-only NAV basis.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
+import { loadScript } from './setup.js';
+
+// portfolio-helpers.js holds the parcel/split/rollback layer under test below.
+// Pure function declarations (no DOM at load time), so it loads cleanly into
+// the same global context utils.js already lives in.
+loadScript('js/portfolio-helpers.js');
+// Browser-global stubs used by the helpers' side-effect paths.
+global.scheduleSave = () => {};
+global.toast = () => {};
 
 function resetState() {
   global.state.portfolio = [];
@@ -17,7 +26,13 @@ function resetState() {
   global.state._paperCashSeeded = false;
   global.state.portfolioViewMode = 'all';
   global.state.activeAccount = 'all';
-  global.state.settings = { paperStartCash: 100000 };
+  global.state.settings = { paperStartCash: 100000, brokerage: 10 };
+  global.state.cgtParcels = [];
+  global.state.cgtDisposals = [];
+  global.state.tradeJournal = [];
+  global.state.cgtMethod = 'fifo';
+  global.state.intraday = { openPositions: [], recommendations: [] };
+  global.state.dayTrading = { ...global.state.dayTrading, recommendations: [] };
 }
 
 describe('isRealTrade invariant', () => {
@@ -140,5 +155,109 @@ describe('mergedPortfolio keys real and paper lots separately', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].mode).toBe('real');
     expect(rows[0].shares).toBe(10);
+  });
+});
+
+// ── Audit fixes (2026-07-02): mode integrity in the parcel/rollback layer ─────
+
+describe('splitParcel inherits the parent mode', () => {
+  beforeEach(resetState);
+
+  it('splitting a REAL parcel produces a REAL sibling (never paper)', () => {
+    addParcel('BHP', '01-06-2026', 10, 40, 10, 'Mining', 'personal', 'real');
+    const parent = state.cgtParcels[0];
+    expect(splitParcel(parent.id, 4)).toBe(true);
+    const sibling = state.cgtParcels[state.cgtParcels.length - 1];
+    expect(sibling.mode).toBe('real');
+    expect(isRealTrade(sibling)).toBe(true);
+    // the split-off lot's new journal row must carry the mode too
+    const newRow = state.tradeJournal.find(j => j.parcelId === sibling.id);
+    expect(newRow.mode).toBe('real');
+  });
+
+  it('splitting a legacy (mode-less) parcel stays paper', () => {
+    addParcel('CBA', '01-06-2026', 10, 100, 10, 'Banking', 'personal');  // no mode
+    const parent = state.cgtParcels[0];
+    delete parent.mode;   // simulate a true pre-feature parcel
+    expect(splitParcel(parent.id, 3)).toBe(true);
+    const sibling = state.cgtParcels[state.cgtParcels.length - 1];
+    expect(isRealTrade(sibling)).toBe(false);
+  });
+});
+
+describe('mode-scoped sell matching (paper sell never consumes real parcels)', () => {
+  beforeEach(resetState);
+
+  it('a paper sell fails when only a real holding exists', () => {
+    applyBuyToPortfolio('BHP', 10, 40, '01-06-2026', 10, 'Mining', 'personal', 'real');
+    const res = applySellToPortfolio('BHP', 5, 50, 10, '02-07-2026', 'fifo', 'personal', 'paper');
+    expect(res.ok).toBe(false);
+    // real holding untouched
+    expect(getPortfolioHolding('BHP', 'personal', 'real').shares).toBe(10);
+  });
+
+  it('a real sell consumes only the real parcel and credits real cash', () => {
+    applyBuyToPortfolio('BHP', 10, 40, '01-06-2026', 0, 'Mining', 'personal', 'real');
+    applyBuyToPortfolio('BHP', 10, 40, '01-06-2026', 0, 'Mining', 'personal', 'paper');
+    const cashBefore = state.cash, paperBefore = state.paperCash;
+    const res = applySellToPortfolio('BHP', 10, 50, 0, '02-07-2026', 'fifo', 'personal', 'real');
+    expect(res.ok).toBe(true);
+    expect(state.cash).toBe(cashBefore + 500);
+    expect(state.paperCash).toBe(paperBefore);           // untouched
+    // paper parcel untouched, real parcel consumed
+    const paperParcel = state.cgtParcels.find(p => (p.mode||'paper') === 'paper');
+    const realParcel  = state.cgtParcels.find(p => p.mode === 'real');
+    expect(paperParcel.remainingQty).toBe(10);
+    expect(realParcel.remainingQty).toBe(0);
+    // disposal carries the mode for the CGT firewall
+    expect(res.disposals.every(d => d.mode === 'real')).toBe(true);
+  });
+});
+
+describe('_recomputeHoldingFromParcels keeps real and paper rows separate', () => {
+  beforeEach(resetState);
+
+  it('rebuilds one row per mode, never a blended real+paper row', () => {
+    addParcel('WES', '01-06-2026', 10, 60, 0, 'Retail', 'personal', 'real');
+    addParcel('WES', '01-06-2026', 4, 65, 0, 'Retail', 'personal', 'paper');
+    _recomputeHoldingFromParcels('WES', 'personal');
+    const rows = state.portfolio.filter(h => h.ticker === 'WES');
+    expect(rows).toHaveLength(2);
+    const real  = rows.find(h => h.mode === 'real');
+    const paper = rows.find(h => h.mode === 'paper');
+    expect(real.shares).toBe(10);
+    expect(real.avgPrice).toBe(60);
+    expect(paper.shares).toBe(4);
+    expect(paper.avgPrice).toBe(65);
+  });
+});
+
+describe('rollbackTradeJournalEntry routes cash by the row mode', () => {
+  beforeEach(resetState);
+
+  it('rolling back a PAPER buy refunds paperCash, never real cash', () => {
+    applyBuyToPortfolio('NAB', 10, 30, '01-07-2026', 10, 'Banking', 'personal', 'paper');
+    const parcel = state.cgtParcels[0];
+    const row = { action: 'BUY', status: 'open', ticker: 'NAB', qty: 10,
+                  entryPrice: 30, fees: 10, account: 'personal', mode: 'paper', parcelId: parcel.id };
+    const cashBefore = state.cash;
+    ensurePaperCashSeeded();
+    const paperBefore = state.paperCash;
+    expect(rollbackTradeJournalEntry(row)).toBe(true);
+    expect(state.cash).toBe(cashBefore);                       // real cash untouched
+    expect(state.paperCash).toBe(paperBefore + 10 * 30 + 10);  // refund landed in paper pool
+  });
+
+  it('rolling back a REAL closed sell debits real cash only', () => {
+    // a real holding exists post-sale reversal target
+    const row = { action: 'SELL', status: 'closed', ticker: 'ANZ', qty: 5,
+                  entryPrice: 20, exitPrice: 25, fees: 0, account: 'personal', mode: 'real' };
+    const cashBefore = state.cash, paperBefore = state.paperCash;
+    expect(rollbackTradeJournalEntry(row)).toBe(true);
+    expect(state.cash).toBe(cashBefore - 5 * 25);   // sale proceeds clawed back from real cash
+    expect(state.paperCash).toBe(paperBefore);
+    // restored holding carries the mode
+    const h = state.portfolio.find(x => x.ticker === 'ANZ');
+    expect(h.mode).toBe('real');
   });
 });

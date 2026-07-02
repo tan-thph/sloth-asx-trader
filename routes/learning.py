@@ -1697,6 +1697,28 @@ def learning_stats():
                 "avg_hold": round(r["avg_hold"], 1) if r["avg_hold"] is not None else None,
             } for r in buy_vs_topup_rows}
 
+            # a2) REAL vs PAPER performance split (gotcha #88) — does paper-trade
+            # performance actually predict real-trade performance? Groups closed
+            # executed outcomes by trade_mode (NULL ⇒ paper, matching the
+            # isRealTrade() invariant). Empty-safe: {} when no closed trades.
+            real_vs_paper_rows = conn.execute("""
+                SELECT CASE WHEN trade_mode='real' THEN 'real' ELSE 'paper' END AS mode,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) AS wins,
+                       AVG(realized_pnl_pct) AS avg_pnl,
+                       AVG(holding_period_days) AS avg_hold
+                FROM ai_learning_events
+                WHERE was_executed=1
+                  AND outcome_status IN ('win','loss','breakeven')
+                GROUP BY 1
+            """).fetchall()
+            real_vs_paper = {r["mode"]: {
+                "n": r["n"], "wins": r["wins"],
+                "win_rate": round(r["wins"]/r["n"]*100, 1) if r["n"] else None,
+                "avg_pnl": round(r["avg_pnl"], 2) if r["avg_pnl"] is not None else None,
+                "avg_hold": round(r["avg_hold"], 1) if r["avg_hold"] is not None else None,
+            } for r in real_vs_paper_rows}
+
             # b) Capital efficiency (pnl/day by entry driver)
             cap_eff_rows = conn.execute("""
                 SELECT primary_entry_driver,
@@ -1790,6 +1812,7 @@ def learning_stats():
             "by_sector":          by_sector,    # Sprint 71: per-sector WR vs market baseline
             "hold_outcomes":      hold_outcomes,  # HOLD passivity calibration (virtual_hold_miss/correct)
             "buy_vs_topup":       buy_vs_topup,
+            "real_vs_paper":      real_vs_paper,  # gotcha #88: paper as predictor of real
             "capital_efficiency": capital_efficiency,
             "ensemble_divergence": ensemble_divergence,
             "mae_mfe_summary":    mae_mfe_summary,
