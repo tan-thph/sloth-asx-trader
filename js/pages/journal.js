@@ -272,7 +272,7 @@ function renderJournal() {
               return `<tr>
                 <td class="text-xs">${t.date}</td>
                 <td class="text-xs text-muted">${t.timestamp||'&mdash;'}</td>
-                <td><strong>${t.ticker}</strong></td>
+                <td><strong>${t.ticker}</strong>${isRealTrade(t) ? '' : '<span class="badge badge-drp" style="margin-left:4px;font-size:9px" title="Paper trade — excluded from CGT, real cash & real performance; feeds calibration only">PAPER</span>'}</td>
                 <td>${actionBadge(t.action)}</td>
                 <td>${t.qty}</td>
                 <td>$${fmt(t.entryPrice)}</td>

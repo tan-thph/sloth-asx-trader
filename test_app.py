@@ -1647,6 +1647,69 @@ class TestCalibrationEfficacy(unittest.TestCase):
         self.assertEqual(d["n"], 0)
 
 
+class TestPaperTradingFirewall(unittest.TestCase):
+    """Paper/real trade firewall — data model, backfill, learning trade_mode."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_trade_journal_has_mode_column(self):
+        cols = {r[1] for r in _get_shared_conn().execute("PRAGMA table_info(trade_journal)").fetchall()}
+        self.assertIn("mode", cols)
+
+    def test_learning_events_has_trade_mode_column(self):
+        cols = {r[1] for r in _get_shared_conn().execute("PRAGMA table_info(ai_learning_events)").fetchall()}
+        self.assertIn("trade_mode", cols)
+
+    def test_trade_mode_in_le_migrations(self):
+        import db as _db
+        self.assertIn("trade_mode", [c for c, _ in _db._LE_MIGRATIONS])
+
+    def test_log_accepts_and_defaults_trade_mode(self):
+        # explicit paper
+        r1 = self.client.post("/api/learning/log", data=json.dumps({
+            "ticker": "AAA", "recommendation": "BUY", "trade_mode": "paper"}),
+            content_type="application/json")
+        self.assertTrue(json.loads(r1.data).get("ok"))
+        # missing → must default to 'paper', never real (firewall invariant)
+        r2 = self.client.post("/api/learning/log", data=json.dumps({
+            "ticker": "BBB", "recommendation": "BUY"}),
+            content_type="application/json")
+        self.assertTrue(json.loads(r2.data).get("ok"))
+        row = _get_shared_conn().execute(
+            "SELECT trade_mode FROM ai_learning_events WHERE ticker='BBB' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(row["trade_mode"], "paper")
+
+    def test_isRealTrade_invariant_in_utils(self):
+        with open(os.path.join(ROOT, "js/utils.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function isRealTrade", src)
+        self.assertIn("=== 'real'", src)  # only explicit 'real' is real
+
+    def test_gatekeeper_defined_in_utils(self):
+        with open(os.path.join(ROOT, "js/utils.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function askTradeMode", src)
+
+    def test_calib_weight_discounts_paper(self):
+        """_calib_compute()'s _weight must discount non-real rows (firewall)."""
+        with open(os.path.join(ROOT, "routes/learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('r.get("trade_mode") == "real"', src)
+
+    def test_paper_cash_persisted(self):
+        """paperCash must round-trip through db_save/db_load (BLOB_KEYS)."""
+        with open(os.path.join(ROOT, "routes/portfolio.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("'paperCash'", src)
+        self.assertIn('"paperCash":', src)  # returned by db_load
+
+
 class TestSprint5(unittest.TestCase):
     """Tests for Sprint 5 features: postmortem digest, EOFY tax pack, persistence fixes."""
 
@@ -2001,15 +2064,29 @@ class TestSprint5(unittest.TestCase):
         self.assertTrue(any("trade_fees" in n for n in names))
 
     def test_eofy_pack_with_disposals(self):
-        """EOFY pack includes CGT disposals when present in blob_store."""
-        sample = json.dumps([{
-            "saleDate": "2025-03-15", "ticker": "CBA",
-            "salePrice": 130.0, "saleQty": 10, "proceeds": 1300.0,
-            "parcelDate": "2024-01-10", "parcelCostPerShare": 100.0,
-            "costBase": 1000.0, "saleFee": 10.0,
-            "grossGain": 290.0, "discount": 145.0, "netGain": 145.0,
-            "heldDays": 429, "eligible50": True,
-        }])
+        """EOFY pack includes REAL CGT disposals but excludes PAPER ones.
+
+        Paper/real firewall: only mode=='real' disposals are ATO-facing. A paper
+        disposal (or a mode-less one) must never appear in the tax pack.
+        """
+        sample = json.dumps([
+            {  # real — must appear
+                "saleDate": "2025-03-15", "ticker": "CBA", "mode": "real",
+                "salePrice": 130.0, "saleQty": 10, "proceeds": 1300.0,
+                "parcelDate": "2024-01-10", "parcelCostPerShare": 100.0,
+                "costBase": 1000.0, "saleFee": 10.0,
+                "grossGain": 290.0, "discount": 145.0, "netGain": 145.0,
+                "heldDays": 429, "eligible50": True,
+            },
+            {  # paper — must be excluded
+                "saleDate": "2025-03-16", "ticker": "PPRZ", "mode": "paper",
+                "salePrice": 50.0, "saleQty": 5, "proceeds": 250.0,
+                "parcelDate": "2024-01-10", "parcelCostPerShare": 40.0,
+                "costBase": 200.0, "saleFee": 10.0,
+                "grossGain": 40.0, "discount": 0.0, "netGain": 40.0,
+                "heldDays": 100, "eligible50": False,
+            },
+        ])
         _get_shared_conn().execute(
             "INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES ('cgtDisposals', ?, datetime('now'))",
             (sample,)
@@ -2023,6 +2100,7 @@ class TestSprint5(unittest.TestCase):
             cgt_csv = zf.read([n for n in zf.namelist() if "cgt" in n][0]).decode()
         self.assertIn("CBA", cgt_csv)
         self.assertIn("290.0", cgt_csv)
+        self.assertNotIn("PPRZ", cgt_csv)  # paper disposal must NOT reach the tax pack
 
     def test_db_save_persists_watchlist(self):
         """POST /api/db/save stores watchlist in blob_store."""

@@ -10,6 +10,13 @@ const state = {
   page: 'dashboard',
   portfolio: [],
   cash: 0,
+  // Paper-trading firewall (see gotcha "paper/real mode"): a trade is REAL only
+  // when its `mode === 'real'`. Anything else — 'paper' or missing — is paper and
+  // is excluded from ALL tax (CGT/EOFY), real-performance, and real-cash math via
+  // isRealTrade() in utils.js. Paper trades draw from this separate simulated
+  // cash pool so the real `cash` figure above stays accurate.
+  paperCash: 0,
+  _paperBackfillDone: false,  // one-time: existing pre-feature records → mode:'paper'
   activeAccount: 'all',   // 'all' | 'personal' | 'super' | 'trading'
   recommendations: [],
   tradeJournal: [],
@@ -56,6 +63,7 @@ const state = {
     maxRiskBudgetPct: 5,
     autoMacroBrief: true, // auto-run the AI morning macro once per trading day (scheduler.js); when off, it still runs on the first manual Run Analysis
     autoMacroBriefTime: '', // 'HH:MM' AEST — don't auto-run before this time; empty = no restriction (fire ASAP, current behaviour)
+    paperStartCash: 100000, // seed for state.paperCash the first time paper mode is used (separate from real cash)
   },
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary

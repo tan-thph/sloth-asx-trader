@@ -972,8 +972,8 @@ def learning_log():
                      tags, trade_thesis,
                      sell_primary_driver, sell_secondary_factors, sell_urgency,
                      alternative_ticker, primary_entry_driver, thesis_verdict,
-                     bull_case, bear_case, calibrated_confidence)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     bull_case, bear_case, calibrated_confidence, trade_mode)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -1016,6 +1016,10 @@ def learning_log():
                 data.get("bull_case"),
                 data.get("bear_case"),
                 data.get("calibrated_confidence"),
+                # Paper/real firewall — default 'paper' so a mode-less event is
+                # never treated as a real outcome. Paper events still calibrate
+                # the model but at a discounted weight in _calib_compute().
+                data.get("trade_mode") or "paper",
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -3495,6 +3499,16 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         # _phase8_active is resolved at call time (closure over outer scope variable).
         sf = max(0.2, min(1.8, float(sk) / 5.0)) if (sk is not None and _phase8_active) else 1.0
         base = td * sf
+        # Paper-trading discount: paper fills are idealized (no real slippage or
+        # behavioural drag) so they're less trustworthy than real outcomes. A
+        # uniform 0.5× is CORRECT: during a pure-paper phase every row scales
+        # equally, so it cancels out of the ESS and weighted-win-rate ratios
+        # (calibration behaves exactly as if undiscounted); once real trades mix
+        # in, paper correctly contributes less statistical weight so real
+        # outcomes dominate. Non-'real' (paper or missing) ⇒ discounted, matching
+        # the isRealTrade() firewall invariant.
+        pm = 1.0 if (r.get("trade_mode") == "real") else 0.5
+        base *= pm
         # Fix #18: virtual rows get 0.75× multiplier × speed_weight (Sprint 44: fast hits weighted higher)
         if r.get("is_virtual"):
             return base * 0.75 * float(r.get("virtual_speed_weight") or 1.0)
@@ -3568,7 +3582,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             rows = conn.execute("""
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
                        realized_pnl_pct, rr_ratio, timestamp,
-                       error_type, error_type_source, exit_reason, skill_score, success_tags
+                       error_type, error_type_source, exit_reason, skill_score, success_tags,
+                       trade_mode
                 FROM ai_learning_events
                 WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
                 ORDER BY timestamp DESC LIMIT 300
@@ -3593,6 +3608,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                        regime, sector, ticker,
                        NULL AS realized_pnl_pct, rr_ratio, timestamp,
                        error_type, exit_reason, skill_score, success_tags,
+                       trade_mode,
                        1 AS is_virtual,
                        COALESCE(virtual_speed_weight, 1.0) AS virtual_speed_weight
                 FROM ai_learning_events

@@ -95,8 +95,8 @@ def db_save():
                     INSERT INTO trade_journal
                         (id, date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status,
                          rec_id, rec_executed, close_date, account, sector, parcel_id, disposal_ids, notes, thesis,
-                         entry_signals_json, exit_signals_json, regime, parcel, parcel_open_date)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         entry_signals_json, exit_signals_json, regime, parcel, parcel_open_date, mode)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     t.get("id"),
                     t.get("date"), t.get("timestamp"), t["ticker"], t["action"],
@@ -110,6 +110,9 @@ def db_save():
                     json.dumps(t["entrySignals"]) if t.get("entrySignals") is not None else None,
                     json.dumps(t["exitSignals"])  if t.get("exitSignals")  is not None else None,
                     t.get("regime"), t.get("parcel"), t.get("parcelOpenDate"),
+                    # Paper/real firewall — default 'paper' so a mode-less row can
+                    # never be persisted as real (isRealTrade() invariant).
+                    t.get("mode") or "paper",
                 ))
 
         # --- rec history ---
@@ -156,6 +159,7 @@ def db_save():
             'portfolioHistory', 'cgtParcels', 'cgtDisposals', 'cgtMethod', 'activityLog',
             'recommendations', 'priceAlerts', 'dayTrading', 'intraday',
             'watchlist', 'savedScreeners', 'targetAllocations', 'digestHistory', 'termDeposits',
+            'paperCash',  # separate simulated cash pool for paper trades (real `cash` stays in the cash table)
         ]
         for key in BLOB_KEYS:
             if key in data:
@@ -213,6 +217,9 @@ def db_load():
                 "regime": row["regime"] if "regime" in row.keys() else None,
                 "parcel":         row["parcel"]          if "parcel"          in row.keys() else None,
                 "parcelOpenDate": row["parcel_open_date"] if "parcel_open_date" in row.keys() else None,
+                # Paper/real firewall — default 'paper' for any legacy/mode-less row
+                # so it's never treated as real by the isRealTrade() invariant.
+                "mode": (row["mode"] if "mode" in row.keys() else None) or "paper",
             })
 
         rec_history = []
@@ -293,6 +300,7 @@ def db_load():
         "targetAllocations":    blobs.get("targetAllocations"),
         "digestHistory":        blobs.get("digestHistory"),
         "termDeposits":         blobs.get("termDeposits"),
+        "paperCash":            blobs.get("paperCash"),
         "intraday":             blobs.get("intraday"),
         "universe_excluded":    blobs.get("universe_excluded") or [],
         "universe_verified_at": blobs.get("universe_verified_at"),
@@ -346,15 +354,26 @@ def eofy_tax_pack():
 
         # Trade journal fees for the FY
         fee_rows = conn.execute("""
-            SELECT date, ticker, action, qty, entry_price, exit_price, fees, pnl, status
+            SELECT date, ticker, action, qty, entry_price, exit_price, fees, pnl, status, mode
             FROM trade_journal
             ORDER BY date ASC
         """).fetchall()
 
-    # Filter disposals by FY sale date
+    # Paper/real firewall: the tax pack is REAL-ONLY. Paper trades never produce a
+    # CGT event, so they must never appear in an ATO-facing export. A disposal or
+    # journal row is real only when mode=='real' (missing/None ⇒ paper), matching
+    # the isRealTrade() invariant in js/utils.js.
+    def _is_real(x):
+        try:
+            return (x.get("mode") if isinstance(x, dict) else x["mode"]) == "real"
+        except Exception:
+            return False
+
+    # Filter disposals by FY sale date AND real-only
     fy_disposals = [
         d for d in disposals
-        if isinstance(d, dict) and fy_start <= (d.get("saleDate") or "") <= fy_end
+        if isinstance(d, dict) and _is_real(d)
+        and fy_start <= (d.get("saleDate") or "") <= fy_end
     ]
 
     # Filter trades by FY date (DD-MM-YYYY → compare as YYYY-MM-DD)
@@ -366,7 +385,7 @@ def eofy_tax_pack():
 
     fy_trades = [
         r for r in fee_rows
-        if fy_start <= _dd_mm_to_iso(r["date"]) <= fy_end
+        if _is_real(r) and fy_start <= _dd_mm_to_iso(r["date"]) <= fy_end
     ]
 
     # ── CGT disposals CSV ──────────────────────────────────────────────────────

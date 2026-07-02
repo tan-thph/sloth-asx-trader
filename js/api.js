@@ -114,6 +114,7 @@ async function saveStateToDb() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         cash: state.cash,
+        paperCash: state.paperCash,
         portfolio: state.portfolio,
         tradeJournal: state.tradeJournal,
         recHistory: state.recHistory,
@@ -190,6 +191,7 @@ async function loadStateFromDb() {
     if (data.tradeJournal !== undefined) state.tradeJournal = _validArray(data.tradeJournal).map(_validTrade).filter(Boolean);
     if (data.recHistory !== undefined)   state.recHistory   = _validArray(data.recHistory).filter(r => (r.action||'').toUpperCase() !== 'HOLD');
     if (data.cash != null)               state.cash         = _validNumber(data.cash, 0);
+    if (data.paperCash != null)          state.paperCash    = _validNumber(data.paperCash, 0);
     if (data.settings && Object.keys(data.settings).length) {
       state.settings = {...state.settings, ...data.settings};
     }

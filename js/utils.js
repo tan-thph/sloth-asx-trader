@@ -30,6 +30,52 @@ function _normTicker(t) {
   return String(t || '').toUpperCase().replace(/\.AX$/, '');
 }
 
+// ── Paper/real trade firewall ────────────────────────────────────────────────
+// THE safety invariant for the paper-trading feature: a record is REAL only when
+// its `mode === 'real'`. Everything else — an explicit 'paper', a legacy record
+// with no mode, an undefined — is treated as PAPER and excluded from all tax
+// (CGT/EOFY), real-performance, and real-cash math. Failing safe means a fake
+// trade can NEVER leak into your tax records by omission. Accepts a record object
+// ({mode}) or a bare mode string. Use everywhere tax/real-money math happens.
+function isRealTrade(x) {
+  const m = (x && typeof x === 'object') ? x.mode : x;
+  return m === 'real';
+}
+
+// Blocking gatekeeper: ask REAL vs PAPER at lodge time, with NO default (the user
+// must choose deliberately). Returns a Promise resolving to 'real' | 'paper', or
+// null if cancelled (caller must abort the lodge on null). Rendered as a modal so
+// it works from any lodge path (AI rec execute, manual, day-trade, DRP, CSV).
+function askTradeMode(summary) {
+  return new Promise((resolve) => {
+    document.getElementById('trade-mode-dialog')?.remove();
+    const dlg = document.createElement('div');
+    dlg.id = 'trade-mode-dialog';
+    dlg.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5)';
+    const done = (val) => { dlg.remove(); resolve(val); };
+    dlg.innerHTML = `
+      <div class="card" style="max-width:420px;width:92%;padding:20px" onclick="event.stopPropagation()">
+        <div class="card-title" style="margin-bottom:6px">Log this trade as…</div>
+        <p class="text-xs text-muted" style="margin-bottom:8px">
+          ${summary ? escapeHTML(summary) + '<br>' : ''}
+          <strong>Real</strong> trades record CGT, real cash &amp; performance.
+          <strong>Paper</strong> trades stay in the journal (badged) and feed model calibration,
+          but never touch tax, real cash, or real performance.
+        </p>
+        <div style="display:flex;gap:10px;margin-top:12px">
+          <button id="tm-real"  class="btn btn-success" style="flex:1">💰 Real trade</button>
+          <button id="tm-paper" class="btn btn-primary" style="flex:1">📝 Paper trade</button>
+        </div>
+        <button id="tm-cancel" class="btn btn-sm" style="width:100%;margin-top:10px">Cancel</button>
+      </div>`;
+    dlg.addEventListener('click', () => done(null));  // click backdrop = cancel
+    document.body.appendChild(dlg);
+    document.getElementById('tm-real').onclick   = () => done('real');
+    document.getElementById('tm-paper').onclick  = () => done('paper');
+    document.getElementById('tm-cancel').onclick = () => done(null);
+  });
+}
+
 // Escape untrusted text before inserting into innerHTML — guards against
 // malformed RSS headlines, AI output, or external API strings breaking layout.
 function escapeHTML(s) {

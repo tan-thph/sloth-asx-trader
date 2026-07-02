@@ -375,6 +375,11 @@ _LE_MIGRATIONS = [
     # elapsed_ms, scrutinized_at}. Patchable via /api/learning/outcome. Aggregated by
     # _compute_scrutiny_stats() (routes/learning.py) for the AI Lesson Generator feed.
     ("local_scrutiny_json", "TEXT"),
+    # Paper/real firewall: 'real' | 'paper'. Set from the lodge-time gatekeeper.
+    # Paper events still feed calibration but at a discounted weight (0.5×) in
+    # _calib_compute() so real outcomes dominate. NULL treated as paper by the
+    # isRealTrade() invariant. Backfilled to 'paper' once for pre-feature rows.
+    ("trade_mode", "TEXT"),
     # Calibration efficacy scoreboard: the POST-nudge confidence actually shown/used
     # for sizing, after the deterministic calibration adjustments (analysis.js §8.3)
     # were applied. `ai_confidence` deliberately stores the ORIGINAL (pre-nudge) value
@@ -475,9 +480,37 @@ def init_db():
             # identifies a disposal-slice row (vs a legacy aggregate SELL row).
             ("parcel",             "TEXT"),
             ("parcel_open_date",   "TEXT"),
+            # Paper/real firewall: 'real' | 'paper'. Only 'real' rows carry CGT,
+            # real cash, and real-performance treatment (isRealTrade() invariant,
+            # js/utils.js). A NULL/missing value is treated as paper by every
+            # consumer, so no fake trade can ever leak into tax by omission.
+            ("mode",               "TEXT"),
         ):
             if col not in tj_cols:
                 conn.execute(f"ALTER TABLE trade_journal ADD COLUMN {col} {defn}")
+
+        # One-time paper-trading backfill: every trade_journal / learning-event
+        # row that predates the paper/real feature is stamped 'paper' (the user
+        # confirmed all lodged trades so far were fake; real holdings get
+        # re-confirmed via the gatekeeper going forward). Guarded by a blob_store
+        # flag so it runs exactly once and never re-touches genuinely-real rows
+        # logged after the feature shipped. Idempotent + safe: even without this,
+        # the isRealTrade() invariant already treats NULL mode as paper.
+        _bf = conn.execute(
+            "SELECT value FROM blob_store WHERE key='paper_backfill_done'"
+        ).fetchone()
+        if not _bf:
+            conn.execute("UPDATE trade_journal SET mode='paper' WHERE mode IS NULL")
+            conn.execute("UPDATE ai_learning_events SET trade_mode='paper' WHERE trade_mode IS NULL")
+            conn.execute(
+                "INSERT OR REPLACE INTO blob_store (key, value, updated_at) "
+                "VALUES ('paper_backfill_done', '1', datetime('now','localtime'))"
+            )
+            # Commit the backfill writes NOW: the PRAGMA wal_checkpoint(PASSIVE)
+            # a few lines below cannot run while a write transaction is open on
+            # this connection (SQLITE_LOCKED). get_db() uses deferred isolation,
+            # so these DML statements keep the txn open until an explicit commit.
+            conn.commit()
 
         # trading_lessons: breadth_scope column (Sprint 44)
         # Valid: adl_below_0.3 | adl_above_0.7 | high_vol | low_vol | NULL (always inject)
