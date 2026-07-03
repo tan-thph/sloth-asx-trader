@@ -492,19 +492,19 @@ const SIGNAL_RULES = [
   {
     id: 'rsi_oversold',
     label: 'RSI Oversold',
-    desc: 'RSI(14) < 30 — potential reversal candidate',
+    desc: 'RSI(14) < 35 — potential reversal candidate',
     color: '#16a34a',
     type: 'buy',
-    eval: s => s.rsi_14 != null && s.rsi_14 < 30,
+    eval: s => s.rsi_14 != null && s.rsi_14 < 35,
     detail: s => `RSI = ${fmt(s.rsi_14, 1)}`,
   },
   {
     id: 'rsi_overbought',
     label: 'RSI Overbought',
-    desc: 'RSI(14) > 70 — consider trimming',
+    desc: 'RSI(14) > 65 — consider trimming',
     color: '#dc2626',
     type: 'sell',
-    eval: s => s.rsi_14 != null && s.rsi_14 > 70,
+    eval: s => s.rsi_14 != null && s.rsi_14 > 65,
     detail: s => `RSI = ${fmt(s.rsi_14, 1)}`,
   },
   {
@@ -527,21 +527,39 @@ const SIGNAL_RULES = [
   },
   {
     id: 'bb_squeeze_low',
-    label: 'BB Lower Touch',
-    desc: 'Price near Bollinger lower band (BB%B < 10%)',
+    label: 'BB Lower Band',
+    desc: 'Price near Bollinger lower band (BB%B < 20%)',
     color: '#16a34a',
     type: 'buy',
-    eval: s => s.bb_pct_b != null && s.bb_pct_b < 0.10,
+    eval: s => s.bb_pct_b != null && s.bb_pct_b < 0.20,
     detail: s => `BB%B = ${fmt(s.bb_pct_b * 100, 0)}%`,
   },
   {
     id: 'bb_upper_touch',
-    label: 'BB Upper Touch',
-    desc: 'Price near Bollinger upper band (BB%B > 90%)',
+    label: 'BB Upper Band',
+    desc: 'Price near Bollinger upper band (BB%B > 80%)',
     color: '#dc2626',
     type: 'sell',
-    eval: s => s.bb_pct_b != null && s.bb_pct_b > 0.90,
+    eval: s => s.bb_pct_b != null && s.bb_pct_b > 0.80,
     detail: s => `BB%B = ${fmt(s.bb_pct_b * 100, 0)}%`,
+  },
+  {
+    id: 'momentum_rising',
+    label: 'Momentum Strong',
+    desc: '20-day return > +8% — sustained upward momentum',
+    color: '#16a34a',
+    type: 'buy',
+    eval: s => s.return_20d != null && s.return_20d > 8,
+    detail: s => `20d return = +${fmt(s.return_20d, 1)}%`,
+  },
+  {
+    id: 'momentum_falling',
+    label: 'Momentum Weak',
+    desc: '20-day return < −8% — sustained selling pressure',
+    color: '#dc2626',
+    type: 'sell',
+    eval: s => s.return_20d != null && s.return_20d < -8,
+    detail: s => `20d return = ${fmt(s.return_20d, 1)}%`,
   },
   {
     id: 'strong_trend',
@@ -564,18 +582,18 @@ const SIGNAL_RULES = [
   {
     id: 'above_sma50',
     label: 'Above SMA(50)',
-    desc: 'Price above 50-day moving average — uptrend',
-    color: '#16a34a',
-    type: 'buy',
+    desc: 'Price above 50-day moving average — trend context',
+    color: '#3b82f6',
+    type: 'info',
     eval: s => s.current_price != null && s.sma_50 != null && s.current_price > s.sma_50,
     detail: s => `Price $${fmt(s.current_price, 3)} vs SMA50 $${fmt(s.sma_50, 3)}`,
   },
   {
     id: 'below_sma50',
     label: 'Below SMA(50)',
-    desc: 'Price below 50-day moving average — downtrend',
-    color: '#dc2626',
-    type: 'sell',
+    desc: 'Price below 50-day moving average — trend context',
+    color: '#9ca3af',
+    type: 'info',
     eval: s => s.current_price != null && s.sma_50 != null && s.current_price < s.sma_50,
     detail: s => `Price $${fmt(s.current_price, 3)} vs SMA50 $${fmt(s.sma_50, 3)}`,
   },
@@ -634,9 +652,14 @@ function _renderBreadthGauge(clusters) {
   const bullPct = Math.round(bullish / total * 100), bearPct = Math.round(bearish / total * 100);
   const neutPct = 100 - bullPct - bearPct;
   const breadthScore = Math.round((bullish - bearish) / total * 100); // -100..100
-  const scoreColor = breadthScore > 15 ? '#16a34a' : breadthScore < -15 ? '#dc2626' : '#d97706';
-  const scoreLabel = breadthScore > 30 ? 'Strongly Bullish' : breadthScore > 15 ? 'Bullish'
-    : breadthScore < -30 ? 'Strongly Bearish' : breadthScore < -15 ? 'Bearish' : 'Balanced';
+  const scoreColor = breadthScore > 10 ? '#16a34a' : breadthScore < -10 ? '#dc2626' : '#d97706';
+  const scoreLabel = breadthScore > 30 ? 'Strongly Bullish'
+    : breadthScore > 10 ? 'Bullish'
+    : breadthScore > 0  ? 'Slight Bull'
+    : breadthScore === 0 ? 'Balanced'
+    : breadthScore >= -10 ? 'Slight Bear'
+    : breadthScore >= -30 ? 'Bearish'
+    : 'Strongly Bearish';
   return `
   <div class="card mb-2">
     <div class="card-title">Market Breadth Gauge <span class="text-xs text-muted" style="font-weight:400">— bull/bear balance across your holdings</span></div>
