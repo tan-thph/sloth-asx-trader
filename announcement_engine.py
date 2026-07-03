@@ -2091,7 +2091,7 @@ def get_ann_brief(
         with get_db(db_path) as conn:
             rows = conn.execute(
                 f"""SELECT ticker, date, headline, type, sentiment, impact,
-                           price_sensitive, summary
+                           price_sensitive, summary, details
                     FROM announcements
                     WHERE date >= ? AND ticker IN ({placeholders})
                     ORDER BY price_sensitive DESC, impact DESC, date DESC
@@ -2104,14 +2104,31 @@ def get_ann_brief(
 
     results = []
     for row in rows:
+        import json as _json
         impact = row["impact"] or 0
         ps     = bool(row["price_sensitive"])
+
+        # Parse key figures from details JSON (extracted by LLM during classification)
+        key_figures: dict = {}
+        try:
+            if row["details"]:
+                key_figures = _json.loads(row["details"]) or {}
+        except Exception:
+            pass
+
+        # Build the signal string — type/sentiment/impact/PS flags
         signal = (
             f"{row['ticker']} [{row['type'] or 'Other'}|"
             f"{row['sentiment'] or 'neutral'}|{impact:.1f}"
             f"{'|⚡PS' if ps else ''}] "
             f"{(row['headline'] or '')[:80]} ({row['date']})"
         )
+        # Append key figures for price-sensitive items so Claude sees the actual numbers,
+        # not just the headline. Each figure is appended as "key=$val" compactly.
+        if ps and key_figures:
+            fig_parts = [f"{k}={v}" for k, v in list(key_figures.items())[:6]]
+            signal += f" | Figures: {', '.join(fig_parts)}"
+
         results.append({
             "ticker":          row["ticker"],
             "date":            row["date"],
@@ -2121,6 +2138,7 @@ def get_ann_brief(
             "impact":          impact,
             "price_sensitive": ps,
             "summary":         (row["summary"] or "")[:120],
+            "key_figures":     key_figures,
             "signal":          signal,
         })
 

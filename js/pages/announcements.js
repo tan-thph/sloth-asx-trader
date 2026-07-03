@@ -507,14 +507,21 @@ function _renderAnnCard(ann) {
          class="btn btn-sm" style="font-size:11px;text-decoration:none">Search ↗</a>`
     : '';
 
-  // Add to analysis button — escape for inline onclick
-  const safeHeadline = headline.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-  const safeSummary  = summary.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-  const safeTicker   = ticker.replace(/'/g, "\\'");
-  const safeDate     = date.replace(/'/g, "\\'");
+  // Add to analysis button — store full ann object in cache, pass key via onclick
+  // so addAnnToContext can build a rich snippet with type/sentiment/impact/key figures.
+  const _annCacheKey = `${ticker}|${date}|${annId || headline.slice(0,20)}`;
+  window._annCache = window._annCache || {};
+  window._annCache[_annCacheKey] = {
+    ticker, date, headline, summary,
+    type: annType, sentiment: senti,
+    impact: ann.impact_score != null ? Number(ann.impact_score) : null,
+    priceSensitive,
+    keyFigures,
+  };
+  const safeCacheKey = _annCacheKey.replace(/'/g, "\\'").replace(/"/g, '&quot;');
 
   const addToAnalysisBtn = `<button class="btn btn-sm btn-primary" style="font-size:11px"
-    onclick="addAnnToContext('${safeHeadline}','${safeSummary}','${safeTicker}','${safeDate}')">+ Add to Analysis</button>`;
+    onclick="addAnnToContext('${safeCacheKey}')">+ Add to Analysis</button>`;
 
   return `
     <div style="border:1px solid var(--border-light);border-left:3px solid ${borderColor};
@@ -920,9 +927,29 @@ async function syncAnnouncements() {
 }
 
 // ── Add to analysis context ───────────────────────────────────
-function addAnnToContext(headline, summary, ticker, date) {
+function addAnnToContext(cacheKey) {
   if (!state.analysisConfig) state.analysisConfig = { extraTickers: [], marketView: '', savedViews: [] };
-  const snippet = `\n\n[${ticker} announcement ${date}] ${headline}: ${summary}`.trim();
+
+  const ann = (window._annCache || {})[cacheKey];
+  let snippet;
+  if (ann) {
+    // Build a rich snippet: header line with type/sentiment/impact/PS, then headline,
+    // then summary, then key figures (the actual numbers Claude needs to reason about).
+    const psFlag   = ann.priceSensitive ? ' ⚡PRICE-SENSITIVE' : '';
+    const impactStr = ann.impact != null ? ` | impact ${ann.impact}/10` : '';
+    const header   = `[${ann.ticker} ${ann.type}${psFlag} | ${ann.sentiment}${impactStr} | ${ann.date}]`;
+    const parts    = [header, ann.headline];
+    if (ann.summary && ann.summary !== ann.headline) parts.push(`Summary: ${ann.summary}`);
+    if (ann.keyFigures && Object.keys(ann.keyFigures).length) {
+      const figs = Object.entries(ann.keyFigures).slice(0, 8).map(([k, v]) => `${k}: ${v}`).join(' | ');
+      parts.push(`Key figures: ${figs}`);
+    }
+    snippet = parts.join('\n');
+  } else {
+    // Fallback: cache miss (e.g. page re-rendered without a full reload)
+    snippet = `[Announcement] ${cacheKey}`;
+  }
+
   state.analysisConfig.marketView = (state.analysisConfig.marketView || '') + '\n\n' + snippet;
   scheduleSave();
   toast('Added to analysis context', 'success');
