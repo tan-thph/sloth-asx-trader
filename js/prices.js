@@ -219,14 +219,31 @@ function recordPortfolioSnapshot() {
   // realPortfolioValue + real state.cash, NOT the view-mode-aware totals.
   const nw = realNetWorth();
   const pv = realPortfolioValue();
+  // Plausibility guard (FIXES #6): a $0 real book while open real parcels exist is
+  // always an upstream data bug (e.g. the mode-not-persisted regression that wrote
+  // the poisoned 03-07-2026 nw=8865/pv=0 point), never a market outcome. Skip the
+  // snapshot so we don't bake another fake −84%/+540% swing into the NAV series.
+  const _openRealParcels = (state.cgtParcels || []).some(
+    p => (p.remainingQty || 0) > 0 && isRealTrade(p)
+  );
+  if (pv === 0 && _openRealParcels) {
+    console.warn('recordPortfolioSnapshot: skipped — real PV is $0 while open real parcels exist (likely upstream data bug).');
+    return;
+  }
+  // Paper book value tracked alongside (paper holdings market value, no cash) so
+  // the Value History tab can split Live vs Paper. Only populated from the day
+  // this shipped onward — historical snapshots have paperValue undefined (the
+  // chart skips those points).
+  const paperVal = paperPortfolioValue();
   const last = state.portfolioHistory[state.portfolioHistory.length - 1];
   // Only record one snapshot per day (overwrite if same day)
   if (last && last.date === today) {
     last.netWorth = nw;
     last.portfolioValue = pv;
     last.cash = state.cash;
+    last.paperValue = paperVal;
   } else {
-    state.portfolioHistory.push({ date: today, netWorth: nw, portfolioValue: pv, cash: state.cash });
+    state.portfolioHistory.push({ date: today, netWorth: nw, portfolioValue: pv, cash: state.cash, paperValue: paperVal });
   }
   // Keep max 3 years of daily data
   if (state.portfolioHistory.length > 1095) state.portfolioHistory.shift();

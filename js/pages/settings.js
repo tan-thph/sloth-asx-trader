@@ -388,6 +388,19 @@ python3 asx_server.py</pre>
     </div>
 
     <div class="card">
+      <div class="card-title">Data maintenance</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+        One-time legacy→real migration. The paper/real firewall defaults unmarked
+        records to <em>paper</em>; run this once to reclassify your pre-firewall book
+        as <em>real</em> so the EOFY tax pack, CGT liability, NAV history and
+        Performance real view see it. The 2 explicitly-paper CGT parcels (and anything
+        linked to them) stay paper. Shows a preview before changing anything.
+      </div>
+      <button class="btn btn-sm" onclick="backfillLegacyModes()">Reclassify legacy records as real…</button>
+      <div id="settings-backfill-result" style="font-size:12px;margin-top:8px"></div>
+    </div>
+
+    <div class="card">
       <div class="card-title">What's New</div>
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Release history — most recent first</div>
 
@@ -518,6 +531,53 @@ async function settingsClearProxyKey() {
     const d = await r.json();
     if (d.ok) { toast('Server-side API key cleared', 'success'); loadProxyKeyStatus(); }
   } catch (e) { toast('Failed to reach server: ' + e.message, 'error'); }
+}
+
+// One-time legacy→real mode migration (FIXES #3). Dry-run first, confirm, apply,
+// then reload state so the migrated modes are live in-memory (otherwise the next
+// auto-save would clobber them back — the backend also bumps _state_version so a
+// stale save 409s as a backstop).
+async function backfillLegacyModes() {
+  const out = document.getElementById('settings-backfill-result');
+  const setOut = (html) => { if (out) out.innerHTML = html; };
+  try {
+    setOut('<span class="text-muted">Computing preview…</span>');
+    const dr = await fetch(`${API}/api/portfolio/backfill-modes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: true }),
+    }).then(r => r.json());
+    const c = dr.would_change || {};
+    const total = (c.portfolio||0)+(c.journal||0)+(c.parcels||0)+(c.disposals||0)+(c.rec_history||0)+(c.learning_events||0);
+    if (total === 0) {
+      setOut('<span class="text-success">Nothing to migrate — all records are already real (or deliberately paper).</span>');
+      return;
+    }
+    const msg = `Reclassify as REAL:\n\n`
+      + `  • ${c.portfolio||0} holdings\n`
+      + `  • ${c.journal||0} journal rows\n`
+      + `  • ${c.parcels||0} CGT parcels\n`
+      + `  • ${c.disposals||0} disposals\n`
+      + `  • ${c.rec_history||0} recommendations\n`
+      + `  • ${c.learning_events||0} learning events\n\n`
+      + `Keeping ${c.preserved_paper_parcels||0} explicitly-paper parcel(s) as paper.\n\n`
+      + `This is a one-time change. Proceed?`;
+    if (!confirm(msg)) { setOut('<span class="text-muted">Cancelled — nothing changed.</span>'); return; }
+
+    setOut('<span class="text-muted">Applying…</span>');
+    const res = await fetch(`${API}/api/portfolio/backfill-modes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: false }),
+    }).then(r => r.json());
+    if (!res.ok) { setOut('<span class="text-danger">Migration failed.</span>'); return; }
+    setOut('<span class="text-success">✓ Migrated. Reloading state…</span>');
+    // Pull the migrated data back into memory so nothing overwrites it.
+    if (typeof loadStateFromDb === 'function') await loadStateFromDb();
+    toast('Legacy records reclassified as real ✓', 'success');
+    if (typeof renderPage === 'function') renderPage();
+    setOut('<span class="text-success">✓ Done. Your real book is now visible to tax/CGT/NAV surfaces.</span>');
+  } catch (e) {
+    setOut(`<span class="text-danger">Error: ${escapeHTML(e.message)}</span>`);
+  }
 }
 
 async function loadProxyKeyStatus() {

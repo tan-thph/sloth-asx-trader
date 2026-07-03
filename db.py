@@ -44,8 +44,9 @@ _SCHEMA = """
         current_price REAL NOT NULL,
         sector        TEXT DEFAULT 'Other',
         account       TEXT NOT NULL DEFAULT 'personal',
+        mode          TEXT NOT NULL DEFAULT 'paper',
         updated_at    TEXT DEFAULT (datetime('now','localtime')),
-        UNIQUE(ticker, account)
+        UNIQUE(ticker, account, mode)
     );
 
     CREATE TABLE IF NOT EXISTS trade_journal (
@@ -419,6 +420,41 @@ def init_db():
                     (id, ticker, shares, avg_price, current_price, sector, account, updated_at)
                     SELECT id, ticker, shares, avg_price, current_price,
                            COALESCE(sector,'Other'), 'personal', updated_at
+                    FROM portfolio;
+                DROP TABLE portfolio;
+                ALTER TABLE portfolio_new RENAME TO portfolio;
+            """)
+
+        # portfolio: add `mode` column and widen UNIQUE(ticker, account) →
+        # UNIQUE(ticker, account, mode) so a ticker can be held real AND paper in
+        # the same account as two distinct rows (paper/real firewall, gotcha #88).
+        # Without the mode column every save dropped it, silently demoting the real
+        # book to paper on reload; without the wider UNIQUE, the second (paper) lot
+        # of an already-held ticker raised IntegrityError → the whole db_save 500'd
+        # and was swallowed, so nothing persisted at all. Re-read cols (the account
+        # migration above may have just recreated the table). Existing rows keep the
+        # 'paper' default here — the legacy-real backfill is a separate user-confirmed
+        # step (/api/portfolio/backfill-modes), since journal modes were already
+        # overwritten to 'paper' and can't be inferred from the data alone.
+        port_cols = {r[1] for r in conn.execute("PRAGMA table_info(portfolio)").fetchall()}
+        if "mode" not in port_cols:
+            conn.executescript("""
+                CREATE TABLE portfolio_new (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker        TEXT NOT NULL,
+                    shares        REAL NOT NULL,
+                    avg_price     REAL NOT NULL,
+                    current_price REAL NOT NULL,
+                    sector        TEXT DEFAULT 'Other',
+                    account       TEXT NOT NULL DEFAULT 'personal',
+                    mode          TEXT NOT NULL DEFAULT 'paper',
+                    updated_at    TEXT DEFAULT (datetime('now','localtime')),
+                    UNIQUE(ticker, account, mode)
+                );
+                INSERT INTO portfolio_new
+                    (id, ticker, shares, avg_price, current_price, sector, account, mode, updated_at)
+                    SELECT id, ticker, shares, avg_price, current_price,
+                           COALESCE(sector,'Other'), account, 'paper', updated_at
                     FROM portfolio;
                 DROP TABLE portfolio;
                 ALTER TABLE portfolio_new RENAME TO portfolio;

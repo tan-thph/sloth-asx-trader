@@ -45,7 +45,7 @@ function renderJournal() {
   // ── Initialise filter state (matches recHistoryFilter shape) ──────────────
   // Migrate old shape {type,value} or missing fields to current shape
   if (!state.journalFilter || !('ticker' in state.journalFilter)) {
-    state.journalFilter = {ticker:'',action:'all',status:'all',pnl:'all',dateFrom:'',dateTo:'',sortBy:'date_desc'};
+    state.journalFilter = {ticker:'',action:'all',status:'all',pnl:'all',mode:'all',dateFrom:'',dateTo:'',sortBy:'date_desc'};
   }
   const jf = state.journalFilter;
 
@@ -55,6 +55,7 @@ function renderJournal() {
   if (jf.ticker) filtered = filtered.filter(t => t.ticker && t.ticker.includes(jf.ticker.toUpperCase()));
   if (jf.action !== 'all') filtered = filtered.filter(t => (t.action||'').toUpperCase() === jf.action);
   if (jf.status !== 'all') filtered = filtered.filter(t => t.status === jf.status);
+  if ((jf.mode||'all') !== 'all') filtered = filtered.filter(t => (t.mode || 'paper') === jf.mode);
   if (jf.pnl === 'winners') filtered = filtered.filter(t => t.pnl != null && t.pnl > 0);
   if (jf.pnl === 'losers')  filtered = filtered.filter(t => t.pnl != null && t.pnl < 0);
   if (jf.pnl === 'open')    filtered = filtered.filter(t => t.status === 'open' || t.status === 'trimmed');
@@ -93,7 +94,7 @@ function renderJournal() {
   const allTickers = [...new Set(state.tradeJournal.map(t => t.ticker))].filter(Boolean).sort();
 
   const hasFilters = jf.ticker || jf.action !== 'all' || jf.status !== 'all' ||
-                     jf.pnl !== 'all' || jf.dateFrom || jf.dateTo;
+                     jf.pnl !== 'all' || (jf.mode||'all') !== 'all' || jf.dateFrom || jf.dateTo;
 
   const selStyle = `style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;font-family:var(--font)"`;
 
@@ -154,6 +155,15 @@ function renderJournal() {
             <option value="open"    ${jf.status==='open'   ?'selected':''}>Open</option>
             <option value="trimmed" ${jf.status==='trimmed'?'selected':''}>Trimmed</option>
             <option value="closed"  ${jf.status==='closed' ?'selected':''}>Closed</option>
+          </select>
+        </div>
+        <!-- Book (Live/Paper) -->
+        <div>
+          <div class="form-label" style="margin-bottom:3px">Book</div>
+          <select onchange="setJournalFilterKey('mode', this.value)" ${selStyle}>
+            <option value="all"   ${(jf.mode||'all')==='all'  ?'selected':''}>All</option>
+            <option value="real"  ${jf.mode==='real' ?'selected':''}>● Live</option>
+            <option value="paper" ${jf.mode==='paper'?'selected':''}>◦ Paper</option>
           </select>
         </div>
         <!-- P&L outcome -->
@@ -500,7 +510,7 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
 
 function setJournalFilterKey(key, value) {
   if (!state.journalFilter) state.journalFilter = {
-    ticker: '', action: 'all', status: 'all', pnl: 'all',
+    ticker: '', action: 'all', status: 'all', pnl: 'all', mode: 'all',
     dateFrom: '', dateTo: '', sortBy: 'date_desc'
   };
   state.journalFilter[key] = value;

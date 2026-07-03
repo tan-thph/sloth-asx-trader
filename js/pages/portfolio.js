@@ -24,16 +24,7 @@ function renderPortfolio() {
       <div class="metric-card"><div class="metric-label">Total Invested</div><div class="metric-value">$${fmt(totalCost())}</div></div>
       <div class="metric-card"><div class="metric-label">Market Value</div><div class="metric-value">$${fmt(pv)}</div></div>
       <div class="metric-card"><div class="metric-label">Unrealised P&L</div><div class="metric-value ${totalGain()>=0?'up':'down'}">${sign(totalGain())}$${fmt(Math.abs(totalGain()))}</div></div>
-      ${(state.portfolioViewMode || 'all') === 'paper' ? '' : `<div class="metric-card"><div class="metric-label">Cash Available</div><div class="metric-value">$${fmt(viewCash())}</div>${(()=>{
-        // Show the real/paper split under Cash when both pools are in play (gotcha #88 Phase D).
-        // Paper view hides Cash entirely — the simulated paper-cash pool is arbitrary
-        // (seeded from paperStartCash) and only confuses "funds available".
-        const vm = state.portfolioViewMode || 'all';
-        const pc = Number(state.paperCash) || 0;
-        if (vm === 'all' && pc > 0) return `<div class="text-xs text-muted">$${fmt(state.cash)} live · $${fmt(pc)} paper</div>`;
-        if (vm === 'real')  return `<div class="text-xs text-muted">live cash</div>`;
-        return '';
-      })()}</div>`}
+      ${(state.portfolioViewMode || 'all') === 'paper' ? '' : `<div class="metric-card"><div class="metric-label">Cash Available</div><div class="metric-value">$${fmt(viewCash())}</div><div class="text-xs text-muted">live cash</div></div>`}
       ${(()=>{
         const annualIncome = merged.reduce((sum, h) => {
           const d = state.dividendData[h.ticker];

@@ -373,7 +373,7 @@ function renderDashboard() {
       <div class="metric-card">
         <div class="metric-label">Cash Available</div>
         <div class="metric-value">$${fmt(state.cash)}</div>
-        <div class="metric-sub">${(Number(state.paperCash)||0) > 0 ? `+ $${fmt(state.paperCash)} paper · ` : ''}${fmt((state.cash/nw)*100)}% of net worth · RBA ${state.rbaRate.toFixed(2)}%</div>
+        <div class="metric-sub">${fmt((state.cash/nw)*100)}% of net worth · RBA ${state.rbaRate.toFixed(2)}%</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Pending Recs</div>

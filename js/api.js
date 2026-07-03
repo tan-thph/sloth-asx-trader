@@ -175,8 +175,33 @@ async function saveStateToDb() {
         const _d = await _resp.json();
         if (typeof _d.stateVersion === 'number') _stateVersion = _d.stateVersion;
       } catch (e) { /* body parse optional */ }
+      _noteSaveOk();
+      return;
     }
-  } catch(e) { /* silent — don't interrupt UX */ }
+    // Non-OK, non-409 (e.g. a 500 from a UNIQUE violation — FIXES #2). A single
+    // transient failure stays silent, but persistent failure is the worst thing
+    // this app can do quietly (changes silently not persisting), so surface it.
+    _noteSaveFail();
+  } catch(e) {
+    // Network/throw — same escalation as a non-OK response.
+    _noteSaveFail();
+  }
+}
+
+// Consecutive-failure tracker for saveStateToDb. One transient failure is normal
+// (server restart, sleep); ≥2 in a row means saves are genuinely not landing.
+let _saveFailCount = 0;
+function _noteSaveOk() {
+  if (_saveFailCount >= 2 && typeof toast === 'function') {
+    toast('Saving recovered — changes are persisting again ✓', 'success');
+  }
+  _saveFailCount = 0;
+}
+function _noteSaveFail() {
+  _saveFailCount++;
+  if (_saveFailCount === 2 && typeof toast === 'function') {
+    toast('⚠ Changes are NOT being saved (server rejected the save). Check the backend — your recent edits are at risk.', 'error');
+  }
 }
 
 // Validators — coerce DB inputs to safe shapes so a bad migration or manual
@@ -203,6 +228,10 @@ function _validHolding(h) {
     // account MUST be preserved — determines which portfolio tab this holding belongs to.
     // Omitting it collapses all accounts back to 'personal' on every reload.
     account:      VALID_ACCOUNTS.includes(h.account) ? h.account : 'personal',
+    // mode MUST be preserved — the paper/real firewall (gotcha #88) keys every
+    // real-only surface off it. Omitting it demoted the real book to paper on
+    // every reload (FIXES #1). Fail-safe: anything not explicitly 'real' → 'paper'.
+    mode:         h.mode === 'real' ? 'real' : 'paper',
   };
 }
 

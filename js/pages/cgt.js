@@ -4,7 +4,7 @@
 // ── CGT FILTER STATE & HELPERS ──────────────────────────────────────────────
 if (!window._cgtFilter) window._cgtFilter = {
   disposal: { ticker: '', yearFY: 'all', outcome: 'all', sortBy: 'date_desc' },
-  parcel:   { ticker: '', discount: 'all', minHeld: 0 }
+  parcel:   { ticker: '', discount: 'all', minHeld: 0, mode: 'all' }
 };
 
 function setCgtDisposalFilter(key, value) {
@@ -13,7 +13,7 @@ function setCgtDisposalFilter(key, value) {
 }
 function resetCgtParcelFilter() {
   if (!window._cgtFilter) window._cgtFilter = {};
-  window._cgtFilter.parcel = { ticker: '', discount: 'all', minHeld: 0 };
+  window._cgtFilter.parcel = { ticker: '', discount: 'all', minHeld: 0, mode: 'all' };
   renderPage();
 }
 
@@ -336,11 +336,12 @@ function renderCGT() {
           if (pf.discount === 'eligible' && held < 365) return;
           if (pf.discount === 'ineligible' && held >= 365) return;
         }
+        if ((pf.mode||'all') !== 'all' && (p.mode || 'paper') !== pf.mode) return;
         if (!filteredTickerMap[p.ticker]) filteredTickerMap[p.ticker] = [];
         filteredTickerMap[p.ticker].push(p);
       });
       const filteredLots = Object.values(filteredTickerMap).flat();
-      const hasFilter = pf.ticker || pf.discount !== 'all';
+      const hasFilter = pf.ticker || pf.discount !== 'all' || (pf.mode||'all') !== 'all';
       const selS = 'style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:11px;font-family:var(--font)"';
       const allTickers = [...new Set(allOpen.map(p=>p.ticker))].sort();
       let html = '<div class="card">';
@@ -363,6 +364,11 @@ function renderCGT() {
           + '<option value="all"' + (pf.discount==='all'?' selected':'') + '>All parcels</option>'
           + '<option value="eligible"' + (pf.discount==='eligible'?' selected':'') + '>50% eligible (>12mo)</option>'
           + '<option value="ineligible"' + (pf.discount==='ineligible'?' selected':'') + '>Not yet eligible</option>'
+          + '</select></div>';
+        html += '<div><div class="form-label" style="margin-bottom:3px">Book</div><select onchange="setCgtParcelFilter(\'mode\',this.value)" ' + selS + '>'
+          + '<option value="all"' + ((pf.mode||'all')==='all'?' selected':'') + '>All</option>'
+          + '<option value="real"' + (pf.mode==='real'?' selected':'') + '>● Live</option>'
+          + '<option value="paper"' + (pf.mode==='paper'?' selected':'') + '>◦ Paper</option>'
           + '</select></div>';
         if (allTickers.length > 0) {
           html += '<div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center"><span class="text-xs text-muted" style="white-space:nowrap">Quick:</span><button class="btn btn-sm ' + (!pf.ticker?'btn-primary':'') + '" style="font-size:11px;padding:2px 8px" onclick="setCgtParcelFilter(\'ticker\',\'\')">All</button>';

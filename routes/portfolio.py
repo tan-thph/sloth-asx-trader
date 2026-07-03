@@ -100,9 +100,12 @@ def db_save():
             conn.execute("DELETE FROM portfolio")
             for h in data["portfolio"]:
                 conn.execute(
-                    "INSERT INTO portfolio (ticker, shares, avg_price, current_price, sector, account) VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO portfolio (ticker, shares, avg_price, current_price, sector, account, mode) VALUES (?,?,?,?,?,?,?)",
                     (h["ticker"], h["shares"], h["avgPrice"], h["currentPrice"],
-                     h.get("sector", "Other"), h.get("account", "personal"))
+                     h.get("sector", "Other"), h.get("account", "personal"),
+                     # Paper/real firewall — default 'paper' so a mode-less holding is
+                     # never persisted as real (isRealTrade() invariant, gotcha #88).
+                     h.get("mode") or "paper")
                 )
 
         # --- trade journal ---
@@ -225,6 +228,9 @@ def db_load():
                 "currentPrice": row["current_price"],
                 "sector": row["sector"],
                 "account": row["account"] if "account" in row.keys() else "personal",
+                # Paper/real firewall — default 'paper' for any legacy/mode-less row
+                # so it's never treated as real by the isRealTrade() invariant.
+                "mode": (row["mode"] if "mode" in row.keys() else None) or "paper",
             })
 
         trade_journal = []
@@ -498,6 +504,144 @@ def eofy_tax_pack():
         mimetype="application/zip",
         headers={"Content-Disposition": f"attachment; filename=eofy_tax_pack_FY{year}-{year+1}.zip"},
     )
+
+
+@bp.route("/api/portfolio/backfill-modes", methods=["POST"])
+def backfill_modes():
+    """One-time legacy→real mode migration (FIXES.md #3).
+
+    The paper/real firewall shipped with "missing mode ⇒ paper", the correct
+    fail-safe for NEW records — but it left the user's entire pre-firewall book
+    invisible to every real-only surface (EOFY tax pack, CGT liability, NAV
+    history, Performance real view). Worse, the server default rewrote legacy
+    journal rows to 'paper' on the first post-feature save, so legacy-real and
+    deliberate-paper can no longer be told apart from the data alone.
+
+    Strategy (user-confirmed): mark EVERYTHING real EXCEPT the CGT parcels already
+    explicitly flagged mode='paper', plus any journal rows / disposals linked to
+    those parcels by id. This is genuinely one-time — going forward askTradeMode()
+    keeps modes explicit.
+
+    Body: {"dry_run": true|false}. Dry-run (default) returns the counts that WOULD
+    change without writing. Applying bumps _state_version so any stale client is
+    forced to reload (version guard) rather than clobbering the migration back to
+    paper on its next save.
+    """
+    data = request.get_json() or {}
+    dry_run = data.get("dry_run", True)
+
+    def _parcel_num(s):
+        # journal `parcel` field is like "P#<id>"; extract the id.
+        if isinstance(s, str) and s.startswith("P#"):
+            return s[2:]
+        return None
+
+    with get_db() as conn:
+        # --- identify the preserve set: parcels explicitly flagged paper ---
+        pblob = conn.execute("SELECT value FROM blob_store WHERE key='cgtParcels'").fetchone()
+        parcels = json.loads(pblob["value"]) if pblob else []
+        preserve_ids = {str(p.get("id")) for p in parcels if (p.get("mode") == "paper")}
+
+        # --- portfolio: all → real ---
+        port_n = conn.execute(
+            "SELECT COUNT(*) FROM portfolio WHERE mode != 'real'"
+        ).fetchone()[0]
+
+        # --- trade_journal: all → real EXCEPT rows linked to a preserved parcel ---
+        jrows = conn.execute(
+            "SELECT id, parcel_id, parcel, mode FROM trade_journal"
+        ).fetchall()
+        journal_to_real = []
+        for r in jrows:
+            linked = (str(r["parcel_id"]) in preserve_ids) or (_parcel_num(r["parcel"]) in preserve_ids)
+            if not linked and r["mode"] != "real":
+                journal_to_real.append(r["id"])
+
+        # --- cgtParcels blob: paper stays paper, everything else → real ---
+        parcels_to_real = sum(1 for p in parcels if p.get("mode") != "paper" and p.get("mode") != "real")
+
+        # --- cgtDisposals blob: paper-parcel-linked stay paper, else → real ---
+        dblob = conn.execute("SELECT value FROM blob_store WHERE key='cgtDisposals'").fetchone()
+        disposals = json.loads(dblob["value"]) if dblob else []
+        disp_to_real = sum(
+            1 for d in disposals
+            if str(d.get("parcelId")) not in preserve_ids and d.get("mode") != "paper" and d.get("mode") != "real"
+        )
+
+        # --- rec_history: mode lives in extra_json; mark real ---
+        rrows = conn.execute("SELECT id, extra_json FROM rec_history").fetchall()
+        rec_to_real = 0
+        rec_updates = []
+        for r in rrows:
+            try:
+                extra = json.loads(r["extra_json"]) if r["extra_json"] else {}
+            except Exception:
+                extra = {}
+            if extra.get("mode") != "real":
+                extra["mode"] = "real"
+                rec_updates.append((json.dumps(extra), r["id"]))
+                rec_to_real += 1
+
+        # --- ai_learning_events: all → real ---
+        learn_n = conn.execute(
+            "SELECT COUNT(*) FROM ai_learning_events WHERE trade_mode IS NOT 'real'"
+        ).fetchone()[0]
+
+        summary = {
+            "portfolio": port_n,
+            "journal": len(journal_to_real),
+            "parcels": parcels_to_real,
+            "disposals": disp_to_real,
+            "rec_history": rec_to_real,
+            "learning_events": learn_n,
+            "preserved_paper_parcels": len(preserve_ids),
+        }
+
+        if dry_run:
+            return jsonify({"ok": True, "dry_run": True, "would_change": summary})
+
+        # --- APPLY ---
+        conn.execute("UPDATE portfolio SET mode='real' WHERE mode != 'real'")
+
+        if journal_to_real:
+            qmarks = ",".join("?" * len(journal_to_real))
+            conn.execute(f"UPDATE trade_journal SET mode='real' WHERE id IN ({qmarks})", journal_to_real)
+
+        for p in parcels:
+            if p.get("mode") != "paper":
+                p["mode"] = "real"
+        conn.execute(
+            "INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES ('cgtParcels', ?, datetime('now','localtime'))",
+            (json.dumps(parcels),)
+        )
+
+        for d in disposals:
+            if str(d.get("parcelId")) not in preserve_ids and d.get("mode") != "paper":
+                d["mode"] = "real"
+        conn.execute(
+            "INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES ('cgtDisposals', ?, datetime('now','localtime'))",
+            (json.dumps(disposals),)
+        )
+
+        for payload, rid in rec_updates:
+            conn.execute("UPDATE rec_history SET extra_json=? WHERE id=?", (payload, rid))
+
+        conn.execute("UPDATE ai_learning_events SET trade_mode='real' WHERE trade_mode IS NOT 'real'")
+
+        # Bump the state version LAST so a stale client's next save 409s and it
+        # reloads the migrated data instead of clobbering it back to paper.
+        sv = conn.execute("SELECT value FROM blob_store WHERE key='_state_version'").fetchone()
+        try:
+            cur = int(json.loads(sv["value"])) if sv else 0
+        except Exception:
+            cur = 0
+        conn.execute(
+            "INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES ('_state_version', ?, datetime('now','localtime'))",
+            (json.dumps(cur + 1),)
+        )
+
+    return jsonify({"ok": True, "dry_run": False, "changed": summary,
+                    "reloadRequired": True, "stateVersion": cur + 1})
 
 
 @bp.route("/api/db/status")

@@ -131,14 +131,14 @@ function _viewModeHoldings() {
   if (vm === 'all') return state.portfolio;
   return state.portfolio.filter(h => (h.mode || 'paper') === vm);
 }
-// Cash matching the active view: real→cash, paper→paperCash, all→both (the paper
-// book's simulated cash is part of the combined 'all' picture, and paperCash is
-// lazily seeded from settings.paperStartCash the first time paper mode is used).
+// Cash matching the active view. Paper trading has NO funds/available-cash
+// concept — the simulated paperCash pool is a fiction that only confuses "money
+// available" (a paper trade is never gated on funds), so it is never shown or
+// summed here. Paper view reports $0; 'all' and 'real' report REAL cash only.
 function viewCash() {
   const vm = state.portfolioViewMode || 'all';
-  if (vm === 'real')  return Number(state.cash) || 0;
-  if (vm === 'paper') { ensurePaperCashSeeded(); return Number(state.paperCash) || 0; }
-  return (Number(state.cash) || 0) + (Number(state.paperCash) || 0);
+  if (vm === 'paper') return 0;
+  return Number(state.cash) || 0;
 }
 const portfolioValue = () => _viewModeHoldings().reduce((s,h)=>s+h.shares*h.currentPrice, 0);
 const totalCost      = () => _viewModeHoldings().reduce((s,h)=>s+h.shares*h.avgPrice, 0);
@@ -151,6 +151,11 @@ const totalNetWorth  = () => portfolioValue() + viewCash();
 const realPortfolioValue = () => state.portfolio
   .filter(h => isRealTrade(h)).reduce((s,h)=>s+h.shares*h.currentPrice, 0);
 const realNetWorth       = () => realPortfolioValue() + (Number(state.cash) || 0);
+// Paper book market value — paper holdings only, NO cash (paper has no funds
+// concept, gotcha #88). Paper "net worth" == paper portfolio value. Used by the
+// Value History snapshot + chart's Paper view.
+const paperPortfolioValue = () => state.portfolio
+  .filter(h => !isRealTrade(h)).reduce((s,h)=>s+h.shares*h.currentPrice, 0);
 
 // Seed the simulated paper-cash pool from settings.paperStartCash the first time
 // paper mode is used (guarded by a one-shot flag so a genuine spend-down to 0

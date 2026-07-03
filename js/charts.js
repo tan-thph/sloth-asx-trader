@@ -40,11 +40,19 @@ window.addEventListener('orientationchange', _onViewportChange);
 // PORTFOLIO VALUE HISTORY PAGE
 // ============================================================
 let _historyPeriod = 'monthly';
+let _historyMode = 'live';   // 'live' | 'paper' — Value History Live/Paper split (gotcha #88)
 
 function renderPortfolioHistory() {
   const history = state.portfolioHistory;
-  const now = totalNetWorth();
-  const pv  = portfolioValue();
+  // Live/Paper split (gotcha #88). Snapshots store real netWorth/portfolioValue/
+  // cash plus a paperValue (paper holdings market value, no cash). Live reads the
+  // real fields; Paper reads paperValue. Historical snapshots predate paperValue
+  // so those points are null and skipped.
+  const mode  = _historyMode;
+  const paper = mode === 'paper';
+  const valOf = s => paper ? (s.paperValue ?? null) : s.netWorth;
+  const now = paper ? paperPortfolioValue() : realNetWorth();
+  const pv  = paper ? paperPortfolioValue() : realPortfolioValue();
 
   // Compute period-bucketed data
   function getFilteredData(period) {
@@ -81,17 +89,20 @@ function renderPortfolioHistory() {
 
   const data = getFilteredData(_historyPeriod);
 
-  // Stats
-  const first = data[0];
-  const change = first ? now - first.netWorth : 0;
-  const changePct = first && first.netWorth ? (change / first.netWorth) * 100 : 0;
-  const maxNW = data.length ? Math.max(...data.map(d=>d.netWorth)) : now;
-  const minNW = data.length ? Math.min(...data.map(d=>d.netWorth)) : now;
+  // Stats — mode-aware, skipping null points (paper series has leading gaps).
+  const _nonNull = data.map(valOf).filter(v => v != null);
+  const first = data.find(s => valOf(s) != null);
+  const change = first ? now - valOf(first) : 0;
+  const changePct = first && valOf(first) ? (change / valOf(first)) * 100 : 0;
+  const maxNW = _nonNull.length ? Math.max(..._nonNull) : now;
+  const minNW = _nonNull.length ? Math.min(..._nonNull) : now;
+  // Enough plottable points for THIS mode? (paper needs ≥2 non-null paperValue)
+  const _plottable = data.filter(s => valOf(s) != null).length;
 
   const periodLabels = {daily:'Last 30 days',weekly:'Last 90 days',monthly:'Last 2 years',yearly:'All time'};
 
-  // Summary row for individual holdings
-  const holdingRows = state.portfolio.map(h => {
+  // Summary row for individual holdings — scoped to the active book.
+  const holdingRows = state.portfolio.filter(h => paper ? !isRealTrade(h) : isRealTrade(h)).map(h => {
     const val = h.shares * h.currentPrice;
     const cost = h.shares * h.avgPrice;
     const pl = val - cost;
@@ -100,22 +111,37 @@ function renderPortfolioHistory() {
   }).sort((a,b) => b.val - a.val);
 
   return `
+    <div class="card" style="margin-bottom:12px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span class="text-xs text-muted" style="font-weight:600">Book</span>
+      <div style="display:flex;gap:6px">
+        ${[['live','● Live'],['paper','◦ Paper']].map(([m,lbl])=>
+          `<button class="btn btn-sm ${_historyMode===m?'btn-primary':''}" onclick="_historyMode='${m}';document.getElementById('main-content').innerHTML=renderPortfolioHistory();setTimeout(drawHistoryChart,80)">${lbl}</button>`
+        ).join('')}
+      </div>
+      ${paper ? `<span class="text-xs text-muted">Paper book value (holdings only, no cash). Series starts from when paper tracking began — earlier dates have no paper snapshot.</span>` : ''}
+    </div>
     <div class="metrics-grid" style="margin-bottom:1.25rem">
       <div class="metric-card">
-        <div class="metric-label">Net Worth (now)</div>
+        <div class="metric-label">${paper ? 'Paper Value (now)' : 'Net Worth (now)'}</div>
         <div class="metric-value">$${fmt(now)}</div>
-        <div class="metric-sub">Stocks + Cash</div>
+        <div class="metric-sub">${paper ? 'Paper holdings only' : 'Stocks + Cash'}</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Portfolio Value</div>
         <div class="metric-value">$${fmt(pv)}</div>
         <div class="metric-sub">Equities only</div>
       </div>
+      ${paper ? `
+      <div class="metric-card">
+        <div class="metric-label">Paper Holdings</div>
+        <div class="metric-value">${holdingRows.length}</div>
+        <div class="metric-sub">open position${holdingRows.length!==1?'s':''}</div>
+      </div>` : `
       <div class="metric-card">
         <div class="metric-label">Cash</div>
         <div class="metric-value">$${fmt(state.cash)}</div>
         <div class="metric-sub">${fmt(state.cash/now*100)}% of net worth</div>
-      </div>
+      </div>`}
       <div class="metric-card">
         <div class="metric-label">Period Change</div>
         <div class="metric-value ${change>=0?'up':'down'}">${change>=0?'+':''}$${fmt(Math.abs(change))}</div>
@@ -134,47 +160,54 @@ function renderPortfolioHistory() {
         </div>
       </div>
 
-      ${data.length < 2 ? `
+      ${_plottable < 2 ? `
         <div class="empty-state" style="padding:2rem">
           <div class="empty-icon">▥</div>
-          <p>Not enough data yet for this period.</p>
-          <p class="sub">Snapshots are auto-recorded when you refresh prices. Click <strong>⊕ Snapshot</strong> above to record today's value now.</p>
+          <p>${paper ? 'Not enough paper snapshots yet for this period.' : 'Not enough data yet for this period.'}</p>
+          <p class="sub">${paper ? 'Paper value is captured from now on — earlier dates have no paper snapshot. ' : 'Snapshots are auto-recorded when you refresh prices. '}Click <strong>⊕ Snapshot</strong> above to record today's value now.</p>
         </div>
       ` : `
         <div style="position:relative;width:100%;height:240px;margin-bottom:8px">
           <canvas id="history-chart" style="width:100%;height:240px"></canvas>
         </div>
         <div class="flex-row" style="gap:16px;font-size:11px;color:var(--text-secondary);margin-top:4px">
-          <span>─ <span style="color:var(--chart-1)">Net Worth</span></span>
-          <span>─ <span style="color:var(--chart-3)">Portfolio</span></span>
-          <span>── <span style="color:var(--chart-2)">Cash</span></span>
-          <span>── <span style="color:var(--chart-6)">ASX200</span></span>
+          ${paper
+            ? `<span>─ <span style="color:var(--chart-1)">Paper Value</span></span>
+               <span>── <span style="color:var(--chart-6)">ASX200</span></span>`
+            : `<span>─ <span style="color:var(--chart-1)">Net Worth</span></span>
+               <span>─ <span style="color:var(--chart-3)">Portfolio</span></span>
+               <span>── <span style="color:var(--chart-2)">Cash</span></span>
+               <span>── <span style="color:var(--chart-6)">ASX200</span></span>`}
           <span style="margin-left:auto">Peak: $${fmt(maxNW)} · Trough: $${fmt(minNW)}</span>
         </div>
         <div style="margin-top:12px">
           <table style="width:100%;border-collapse:collapse;font-size:12px">
             <thead><tr>
               <th style="text-align:left;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Date</th>
-              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Net Worth</th>
-              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Portfolio</th>
-              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Cash</th>
-              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Δ Net Worth</th>
+              ${paper
+                ? `<th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Paper Value</th>`
+                : `<th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Net Worth</th>
+                   <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Portfolio</th>
+                   <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Cash</th>`}
+              <th style="text-align:right;padding:5px 8px;color:var(--text-secondary);font-weight:600;border-bottom:0.5px solid var(--border-light)">Δ ${paper ? 'Paper Value' : 'Net Worth'}</th>
             </tr></thead>
             <tbody>
-              ${data.slice().reverse().slice(0,20).map((s,i,arr)=>{
+              ${data.filter(s => valOf(s) != null).slice().reverse().slice(0,20).map((s,i,arr)=>{
                 const prev = arr[i+1];
-                const delta = prev ? s.netWorth - prev.netWorth : null;
+                const delta = prev ? valOf(s) - valOf(prev) : null;
                 return `<tr>
                   <td style="padding:5px 8px">${s.date}</td>
-                  <td style="padding:5px 8px;text-align:right;font-weight:600">$${fmt(s.netWorth)}</td>
-                  <td style="padding:5px 8px;text-align:right">$${fmt(s.portfolioValue)}</td>
-                  <td style="padding:5px 8px;text-align:right">$${fmt(s.cash)}</td>
+                  ${paper
+                    ? `<td style="padding:5px 8px;text-align:right;font-weight:600">$${fmt(valOf(s))}</td>`
+                    : `<td style="padding:5px 8px;text-align:right;font-weight:600">$${fmt(s.netWorth)}</td>
+                       <td style="padding:5px 8px;text-align:right">$${fmt(s.portfolioValue)}</td>
+                       <td style="padding:5px 8px;text-align:right">$${fmt(s.cash)}</td>`}
                   <td style="padding:5px 8px;text-align:right;color:${delta==null?'var(--text-muted)':delta>=0?'#16a34a':'#dc2626'}">${delta==null?'—':(delta>=0?'+':'')+' $'+fmt(Math.abs(delta))}</td>
                 </tr>`;
               }).join('')}
             </tbody>
           </table>
-          ${data.length > 20 ? `<p class="text-xs text-muted mt-1">Showing 20 most recent entries of ${data.length} total.</p>` : ''}
+          ${_plottable > 20 ? `<p class="text-xs text-muted mt-1">Showing 20 most recent entries of ${_plottable} total.</p>` : ''}
         </div>
       `}
     </div>
@@ -198,12 +231,12 @@ function renderPortfolioHistory() {
                 </div>
               </td>
             </tr>`).join('')}
-            <tr style="border-top:0.5px solid var(--border-medium)">
+            ${paper ? '' : `<tr style="border-top:0.5px solid var(--border-medium)">
               <td colspan="2"><strong>Cash</strong></td>
               <td>$${fmt(state.cash)}</td>
               <td colspan="2" class="text-muted">—</td>
               <td class="text-xs">${fmt(state.cash/now*100)}% of total</td>
-            </tr>
+            </tr>`}
           </tbody>
         </table>
       </div>
@@ -264,9 +297,12 @@ async function drawHistoryChart() {
 
   const { ctx, w, h } = _fitCanvas(canvas, window.innerWidth < 640 ? 180 : 240);
 
-  const nwArr   = data.map(d => d.netWorth);
-  const pvArr   = data.map(d => d.portfolioValue);
-  const cashArr = data.map(d => d.cash);
+  // Live/Paper split: Paper plots a single paperValue series (nulls for dates
+  // before paper tracking began — drawLine/scale skip them); no portfolio/cash lines.
+  const paper   = _historyMode === 'paper';
+  const nwArr   = data.map(d => paper ? (d.paperValue ?? null) : d.netWorth);
+  const pvArr   = paper ? null : data.map(d => d.portfolioValue);
+  const cashArr = paper ? null : data.map(d => d.cash);
 
   // Build normalized benchmark series aligned to portfolio dates
   let benchArr = null;
@@ -282,7 +318,7 @@ async function drawHistoryChart() {
     let baseNW = null, baseBench = null;
     for (let i = 0; i < portfolioDatesISO.length; i++) {
       const bp = benchMap[portfolioDatesISO[i]];
-      if (bp != null) { baseNW = nwArr[i]; baseBench = bp; break; }
+      if (bp != null && nwArr[i] != null) { baseNW = nwArr[i]; baseBench = bp; break; }
     }
     if (baseNW != null && baseBench != null) {
       const raw = portfolioDatesISO.map(iso => {
@@ -298,7 +334,7 @@ async function drawHistoryChart() {
   // the top/middle of the chart (cash drags minV to near 0; a diverged benchmark
   // can drag either extreme).  The cash/benchmark lines are still drawn but may
   // extend below/above the visible area if they're far from the portfolio range.
-  const scaleVals = [...nwArr, ...pvArr, ...(benchArr ? benchArr.filter(Boolean) : [])];
+  const scaleVals = [...nwArr, ...(pvArr || []), ...(benchArr ? benchArr.filter(Boolean) : [])].filter(v => v != null);
   const rawMin = Math.min(...scaleVals);
   const rawMax = Math.max(...scaleVals);
   const nwRange = rawMax - rawMin;
@@ -366,20 +402,32 @@ async function drawHistoryChart() {
   const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
   grad.addColorStop(0, c1 + '2e');
   grad.addColorStop(1, c1 + '00');
+  // Gradient fill under the main series — skips null gaps (paper leading nulls).
   ctx.beginPath();
-  nwArr.forEach((v, i) => i === 0 ? ctx.moveTo(py(i), px(v)) : ctx.lineTo(py(i), px(v)));
-  ctx.lineTo(py(data.length - 1), pad.t + ch);
-  ctx.lineTo(py(0), pad.t + ch);
-  ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+  let _gStarted = false, _gFirstX = null, _gLastX = null;
+  nwArr.forEach((v, i) => {
+    if (v == null) return;
+    const x = py(i), y = px(v);
+    if (!_gStarted) { ctx.moveTo(x, y); _gFirstX = x; _gStarted = true; }
+    else ctx.lineTo(x, y);
+    _gLastX = x;
+  });
+  if (_gStarted) {
+    ctx.lineTo(_gLastX, pad.t + ch);
+    ctx.lineTo(_gFirstX, pad.t + ch);
+    ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+  }
   if (benchArr) drawLine(benchArr, c6, true);
   drawLine(nwArr, c1, false);
-  drawLine(pvArr, c3, false);
-  drawLine(cashArr, c2, true);
+  if (pvArr)   drawLine(pvArr, c3, false);
+  if (cashArr) drawLine(cashArr, c2, true);
 
-  // Dots at last point
-  [[c1, nwArr], [c3, pvArr], [c2, cashArr]].forEach(([col, arr]) => {
-    const lastX = py(arr.length - 1), lastY = px(arr[arr.length - 1]);
-    ctx.beginPath(); ctx.arc(lastX, lastY, 4, 0, Math.PI*2);
+  // Dots at last non-null point of each drawn series
+  (paper ? [[c1, nwArr]] : [[c1, nwArr], [c3, pvArr], [c2, cashArr]]).forEach(([col, arr]) => {
+    if (!arr) return;
+    let li = -1; for (let i = arr.length - 1; i >= 0; i--) { if (arr[i] != null) { li = i; break; } }
+    if (li < 0) return;
+    ctx.beginPath(); ctx.arc(py(li), px(arr[li]), 4, 0, Math.PI*2);
     ctx.fillStyle = col; ctx.fill();
   });
   if (benchArr) {

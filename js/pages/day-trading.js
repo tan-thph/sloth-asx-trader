@@ -1321,9 +1321,11 @@ function executeIntradayTrade(recId) {
     // actualQty is the user-entered value (may differ from AI-suggested rec.qty)
     const qty  = actualQty || rec.qty;
     const cost = qty * entryPrice + brokerage;
-    if (!isRealTrade(mode)) ensurePaperCashSeeded();
-    const _pool = isRealTrade(mode) ? state.cash : state.paperCash;
-    if (cost > _pool) { toast(`Insufficient ${isRealTrade(mode) ? 'cash' : 'paper cash'} for this trade`, 'error'); return; }
+    // Paper trades ignore available funds — there is no paper-cash concept to
+    // gate on. Only real trades are blocked when they exceed real cash.
+    if (isRealTrade(mode) && cost > (Number(state.cash) || 0)) {
+      toast('Insufficient cash for this trade', 'error'); return;
+    }
 
     // Ensure daily-timeframe live signals are available — intraday scan candidates
     // are rarely in state.liveSignals (that cache is populated by the Live Signals

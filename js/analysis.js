@@ -1659,8 +1659,15 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       r.thesis_verdict = r._thesisCheck?.verdict ?? null;
     });
 
-    // Log recommendations to the Learning Loop backend (fire-and-forget)
-    logRecsToLearningLoop(cappedDedupedRecs, _activeRegime, _debateResults);
+    // Log recommendations to the Learning Loop backend (fire-and-forget).
+    // Include the HOLDs that were stripped from the pending/UI set (filteredRecs
+    // dropped them at the top): they must still reach ai_learning_events as
+    // was_executed=0 events, otherwise _resolve_hold_outcomes / the hold_outcomes
+    // stat / the ⚠HOLD_TOO_PASSIVE nudge are all structurally dead — the model is
+    // never graded on its passivity (FIXES #4). HOLDs carry ticker/confidence/
+    // reasoning/signals; the logger tolerates their missing target/stop/qty.
+    const _holdRecs = recs.filter(r => r.action && r.action.toUpperCase() === 'HOLD');
+    logRecsToLearningLoop([...cappedDedupedRecs, ..._holdRecs], _activeRegime, _debateResults);
     showPage('recommendations');
   } catch(e) {
     state.analysisRunning = false;

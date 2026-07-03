@@ -2182,6 +2182,98 @@ class TestSprint5(unittest.TestCase):
         self.assertEqual(loaded["outcome"], "win")
         self.assertEqual(loaded["actualProfit"], 45.0)
 
+    def test_db_save_load_portfolio_round_trips_mode_dual_book(self):
+        """FIXES #1/#2: the portfolio table must persist holding `mode`, and a ticker
+        held in BOTH real and paper in the same account must survive as two distinct
+        rows. Before the mode column + UNIQUE(ticker,account,mode) fix, mode was
+        dropped on save (real book demoted to paper on reload) and the second lot of
+        an already-held ticker raised an IntegrityError that 500'd the whole save."""
+        holdings = [
+            {"ticker": "CBA", "shares": 100, "avgPrice": 90.0, "currentPrice": 130.0,
+             "sector": "Financials", "account": "personal", "mode": "real"},
+            {"ticker": "CBA", "shares": 5, "avgPrice": 128.0, "currentPrice": 130.0,
+             "sector": "Financials", "account": "personal", "mode": "paper"},
+            {"ticker": "BHP", "shares": 50, "avgPrice": 40.0, "currentPrice": 45.0,
+             "sector": "Materials", "account": "trading"},  # mode omitted → paper
+        ]
+        resp = self.client.post(
+            "/api/db/save",
+            data=json.dumps({"portfolio": holdings}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        d = json.loads(self.client.get("/api/db/load").data)
+        loaded = d["portfolio"]
+        # Both CBA lots survive as distinct rows (UNIQUE now includes mode).
+        cba = sorted([h for h in loaded if h["ticker"] == "CBA"], key=lambda h: h["mode"])
+        self.assertEqual(len(cba), 2)
+        self.assertEqual(cba[0]["mode"], "paper")
+        self.assertEqual(cba[0]["shares"], 5)
+        self.assertEqual(cba[1]["mode"], "real")
+        self.assertEqual(cba[1]["shares"], 100)
+        # Mode-less holding fails safe to paper (isRealTrade invariant).
+        bhp = next(h for h in loaded if h["ticker"] == "BHP")
+        self.assertEqual(bhp["mode"], "paper")
+
+    def test_backfill_modes_marks_real_but_preserves_paper_parcels(self):
+        """FIXES #3: the one-time legacy→real migration marks holdings/journal/
+        parcels/disposals/recs/learning-events real, EXCEPT parcels already flagged
+        paper and anything linked to them by id."""
+        # Seed: a real-to-be holding, a paper parcel + its linked journal row, and a
+        # legacy (unmarked→paper) journal row that should flip to real.
+        self.client.post("/api/db/save", data=json.dumps({
+            "portfolio": [
+                {"ticker": "BHP", "shares": 10, "avgPrice": 40, "currentPrice": 45,
+                 "account": "personal", "mode": "paper"},
+            ],
+            "tradeJournal": [
+                {"id": 1, "date": "01-01-2025", "ticker": "BHP", "action": "BUY",
+                 "qty": 10, "entryPrice": 40, "parcelId": "P-legacy", "mode": "paper"},
+                {"id": 2, "date": "01-06-2026", "ticker": "XYZ", "action": "BUY",
+                 "qty": 5, "entryPrice": 2, "parcelId": "P-paper", "mode": "paper"},
+            ],
+            "cgtParcels": [
+                {"id": "P-legacy", "ticker": "BHP", "date": "01-01-2025", "qty": 10,
+                 "costPerShare": 40, "remainingQty": 10},  # unmarked → real
+                {"id": "P-paper", "ticker": "XYZ", "date": "01-06-2026", "qty": 5,
+                 "costPerShare": 2, "remainingQty": 5, "mode": "paper"},  # kept paper
+            ],
+        }), content_type="application/json")
+
+        # Dry-run must report changes without writing.
+        dr = json.loads(self.client.post(
+            "/api/portfolio/backfill-modes",
+            data=json.dumps({"dry_run": True}),
+            content_type="application/json",
+        ).data)
+        self.assertTrue(dr["dry_run"])
+        self.assertEqual(dr["would_change"]["portfolio"], 1)
+        self.assertEqual(dr["would_change"]["journal"], 1)     # only the legacy row
+        self.assertEqual(dr["would_change"]["parcels"], 1)     # only P-legacy
+        self.assertEqual(dr["would_change"]["preserved_paper_parcels"], 1)
+        # still paper in the DB after dry-run
+        d = json.loads(self.client.get("/api/db/load").data)
+        self.assertEqual(d["portfolio"][0]["mode"], "paper")
+
+        # Apply.
+        res = json.loads(self.client.post(
+            "/api/portfolio/backfill-modes",
+            data=json.dumps({"dry_run": False}),
+            content_type="application/json",
+        ).data)
+        self.assertFalse(res["dry_run"])
+        self.assertTrue(res["reloadRequired"])
+
+        d = json.loads(self.client.get("/api/db/load").data)
+        self.assertEqual(d["portfolio"][0]["mode"], "real")
+        jrows = {t["id"]: t for t in d["tradeJournal"]}
+        self.assertEqual(jrows[1]["mode"], "real")   # legacy → real
+        self.assertEqual(jrows[2]["mode"], "paper")  # paper-parcel-linked → kept
+        pmap = {p["id"]: p for p in d["cgtParcels"]}
+        self.assertEqual(pmap["P-legacy"]["mode"], "real")
+        self.assertEqual(pmap["P-paper"]["mode"], "paper")
+
     def test_db_save_version_guard_rejects_stale_save(self):
         """Optimistic-concurrency guard: a save whose baseVersion is behind the
         server's current version must be rejected 409 (stale-tab clobber
@@ -5798,6 +5890,17 @@ class TestHoldOutcomeTracking(unittest.TestCase):
             src = f.read()
         self.assertIn("def _resolve_hold_outcomes(", src)
         self.assertIn("_resolve_hold_outcomes(conn)", src)  # wired into _calib_compute
+
+    def test_analysis_js_logs_hold_recs_to_learning_loop(self):
+        """FIXES #4: HOLDs are stripped from the pending/UI set, but they must still
+        be passed to logRecsToLearningLoop() — otherwise no HOLD event ever reaches
+        ai_learning_events and the entire _resolve_hold_outcomes feature is dead."""
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        # HOLDs are re-collected from the pre-filter recs and concatenated into the log call.
+        self.assertIn("_holdRecs", src)
+        self.assertIn("=== 'HOLD'", src)
+        self.assertIn("logRecsToLearningLoop([...cappedDedupedRecs, ..._holdRecs]", src)
 
     def test_resolve_hold_outcomes_scoped_to_hold_recommendation(self):
         """Must filter on recommendation='HOLD' so it never touches BUY/SELL/TRIM

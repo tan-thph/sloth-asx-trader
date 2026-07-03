@@ -92,11 +92,11 @@ describe('view-mode display filtering', () => {
     state.paperCash = 200;
   });
 
-  it("'all' shows every holding and combines cash pools", () => {
+  it("'all' shows every holding but only REAL cash (paper cash is a fiction)", () => {
     state.portfolioViewMode = 'all';
     expect(portfolioValue()).toBe(10*50 + 5*120 + 20*30); // 500+600+600 = 1700
-    expect(viewCash()).toBe(1000 + 200);
-    expect(totalNetWorth()).toBe(1700 + 1200);
+    expect(viewCash()).toBe(1000);                 // real cash only — paperCash never summed
+    expect(totalNetWorth()).toBe(1700 + 1000);
   });
 
   it("'real' shows only real holdings and real cash", () => {
@@ -106,10 +106,11 @@ describe('view-mode display filtering', () => {
     expect(totalNetWorth()).toBe(500 + 1000);
   });
 
-  it("'paper' shows paper + legacy-mode-less holdings and paper cash", () => {
+  it("'paper' shows paper + legacy-mode-less holdings and NO cash", () => {
     state.portfolioViewMode = 'paper';
     expect(portfolioValue()).toBe(5*120 + 20*30); // CBA + WOW(legacy)
-    expect(viewCash()).toBe(200);
+    expect(viewCash()).toBe(0);                    // paper has no funds/available-cash concept
+    expect(totalNetWorth()).toBe(5*120 + 20*30);   // holdings value only, no phantom cash
   });
 });
 
@@ -128,6 +129,13 @@ describe('real-only NAV basis ignores the view toggle', () => {
       state.portfolioViewMode = vm;
       expect(realPortfolioValue()).toBe(500);       // BHP only, always
       expect(realNetWorth()).toBe(500 + 1000);      // + real cash only, never paperCash
+    }
+  });
+
+  it('paperPortfolioValue is paper holdings only (no cash), in EVERY view mode', () => {
+    for (const vm of ['all', 'real', 'paper']) {
+      state.portfolioViewMode = vm;
+      expect(paperPortfolioValue()).toBe(600);      // CBA only (5×120), never real BHP, never paperCash
     }
   });
 });
@@ -259,5 +267,21 @@ describe('rollbackTradeJournalEntry routes cash by the row mode', () => {
     // restored holding carries the mode
     const h = state.portfolio.find(x => x.ticker === 'ANZ');
     expect(h.mode).toBe('real');
+  });
+});
+
+// api.js is all top-level function declarations (fetch/DOM refs are inside
+// functions), so it loads cleanly into the same global context.
+loadScript('js/api.js');
+
+describe('_validHolding preserves mode across the load sanitiser (FIXES #1)', () => {
+  it('keeps mode==="real" and fails everything else safe to paper', () => {
+    expect(_validHolding({ ticker: 'cba', shares: 10, avgPrice: 90, currentPrice: 130,
+                           account: 'personal', mode: 'real' }).mode).toBe('real');
+    // missing / null / explicit paper / bogus → paper (isRealTrade invariant)
+    expect(_validHolding({ ticker: 'BHP', shares: 1, avgPrice: 40, currentPrice: 45 }).mode).toBe('paper');
+    expect(_validHolding({ ticker: 'BHP', mode: null }).mode).toBe('paper');
+    expect(_validHolding({ ticker: 'BHP', mode: 'paper' }).mode).toBe('paper');
+    expect(_validHolding({ ticker: 'BHP', mode: 'REAL' }).mode).toBe('paper'); // case-sensitive
   });
 });

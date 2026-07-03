@@ -432,9 +432,11 @@ function executeDayTrade(recId) {
     // Use user-entered qty; fall back to AI qty if dialog didn't return one
     const qty  = (actualQty && actualQty > 0) ? actualQty : rec.qty;
     const cost = qty * entryPrice + brokerage;
-    if (!isRealTrade(mode)) ensurePaperCashSeeded();
-    const _pool = isRealTrade(mode) ? state.cash : state.paperCash;
-    if (cost > _pool) { toast(`Insufficient ${isRealTrade(mode) ? 'cash' : 'paper cash'}`, 'error'); return; }
+    // Paper trades ignore available funds — there is no paper-cash concept to
+    // gate on. Only real trades are blocked when they exceed real cash.
+    if (isRealTrade(mode) && cost > (Number(state.cash) || 0)) {
+      toast('Insufficient cash', 'error'); return;
+    }
 
     // Ensure live signals are available — fetch fresh if the scan cache is stale
     // or this ticker wasn't in the last scan. This is the main gap: without a
