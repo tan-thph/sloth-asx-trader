@@ -55,9 +55,39 @@ def set_cash():
 
 @bp.route("/api/db/save", methods=["POST"])
 def db_save():
-    """Save full frontend state to SQLite in one call."""
+    """Save full frontend state to SQLite in one call.
+
+    Optimistic-concurrency guard: the client sends `baseVersion` — the
+    `_state_version` it last loaded/saved. If the stored version has moved on
+    since (another tab/device saved in between), this save is stale and would
+    silently clobber newer data, so we reject with 409 and echo the current
+    version. The client then reloads instead of overwriting (the 2026-07-03
+    disappearing-macro incident: a stale tab auto-saved yesterday's snapshot
+    over today's fresh macro + recs). `baseVersion` omitted → legacy client,
+    guard skipped. `forceSave:true` → intentional override (post-reload retry).
+    """
     data = request.get_json() or {}
     with get_db() as conn:
+        # --- optimistic concurrency guard (runs before any write) ---
+        _sv_row = conn.execute(
+            "SELECT value FROM blob_store WHERE key='_state_version'"
+        ).fetchone()
+        cur_ver = 0
+        if _sv_row:
+            try:
+                cur_ver = int(json.loads(_sv_row["value"]))
+            except Exception:
+                cur_ver = 0
+        base_ver = data.get("baseVersion", None)
+        if (base_ver is not None and not data.get("forceSave")
+                and int(base_ver) < cur_ver):
+            return jsonify({
+                "ok": False, "conflict": True,
+                "stateVersion": cur_ver,
+                "error": "stale_state",
+            }), 409
+        new_ver = cur_ver + 1
+
         # --- cash ---
         if "cash" in data:
             conn.execute(
@@ -168,7 +198,15 @@ def db_save():
                     (key, json.dumps(data[key]))
                 )
 
-    return jsonify({"ok": True, "saved_at": datetime.now().isoformat()})
+        # --- bump the monotonic state version (last, so a rejected save above
+        #     never advances it) ---
+        conn.execute(
+            "INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES ('_state_version', ?, datetime('now','localtime'))",
+            (json.dumps(new_ver),)
+        )
+
+    return jsonify({"ok": True, "saved_at": datetime.now().isoformat(),
+                    "stateVersion": new_ver})
 
 
 @bp.route("/api/db/load")
@@ -275,8 +313,17 @@ def db_load():
             except Exception:
                 blobs[row["key"]] = row["value"]
 
+        # Monotonic version for the optimistic-concurrency guard (see db_save).
+        # Stored in blob_store under a leading-underscore key so it is not part
+        # of any frontend state field.
+        try:
+            state_version = int(blobs.get("_state_version") or 0)
+        except (TypeError, ValueError):
+            state_version = 0
+
     return jsonify({
         "hasData": has_data,
+        "stateVersion": state_version,
         "cash": cash,
         "portfolio": portfolio,
         "tradeJournal": trade_journal,

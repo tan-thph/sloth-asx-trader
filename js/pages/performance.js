@@ -178,8 +178,9 @@ async function renderPerformancePage(gen) {
   // Refresh outcomes from journal once, BEFORE render — keeps render pure.
   if (typeof reconcileRecOutcomes === 'function') reconcileRecOutcomes();
   el.innerHTML = renderPerformance(); // sync render first (no waiting)
-  // Then fetch and draw equity curve overlay
-  if (state.serverOk && state.portfolio.length) {
+  // Then fetch and draw equity curve overlay — real-only (NAV never follows the
+  // paper book, gotcha #88), so skip the fetch entirely in Paper view.
+  if (state.serverOk && state.portfolio.length && (state.portfolioViewMode || 'all') !== 'paper') {
     const equityDiv = document.getElementById('perf-equity-curve');
     try {
       const resp = await fetch(`${API}/api/portfolio/nav-history`, {
@@ -222,16 +223,28 @@ async function renderPerformancePage(gen) {
 }
 
 function renderPerformance() {
-  const closedTrades=state.tradeJournal.filter(t=>t.pnl!=null);
+  // Paper/real firewall (gotcha #88): the Performance page follows the same
+  // view-mode toggle as the Portfolio page (state.portfolioViewMode). 'all' shows
+  // real+paper together; 'real' (Live) and 'paper' narrow every trade/rec metric.
+  // Portfolio helpers (portfolioValue/totalCost/totalGain/viewCash) already follow
+  // this flag, so unrealised figures stay consistent with the toggle. The NAV
+  // equity curve is real-only (below) and is hidden in Paper view.
+  const vm = state.portfolioViewMode || 'all';
+  const _modeMatch    = t => vm === 'all' || (t.mode || 'paper') === vm;   // trades default paper
+  const _recModeMatch = r => vm === 'all' || (r.mode || 'paper') === vm;   // recs default paper
+  const _journalInView = state.tradeJournal.filter(_modeMatch);
+  const _recsInView    = state.recHistory.filter(_recModeMatch);
+
+  const closedTrades=_journalInView.filter(t=>t.pnl!=null);
   const wins=closedTrades.filter(t=>t.pnl>0).length;
   const losses=closedTrades.filter(t=>t.pnl<0).length;
   const total=wins+losses;
   const winRate=total?wins/total*100:0;
-  const execRecIds=new Set(state.tradeJournal.filter(t=>t.recId != null).map(t=>t.recId));
-  const execRate=state.recHistory.length?execRecIds.size/state.recHistory.length*100:0;
-  const totalFees=state.tradeJournal.reduce((s,t)=>s+(Number(t.fees)||0),0);
+  const execRecIds=new Set(_journalInView.filter(t=>t.recId != null).map(t=>t.recId));
+  const execRate=_recsInView.length?execRecIds.size/_recsInView.length*100:0;
+  const totalFees=_journalInView.reduce((s,t)=>s+(Number(t.fees)||0),0);
   const realised=closedTrades.reduce((s,t)=>s+(Number(t.pnl)||0),0);
-  const skipped=state.recHistory.filter(r=>!r.executed);
+  const skipped=_recsInView.filter(r=>!r.executed);
 
   // Dividend income metrics
   const annualDivIncome = mergedPortfolio().reduce((sum, h) => {
@@ -302,7 +315,7 @@ function renderPerformance() {
   const ddAlertActive = _ddCurrent > 0 && _ddCurrent >= ddAlertPct;
 
   const confBuckets=[0.5,0.6,0.7,0.8,0.9].map(c=>{
-    const b=state.recHistory.filter(r=>r.confidence>=c&&r.confidence<c+0.1&&r.outcome!=='open'&&r.outcome!=='skipped');
+    const b=_recsInView.filter(r=>r.confidence>=c&&r.confidence<c+0.1&&r.outcome!=='open'&&r.outcome!=='skipped');
     const w=b.filter(r=>r.outcome==='win').length;
     return {conf:fmt(c*100,0)+'%',wins:w,total:b.length,rate:b.length?w/b.length:null};
   });
@@ -310,15 +323,34 @@ function renderPerformance() {
   const apiCostValue = `<a href="https://console.anthropic.com/settings/cost" target="_blank" rel="noopener"
     style="font-size:13px;color:#3b82f6;font-weight:500;text-decoration:underline;display:inline-flex;align-items:center;gap:4px">
     View on Anthropic Console ↗</a>`;
+  const _VM_LABELS = { all:'All', real:'● Live only', paper:'◦ Paper only' };
+  const _toggleBar = `
+    <div class="card" style="margin-bottom:12px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span class="text-xs text-muted" style="font-weight:600">Performance view</span>
+      <div style="display:flex;gap:6px">
+        ${['all','real','paper'].map(m =>
+          `<button class="btn btn-sm" style="${m===vm?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="state.portfolioViewMode='${m}';renderPage()">${_VM_LABELS[m]}</button>`
+        ).join('')}
+      </div>
+      ${vm==='paper' ? `<span class="text-xs text-muted">Paper book — realised P&amp;L on cost basis. Tax, real cash &amp; NAV history are excluded.</span>`
+        : vm==='real' ? `<span class="text-xs text-muted">Live trades only — the real-money book.</span>`
+        : ''}
+    </div>`;
   return `
-    <!-- Equity curve placeholder — filled async by renderPerformancePage -->
+    ${_toggleBar}
+    <!-- Equity curve placeholder — filled async by renderPerformancePage. NAV is
+         real-only (gotcha #88), so it is hidden in Paper view. -->
     <div id="perf-equity-curve">
-      ${state.serverOk && state.portfolio.length
+      ${state.serverOk && state.portfolio.length && vm !== 'paper'
         ? `<div class="card" style="margin-bottom:14px;padding:14px 18px;min-height:56px;display:flex;align-items:center;gap:10px">
              <div class="loading-dots"><span></span><span></span><span></span></div>
              <span class="text-xs text-muted">Loading portfolio NAV history…</span>
            </div>`
-        : ''}
+        : vm === 'paper'
+          ? `<div class="card" style="margin-bottom:14px;padding:12px 16px;border-left:3px solid var(--accent-primary);background:var(--bg-secondary)">
+               <span class="text-xs text-muted">NAV equity curve tracks live trades only — paper performance is shown as realised &amp; unrealised P&amp;L below.</span>
+             </div>`
+          : ''}
     </div>
 
     ${ddAlertActive ? `
@@ -332,7 +364,7 @@ function renderPerformance() {
 
     <div class="metrics-grid">
       <div class="metric-card"><div class="metric-label">Win Rate</div><div class="metric-value ${winRate>=50?'up':'down'}">${fmt(winRate,0)}%</div><div class="metric-sub">${wins}W / ${losses}L</div></div>
-      <div class="metric-card"><div class="metric-label">Execution Rate</div><div class="metric-value">${fmt(execRate,0)}%</div><div class="metric-sub">${execRecIds.size} of ${state.recHistory.length} recs</div></div>
+      <div class="metric-card"><div class="metric-label">Execution Rate</div><div class="metric-value">${fmt(execRate,0)}%</div><div class="metric-sub">${execRecIds.size} of ${_recsInView.length} recs</div></div>
       <div class="metric-card"><div class="metric-label">Realised P&L</div><div class="metric-value ${realised>=0?'up':'down'}">${sign(realised)}$${fmt(Math.abs(realised))}</div></div>
       <div class="metric-card"><div class="metric-label">Fees Paid</div><div class="metric-value">$${fmt(totalFees)}</div></div>
       ${ph.length > 1 ? `
@@ -408,7 +440,7 @@ function renderPerformance() {
         ${(()=>{
           // Read-only reconciliation for display. State mutation is handled
           // separately by reconcileRecOutcomes() (called from journal close flows).
-          const reconciledHistory = computeReconciledRecHistory();
+          const reconciledHistory = computeReconciledRecHistory().filter(_recModeMatch);
           const execWon  = reconciledHistory.filter(r=>r.executed&&r.outcome==='win').length;
           const execLost = reconciledHistory.filter(r=>r.executed&&r.outcome==='loss').length;
           const execOpen = reconciledHistory.filter(r=>r.executed&&r.outcome==='open').length;

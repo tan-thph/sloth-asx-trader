@@ -2182,6 +2182,65 @@ class TestSprint5(unittest.TestCase):
         self.assertEqual(loaded["outcome"], "win")
         self.assertEqual(loaded["actualProfit"], 45.0)
 
+    def test_db_save_version_guard_rejects_stale_save(self):
+        """Optimistic-concurrency guard: a save whose baseVersion is behind the
+        server's current version must be rejected 409 (stale-tab clobber
+        prevention — 2026-07-03 disappearing-macro incident)."""
+        # Load to learn the current version.
+        d0 = json.loads(self.client.get("/api/db/load").data)
+        self.assertIn("stateVersion", d0)
+        v0 = d0["stateVersion"]
+
+        # A save carrying the current version succeeds and advances it.
+        r1 = self.client.post(
+            "/api/db/save",
+            data=json.dumps({"baseVersion": v0, "cash": 12345}),
+            content_type="application/json",
+        )
+        self.assertEqual(r1.status_code, 200)
+        v1 = json.loads(r1.data)["stateVersion"]
+        self.assertEqual(v1, v0 + 1)
+
+        # A second save still carrying the OLD version is stale → 409, and it
+        # must NOT have written (cash stays at the first save's value).
+        r2 = self.client.post(
+            "/api/db/save",
+            data=json.dumps({"baseVersion": v0, "cash": 99999}),
+            content_type="application/json",
+        )
+        self.assertEqual(r2.status_code, 409)
+        body = json.loads(r2.data)
+        self.assertTrue(body.get("conflict"))
+        self.assertEqual(body["stateVersion"], v1)
+        cash_now = json.loads(self.client.get("/api/db/load").data)["cash"]
+        self.assertEqual(cash_now, 12345, "stale save must not have written")
+
+        # After catching up to the current version, the save goes through.
+        r3 = self.client.post(
+            "/api/db/save",
+            data=json.dumps({"baseVersion": v1, "cash": 54321}),
+            content_type="application/json",
+        )
+        self.assertEqual(r3.status_code, 200)
+        self.assertEqual(json.loads(r3.data)["stateVersion"], v1 + 1)
+
+        # forceSave overrides the guard even with a stale version.
+        r4 = self.client.post(
+            "/api/db/save",
+            data=json.dumps({"baseVersion": v0, "forceSave": True, "cash": 777}),
+            content_type="application/json",
+        )
+        self.assertEqual(r4.status_code, 200)
+
+    def test_db_save_without_base_version_is_backward_compatible(self):
+        """A legacy client that omits baseVersion is never blocked by the guard."""
+        r = self.client.post(
+            "/api/db/save",
+            data=json.dumps({"cash": 4242}),
+            content_type="application/json",
+        )
+        self.assertEqual(r.status_code, 200)
+
     def test_journal_regime_badge_function(self):
         """journal.js must define _journalRegimeBadge helper."""
         with open(os.path.join(ROOT, "js/pages/journal.js"), encoding="utf-8") as f:

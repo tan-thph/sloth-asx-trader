@@ -65,7 +65,7 @@ function switchRecTab(tab) {
 function _onAnalysisModelSelect(val) {
   if (val === '__custom__') {
     const inp = document.getElementById('analysis-model-custom');
-    if (inp) { inp.style.display = ''; inp.value = state.settings.analysisModel && !['','claude-opus-4-8','claude-haiku-4-5-20251001'].includes(state.settings.analysisModel) ? state.settings.analysisModel : ''; inp.focus(); updateSetting('analysisModel', inp.value.trim()); }
+    if (inp) { inp.style.display = ''; inp.value = state.settings.analysisModel && !['','claude-opus-4-8','claude-haiku-4-5-20251001'].includes(state.settings.analysisModel) ? state.settings.analysisModel : ''; inp.focus(); }
   } else {
     updateSetting('analysisModel', val);
     const inp = document.getElementById('analysis-model-custom');
@@ -191,7 +191,8 @@ function renderRunAnalysisPanel() {
                 <input id="analysis-model-custom" type="text"
                   value="${_isCustom?escapeHTML(state.settings.analysisModel):''}"
                   placeholder="e.g. claude-sonnet-4-7"
-                  oninput="updateSetting('analysisModel',this.value.trim())"
+                  onblur="updateSetting('analysisModel',this.value.trim())"
+                  onkeydown="if(event.key==='Enter'){this.blur()}"
                   style="${_selStyle};width:200px;${_isCustom?'':'display:none'}"
                   title="Enter the exact model ID from Anthropic's docs"/>
               </div>`;

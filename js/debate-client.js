@@ -150,6 +150,7 @@ function preferredDebateModel(pulledModels = []) {
   if (userPref && pulledModels.includes(userPref)) return userPref;
 
   const PRIORITY = [
+    'qwen3.6:27b',                                    // preferred: most reliable critic
     'qwen3.5:9b', 'qwen3.5:4b',                      // qwen3.5 family (explicit)
     'qwen3:9b', 'qwen3:8b', 'qwen3:4b', 'qwen3:0.6b',
     'gemma4',                                         // gemma4:e4b etc.
@@ -384,8 +385,8 @@ async function triggerScrutiny(eventId, opts = {}) {
       const r = await fetch(`${API}/api/debate/scrutinize`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ id: eventId, model, timeout: opts.timeout || 60 }),
-        signal:  AbortSignal.timeout(130_000),
+        body:    JSON.stringify({ id: eventId, model, timeout: opts.timeout || 180 }),
+        signal:  AbortSignal.timeout(320_000), // > server cap (300s) for the slower 27B critic
       });
       if (r.ok) return await r.json();
       try { return await r.json(); } catch { return null; }

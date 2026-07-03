@@ -99,6 +99,15 @@ async function fetchDividends(tickers, force = false) {
 // ============================================================
 let _saveTimer = null;
 
+// Optimistic-concurrency guard. `_stateVersion` is the monotonic version the
+// server returned on our last load/save. We send it as `baseVersion` on every
+// save; if the server's version has moved on (another tab/device saved in
+// between), the save is rejected 409 and we reload instead of clobbering the
+// newer data (the 2026-07-03 stale-tab incident that wiped that morning's macro
+// + recs). `null` until the first load/save completes.
+let _stateVersion = null;
+let _conflictReloading = false;
+
 function scheduleSave() {
   // Debounce — save 500ms after last change (was 1500ms — shorter window = less data loss
   // if the tab is closed before the timer fires).
@@ -106,13 +115,30 @@ function scheduleSave() {
   _saveTimer = setTimeout(saveStateToDb, 500);
 }
 
+// On a 409 (another tab saved newer state), don't overwrite it — reload the
+// fresh state so this tab catches up. Guarded against re-entrancy so a burst of
+// queued saves can't trigger a reload storm.
+async function _handleSaveConflict() {
+  if (_conflictReloading) return;
+  _conflictReloading = true;
+  try {
+    if (typeof toast === 'function') {
+      toast('Newer data was saved in another tab — reloading to stay in sync', 'warning');
+    }
+    await loadStateFromDb();
+    if (typeof renderPage === 'function') renderPage();
+  } catch (e) { /* ignore — next interaction will retry */ }
+  finally { _conflictReloading = false; }
+}
+
 async function saveStateToDb() {
   if (!state.serverOk) return;
   try {
-    await fetch(`${API}/api/db/save`, {
+    const _resp = await fetch(`${API}/api/db/save`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
+        baseVersion: _stateVersion,
         cash: state.cash,
         paperCash: state.paperCash,
         portfolio: state.portfolio,
@@ -139,6 +165,17 @@ async function saveStateToDb() {
         termDeposits: state.termDeposits,
       })
     });
+    if (_resp.status === 409) {
+      // Stale save — another tab/device has newer data. Reload, don't clobber.
+      await _handleSaveConflict();
+      return;
+    }
+    if (_resp.ok) {
+      try {
+        const _d = await _resp.json();
+        if (typeof _d.stateVersion === 'number') _stateVersion = _d.stateVersion;
+      } catch (e) { /* body parse optional */ }
+    }
   } catch(e) { /* silent — don't interrupt UX */ }
 }
 
@@ -185,6 +222,9 @@ async function loadStateFromDb() {
     const r = await fetch(`${API}/api/db/load`);
     if (!r.ok) return false;
     const data = await r.json();
+    // Track the server's version even on an empty DB so the very first save
+    // carries a correct baseVersion (guards the fresh-install race too).
+    if (typeof data.stateVersion === 'number') _stateVersion = data.stateVersion;
     if (!data.hasData) return false;
 
     if (data.portfolio !== undefined)    state.portfolio    = _validArray(data.portfolio).map(_validHolding).filter(Boolean);

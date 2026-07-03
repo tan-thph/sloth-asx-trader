@@ -96,6 +96,21 @@ function _llTagCell(evId, currentTagStr, status, tagSource) {
   return noneBadge + _llTagButtons(evId, currentTagStr, tagSource);
 }
 
+// ── Recent Events: filter rows by win tag-status ─────────────────────────────
+// Rows carry data-wintag = pattern | none | untagged | na (non-win). Pure DOM
+// toggle — no re-fetch/re-render — so it survives the frequent scheduleSave()
+// re-render cycles as long as it's re-applied on demand.
+function _llFilterWinTags(mode) {
+  document.querySelectorAll('tr[data-wintag]').forEach(tr => {
+    const s = tr.getAttribute('data-wintag');
+    let show = true;
+    if (mode === 'tagged')        show = (s === 'pattern' || s === 'none');
+    else if (mode === 'untagged') show = (s === 'untagged');
+    // 'all' (default) shows every row, including non-win 'na' rows.
+    tr.style.display = show ? '' : 'none';
+  });
+}
+
 // ── Batch classify state — persists across page re-renders ───────────────────
 // renderLearningPage() calls _syncClassifyUI() after every re-render so the
 // progress bar survives scheduleSave() / refreshPrices() re-render cycles.
@@ -801,11 +816,20 @@ function _renderLearningContent(d, brier) {
   const TAG_STATUSES = _LL_TAG_STATUSES;
   const tagCell      = _llTagCell;
 
+  const _winEvents = events.filter(e => e.outcome_status === 'win');
+  const _winTagged = _winEvents.filter(e => (e.success_tags || '') !== '').length;
   const recentCard = `
     <div class="card section-gap">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:8px">
         <div class="card-title" style="margin:0">Recent Events (${events.length})</div>
-        <div style="display:flex;align-items:center;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          ${_winEvents.length ? `<span class="text-xs" title="Winning trades with a success tag (a pattern or a classified '✓ no pattern'). 🏆 gold = tagged, hollow = untagged.">🏆 Wins tagged: <strong>${_winTagged}/${_winEvents.length}</strong></span>
+          <select onchange="_llFilterWinTags(this.value)" title="Filter rows by win tag-status"
+            style="font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-secondary)">
+            <option value="all">Wins: all</option>
+            <option value="tagged">Wins: tagged only</option>
+            <option value="untagged">Wins: untagged only</option>
+          </select>` : ''}
           <span class="text-xs text-muted">Tag failures on closed trades · ✕ removes outliers from calibration</span>
           <button class="btn btn-sm" id="classify-all-btn"
             onclick="classifyAllPostmortems()"
@@ -856,18 +880,28 @@ function _renderLearningContent(d, brier) {
                          onmouseover="this.style.color='#15803d'" onmouseout="this.style.color='var(--text-muted)'"
                        >🛡<span style="font-size:8px;vertical-align:middle">?</span></button>`
                     : '';
-                // 🏆 success tags — show chips for wins; show Tag Win button when untagged
+                // 🏆 success tags — wins carry an explicit tag-status so you can tell
+                // at a glance which winners are already classified:
+                //   'pattern'  → success_tags chips (a standout pattern was found)
+                //   'none'     → muted "✓ no pattern" chip (classified, nothing notable)
+                //   'untagged' → no chip + hollow 🏆 button (not yet classified)
+                // 'none' and NULL used to render identically (both blank), so a
+                // classified-but-unremarkable win looked the same as one never tagged.
                 const successTags = (ev.success_tags || '').split(',').map(t=>t.trim()).filter(Boolean);
                 const WIN_TAG_COLORS = {
                   catalyst_capture: '#3b82f6', regime_aligned: '#8b5cf6',
                   confluence_entry: '#0891b2', disciplined_hold: '#059669',
                   good_sizing: '#d97706', none: '#6b7280',
                 };
-                const successTagsEl = ev.outcome_status === 'win'
-                  ? (successTags.length && successTags[0] !== 'none'
-                      ? successTags.map(t => `<span title="${t}" style="font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600;background:${(WIN_TAG_COLORS[t]||'#3b82f6')}22;color:${WIN_TAG_COLORS[t]||'#3b82f6'};margin-right:2px">${t.replace(/_/g,' ')}</span>`).join('')
-                      : '')
-                  : '';
+                const winTagState = ev.outcome_status !== 'win' ? 'na'
+                  : (successTags.length && successTags[0] !== 'none') ? 'pattern'
+                  : (ev.success_tags === 'none') ? 'none'
+                  : 'untagged';
+                const successTagsEl = winTagState === 'pattern'
+                  ? successTags.map(t => `<span title="${t}" style="font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600;background:${(WIN_TAG_COLORS[t]||'#3b82f6')}22;color:${WIN_TAG_COLORS[t]||'#3b82f6'};margin-right:2px">${t.replace(/_/g,' ')}</span>`).join('')
+                  : winTagState === 'none'
+                    ? `<span title="Classified — no standout success pattern found" style="font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600;background:#6b728022;color:#6b7280">✓ no pattern</span>`
+                    : '';
 
                 // 🔍 post-mortem — always show for loss/breakeven so re-runs are possible.
                 // Relabelled "Scrutinize" (current session) — same error_type tagging
@@ -974,7 +1008,7 @@ function _renderLearningContent(d, brier) {
                      onmouseout="this.style.background='none'"
                    >${icon}<span style="font-size:8px;display:block;line-height:1;text-align:center;color:var(--text-muted)">${label}</span></button>`;
 
-                return `<tr id="ll-row-${ev.id}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
+                return `<tr id="ll-row-${ev.id}" data-wintag="${winTagState}" style="border-bottom:1px solid var(--border);${isOpen ? 'opacity:0.6' : ''}">
                   <td data-label="Date" style="padding:3px 6px;color:var(--text-muted);white-space:nowrap">${(ev.timestamp||'').slice(0,10)}</td>
                   <td data-label="Ticker" style="padding:3px 6px;font-weight:600">${ev.ticker||'—'}</td>
                   <td data-label="Action" style="padding:3px 6px">${ev.recommendation||'—'}</td>
@@ -998,8 +1032,9 @@ function _renderLearningContent(d, brier) {
                     <div style="display:inline-flex;align-items:center;gap:1px">
                       ${_slot(26, ev.outcome_status === 'win'
                         ? _iconBtn(`tagwin-btn-${ev.id}`, `triggerTagWin(${ev.id})`,
-                            ev.success_tags ? 'Re-tag winning trade' : 'Tag win: identify why this trade succeeded',
-                            '&#127942;', 'Tag', ';color:var(--text-secondary)')
+                            winTagState !== 'untagged' ? 'Tagged — click to re-tag this winning trade' : 'Untagged win: identify why this trade succeeded',
+                            '&#127942;', winTagState !== 'untagged' ? 'Tagged' : 'Tag',
+                            winTagState !== 'untagged' ? ';color:#d97706' : ';color:var(--text-muted);opacity:0.65')
                         : (showPm
                             ? _iconBtn(`pm-btn-${ev.id}`, `triggerDebatePostmortem(${ev.id})`, pmTitle, '🔍', 'Scrut')
                             : ''))}

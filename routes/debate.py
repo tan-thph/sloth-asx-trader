@@ -2217,7 +2217,11 @@ def debate_skill():
 def debate_scrutinize():
     """
     Local-LLM (e.g. a 24B Ollama model) second opinion on an already-generated
-    Claude rec — a skeptical risk-manager critique, not a fresh bull/bear debate.
+    Claude rec — a balanced independent review that can land on agree / disagree /
+    uncertain, not a fresh bull/bear debate. Framed to reach the right call rather
+    than reflexively reject (the earlier "skeptical risk manager" framing drove a
+    100%-disagree rate that carried no discriminating signal — see
+    _compute_scrutiny_stats disagree_rate).
 
     Manually triggered per-rec via the 🔍 Scrutinize button on the rec card —
     mirrors the manual-only pattern already established for postmortem/skill
@@ -2239,8 +2243,10 @@ def debate_scrutinize():
     if not ev_id:
         return jsonify({"ok": False, "error": "id required"}), 400
 
-    model = data.get("model", "qwen3:9b")
-    tout  = min(int(data.get("timeout", 60)), 120)
+    model = data.get("model", "qwen3.6:27b")
+    # 27B-class local models are ~2-4× slower than a 9B — allow a longer wait.
+    # Scrutinize is a manual, one-at-a-time button press so latency is acceptable.
+    tout  = min(int(data.get("timeout", 180)), 300)
 
     with get_db() as conn:
         row = conn.execute(
@@ -2276,8 +2282,9 @@ def debate_scrutinize():
     )
 
     prompt = (
-        "You are a skeptical risk manager reviewing another analyst's ASX trade "
-        "recommendation before it is acted on.\n\n"
+        "You are an independent second reviewer giving a balanced verdict on another "
+        "analyst's ASX trade recommendation before it is acted on. Your job is to reach "
+        "the RIGHT call, not to find fault — a well-supported rec deserves 'agree'.\n\n"
         f"Recommendation: {summary}\n"
         + (f"Rationale: {row['rationale_summary']}\n" if row["rationale_summary"] else "")
         + (f"Thesis: {thesis}\n" if thesis else "")
@@ -2285,14 +2292,24 @@ def debate_scrutinize():
         + (f"{signals_str}\n" if signals_str else "")
         + (f"{macro_str}\n" if macro_str else "")
         + "\n"
-        "Critique this recommendation on its own terms — does the technical and "
-        "macro data actually support it? Flag any risk the rationale underweights. "
+        "Weigh the case on both sides:\n"
+        "- Does the technical AND fundamental/macro data, taken together, support the call? "
+        "Give the stated thesis and steelman fair weight — don't judge on one indicator alone.\n"
+        "- The 'regime' is a MARKET-WIDE label (whole ASX), NOT this stock's own trend. A stock "
+        "trending strongly (high ADX/RS) inside a sideways market is normal and does NOT contradict "
+        "the regime — do not treat that as a flaw.\n"
+        "- For large-cap / long-horizon holds, fundamentals and valuation outweigh short-term "
+        "technical noise (RSI/MACD/MA wobble); don't reject a sound thesis over a few days of price action.\n"
+        "- Only choose 'disagree' when there is a MATERIAL, SPECIFIC flaw that genuinely outweighs the "
+        "case — not merely a risk that already appears in the steelman. Use 'agree' when the data backs "
+        "the rec (minor caveats are fine), and 'uncertain' when the evidence is genuinely mixed.\n\n"
         "Reply with JSON only:\n"
         '{"verdict":"agree"|"disagree"|"uncertain",'
-        '"concerns":"1-2 sentences, specific to the numbers above",'
-        '"confidence_adj":-0.15}\n'
-        "confidence_adj is the adjustment (as a decimal, e.g. -0.15 for -15pp) you would "
-        "apply to the analyst's stated confidence. No markdown."
+        '"concerns":"1-2 sentences, specific to the numbers above (for agree, note the caveat you are still watching)",'
+        '"confidence_adj":0.0}\n'
+        "confidence_adj is how you would nudge the analyst's stated confidence (decimal, e.g. -0.10 for "
+        "-10pp): 0 when you agree, a small negative for minor concerns, a larger negative only for a "
+        "material flaw, and a small positive if the rec looks if anything under-confident. No markdown."
     )
 
     t0 = time.time()
