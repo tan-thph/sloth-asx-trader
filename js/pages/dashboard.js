@@ -314,14 +314,23 @@ function renderDashboard() {
     });
   }
 
+  // Paper/real view mode (gotcha #88) — same toggle as the Portfolio page,
+  // driving the SAME state.portfolioViewMode. The portfolio math helpers
+  // (portfolioValue/totalNetWorth/totalGain/totalCost/viewCash/mergedPortfolio)
+  // already narrow to the active mode, so the cards + holdings table below react
+  // to the toggle automatically.
+  const _vm = state.portfolioViewMode || 'all';
+  const _hasPaper = (state.portfolio || []).some(h => (h.mode||'paper') !== 'real')
+    || (Number(state.paperCash) || 0) > 0;
+
   const pv=portfolioValue(), nw=totalNetWorth(), gain=totalGain(), gainPct=(gain/totalCost())*100;
-  // Paper/real split (gotcha #88): the Dashboard has no view toggle, so the
-  // combined figures are annotated with the live/paper split whenever any paper
-  // value exists — otherwise seeding paperCash (~$100k simulated) would silently
-  // inflate "Net Worth" with fake money.
+  const _cash = viewCash();
+  // Live/paper split annotation on Net Worth — only meaningful in the combined
+  // 'all' view. Real = real portfolio + real cash; paper = paper holdings mkt
+  // value (no cash, gotcha #88).
   const _rnw = realNetWorth();
-  const _paperNw = nw - _rnw;
-  const _hasPaperNw = Math.abs(_paperNw) > 0.005;
+  const _paperPv = paperPortfolioValue();
+  const _hasPaperNw = _vm === 'all' && (_paperPv > 0.005);
   const pending=state.recommendations.filter(r=>r.status==='pending').length;
   const execRate=state.recHistory.length ? state.recHistory.filter(r=>r.executed).length/state.recHistory.length : 0;
   // ── Schedule: read from state.settings, not hardcoded ─────────────────────
@@ -359,22 +368,38 @@ function renderDashboard() {
     ${_buildOpsStrip()}
     ${!state.serverOk ? `<div class="info-banner">⚠ Backend server not running. Start it with: <code>python3 asx_server.py</code> — then click "Refresh Prices" for live yfinance data.</div>` : ''}
     ${renderCriticalAlertBanners()}
+    ${_hasPaper ? (()=>{
+      const _VM_LABELS = { all:'All', real:'● Live only', paper:'◦ Paper only' };
+      return `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
+        <span class="text-xs text-muted" style="margin-right:2px">Trade mode:</span>
+        ${['all','real','paper'].map(m => `
+          <button class="btn btn-sm" style="${m===_vm?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="state.portfolioViewMode='${m}';renderPage()">${_VM_LABELS[m]}</button>
+        `).join('')}
+        <span class="text-xs text-muted" style="align-self:center;margin-left:4px">Paper trades are simulated — excluded from CGT/EOFY, real cash &amp; real performance.</span>
+      </div>`;
+    })() : ''}
     <div class="metrics-grid">
       <div class="metric-card">
-        <div class="metric-label">Net Worth</div>
+        <div class="metric-label">Net Worth${_vm!=='all'?` <span class="text-xs text-muted">(${_vm==='real'?'live':'paper'})</span>`:''}</div>
         <div class="metric-value">$${fmt(nw)}</div>
-        <div class="metric-sub">${_hasPaperNw ? `● live $${fmt(_rnw)} · ◦ paper $${fmt(_paperNw)}` : 'Portfolio + Cash'}</div>
+        <div class="metric-sub">${_hasPaperNw ? `● live $${fmt(_rnw)} · ◦ paper $${fmt(_paperPv)}` : _vm==='paper' ? 'Paper holdings (no cash)' : 'Portfolio + Cash'}</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Portfolio Value</div>
         <div class="metric-value">$${fmt(pv)}</div>
         <div class="metric-sub ${gain>=0?'up':'down'}">${sign(gain)}$${fmt(Math.abs(gain))} (${sign(gainPct)}${fmt(Math.abs(gainPct))}%)</div>
       </div>
+      ${_vm==='paper' ? `
+      <div class="metric-card">
+        <div class="metric-label">Positions</div>
+        <div class="metric-value">${mergedPortfolio().length}</div>
+        <div class="metric-sub">Paper book — no cash concept</div>
+      </div>` : `
       <div class="metric-card">
         <div class="metric-label">Cash Available</div>
-        <div class="metric-value">$${fmt(state.cash)}</div>
-        <div class="metric-sub">${fmt((state.cash/nw)*100)}% of net worth · RBA ${state.rbaRate.toFixed(2)}%</div>
-      </div>
+        <div class="metric-value">$${fmt(_cash)}</div>
+        <div class="metric-sub">${fmt(nw>0?(_cash/nw)*100:0)}% of net worth · RBA ${state.rbaRate.toFixed(2)}%</div>
+      </div>`}
       <div class="metric-card">
         <div class="metric-label">Pending Recs</div>
         <div class="metric-value">${pending}</div>

@@ -95,6 +95,19 @@ async function runAnalysis() {
   // Proxy mode has no browser-side key — callClaude() routes via the backend.
   if(!key && !state.settings?.useBackendProxy){toast('Add API key in Settings','error');showPage('settings');return;}
   state.analysisRunning=true;
+  // Gate the analysis on the active trade-mode toggle (gotcha #88). mergedPortfolio()
+  // — the source of every ticker/holding sent to Claude below — already narrows to
+  // state.portfolioViewMode, so surface which book is being analysed so a 'paper' or
+  // 'all' view is never a silent surprise.
+  const _vm = state.portfolioViewMode || 'all';
+  const _hasPaper = (state.portfolio || []).some(h => (h.mode||'paper') !== 'real');
+  if (_hasPaper && _vm === 'all') {
+    toast('Analysing ALL holdings (real + paper). Switch to “Live only” on Recommendations to exclude paper.','info');
+  } else if (_vm === 'real') {
+    toast('Analysing your LIVE book only (paper positions excluded).','info');
+  } else if (_vm === 'paper') {
+    toast('Analysing your PAPER book only — recommendations apply to the simulated book.','info');
+  }
   toast('Running analysis — refreshing live prices first...','info');
 
   // ── Step 0: ALWAYS refresh portfolio prices before sending data to the AI ──

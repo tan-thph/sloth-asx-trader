@@ -84,7 +84,34 @@ function renderRunAnalysisPanel() {
 
       <!-- Portfolio tickers (display only) -->
       <div class="card">
-        <div class="card-title">Portfolio Tickers (always included)</div>
+        <div class="flex-between" style="margin-bottom:4px">
+          <div class="card-title" style="margin:0">Portfolio Tickers (always included)</div>
+          ${(()=>{
+            const _vm = state.portfolioViewMode || 'all';
+            const _hasPaper = (state.portfolio || []).some(h => (h.mode||'paper') !== 'real')
+              || (Number(state.paperCash) || 0) > 0;
+            if (!_hasPaper) return '';
+            const _VM_LABELS = { all:'All', real:'● Live only', paper:'◦ Paper only' };
+            // Re-renders just this panel so the ticker list + Analysis Summary update
+            // without leaving the tab. Drives the SAME state.portfolioViewMode as the
+            // Portfolio/Dashboard toggle.
+            return `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <span class="text-xs text-muted">Analyse book:</span>
+              ${['all','real','paper'].map(m => `
+                <button class="btn btn-sm" style="font-size:11px;padding:3px 8px;${m===_vm?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="state.portfolioViewMode='${m}';document.getElementById('rec-content').innerHTML=renderRunAnalysisPanel()">${_VM_LABELS[m]}</button>
+              `).join('')}
+            </div>`;
+          })()}
+        </div>
+        ${(()=>{
+          const _vm = state.portfolioViewMode || 'all';
+          const _msg = _vm === 'real'
+            ? '● Live only — paper positions are excluded from this analysis.'
+            : _vm === 'paper'
+            ? '◦ Paper only — real holdings are excluded; recommendations apply to the simulated book.'
+            : 'All holdings — real + paper positions are BOTH sent to the AI. Switch to “● Live only” to analyse just your real book.';
+          return `<div class="text-xs" style="margin-bottom:8px;color:${_vm==='all'?'#b45309':'var(--text-muted)'}">${_msg}</div>`;
+        })()}
         <div class="flex-row" style="flex-wrap:wrap;gap:6px;margin-top:4px">
           ${portfolioTickers.length ? portfolioTickers.map(t=>`
             <span style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;background:var(--bg-secondary);border:0.5px solid var(--border-medium);border-radius:6px;font-size:12px;font-weight:600">

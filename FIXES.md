@@ -1,312 +1,138 @@
-# fixes.md — Trade Journal / Account-Type / Parcel Matching Audit
+# fixes.md — Paper/Real Firewall + Learning Loop Audit
 
-Audit date: 2026-06-25. Scope: Trade Journal matching, account type changes (personal/trading/super), and BUY/SELL/TRIM record matching. Findings are ordered by severity. File:line references are accurate as of this commit (`b0bf985`).
+Audit date: 2026-07-03. Scope: (1) Live/Paper trade separation (gotcha #88 firewall), (2) Learning Loop pipeline. Findings verified against source AND the live `asx_trader.db` (read-only queries), not just inferred. Baseline at audit time: `python test_app.py` 865 tests green, `npm run test:js` 183 tests green — **none of the issues below are caught by the existing suites.**
 
-**Status: all 9 findings fixed and verified (isolated test per fix + full suite green) — see CLAUDE.md gotcha #81 for the consolidated summary.** Finding #10 confirmed as intentional dead code, no fix needed.
+Prior audit (2026-06-25, Trade Journal/account-type/parcel matching — all 9 findings fixed) is preserved in git history at `c81ebe9`.
 
----
-
-## 1. [CRITICAL] ✅ FIXED — `_findParcelJournalRow()` can match a disposal-slice row instead of the parcel's BUY row
-
-**Files:** `js/portfolio-helpers.js` (`_findParcelJournalRow`, `_splitParcelJournalRow`, `_syncParcelJournalRow`, `buildDisposalJournalEntries`)
-
-**Problem:** `_findParcelJournalRow(parcelId)` is supposed to find "the one journal row representing this parcel" via `.find(j => j.parcelId === parcelId)`. But two different kinds of rows can carry the same `parcelId`:
-1. The original BUY/TOP_UP (or RECLASSIFY) row created when the parcel was opened.
-2. Disposal-slice rows created by `buildDisposalJournalEntries()` for every SELL/TRIM that partially consumed that parcel (per gotcha #66 — these also carry `parcelId: d.parcelId`).
-
-Both the original BUY row and any later disposal rows are inserted via `unshift()` (prepend), so a disposal row created **after** the BUY row ends up **earlier** in `state.tradeJournal`. `.find()` scans front-to-back and therefore returns the disposal row, not the original BUY row, once a parcel has been partially trimmed.
-
-**Impact:** `setParcelAccount()` (account reassignment) and `splitParcel()` both call this lookup to mutate "the parcel's journal row" in place. On a parcel that has been partially trimmed:
-- `setParcelAccount()` flips the **disposal/SELL row's** `account`/`action` to `RECLASSIFY` instead of the still-open BUY row's — corrupting a closed, already-realised SELL record's account/action fields, while the actual open lot's journal row keeps its stale account.
-- `splitParcel()` would similarly mutate the wrong row's `qty`/`action`.
-
-**Repro:**
-1. Buy 100 CBA → parcel P#1, journal row A (`BUY`, `parcelId:1`, `status:'open'`).
-2. Sell 40 CBA → `buildDisposalJournalEntries` creates row B (`SELL`, `parcelId:1`, `status:'closed'`), unshifted to the front of the array; row A's status is patched to `'trimmed'`.
-3. Reassign the remaining 60 shares (still parcel P#1) to `trading` via the Portfolio lots UI → `setParcelAccount(1, 'trading')` → `_findParcelJournalRow(1)` returns row B (earlier in the array) and corrupts it to `account:'trading', action:'RECLASSIFY'`. Row A — the one that should have moved — is untouched.
-
-**Fix:** Restrict `_findParcelJournalRow()` to rows that represent the *open lot itself*, i.e. add a filter excluding disposal actions: match on `parcelId` AND `action !== 'SELL' && action !== 'TRIM'` (equivalent to the `BUY|TOP_UP|RECLASSIFY` filter that `buildDisposalJournalEntries()`'s own internal `buyRow` lookup already correctly uses). Ideally extract one shared helper so the two lookups (the correct one and the buggy one) can't diverge again.
+Each entry has a `Status` field. Flip to `Resolved` (with a one-line note + commit ref) once fixed.
 
 ---
 
-## 2. [HIGH] ✅ FIXED — `markExecuted()`'s parent-BUY reconciliation checks the wrong account's remaining shares
+## 1. [CRITICAL] Holding `mode` is not persisted — the real book demotes to paper on every reload
 
-**File:** `js/pages/recommendations.js` (around line 1667)
+**Status:** Resolved — `portfolio.mode` column + `UNIQUE(ticker,account,mode)` migration (`db.py`), `db_save`/`db_load` plumbing (`routes/portfolio.py`), `_validHolding` preserves mode (`js/api.js`). Round-trip tests both sides.
+**Files:** `routes/portfolio.py` (`db_save` ~:101-106, `db_load` ~:219-228), `db.py` (portfolio schema, ~:39 + migration ~:400-425), `js/api.js` (`_validHolding()` :194-207)
 
-```js
-const remaining = getPortfolioHolding(rec.ticker);
-const positionClosed = !remaining || (remaining.shares || 0) <= 0;
+**Problem:** The paper/real firewall keys everything off `holding.mode`, but the `portfolio` table has no `mode` column:
+
+- `db_save()` INSERT lists `(ticker, shares, avg_price, current_price, sector, account)` — `mode` is silently dropped on every save.
+- `db_load()` never returns a `mode` field.
+- Even if it did, the client-side sanitiser `_validHolding()` (api.js) rebuilds each holding from an explicit field list that **omits `mode`** — so mode is stripped a second time on load.
+- Nothing at init time rebuilds holding modes from parcels (init.js only runs `reconcileJournalParcels()`, which is journal→parcels, not parcels→portfolio).
+
+Per the `isRealTrade()` invariant, missing mode ⇒ paper. So **every save→reload cycle reclassifies every real holding as paper.**
+
+**Observed impact (live DB, confirmed):** The persisted NAV series collapsed today:
+
+```
+02-07-2026  netWorth=56,062  portfolioValue=47,197  cash=8,865
+03-07-2026  netWorth= 8,865  portfolioValue=     0  cash=8,865   ← real PV read as $0
 ```
 
-**Problem:** `getPortfolioHolding(ticker)` with no `account` argument returns the *first* `state.portfolio` row matching the ticker, regardless of account. If a ticker is held in two accounts (e.g. `personal` and `trading`), fully selling the position in **one** account can produce a false negative: the *other* account still holds shares, so `positionClosed` evaluates `false` even though the account actually being sold is fully closed.
+`recordPortfolioSnapshot()` uses `realPortfolioValue()` (filters `isRealTrade(h)`), found zero "real" holdings, and recorded net worth = cash only. This is almost certainly what prompted today's DB restore (`asx_trader.db.pre-restore-20260703-154303`). The restore does not fix anything — the next save/reload reproduces it.
 
-**Impact:** The parent BUY/TOP_UP learning events for the now-closed position are never reconciled — `outcome` stays `'open'` forever, polluting calibration stats and the Learning page's win-rate/decay calculations indefinitely. This is a distinct bug from gotcha #67 in CLAUDE.md (which only fixed *which account a SELL/TRIM debits shares from* — it never touched this downstream "did this fully close the position" check).
+**Secondary impact:** real SELL/TRIM execution breaks. `markExecuted()` resolves the holding via `getPortfolioHolding(ticker, acct, 'real')`; with all holdings demoted to paper the lookup fails → `_executionFailed` → "no position found — trade not executed".
 
-**Repro:** Hold CBA in both `personal` (10 sh) and `trading` (5 sh). Fully sell the 5 `trading` shares via a SELL rec. `getPortfolioHolding('CBA')` returns the `personal` row (10 shares, non-zero) → `positionClosed=false` → the `trading` position's parent BUY/TOP_UP learning event never gets graded.
+**Fix:**
+1. `db.py`: idempotent migration adding `mode TEXT NOT NULL DEFAULT 'paper'` to `portfolio`, and recreate the table with `UNIQUE(ticker, account, mode)` (see finding #2). Backfill policy for existing rows is finding #3.
+2. `routes/portfolio.py db_save()`: add `mode` to the INSERT (`h.get("mode") or "paper"`).
+3. `routes/portfolio.py db_load()`: return `"mode": (row["mode"] if "mode" in row.keys() else None) or "paper"` (same pattern as trade_journal).
+4. `js/api.js _validHolding()`: preserve `mode: h.mode === 'real' ? 'real' : 'paper'`.
+5. Add a round-trip regression test on both sides (test_app.py save→load keeps mode; vitest `_validHolding` keeps mode).
 
-**Fix:** Pass the resolved `sellAccount` into the call: `getPortfolioHolding(rec.ticker, sellAccount)`.
-
----
-
-## 3. [HIGH] ✅ FIXED — Broker-CSV SELL import bypasses the per-parcel journal model entirely
-
-**File:** `js/pages/portfolio.js` (`_applyImportedSells`, lines ~849-899)
-
-**Problem:** CLAUDE.md gotcha #66 documents that every SELL/TRIM must create one journal row per parcel matched (via `buildDisposalJournalEntries()`) and patch the original BUY/TOP_UP row's `status` to `closed`/`trimmed`. The broker-CSV "Apply SELL imports" handler does none of this:
-- Calls `matchSaleAgainstParcels()` directly (mutates parcel `remainingQty`, pushes to `cgtDisposals`) but **never calls `buildDisposalJournalEntries()`**.
-- Pushes exactly **one aggregate journal row** for the whole sale, using `disposals[0]?.parcelCostPerShare` as the row's `entryPrice` — when the sale spans multiple parcels bought at different prices, the displayed entry price reflects only the *first* parcel, even though `pnl` is (correctly) summed across all of them.
-- Never sets `parcelId`/`parcel` on the new row and never patches the original BUY rows' `status`. Every parcel consumed by a CSV-imported SELL stays `status:'open'` forever, even though its `remainingQty` is now 0.
-
-**Impact:** The Journal page's "Open positions" filter keeps showing fully-sold BUY rows as open indefinitely after a CSV-imported sale. The displayed entry price for multi-parcel CSV disposals is wrong/misleading. Any future code that trusts `status` to reflect whether a parcel is still open (rather than re-deriving from `remainingQty`) will disagree with reality for every CSV-imported sale.
-
-**Repro:** Import a CommSec/SelfWealth CSV with a SELL row for a ticker that has 2 open parcels bought at different prices. Apply the SELL. Check the Journal page — the original 2 BUY rows still show `status:'open'`, and the new aggregate SELL row's Entry column shows only the first parcel's cost.
-
-**Fix:** Route `_applyImportedSells()` through `buildDisposalJournalEntries()`, exactly as `markExecuted()` and `addManualTrade()` already do, instead of hand-rolling a single aggregate row.
+⚠️ Note the backfill interaction: the DEFAULT must be `'paper'` for *inserts*, but blindly stamping existing rows `'paper'` cements finding #3. Do the migration and the backfill (finding #3) in the same release.
 
 ---
 
-## 4. [MEDIUM-HIGH] ✅ FIXED — `addHolding()` always creates the paired CGT parcel as `personal`, regardless of the chosen account
+## 2. [HIGH] `db_save` portfolio INSERT violates `UNIQUE(ticker, account)` once a ticker is held in both modes → every subsequent save silently fails
 
-**File:** `js/pages/portfolio.js` (`addHolding`, lines ~939-955)
+**Status:** Resolved — `UNIQUE(ticker, account, mode)` (folded into #1's table rebuild) lets a real+paper lot coexist; `saveStateToDb()` now surfaces persistent (≥2 consecutive) non-409 save failures via toast (`js/api.js`, IMPROVEMENTS #5).
+**Files:** `db.py` (portfolio migration `UNIQUE(ticker, account)` :416), `routes/portfolio.py` (`db_save`), `js/api.js` (`saveStateToDb` catch-all)
 
-```js
-const account = ['personal','super','trading'].includes(acctRaw) ? acctRaw : 'personal';
-...
-state.portfolio.push({ ticker: symbol, shares, avgPrice: avg, currentPrice: avg, sector, account });
-...
-addParcel(symbol, dateRaw, shares, avg, fees, sector);   // account argument omitted
-```
+**Problem:** The client deliberately keeps a real and a paper lot of the same ticker+account as **two separate `state.portfolio` rows** (`applyBuyToPortfolio` keys by ticker+account+mode; `mergedPortfolio` keys the same way). But the table's `UNIQUE(ticker, account)` constraint only allows one. `db_save()` does DELETE+INSERT inside one transaction; the second row raises `IntegrityError` → the whole save 500s → the transaction rolls back → **and `saveStateToDb()`'s `catch(e) { /* silent */ }` swallows it.** From the moment a user paper-trades a ticker they also hold for real, *no state persists at all* — every trade/journal/settings change since is lost on next reload, with zero user-visible signal.
 
-**Problem:** The manual "Add Holding" flow correctly tags the new `state.portfolio` row with the user-chosen account, but the paired `addParcel()` call omits the `account` parameter — so the parcel itself always defaults to `personal`. The portfolio row and its own CGT parcel disagree about account from the moment of creation.
+**Repro:** Hold CBA (real). Execute any paper BUY of CBA in the same account. Watch the next `POST /api/db/save` return 500; close the tab; reload — the paper trade (and everything else changed since) is gone.
 
-**Impact:** `getParcelsForTicker(ticker, method, 'trading')` (or `'super'`) will find zero parcels for a holding added under that account, since the underlying parcel is tagged `personal`. Selling the holding through the non-personal account flow either hits the "no open parcels" fallback (see Finding 6 below — wrong cost basis) or fails to find a matching open lot at all.
-
-**Repro:** Add Holding → choose account `trading`. Portfolio row shows `account:'trading'`; `state.cgtParcels` shows the new parcel as `account:'personal'`.
-
-**Fix:** Pass `account` through: `addParcel(symbol, dateRaw, shares, avg, fees, sector, account)`.
+**Fix:** Fold into finding #1's table recreation: `UNIQUE(ticker, account, mode)`. Separately, `saveStateToDb()` should surface non-409 failures (one-shot toast "Save failed — changes are not being persisted") instead of unconditionally swallowing; silent persistent save failure is the worst failure mode this app can have.
 
 ---
 
-## 5. [MEDIUM-HIGH] ✅ FIXED — `reconcileJournalParcels()` drops the journal row's `account` when creating a missing parcel
+## 3. [CRITICAL — data, not code] No migration for pre-firewall records — the user's entire real history is now invisible to every real-only surface
 
-**File:** `js/reconcile.js` (around line 26)
+**Status:** Resolved (tool shipped; user must run it once) — `POST /api/portfolio/backfill-modes` (dry-run first) marks all holdings/journal/parcels/disposals/recs/learning-events real, preserving the 2 explicitly-paper parcels + anything linked to them. UI: Settings → Data maintenance → "Reclassify legacy records as real…". Bumps `_state_version` + reloads state so the migration can't be clobbered back to paper.
+**Files:** data in `asx_trader.db`; migration touchpoints in `db.py`, plus a one-time UI/endpoint
 
-```js
-addParcel(t.ticker, t.date || todayStr(), t.qty, t.entryPrice, t.fees || 0, t.sector || 'Other');
-```
+**Problem:** The firewall ships with "missing mode ⇒ paper", which is the correct fail-safe **for new records**, but nothing migrated the existing book. Live DB today:
 
-**Problem:** `addParcel`'s signature accepts a trailing `account` argument, but the "⟳ Reconcile" button's call site omits it — every parcel created during reconciliation defaults to `personal`, even when the journal row being reconciled says `account: 'trading'` or `'super'`. The "existing parcel" match a few lines above also doesn't check `account`, so it can silently re-link to a parcel that actually belongs to a *different* account but happens to share ticker/date/qty/cost (plausible when two accounts buy the same stock on the same day).
+- `portfolio`: 21 holdings, all mode-less ⇒ all paper (BHP, CBA, WOW, MQG… — plainly the user's real positions).
+- `trade_journal`: all 71 rows now literally stamped `mode='paper'` — the server default (`t.get("mode") or "paper"`) **rewrote** legacy rows on the first post-feature save, so "legacy real" and "deliberately paper" are no longer distinguishable from the data alone.
+- `cgtParcels` blob: 49 of 51 parcels mode-less ⇒ paper.
+- `ai_learning_events.trade_mode`: all 41 = 'paper'.
 
-**Impact:** After reconciliation, a parcel's `account` field can permanently disagree with the journal row that "owns" it. Any later SELL against the correct (non-personal) account for that ticker may find "no open parcels" and fall through to a cost-basis fallback that's wrong (see Finding 6), or a `personal`-account sell could consume a parcel that should have been ring-fenced to `trading`/`super`.
+**Impact:** Every real-only surface is empty or wrong: **EOFY tax pack (FY25-26 just closed — it would export zero disposals)**, CGT liability summary, NAV history (finding #1's collapse), Performance real view, `real_vs_paper` learning stats (n_real=0). The firewall's stated guarantee ("paper can never leak into tax records") is upheld, but the inverse — real records leaking *out* of tax records — happened wholesale.
 
-**Fix:** Pass `t.account` through to `addParcel(...)`; add an `account` check to the existing-parcel match.
-
----
-
-## 6. [LOW-MEDIUM] ✅ FIXED — `matchSaleAgainstParcels()`'s no-open-parcel fallback picks cost basis from the wrong account
-
-**File:** `js/portfolio-helpers.js` (`matchSaleAgainstParcels`, around line 537-540)
-
-```js
-if (remaining > 0) {
-  const holding = getPortfolioHolding(ticker);   // not scoped by account
-  const costPerShare = holding ? holding.avgPrice : salePrice;
-  ...
-```
-
-**Problem:** When a sale's quantity exceeds what the account-scoped open parcels can cover (the fallback path intended for legacy/pre-app positions with no parcel history), the cost basis defaults to `getPortfolioHolding(ticker)` — unscoped by account — even though `account` is already an available parameter in this function's signature.
-
-**Impact:** If the same ticker is also held in a different account, this fallback can silently borrow that *other* account's average cost as the CGT cost basis, producing an incorrect `grossGain`/`netGain` for the disposal record. Compounds Findings 4 and 5, since both can leave a parcel tagged with the wrong account, making this fallback path more likely to trigger.
-
-**Fix:** Thread `account` into this fallback's lookup: `getPortfolioHolding(ticker, account)`.
+**Fix:** One-time guided migration, user-confirmed (cannot be inferred from data since journal modes were overwritten):
+1. Backend endpoint or script: `mark all portfolio holdings / parcels / journal rows / disposals / rec_history / learning events created before <cutoff date> as real`, with a dry-run listing.
+2. Sensible default cutoff: the date the paper feature shipped (first row with an explicit deliberate 'paper' choice — the 2 paper parcels give the boundary).
+3. Re-record today's NAV snapshot after migration (see finding #6).
+4. Going forward the `askTradeMode()` gatekeeper keeps modes explicit, so this is genuinely one-time.
 
 ---
 
-## 7. [MEDIUM] ✅ FIXED — `removeHolding()` orphans CGT parcels and journal rows, and the holding can silently resurrect
+## 4. [MEDIUM] HOLD recommendations are never logged — the entire HOLD-outcome feature is structurally dead
 
-**File:** `js/pages/portfolio.js` (`removeHolding`, lines ~993-996)
+**Status:** Resolved — `runPortfolioAnalysis()` now concatenates the stripped HOLDs back into the `logRecsToLearningLoop([...cappedDedupedRecs, ..._holdRecs], …)` call (`js/analysis.js`), so HOLDs reach `ai_learning_events` as `was_executed=0`. The logger already tolerates their missing target/stop/qty.
+**Files:** `js/analysis.js` (:1412 HOLD filter, :1663 `logRecsToLearningLoop(cappedDedupedRecs, …)`), `routes/learning.py` (`_resolve_hold_outcomes` :2726)
 
-```js
-function removeHolding(i) {
-  if(!confirm(`Remove ${state.portfolio[i].ticker}?`)) return;
-  state.portfolio.splice(i,1); scheduleSave(); renderPage();
-}
-```
+**Problem:** `runPortfolioAnalysis()` strips HOLD recs at line 1412 (`filteredRecs = recs.filter(r => … !== 'HOLD')`) and every downstream set (`conflictFreeRecs` → `cappedDedupedRecs`) derives from it — including the one passed to `logRecsToLearningLoop()`. So no HOLD event has ever reached `ai_learning_events` (confirmed live: recommendation distribution is BUY 3 / TOP_UP 6 / SELL 13 / TRIM 19 — zero HOLD). Meanwhile `_resolve_hold_outcomes()` selects `WHERE recommendation = 'HOLD'` — permanently zero rows. The `hold_outcomes` stats block, the `virtual_hold_miss/virtual_hold_correct` resolution, and the `⚠HOLD_TOO_PASSIVE` calibration nudge (CLAUDE.md gotcha #85, documented as shipped) can never fire. The model is never graded on its passivity.
 
-**Problem:** This only removes the `state.portfolio` row. It does not touch `state.cgtParcels` (open parcels for that ticker/account remain with `remainingQty > 0`) or `state.tradeJournal`. Any later call to `_recomputeHoldingFromParcels(ticker, account)` — triggered by `setParcelAccount()` for that ticker+account, including unrelated reassignments of other parcels of the same ticker — sums the still-open parcels and re-pushes a new `state.portfolio` row, resurrecting a holding the user explicitly removed.
-
-**Impact:** Data inconsistency between the portfolio view and underlying parcel/journal data; a holding the user thought was deleted can reappear after an unrelated account-reassignment action.
-
-**Repro:** Hold BHP with 2 open parcels. Click "✕ Remove" on the Portfolio page — the row disappears. Later, reassign one of BHP's parcels to another account and back — `_recomputeHoldingFromParcels` recreates the BHP row from the still-existing parcels.
-
-**Fix:** Either block removal while open parcels exist (force the user to sell/transfer first), or explicitly clear the matching `cgtParcels` (and decide how to handle their journal rows) when a holding is force-removed.
+**Fix:** In `runPortfolioAnalysis()`, pass the *pre-HOLD-filter* rec list (or `filteredRecs` plus the dropped HOLDs) to `logRecsToLearningLoop()`, logging HOLDs as `was_executed=0` events. Keep the UI/pending-recs filtering exactly as is. One wrinkle: the same-day-conflict and dedup logic runs after the HOLD filter — simplest correct form is `logRecsToLearningLoop([...cappedDedupedRecs, ...recs.filter(r => r.action?.toUpperCase() === 'HOLD')], …)`.
 
 ---
 
-## 8. [MEDIUM] ✅ FIXED — `removeJournalTrade()` deletes RECLASSIFY rows even though `rollbackTradeJournalEntry()` silently no-ops for them
+## 5. [MEDIUM] Multi-account tickers never reconcile parent BUY/TOP_UP learning events
 
-**Files:** `js/portfolio-helpers.js` (`rollbackTradeJournalEntry`, lines ~710-772); `js/pages/journal.js` (`removeJournalTrade`, lines ~617-625)
+**Status:** Open
+**File:** `js/pages/recommendations.js` (`markExecuted`, `if (positionClosed && _distinctAccts.length <= 1)` ~:1992)
 
-**Problem:** `rollbackTradeJournalEntry(t)` only has branches for `action==='BUY'` and `action==='SELL'`. A row with `action:'RECLASSIFY'` (created by `splitParcel()`/`setParcelAccount()` per gotcha #79) matches neither branch and is a documented no-op for rollback purposes. But `removeJournalTrade()` calls `rollbackTradeJournalEntry(t)` and then unconditionally splices the row out of `state.tradeJournal` regardless of whether the rollback did anything.
+**Problem:** The parent-event reconciliation block (grades all open BUY/TOP_UP learning events when a position fully closes) is gated on `_distinctAccts.length <= 1`. For any ticker held in two accounts, fully closing one account's position skips reconciliation entirely — the parent events stay `outcome='open'` forever, exactly the calibration-pollution failure the 2026-06-25 audit's finding #2 fixed for the account-scoping half. The `<= 1` gate was presumably added as a conservative guard because recHistory parents carry no account marker, but the result is a permanent blind spot instead of an occasional misattribution.
 
-**Impact:** Clicking "✕ Remove" on an `open`-status RECLASSIFY row (representing a still-held lot) deletes the only journal row for that parcel, without reversing any portfolio/parcel state and without warning the user that nothing was actually reversed. The underlying parcel becomes "journal-less" until the next account move recreates a row via `_syncParcelJournalRow`'s fallback insert path.
+**Repro:** Hold WDS in `trading` and `personal`. Fully SELL the `trading` position via a rec. The original `trading` BUY's learning event is never graded.
 
-**Fix:** Give `rollbackTradeJournalEntry` an explicit `RECLASSIFY` branch (would need a stored "previous account" to revert to), or have `removeJournalTrade()` refuse/no-op with a clear toast for `RECLASSIFY` rows — the same way it already deliberately refuses for `'trimmed'` BUY rows.
-
----
-
-## 9. [LOW] ✅ FIXED — Rec-card preview avg-cost/qty is unscoped by account (cosmetic only)
-
-**File:** `js/pages/recommendations.js` (around line 363-365)
-
-```js
-const holding   = isReducing ? getPortfolioHolding(r.ticker) : null;
-const avgCost   = holding ? holding.avgPrice : null;
-const heldQty   = holding ? holding.shares : 0;
-```
-
-**Problem:** Purely a rendering concern for the pending-rec card's "avg cost"/"held qty" preview. When the ticker is held in 2+ accounts, the preview shows whichever account's row happens to be first in `state.portfolio`, which may not be the account the user is about to execute against. Not state-corrupting — the actual execution path in `markExecuted()` resolves the account correctly via the picker — but the preview numbers shown *before* execution can mislead.
-
-**Fix:** If only one account holds the ticker, scope to it; if multiple, either show a clearly-labelled aggregate or defer the number until the account picker selection is known.
+**Fix:** Journal rows *do* carry `account` — resolve parents via their `journalId`/executed journal rows scoped to `sellAccount` instead of gating the whole block off. Interim cheaper fix: keep the gate but log a visible warning + surface these in `/api/learning/untagged`-style hygiene so they aren't silently open forever.
 
 ---
 
-## 10. [Informational] Dead `status==='reclass'` code path confirms the documented model
+## 6. [LOW] Corrupt 03-07-2026 NAV snapshot needs repair; snapshots have no plausibility guard
 
-**File:** `js/pages/journal.js` (around line 282)
+**Status:** Resolved (guard) — `recordPortfolioSnapshot()` now skips + `console.warn`s when `realPortfolioValue()===0` while open real parcels exist (`js/prices.js`). The poisoned 03-07 point self-heals via same-day overwrite once the user runs the #3 migration + refreshes prices (still same date).
+**Files:** data (`blob_store.portfolioHistory`), `js/prices.js` (`recordPortfolioSnapshot` :214)
 
-The status badge ternary still checks for a `'reclass'` status value that, per CLAUDE.md gotchas #77/#79, no longer exists (status stays `open`/`trimmed`/`closed`; only `action` flips to `RECLASSIFY`). This is harmless dead code retained as a fallback for any pre-migration legacy rows — not a functional bug. Flagged only because this audit cross-checked code against CLAUDE.md's documented behavior, and this is a case where the documentation's claim is accurate.
+**Problem:** Finding #1 already wrote a poisoned snapshot (`03-07-2026 nw=8,865 pv=0`) into the persisted 37-point NAV series. Same-day overwrite will *not* heal it after the mode fix unless a snapshot is re-recorded on the same date string; any drawdown-alert or performance math spanning that date sees a fake −84%/+540% swing. There is also no guard against recording a snapshot whose real PV is $0 while open real parcels exist.
 
----
-
-## Summary table
-
-| # | Title | File:line | Severity |
-|---|---|---|---|
-| 1 | `_findParcelJournalRow` can match a disposal row instead of the parcel's BUY row | `portfolio-helpers.js` (`_findParcelJournalRow`/`_splitParcelJournalRow`/`_syncParcelJournalRow`) | **Critical** |
-| 2 | `markExecuted` parent-BUY reconciliation checks wrong account's remaining shares | `recommendations.js:~1667` | High |
-| 3 | CSV SELL import bypasses the per-parcel journal model entirely | `portfolio.js` (`_applyImportedSells`, ~849-899) | High |
-| 4 | `addHolding` parcel always defaults to `personal` regardless of chosen account | `portfolio.js:~955` | Medium-High |
-| 5 | `reconcileJournalParcels` drops `account` when creating missing parcels | `reconcile.js:~26` | Medium-High |
-| 6 | `matchSaleAgainstParcels` fallback cost-basis ignores account | `portfolio-helpers.js:~539` | Low-Medium |
-| 7 | `removeHolding` orphans parcels/journal rows; holding can resurrect | `portfolio.js:~993-996` | Medium |
-| 8 | `removeJournalTrade` deletes RECLASSIFY rows even though rollback no-ops | `portfolio-helpers.js` (`rollbackTradeJournalEntry`) + `journal.js:~617` | Medium |
-| 9 | Rec-card preview avg cost/qty unscoped by account | `recommendations.js:~363` | Low (cosmetic) |
-| 10 | Dead `status==='reclass'` code path | `journal.js:~282` | Informational |
-
-**Common root cause across most findings:** account-scoping was added incrementally (gotchas #66–#80) to the *primary* execution paths (`markExecuted`, `setParcelAccount`, `splitParcel`), but several **secondary/legacy paths** — CSV import, manual Add Holding, the Reconcile button, and the no-parcel fallback inside `matchSaleAgainstParcels` — were never updated to thread `account` through, and one *primary* path (`_findParcelJournalRow`) has a latent ordering bug from the `unshift()` convention used elsewhere. Recommend a follow-up pass that (a) makes `account` a required, non-optional parameter everywhere parcels are created or queried so a missing argument is a loud error rather than a silent `personal` default, and (b) adds a single shared "find the open-lot journal row for this parcel" helper used by every reassignment/split code path.
-
-No code was changed as part of this audit.
-
----
----
-
-# fixes.md — App-wide financial / record-keeping audit (round 2)
-
-Audit date: 2026-06-26. Scope: whole-app sweep for bookkeeping mismatches and logic errors, focused on the money paths — parcel/CGT accounting, cash ledger, P&L, and journal sync. Findings are ordered by severity. File:line references accurate as of working tree on branch `main` (uncommitted changes present in `js/analysis.js`). **Status: NOT yet fixed — reported only.** Numbering continues from the round-1 audit above (R2-1, R2-2, … to avoid collision).
+**Fix:** (a) After findings #1/#3 land, force-re-record today's snapshot (the function already overwrites same-day). If the fix lands after date rollover, patch the bad point directly. (b) Add a cheap guard in `recordPortfolioSnapshot()`: if `realPortfolioValue() === 0` while `state.cgtParcels` contains open real parcels, skip the snapshot and `console.warn` — a $0 real book with real lots open is always an upstream data bug, never a market outcome.
 
 ---
 
-## R2-1. [HIGH — tax correctness] CGT 50% discount eligibility is off by one day (`>= 365` should be `> 365`)
+## 7. [LOW] `quickSellFromAlert()` / critical-alert P&L use mode- and account-blind holding lookups
 
-**Files / lines (4 sites, all consistent):**
-- `js/portfolio-helpers.js:519` — `const eligible50 = held >= 365;` (the authoritative disposal-recording path, `matchSaleAgainstParcels`)
-- `js/portfolio-helpers.js:211-212` — `minimise` CGT method discount-eligibility sort (`daysBetween(...) >= 365`)
-- `js/analysis.js` `_splitRecsByParcels` — `_cgtEligible: days != null && days >= 365` (3 occurrences: single-parcel, SELL-split, TRIM-split branches)
+**Status:** Open
+**File:** `js/portfolio-helpers.js` (`computeCriticalAlerts` :16, `renderCriticalAlertBanners` :100, `quickSellFromAlert` :147)
 
-**Problem:** The ATO 50% CGT discount requires the asset to be held for **more than** 12 months — i.e. the CGT event must occur at least 366 days after acquisition (the acquisition day is excluded from the count, the disposal day is included). A disposal occurring *exactly* 365 days after purchase does **not** qualify, but `held >= 365` grants the discount one day early.
+**Problem:** All three call `getPortfolioHolding(ticker)` bare — first array match wins regardless of account/mode. With a ticker held both real and paper (or in two accounts), the alert banner's "Position value / Unrealised P&L" and the pre-filled SELL qty can reflect the *wrong* book (e.g. pre-filling a real SELL with the paper lot's share count). Alerting on paper holdings at all is also debatable.
 
-**Impact:** Any disposal landing exactly on the 365-day boundary is recorded with a 50% discount it isn't entitled to, understating the taxable net gain. Because `matchSaleAgainstParcels` is the single source of truth for `state.cgtDisposals`, this flows straight into the EOFY tax pack ZIP (`/api/tax/eofy-pack`), the CGT disposals CSV export (`journal.js exportCSV`), and the CGT page. The `_splitRecsByParcels` copies also mislabel rec cards' CGT-eligibility badge on the boundary day.
-
-**Repro:** Buy 100 BHP on 1 Jul 2024, sell on 1 Jul 2025. `daysBetween('01-07-2024','01-07-2025') = 365` → `eligible50 = true`, `discount = grossGain * 0.5`. Correct ATO treatment: not eligible until 2 Jul 2025.
-
-**Fix:** Change all four sites to `held > 365` (equivalently `>= 366`). Extract a single `cgtDiscountEligible(heldDays)` helper so the threshold can't drift between the disposal path and the display path. **Recommend confirming the exact boundary interpretation with the user's tax adviser before committing** — the direction (currently one day too generous) is not in doubt, but document the chosen convention in a code comment.
+**Fix:** Aggregate across matching holdings for display; for the pre-fill, either sum per-mode and let the journal's `askTradeMode()` + mode-scoped sell matching catch mismatches (it will — sell will fail if qty exceeds the chosen book), or prompt for book first. Low urgency because the sell path itself is firewalled.
 
 ---
 
-## R2-2. [HIGH — silent data loss] Manual BUY/SELL of a non-`personal` holding silently no-ops
+## Remediation plan (suggested order)
 
-**File:** `js/pages/journal.js` (`addManualTrade`, lines ~568-608)
+| Step | Findings | Why this order |
+|---|---|---|
+| 1 | #1 + #2 in one migration (mode column + UNIQUE(ticker,account,mode) + save/load/validator plumbing + tests) | Everything else is moot while mode can't round-trip; #2 shares the table rebuild |
+| 2 | #3 legacy backfill (user-confirmed, dry-run first) | Needs #1's column to exist; unblocks EOFY/CGT/NAV/real-perf immediately — time-sensitive (FY25-26 tax pack) |
+| 3 | #6 snapshot repair + guard | One-liner once #1/#3 restore real PV |
+| 4 | #4 HOLD logging | Independent; starts accumulating HOLD data (30-day resolution lag means the sooner it lands the sooner the nudge can ever fire) |
+| 5 | #5, #7 | Correctness hardening, lower blast radius |
 
-```js
-if (action === 'SELL') {
-  const holding = getPortfolioHolding(symbol);                       // unscoped → first ticker match, ANY account
-  if (holding && holding.shares >= qty) {
-    const { disposals } = applySellToPortfolio(symbol, qty, price, fees, tradeDate);  // no account → defaults 'personal'
-    ...
-} else {
-  applyBuyToPortfolio(symbol, qty, price, tradeDate, fees, sector);  // no account → parcel + holding default to 'personal'
-  state.cash -= qty * price + fees;
-}
-```
-
-**Problem:** `getPortfolioHolding(symbol)` (utils.js:142) with no account returns the *first* ticker match regardless of account, so the `holding.shares >= qty` guard **passes** for a `trading`/`super`-only holding. But `applySellToPortfolio` defaults to `account='personal'`, finds no personal holding, and returns `{ok:false, disposals:[]}`. Net result: **no cash credited, no CGT disposal recorded, the portfolio holding is not reduced** — yet the user sees `toast('Trade logged','success')`. `buildDisposalJournalEntries` is called with an empty `disposals` array, so no journal row is created either (and `_disposalEntries` is a truthy `[]`, so the fallback `unshift(tradeEntry)` is skipped too). The manual SELL evaporates entirely.
-
-The BUY branch has the mirror-image defect: a manual BUY is *always* booked to `personal` (and a `personal` parcel created), even when `state.activeAccount === 'trading'`/`'super'`. Cash is debited correctly but the shares land in the wrong account, and a later correctly-scoped SELL of that account won't find them.
-
-**Impact:** Direct ledger corruption / silent loss for any multi-account user transacting manually on a non-personal holding. The portfolio, cash, CGT disposals, and journal all disagree with what the user believes happened.
-
-**Repro:** Hold WES only in `trading`. Journal → manual SELL 50 WES. Guard passes (trading holding found), `applySellToPortfolio` defaults to personal → `{ok:false}`. Toast says "Trade logged". Portfolio still shows 50 WES in trading, cash unchanged, no disposal, no journal row.
-
-**Fix:** Thread the account through both branches. Resolve the target account the same way `markExecuted()` does (gotcha #67) — prefer `holding.account` when the unscoped lookup found exactly one ticker row, otherwise use `state.activeAccount` (when not `'all'`), and surface an account picker / warning when the ticker is held in multiple accounts. Pass it to `getPortfolioHolding(symbol, acct)`, `applySellToPortfolio(..., acct)`, and `applyBuyToPortfolio(..., acct)`. Add a Vitest case asserting a `trading`-only manual SELL actually reduces the trading holding and records a disposal.
-
----
-
-## R2-3. [MEDIUM — expectation vs. ledger drift] Per-parcel SELL cards mislabel which lot is actually disposed
-
-**File:** `js/analysis.js` (`_splitRecsByParcels`, new in the uncommitted diff)
-
-**Problem:** A multi-parcel SELL rec is expanded into one card per parcel, each stamped with that specific parcel's `_costBasis`, `_holdingDays`, `_cgtEligible` and a `P#<id>` label. But execution routes through `markExecuted → applySellToPortfolio → matchSaleAgainstParcels`, which **always disposes parcels in the configured CGT order (FIFO/LIFO/minimise/maximise)** — never "the parcel this card was labelled with". When the user executes the card labelled with a newer, non-discount-eligible lot, FIFO (default) actually consumes the *oldest* lot, so the disposal recorded in `cgtDisposals` carries a different cost basis and CGT-discount status than the card promised.
-
-Secondary issue: the parcel filter is `_normTk(p.ticker) === ticker` only — **not account-scoped** — so a ticker held in two accounts expands into cards covering both accounts' lots, while the actual SELL debits a single resolved account.
-
-**Impact:** The CGT-eligibility/cost-basis shown at decision time can disagree with the realised disposal record. No ledger corruption (the disposal itself is internally correct), but it undermines the per-lot tax-aware decision the feature exists to support.
-
-**Fix (product decision required):** Either (a) make execution parcel-targeted — pass the card's `_parcelId` through `markExecuted` into a parcel-specific disposal so the labelled lot is the one actually sold; or (b) relabel the cards to reflect that disposal follows the active CGT method (e.g. show the FIFO-order lot that *will* be consumed, and account-scope the parcel filter). Option (a) is the more honest fix for a tax-optimisation feature.
-
----
-
-## R2-4. [MEDIUM — latent corruption] `cgtDisposals` referenced by array index breaks across out-of-order deletes
-
-**Files:** `js/portfolio-helpers.js` — `buildDisposalJournalEntries` writes `disposalIds: [disposalIdBase + i]` (positional offsets into `state.cgtDisposals`); `rollbackTradeJournalEntry` (`:780-792`) reads `state.cgtDisposals[dIdx]` and `splice`s by those indices.
-
-**Problem:** `disposalIds` are positions, not stable ids. They're only valid while no *earlier* disposal is ever removed. Rolling back / deleting one journal row splices its disposals out of the middle of the array, shifting the positions of every later trade's disposals. A subsequent rollback then restores `remainingQty` to the **wrong parcel**, or splices the wrong `cgtDisposals` entry. The in-trade reverse-order splice (`:791`) only protects indices *within a single trade*, not across trades.
-
-**Impact:** Deleting journal rows out of chronological order can silently corrupt parcel `remainingQty` and the CGT disposal ledger. Pre-existing (not introduced this round); triggers only on multi-delete workflows.
-
-**Fix:** Give each disposal a stable `id` (monotonic, like `nextParcelId`), store `disposalIds` as those ids, and look up/splice by `find`/`findIndex` on `id` rather than by position.
-
----
-
-## R2-5. [LOW-MEDIUM — latent] Journal `id` generation via `length + 1` collides after deletes
-
-**Files:** `js/pages/recommendations.js:1734,1751`; `js/pages/journal.js:588,601` use `id: state.tradeJournal.length + 1`. Other writers use `Date.now()+i` (`buildDisposalJournalEntries`) and `Date.now()` (DRP, `portfolio.js:1211`).
-
-**Problem:** `length + 1` is not unique once any row has been removed (length shrinks, so the next insert reuses an existing id). `histEntry.journalId = tradeEntry.id` and any `find(j => j.id === …)` can then resolve the wrong journal row. The mixed id schemes (small integers vs. `Date.now()` epoch-millis) compound the fragility.
-
-**Impact:** Mis-linked journal↔recHistory rows, wrong-row edits/deletes. Low probability but real, and worsens over time as rows are deleted.
-
-**Fix:** Introduce a single `nextJournalId()` helper (monotonic `max(existing id)+1`, mirroring `nextParcelId()`) and use it at every journal-insert site. Don't mix `Date.now()` ids in.
-
----
-
-## R2-6. [INFORMATIONAL] Unrealised vs. realised P&L differ by brokerage — confirmed correct, documented to prevent a "fix" that breaks it
-
-`avgPrice` deliberately excludes buy brokerage (`applyBuyToPortfolio` stores fees on the parcel, not in `avgPrice`), so `portfolioValue()/totalGain()` show a clean price-only unrealised gain. CGT `costBase` in `matchSaleAgainstParcels` *includes* pro-rata buy fees (`parcel.fees * matched / parcel.qty`) plus the allocated sale fee — correct ATO cost-base treatment. Consequence: realised P&L runs slightly below the unrealised figure shown pre-sale by roughly the round-trip brokerage. This is **correct**, not a bug — flagged so a future "the numbers don't tie out" report doesn't reconcile them the wrong way (e.g. by folding fees into `avgPrice`, which would distort weight/CGT).
-
----
-
-## Summary table (round 2)
-
-| # | Title | File:line | Severity |
-|---|---|---|---|
-| R2-1 | CGT 50% discount eligibility off by one day (`>=365` → `>365`) | `portfolio-helpers.js:519,211`; `analysis.js _splitRecsByParcels` | **High (tax)** |
-| R2-2 | Manual BUY/SELL of non-`personal` holding silently no-ops | `journal.js:~568-608` | **High (data loss)** |
-| R2-3 | Per-parcel SELL cards mislabel the lot actually disposed (FIFO vs. label) | `analysis.js _splitRecsByParcels` | Medium |
-| R2-4 | `cgtDisposals` indexed by position — corrupts across out-of-order deletes | `portfolio-helpers.js:780-792` | Medium |
-| R2-5 | Journal `id = length+1` collides after deletes | `recommendations.js:1734/1751`, `journal.js:588/601` | Low-Medium |
-| R2-6 | Unrealised vs realised P&L brokerage gap — confirmed correct | `utils.js:56-58` vs `portfolio-helpers.js:521` | Informational |
-
-**Common root cause (carries over from round 1):** the same account-scoping gap that produced findings #2-#9 in round 1 also produced R2-2 — `getPortfolioHolding` / `applyBuyToPortfolio` / `applySellToPortfolio` default to `'personal'` when an account isn't threaded through, and the manual-trade path (`addManualTrade`) was never updated alongside `markExecuted`. R2-1 is independent (a tax-rule off-by-one). R2-4/R2-5 are a separate class: positional/`length`-based identifiers that aren't stable across deletion. Recommend prioritising R2-1 (tax correctness, ~4-line change) and R2-2 (silent ledger loss) first; both are small and contained.
-
-No code was changed as part of this audit.
+Also add to the suites: a Python round-trip test asserting `portfolio` save→load preserves `mode` for a dual-mode ticker (would have caught #1 and #2), and a vitest asserting `_validHolding` preserves `mode`.
