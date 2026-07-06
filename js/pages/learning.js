@@ -153,6 +153,43 @@ function _syncClassifyUI() {
   }
 }
 
+// ── Master date-window filter ────────────────────────────────────────────────
+// One global window applied to the dated transaction-LIST cards (Recent Events,
+// Buy/Sell Decision Trackers). Aggregate/stat cards (win-rates, calibration,
+// matrices, verdicts) deliberately IGNORE it — they need full history to be the
+// learning signal. Default 90 days so "years of data" never dumps hundreds of
+// rows; 0 = All (bounded by each card's own count cap).
+const _LL_WINDOW_PRESETS = [[30, '30d'], [90, '90d'], [180, '6M'], [365, '1Y'], [0, 'All']];
+function _llWindowDays() {
+  const v = state._llWindowDays;
+  return (v === 0 || v > 0) ? v : 90;   // default 90d when unset
+}
+function _llWindowParam() {
+  const d = _llWindowDays();
+  return d > 0 ? `&days=${d}` : '';
+}
+// Client-side window filter for lists rendered from an already-fetched array
+// (Recent Events rides the shared /stats payload, so it can't take a ?days param).
+function _llWithinWindow(timestamp) {
+  const d = _llWindowDays();
+  if (d <= 0) return true;
+  if (!timestamp) return true;                 // keep undated rows rather than hide them
+  const t = new Date(timestamp).getTime();
+  return isNaN(t) || t >= Date.now() - d * 86400000;
+}
+function setLlWindow(days) {
+  state._llWindowDays = days;
+  renderPage();   // full re-render so every dated card refetches with the new window
+}
+function _llWindowBar() {
+  const cur = _llWindowDays();
+  return `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:12px;padding:8px 10px;border:0.5px solid var(--border-light);border-radius:var(--radius-md,6px);background:var(--bg-inset)">
+    <span class="text-xs" style="font-weight:600">📅 Show trades from:</span>
+    ${_LL_WINDOW_PRESETS.map(([d, lab]) => `<button class="btn btn-sm" style="${d === cur ? 'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)' : ''}" onclick="setLlWindow(${d})">${lab}</button>`).join('')}
+    <span class="text-xs text-muted" style="margin-left:4px">Applies to the dated lists (Recent Events, Buy/Sell Trackers). Stats &amp; calibration always use full history.</span>
+  </div>`;
+}
+
 async function renderLearningPage(gen) {
   const el = document.getElementById('main-content');
   if (state._renderGen !== gen) return;
@@ -208,8 +245,13 @@ async function renderLearningPage(gen) {
   renderSellOutcomesCard().catch(() => {});
   // Async: load buy/top-up decision tracker card (entry-side complement)
   renderBuyOutcomesCard().catch(() => {});
-  // Async: load rule-override efficacy card (were failed quant rules too strict?)
-  renderRuleEfficacyCard().catch(() => {});
+  // Async: one-time backfill of pre-feature rule warnings from recHistory /
+  // recommendations (_ruleWarnings persisted in extra_json) into the learning
+  // events, THEN render the efficacy card so it populates from existing history
+  // instead of only from new analysis runs.
+  _backfillRuleWarningsOnce()
+    .then(() => renderRuleEfficacyCard())
+    .catch(() => { renderRuleEfficacyCard().catch(() => {}); });
   // Async: load thesis drift analytics card (Sprint 45)
   renderThesisDriftCard().catch(() => {});
   // Async: load thesis accuracy matrix card (Phase 2+3)
@@ -234,7 +276,9 @@ function _renderLearningContent(d, brier) {
   const confBands       = d.conf_bands        || [];
   const regimes         = d.regime_stats      || [];
   const versions        = d.version_stats     || [];
-  const events          = d.recent_events     || [];
+  // Recent Events rides the shared /stats payload (can't take a ?days param), so
+  // apply the master window client-side. The list is already server-capped at 30.
+  const events          = (d.recent_events   || []).filter(e => _llWithinWindow(e.timestamp));
   const failed          = d.failed_tickers    || [];
   const failPats        = d.failure_patterns  || {};
   const successPats     = d.success_patterns  || {};
@@ -1243,7 +1287,7 @@ function _renderLearningContent(d, brier) {
       </div>
     </details>`;
 
-  return introNote + summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
+  return introNote + _llWindowBar() + summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard +
     realVsPaperCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
@@ -3401,13 +3445,16 @@ async function renderSellOutcomesCard() {
   let data;
   try {
     const qs = _sellOutcomesFilter !== 'all' ? `&action=${_sellOutcomesFilter}` : '';
-    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=25${qs}`);
+    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=25${qs}${_llWindowParam()}`);
     if (!r.ok) return;
     data = await r.json();
   } catch { return; }
 
   const events = (data.events || []);
-  if (!events.length && _sellOutcomesFilter === 'all') { el.style.display = 'none'; return; }
+  // Hide only on a genuinely empty history (no filters). With an active date
+  // window or action filter, stay visible and show the "no events" note so a
+  // vanished card is never mistaken for missing data.
+  if (!events.length && _sellOutcomesFilter === 'all' && _llWindowDays() <= 0) { el.style.display = 'none'; return; }
   el.style.display = '';
 
   const DRIVER_LABEL = {
@@ -3510,19 +3557,80 @@ async function refreshSellOutcomes() {
   const el = document.getElementById('ll-sell-outcomes-card');
   if (!el || !state.serverOk) return;
   try {
-    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=25&force=1`);
+    const r = await fetch(`${API}/api/learning/sell-outcomes?limit=25&force=1${_llWindowParam()}`);
     if (!r.ok) return;
     await renderSellOutcomesCard();
     toast('Sell outcomes refreshed', 'success');
   } catch { toast('Error refreshing sell outcomes', 'error'); }
 }
 
+// ── One-time rule-warning backfill ────────────────────────────────────────────
+// Rows logged before the failed-quant-rule capture shipped have NULL
+// rule_warnings_json on their learning event even though the raw warnings survive
+// in recHistory/recommendations (_ruleWarnings in extra_json). Reuse the SAME
+// classifier the going-forward path uses (_classifyRuleWarnings, analysis.js — no
+// duplicated enum, gotcha #92) and patch each event via /api/learning/outcome so
+// the efficacy card lights up from existing history. One-shot per session; cheap
+// because it only touches recs that actually carry warnings.
+async function _backfillRuleWarningsOnce() {
+  if (!state.serverOk || state._ruleWarnBackfillDone) return;
+  state._ruleWarnBackfillDone = true;   // guard first — never re-run this session
+  if (typeof _classifyRuleWarnings !== 'function') return;
+
+  const seen = new Set();
+  const candidates = [...(state.recommendations || []), ...(state.recHistory || [])]
+    .filter(r => {
+      const lid = r._learningId || r.learningId;
+      if (!lid || seen.has(lid)) return false;
+      if (!(Array.isArray(r._ruleWarnings) && r._ruleWarnings.length)) return false;
+      seen.add(lid);
+      return true;
+    });
+  if (!candidates.length) return;
+
+  for (const r of candidates) {
+    const rw = _classifyRuleWarnings(r);
+    if (!rw.length) continue;
+    try {
+      await fetch(`${API}/api/learning/outcome`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ id: r._learningId || r.learningId, rule_warnings_json: JSON.stringify(rw) }),
+      });
+    } catch (_) { /* non-fatal — best-effort backfill */ }
+  }
+}
+
 // ── Rule Override Efficacy card ───────────────────────────────────────────────
 // Answers "when I overrode a failed quant rule, was I right?" For each rule code,
-// the win-rate + avg P&L of breached-AND-executed trades vs the whole-book
-// baseline, with a Wilson-CI-gated verdict (too_strict / validated / inconclusive)
-// from GET /api/learning/rule-override-efficacy. Hidden entirely until at least
-// one breached rec has been logged, so a clean history shows no clutter.
+// the win-rate + REALIZED avg P&L of breached trades that CLOSED, vs the
+// whole-book baseline, with a Wilson-CI-gated verdict (too_strict / validated /
+// inconclusive) from GET /api/learning/rule-override-efficacy. Still-open
+// BUY/TOP_UP overrides carry no realized P&L (only a sale realizes it) — they
+// show in a separate "open" count and, in the drill-down, a LIVE mark-to-market
+// since entry. Hidden entirely until at least one breached rec has been logged.
+let _ruleEffExpanded = {};   // { code: bool } — drill-down open state (persists across re-renders)
+
+// Live price for a ticker from the freshest client-side source (live signals →
+// current holding). Returns null when unknown so the drill-down shows "—".
+function _ruleEffLivePrice(ticker) {
+  if (!ticker) return null;
+  const t = ticker.replace(/\.AX$/i, '');
+  const sig = state.liveSignals?.[t] || state.liveSignals?.[t + '.AX'];
+  if (sig && typeof sig.current_price === 'number' && sig.current_price > 0) return sig.current_price;
+  const h = (typeof getPortfolioHolding === 'function') ? getPortfolioHolding(t) : null;
+  if (h && typeof h.currentPrice === 'number' && h.currentPrice > 0) return h.currentPrice;
+  return null;
+}
+
+function toggleRuleEff(code) {
+  _ruleEffExpanded[code] = !_ruleEffExpanded[code];
+  const row = document.getElementById(`rule-ev-${code}`);
+  const btn = document.getElementById(`rule-ev-btn-${code}`);
+  if (row) row.style.display = _ruleEffExpanded[code] ? '' : 'none';
+  if (btn) btn.textContent = _ruleEffExpanded[code] ? '▾' : '▸';
+}
+
 async function renderRuleEfficacyCard() {
   const el = document.getElementById('ll-rule-efficacy-card');
   if (!el || !state.serverOk) return;
@@ -3544,26 +3652,77 @@ async function renderRuleEfficacyCard() {
     validated:    { bg: '#dcfce7', fg: '#15803d', icon: '✓', label: 'Rule was right' },
     inconclusive: { bg: '#f3f4f6', fg: '#6b7280', icon: '—', label: 'Insufficient data' },
   };
+  const _up = 'var(--up,#15803d)', _down = 'var(--down,#dc2626)';
+  const _pnlSpan = (v, prefix = '$') => `<span style="color:${v >= 0 ? _up : _down}">${v >= 0 ? '+' : '-'}${prefix}${fmt(Math.abs(v))}</span>`;
+
+  // Per-event drill-down row. Entry (BUY/TOP_UP) that is still open shows a LIVE
+  // unrealized move since its own entry price (realized P&L intentionally blank —
+  // only a sale realizes it). Closed rows show realized P&L. Skipped show "—".
+  const _evRow = (e) => {
+    const isEntry = e.action === 'BUY' || e.action === 'TOP_UP';
+    let pnlCell = '<span style="color:var(--text-muted)">—</span>';
+    let note = '';
+    if (e.state === 'closed' && e.realized_pnl_aud != null) {
+      pnlCell = _pnlSpan(e.realized_pnl_aud)
+        + (e.realized_pnl_pct != null ? ` <span style="font-size:10px;color:var(--text-muted)">(${e.realized_pnl_pct >= 0 ? '+' : ''}${e.realized_pnl_pct.toFixed(1)}%)</span>` : '');
+    } else if (e.state === 'open' && isEntry) {
+      const px = _ruleEffLivePrice(e.ticker);
+      if (px != null && e.entry_price) {
+        const pct = (px / e.entry_price - 1) * 100;
+        pnlCell = `<span style="color:var(--text-muted)">unrealized</span> `
+          + `<span style="color:${pct >= 0 ? _up : _down};font-weight:600">${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%</span>`
+          + ` <span style="font-size:10px;color:var(--text-muted)">@ $${fmt(px)}</span>`;
+      } else {
+        pnlCell = '<span style="color:var(--text-muted)">open · live px n/a</span>';
+      }
+    }
+    const stateBadge = {
+      closed:  '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3">closed</span>',
+      open:    '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:#dcfce7;color:#15803d">open</span>',
+      skipped: '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:#f3f4f6;color:#6b7280">skipped</span>',
+    }[e.state] || '';
+    return `<tr style="font-size:11.5px;border-bottom:1px solid var(--border-light)">
+      <td style="padding:3px 8px;color:var(--text-muted)">${(e.timestamp || '').slice(0, 10)}</td>
+      <td style="padding:3px 8px;font-weight:600">${escapeHTML(e.ticker || '—')}</td>
+      <td style="padding:3px 8px">${typeof actionBadge === 'function' ? actionBadge(e.action) : escapeHTML(e.action || '')}</td>
+      <td style="padding:3px 8px">${stateBadge}</td>
+      <td style="padding:3px 8px;text-align:right">${e.entry_price != null ? '$' + fmt(e.entry_price) : '—'}</td>
+      <td style="padding:3px 8px">${pnlCell}</td>
+    </tr>`;
+  };
 
   const rows = rules.map(r => {
     const vs = VS[r.verdict] || VS.inconclusive;
     const wr = r.win_rate != null ? `${r.win_rate.toFixed(0)}%` : '—';
     const ciTxt = Array.isArray(r.wilson_ci) ? ` <span style="font-size:10px;color:var(--text-muted)">CI ${r.wilson_ci[0].toFixed(0)}–${r.wilson_ci[1].toFixed(0)}</span>` : '';
-    const pnl = r.avg_pnl_aud != null
-      ? `<span style="color:${r.avg_pnl_aud >= 0 ? 'var(--up,#15803d)' : 'var(--down,#dc2626)'}">${r.avg_pnl_aud >= 0 ? '+' : ''}$${fmt(Math.abs(r.avg_pnl_aud))}</span>`
-      : '—';
+    // Realized avg P&L — from CLOSED trades only. Blank while a rule has no closes.
+    const pnl = r.avg_pnl_aud != null ? _pnlSpan(r.avg_pnl_aud) : '<span style="color:var(--text-muted)">—</span>';
+    const open = _ruleEffExpanded[r.code];
+    const evRows = (r.events || []).map(_evRow).join('');
     return `<tr style="border-bottom:1px solid var(--border-light);font-size:12px">
-      <td style="padding:5px 8px;font-weight:600">${escapeHTML(r.label || r.code)}</td>
-      <td style="padding:5px 8px;text-align:right">${r.executed_n}<span style="font-size:10px;color:var(--text-muted)"> exec</span></td>
+      <td style="padding:5px 8px"><button id="rule-ev-btn-${r.code}" class="btn btn-sm" style="padding:1px 6px;margin-right:4px" onclick="toggleRuleEff('${r.code}')" title="Show the individual trades in this rule group">${open ? '▾' : '▸'}</button><strong>${escapeHTML(r.label || r.code)}</strong></td>
+      <td style="padding:5px 8px;text-align:right" title="Closed (realized) trades that fed the win-rate">${r.closed_n}<span style="font-size:10px;color:var(--text-muted)"> closed</span></td>
+      <td style="padding:5px 8px;text-align:right" title="Executed but still open — no realized P&L yet">${r.open_n}<span style="font-size:10px;color:var(--text-muted)"> open</span></td>
       <td style="padding:5px 8px;text-align:right;color:var(--text-muted)">${r.skipped_n}<span style="font-size:10px"> skip</span></td>
       <td style="padding:5px 8px;text-align:right">${wr}${ciTxt}</td>
       <td style="padding:5px 8px;text-align:right">${pnl}</td>
       <td style="padding:5px 8px"><span style="padding:2px 7px;border-radius:3px;font-size:11px;font-weight:600;background:${vs.bg};color:${vs.fg}">${vs.icon} ${vs.label}</span></td>
+    </tr>
+    <tr id="rule-ev-${r.code}" style="display:${open ? '' : 'none'}">
+      <td colspan="7" style="background:var(--bg-inset);padding:6px 10px">
+        <div class="text-xs text-muted" style="margin-bottom:4px">${r.closed_n} closed · ${r.open_n} open · ${r.skipped_n} skipped — realized P&amp;L shown for closed disposals; open entries show live move since entry.</div>
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="color:var(--text-muted);font-size:10px;text-align:left">
+            <th style="padding:2px 8px">Date</th><th style="padding:2px 8px">Ticker</th><th style="padding:2px 8px">Action</th><th style="padding:2px 8px">State</th><th style="padding:2px 8px;text-align:right">Entry</th><th style="padding:2px 8px">P&amp;L</th>
+          </tr></thead>
+          <tbody>${evRows || '<tr><td colspan="6" class="text-xs text-muted" style="padding:4px 8px">No events.</td></tr>'}</tbody>
+        </table>
+      </td>
     </tr>`;
   }).join('');
 
   const baseTxt = base.win_rate != null
-    ? `Baseline (all executed trades): <strong>${base.win_rate.toFixed(0)}% WR</strong> over ${base.n} trades${base.avg_pnl_aud != null ? `, avg ${base.avg_pnl_aud >= 0 ? '+' : ''}$${fmt(Math.abs(base.avg_pnl_aud))}/trade` : ''}.`
+    ? `Baseline (all closed trades): <strong>${base.win_rate.toFixed(0)}% WR</strong> over ${base.n} trades${base.avg_pnl_aud != null ? `, avg ${base.avg_pnl_aud >= 0 ? '+' : ''}$${fmt(Math.abs(base.avg_pnl_aud))}/trade` : ''}.`
     : 'Baseline win-rate not yet available (need closed executed trades).';
 
   el.innerHTML = `
@@ -3571,19 +3730,20 @@ async function renderRuleEfficacyCard() {
       <div class="card-title" style="margin-bottom:6px">🧪 Rule Override Efficacy (${rules.length})</div>
       <p class="text-xs text-muted" style="margin-bottom:8px">
         When a deterministic quant/validation rule flagged a rec and you executed it anyway, did it pay off?
-        <strong>Too strict?</strong> = breached trades beat baseline (rule may be over-cautious).
-        <strong>Rule was right</strong> = breached trades underperformed (keep the rule).
-        Verdicts fire only past ${data.min_n || 12} executed trades with a statistically clear gap. ${baseTxt}
+        <strong>Win-rate &amp; avg P&amp;L use only CLOSED trades</strong> — an open BUY/TOP_UP carries no realized P&amp;L until the parcel is sold (▸ expand for its live move since entry).
+        <strong>Too strict?</strong> = breached trades beat baseline. <strong>Rule was right</strong> = they underperformed.
+        Verdicts fire only past ${data.min_n || 12} closed trades with a statistically clear gap. ${baseTxt}
       </p>
       <div style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse">
           <thead>
             <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
               <th style="text-align:left;padding:4px 8px">Rule</th>
-              <th style="text-align:right;padding:4px 8px">Executed</th>
+              <th style="text-align:right;padding:4px 8px">Closed</th>
+              <th style="text-align:right;padding:4px 8px">Open</th>
               <th style="text-align:right;padding:4px 8px">Skipped</th>
               <th style="text-align:right;padding:4px 8px">Win rate</th>
-              <th style="text-align:right;padding:4px 8px">Avg P&amp;L</th>
+              <th style="text-align:right;padding:4px 8px">Realized P&amp;L</th>
               <th style="text-align:left;padding:4px 8px">Verdict</th>
             </tr>
           </thead>
@@ -3605,13 +3765,14 @@ async function renderBuyOutcomesCard() {
   let data;
   try {
     const qs = _buyOutcomesFilter !== 'all' ? `&action=${_buyOutcomesFilter}` : '';
-    const r = await fetch(`${API}/api/learning/buy-outcomes?limit=25${qs}`);
+    const r = await fetch(`${API}/api/learning/buy-outcomes?limit=25${qs}${_llWindowParam()}`);
     if (!r.ok) return;
     data = await r.json();
   } catch { return; }
 
   const events = (data.events || []);
-  if (!events.length && _buyOutcomesFilter === 'all') { el.style.display = 'none'; return; }
+  // Stay visible under an active date window / action filter (see sell tracker).
+  if (!events.length && _buyOutcomesFilter === 'all' && _llWindowDays() <= 0) { el.style.display = 'none'; return; }
   el.style.display = '';
 
   const ENTRY_DRIVER_LABEL = {
@@ -3692,7 +3853,7 @@ async function refreshBuyOutcomes() {
   const el = document.getElementById('ll-buy-outcomes-card');
   if (!el || !state.serverOk) return;
   try {
-    const r = await fetch(`${API}/api/learning/buy-outcomes?limit=25&force=1`);
+    const r = await fetch(`${API}/api/learning/buy-outcomes?limit=25&force=1${_llWindowParam()}`);
     if (!r.ok) return;
     await renderBuyOutcomesCard();
     toast('Buy/top-up outcomes refreshed', 'success');

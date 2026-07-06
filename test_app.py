@@ -10511,6 +10511,22 @@ class TestRuleOverrideEfficacy(unittest.TestCase):
         parsed = json.loads(row[0])
         self.assertEqual(parsed[0]["code"], "confidence_floor")
 
+    def test_outcome_can_backfill_rule_warnings(self):
+        """/api/learning/outcome must accept rule_warnings_json so the client can
+        one-time backfill pre-feature events (card populates from history)."""
+        ev_id = self._log(ticker="WBC")  # logged with no warnings
+        rw = json.dumps([{"code": "whipsaw", "detail": "contradicts your own SELL", "severity": "warn"}])
+        r = self.client.post("/api/learning/outcome", data=json.dumps({
+            "id": ev_id, "rule_warnings_json": rw,
+        }), content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(json.loads(r.data).get("ok"))
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT rule_warnings_json FROM ai_learning_events WHERE id=?", (ev_id,)
+            ).fetchone()
+        self.assertEqual(json.loads(row[0])[0]["code"], "whipsaw")
+
     def test_efficacy_endpoint_shape(self):
         resp = self.client.get("/api/learning/rule-override-efficacy")
         self.assertEqual(resp.status_code, 200)
@@ -10520,9 +10536,10 @@ class TestRuleOverrideEfficacy(unittest.TestCase):
             self.assertIn(key, body)
         self.assertIsInstance(body["rules"], list)
 
-    def test_efficacy_aggregates_executed_and_skipped(self):
-        """A breached-and-executed win + a breached-and-skipped rec must be
-        tallied under the right code with the right executed/skipped counts."""
+    def test_efficacy_closed_open_skipped_split(self):
+        """Closed win + still-open entry + skipped rec must land in the closed /
+        open / skipped buckets respectively, and an OPEN entry must contribute NO
+        realized P&L (only closed disposals feed win-rate + avg P&L)."""
         rw = json.dumps([{"code": "neg_ev", "detail": "engine net-EV <= 0", "severity": "block"}])
         # Executed + closed win
         won = self._log(ticker="QBE", rule_warnings_json=rw, was_executed=True)
@@ -10530,15 +10547,30 @@ class TestRuleOverrideEfficacy(unittest.TestCase):
             "id": won, "was_executed": True, "outcome_status": "win",
             "realized_pnl_aud": 200.0, "realized_pnl_pct": 5.0,
         }), content_type="application/json")
+        # Executed BUT still open (no outcome_status) — must NOT add realized P&L
+        opened = self._log(ticker="ANZ", recommendation="TOP_UP",
+                           rule_warnings_json=rw, was_executed=True)
+        self.client.post("/api/learning/outcome", data=json.dumps({
+            "id": opened, "actual_entry_price": 35.20,
+        }), content_type="application/json")
         # Skipped (never executed)
         self._log(ticker="QBE", rule_warnings_json=rw, was_executed=False)
 
         body = json.loads(self.client.get("/api/learning/rule-override-efficacy").data)
         neg = next((r for r in body["rules"] if r["code"] == "neg_ev"), None)
         self.assertIsNotNone(neg, "neg_ev code should appear in efficacy rules")
-        self.assertGreaterEqual(neg["executed_n"], 1)
+        self.assertGreaterEqual(neg["closed_n"], 1)
+        self.assertGreaterEqual(neg["open_n"], 1)
         self.assertGreaterEqual(neg["skipped_n"], 1)
-        self.assertGreaterEqual(neg["executed_wins"], 1)
+        self.assertGreaterEqual(neg["closed_wins"], 1)
+        # avg P&L reflects ONLY the closed trade (200.0), not the open entry.
+        self.assertAlmostEqual(neg["avg_pnl_aud"], 200.0, places=2)
+        # Drill-down events present; the open entry carries entry_price + null P&L.
+        self.assertIn("events", neg)
+        open_ev = next((e for e in neg["events"] if e["state"] == "open"), None)
+        self.assertIsNotNone(open_ev)
+        self.assertIsNone(open_ev["realized_pnl_aud"])
+        self.assertAlmostEqual(open_ev["entry_price"], 35.20, places=2)
         # Below the min_n floor → verdict stays inconclusive (no premature nudge).
         self.assertEqual(neg["verdict"], "inconclusive")
 
@@ -10548,6 +10580,43 @@ class TestRuleOverrideEfficacy(unittest.TestCase):
         body = json.loads(self.client.get("/api/learning/rule-override-efficacy").data)
         # CBA carried no code, so no code was invented for it.
         self.assertNotIn("cba", [r["code"] for r in body["rules"]])
+
+    def _insert_dated(self, ticker, action, days_ago):
+        """Insert a closed executed event at a specific age for window-filter tests."""
+        with _test_get_db() as conn:
+            conn.execute(
+                """INSERT INTO ai_learning_events
+                       (event_type, ticker, recommendation, was_executed, outcome_status,
+                        realized_pnl_pct, actual_entry_price, sell_primary_driver,
+                        primary_entry_driver, timestamp)
+                   VALUES ('recommendation', ?, ?, 1, 'win', 3.0, 10.0, ?, ?,
+                           datetime('now','localtime',?))""",
+                (ticker, action,
+                 'target_reached' if action in ('SELL', 'TRIM') else None,
+                 'momentum_breakout' if action in ('BUY', 'TOP_UP') else None,
+                 f"-{days_ago} days"),
+            )
+
+    def test_buy_outcomes_date_window(self):
+        """?days=N must restrict buy-outcomes to the last N days; no param = all."""
+        self._insert_dated("RECENTB", "BUY", 5)
+        self._insert_dated("OLDBUYX", "BUY", 200)
+        windowed = json.loads(self.client.get("/api/learning/buy-outcomes?days=90").data)
+        wt = [e["ticker"] for e in windowed["events"]]
+        self.assertIn("RECENTB", wt)
+        self.assertNotIn("OLDBUYX", wt)
+        allrows = json.loads(self.client.get("/api/learning/buy-outcomes").data)
+        at = [e["ticker"] for e in allrows["events"]]
+        self.assertIn("OLDBUYX", at)
+
+    def test_sell_outcomes_date_window(self):
+        """?days=N must restrict sell-outcomes to the last N days."""
+        self._insert_dated("RECENTS", "SELL", 5)
+        self._insert_dated("OLDSELLX", "SELL", 200)
+        windowed = json.loads(self.client.get("/api/learning/sell-outcomes?days=90").data)
+        wt = [e["ticker"] for e in windowed["events"]]
+        self.assertIn("RECENTS", wt)
+        self.assertNotIn("OLDSELLX", wt)
 
 
 class TestRuleWarningSourcePresence(unittest.TestCase):
@@ -10579,6 +10648,28 @@ class TestRuleWarningSourcePresence(unittest.TestCase):
     def test_learning_page_renders_efficacy_card(self):
         src = self._src("js/pages/learning.js")
         self.assertIn("renderRuleEfficacyCard", src)
+
+    def test_learning_page_backfills_rule_warnings(self):
+        src = self._src("js/pages/learning.js")
+        self.assertIn("_backfillRuleWarningsOnce", src)
+
+    def test_efficacy_card_has_drilldown_and_live_price(self):
+        src = self._src("js/pages/learning.js")
+        self.assertIn("toggleRuleEff", src)
+        self.assertIn("_ruleEffLivePrice", src)
+
+    def test_learning_page_has_master_date_window(self):
+        src = self._src("js/pages/learning.js")
+        for needle in ("_llWindowBar", "setLlWindow", "_llWindowParam", "_llWithinWindow"):
+            self.assertIn(needle, src)
+
+    def test_learning_endpoints_have_days_window_helper(self):
+        src = self._src("routes/learning.py")
+        self.assertIn("_days_window_sql", src)
+
+    def test_outcome_cols_allow_rule_warnings(self):
+        src = self._src("routes/learning.py")
+        self.assertIn('"rule_warnings_json"', src)
 
     def test_db_has_rule_warnings_columns(self):
         src = self._src("db.py")

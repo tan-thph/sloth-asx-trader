@@ -37,6 +37,10 @@ _ALLOWED_OUTCOME_COLS = (
     "trade_mode",
     "bull_case", "bear_case",
     "local_scrutiny_json",
+    # Failed-quant-rule capture — patchable so the client can one-time backfill
+    # historical events from recHistory._ruleWarnings (rows logged before the
+    # capture shipped). Going-forward recs already carry it from INSERT time.
+    "rule_warnings_json",
 )
 
 # ── Calibration TTL cache (L4) ────────────────────────────────────────────────
@@ -944,6 +948,25 @@ def _ci_excludes(successes: int, n: int, threshold: float) -> bool:
     lo, hi = ci
     t = threshold * 100
     return lo > t or hi < t
+
+
+def _days_window_sql(alias=""):
+    """Master date-window filter for the Learning page's dated list cards.
+
+    If the request carries ?days=N (N>0), return an (SQL clause, param) pair that
+    restricts `timestamp` to the last N days; otherwise ('', None) for the full
+    history. `alias` optionally prefixes the column (e.g. 'e.') for joined
+    queries. 'now','localtime' matches the insert-time convention
+    (datetime('now','localtime')) so the window is day-accurate, not UTC-skewed.
+    """
+    try:
+        days = int(request.args.get("days", 0))
+    except (TypeError, ValueError):
+        days = 0
+    if days <= 0:
+        return "", None
+    col = f"{alias}timestamp" if alias else "timestamp"
+    return f" AND {col} >= datetime('now','localtime',?)", f"-{days} days"
 
 
 def _expire_old_events(conn) -> None:
@@ -5078,6 +5101,13 @@ def sell_outcomes():
             if action in ("SELL", "TRIM"):
                 sql += " AND recommendation = ?"
                 params.append(action)
+            # Master date window (Learning page). When a window is active it bounds
+            # the set, so relax the count cap and let the window do the limiting.
+            dclause, dparam = _days_window_sql()
+            if dclause:
+                sql += dclause
+                params.append(dparam)
+                limit = max(limit, 500)
             sql += " ORDER BY timestamp DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
@@ -5138,9 +5168,13 @@ def rule_override_efficacy():
                   AND outcome_status IN ('win','loss','breakeven')
             """).fetchall()
 
-            # All recs that carried a rule warning (executed or not).
+            # All recs that carried a rule warning (executed or not). Pull the
+            # per-trade fields the drill-down needs (ticker/action/entry price for
+            # live tracking of still-open entries).
             flagged_rows = conn.execute("""
-                SELECT was_executed, outcome_status, realized_pnl_aud, rule_warnings_json
+                SELECT id, ticker, recommendation, was_executed, outcome_status,
+                       realized_pnl_aud, realized_pnl_pct, actual_entry_price,
+                       timestamp, rule_warnings_json
                 FROM ai_learning_events
                 WHERE rule_warnings_json IS NOT NULL
                   AND rule_warnings_json != ''
@@ -5153,6 +5187,8 @@ def rule_override_efficacy():
         base_pnls = [r["realized_pnl_aud"] for r in base_rows if r["realized_pnl_aud"] is not None]
         base_avg_pnl = round(sum(base_pnls) / len(base_pnls), 2) if base_pnls else None
 
+        _CLOSED = ("win", "loss", "breakeven")
+
         # Aggregate per rule code. A rec can carry >1 code; it counts once per code.
         agg: dict[str, dict] = {}
         for row in flagged_rows:
@@ -5163,29 +5199,50 @@ def rule_override_efficacy():
             if not isinstance(warns, list):
                 continue
             codes = {w.get("code") for w in warns if isinstance(w, dict) and w.get("code")}
+            status = (row["outcome_status"] or "")
+            # Trade state: a still-open BUY/TOP_UP contributes NO P&L (realized P&L
+            # is only meaningful once the parcel is sold — user requirement). Only
+            # closed disposals feed win-rate + avg P&L; open entries are surfaced
+            # separately with live mark-to-market computed client-side.
+            if row["was_executed"] and status in _CLOSED:
+                state = "closed"
+            elif row["was_executed"]:
+                state = "open"
+            else:
+                state = "skipped"
             for code in codes:
                 a = agg.setdefault(code, {
-                    "executed_n": 0, "executed_wins": 0, "executed_losses": 0,
-                    "skipped_n": 0, "pnls": [],
+                    "closed_n": 0, "closed_wins": 0, "closed_losses": 0,
+                    "open_n": 0, "skipped_n": 0, "pnls": [], "events": [],
                 })
-                if row["was_executed"]:
-                    status = (row["outcome_status"] or "")
-                    if status in ("win", "loss", "breakeven"):
-                        a["executed_n"] += 1
-                        if status == "win":
-                            a["executed_wins"] += 1
-                        elif status == "loss":
-                            a["executed_losses"] += 1
-                        if row["realized_pnl_aud"] is not None:
-                            a["pnls"].append(row["realized_pnl_aud"])
-                    # executed-but-still-open recs contribute no outcome yet
+                if state == "closed":
+                    a["closed_n"] += 1
+                    if status == "win":
+                        a["closed_wins"] += 1
+                    elif status == "loss":
+                        a["closed_losses"] += 1
+                    if row["realized_pnl_aud"] is not None:
+                        a["pnls"].append(row["realized_pnl_aud"])
+                elif state == "open":
+                    a["open_n"] += 1
                 else:
                     a["skipped_n"] += 1
+                a["events"].append({
+                    "id":              row["id"],
+                    "ticker":          row["ticker"],
+                    "action":          row["recommendation"],
+                    "state":           state,
+                    "realized_pnl_aud": row["realized_pnl_aud"] if state == "closed" else None,
+                    "realized_pnl_pct": row["realized_pnl_pct"] if state == "closed" else None,
+                    "entry_price":     row["actual_entry_price"],
+                    "timestamp":       row["timestamp"],
+                })
 
         rules = []
+        _state_order = {"closed": 0, "open": 1, "skipped": 2}
         for code, a in agg.items():
-            n = a["executed_n"]
-            wins = a["executed_wins"]
+            n = a["closed_n"]                    # win-rate/verdict use CLOSED only
+            wins = a["closed_wins"]
             wr = (wins / n) if n else None
             avg_pnl = round(sum(a["pnls"]) / len(a["pnls"]), 2) if a["pnls"] else None
             wilson = _wilson_ci(wins, n) if n else None
@@ -5194,22 +5251,29 @@ def rule_override_efficacy():
                 if _ci_excludes(wins, n, base_wr):
                     # CI entirely on one side of baseline → significant.
                     verdict = "too_strict" if (wr or 0) > base_wr else "validated"
+            events = sorted(
+                a["events"],
+                key=lambda e: (_state_order.get(e["state"], 3), e["timestamp"] or ""),
+            )[:30]
             rules.append({
-                "code":           code,
-                "label":          _RULE_CODE_LABELS.get(code, code),
-                "executed_n":     n,
-                "executed_wins":  wins,
-                "executed_losses": a["executed_losses"],
-                "skipped_n":      a["skipped_n"],
-                "win_rate":       round(wr * 100, 1) if wr is not None else None,
-                "avg_pnl_aud":    avg_pnl,
-                "wilson_ci":      wilson,
-                "verdict":        verdict,
+                "code":            code,
+                "label":           _RULE_CODE_LABELS.get(code, code),
+                "closed_n":        n,
+                "closed_wins":     wins,
+                "closed_losses":   a["closed_losses"],
+                "open_n":          a["open_n"],
+                "skipped_n":       a["skipped_n"],
+                "win_rate":        round(wr * 100, 1) if wr is not None else None,
+                "avg_pnl_aud":     avg_pnl,
+                "wilson_ci":       wilson,
+                "verdict":         verdict,
+                "events":          events,
             })
 
-        # Most-actionable first: too_strict, then validated, then by executed_n.
+        # Most-actionable first: too_strict, then validated, then by total activity.
         _order = {"too_strict": 0, "validated": 1, "inconclusive": 2}
-        rules.sort(key=lambda r: (_order.get(r["verdict"], 3), -r["executed_n"]))
+        rules.sort(key=lambda r: (_order.get(r["verdict"], 3),
+                                  -(r["closed_n"] + r["open_n"] + r["skipped_n"])))
 
         return jsonify({
             "ok": True,
@@ -5265,6 +5329,12 @@ def buy_outcomes():
             if action in ("BUY", "TOP_UP"):
                 sql += " AND recommendation = ?"
                 params.append(action)
+            # Master date window (Learning page) — see sell_outcomes.
+            dclause, dparam = _days_window_sql()
+            if dclause:
+                sql += dclause
+                params.append(dparam)
+                limit = max(limit, 500)
             sql += " ORDER BY timestamp DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()

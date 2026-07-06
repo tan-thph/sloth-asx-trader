@@ -796,8 +796,8 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         if (decisive.length) {
           const lines = decisive.map(r => {
             const dir = r.verdict === 'too_strict'
-              ? `has been OVER-CAUTIOUS (overrides won ${r.win_rate}% vs ${_rd.baseline?.win_rate}% baseline over ${r.executed_n} trades) — do not over-penalise a setup solely because it trips this rule`
-              : `has been RELIABLE (overrides won only ${r.win_rate}% vs ${_rd.baseline?.win_rate}% baseline over ${r.executed_n} trades) — treat this flag as a genuine warning`;
+              ? `has been OVER-CAUTIOUS (overrides won ${r.win_rate}% vs ${_rd.baseline?.win_rate}% baseline over ${r.closed_n} closed trades) — do not over-penalise a setup solely because it trips this rule`
+              : `has been RELIABLE (overrides won only ${r.win_rate}% vs ${_rd.baseline?.win_rate}% baseline over ${r.closed_n} closed trades) — treat this flag as a genuine warning`;
             return `- "${r.label}" ${dir}.`;
           });
           _ruleNudgeBlock = `\n\nRULE-OVERRIDE CALIBRATION (empirical, from this user's own executed overrides):\n${lines.join('\n')}`;

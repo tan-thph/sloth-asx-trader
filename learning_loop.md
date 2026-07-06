@@ -1,7 +1,7 @@
 # Learning Loop — Architecture & Data Flow
 
-**Last Updated:** 2026-07-01 (current session: Decision Trackers deepened — the Sell Decision Tracker now surfaces holding period, regime at generation/execution, sector, deterministic skill score, exit-quality tag, MAE/MFE path, thesis verdict and error tags per row, plus an explicit SELL-vs-TRIM action filter/badge so trims are no longer visually indistinguishable from full sells; a brand-new per-trade Buy/Top-Up Decision Tracker mirrors the same shape for entries — see "Decision Trackers" section below. Both are 100% deterministic reads of already-computed `ai_learning_events` columns — no new Claude/Ollama calls, no schema migration.)
-**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–71 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block) · Thesis Tracking Live (Sprint 67–68) · Deterministic tagging/scoring Live (Sprint 70); LLM postmortem/skill demoted to manual override · Sprint 71 Learning Deepening Live (data capture, multi-tag, MAE/MFE, exemplars, sector delta framing) · Decision Trackers deepened + Buy/Top-Up tracker added (current session)
+**Last Updated:** 2026-07-06 (current session: **Failed-Quant-Rule Capture & Rule Override Efficacy** — the deterministic quant/validation rules that fire on a rec (`_ruleWarnings`) are now persisted as a stable taxonomy in `rule_warnings_json`, fed into the local-LLM scrutinize prompt, cross-tabbed by `GET /api/learning/rule-override-efficacy` to answer "was overriding this rule right, or is it too strict?", and mirrored onto the trade journal. Win-rate/avg-P&L use only CLOSED disposals — a still-open BUY/TOP_UP override carries no realized P&L (it shows a live mark-to-market in the card drill-down instead). Plus a **master date-window filter** on the Learning page (`30d/90d/6M/1Y/All`, default 90d) applied to the dated list cards. See the "Failed-Quant-Rule Capture" and "Master Date-Window Filter" sections below.)
+**Status:** Phases 1–8 Complete · Stages 1–4 + D1–D7 + L1–L6 + Sprint 23–71 improvements applied · Phase 8 Live (Mann-Whitney U gate, z>1.28, now in both stats and calibration block) · Thesis Tracking Live (Sprint 67–68) · Deterministic tagging/scoring Live (Sprint 70); LLM postmortem/skill demoted to manual override · Sprint 71 Learning Deepening Live (data capture, multi-tag, MAE/MFE, exemplars, sector delta framing) · Decision Trackers deepened + Buy/Top-Up tracker added · Rule Override Efficacy + master date-window filter Live (current session)
 
 The Learning Loop closes the feedback cycle between Claude's recommendations and real-world outcomes. It systematically records every AI-generated trade recommendation, links it to execution and closure data, analyses performance, and feeds compact, statistically meaningful insights back into future Claude calls.
 
@@ -76,6 +76,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
 | `sell_verify_alt_chg`      | REAL       | % price change of `alternative_ticker` from sell date → verify date (Sprint 37) |
 | `primary_entry_driver`     | TEXT       | Structured entry driver declared by Claude at BUY/TOP_UP generation: one of `mean_reversion` / `momentum_breakout` / `trend_pullback` / `fundamental_value` / `macro_tailwind`. Aligns with `indicators.FACTOR_WEIGHTS`. Backfillable for historical rows via `classify_entry_driver()` (Sprint 67) |
 | `thesis_verdict`           | TEXT       | Exit verdict — did the original entry driver play out? `validated` / `invalidated` / `irrelevant`. Computed client-side by `computeThesisDrift()` at SELL/TRIM time (entry-vs-current technicals), patched onto the **parent BUY/TOP_UP** event at position close. Joined with `primary_entry_driver` for the Thesis Accuracy Matrix. Distinct from `sell_verify_verdict` (which asks "was selling the right call") (Sprint 68) |
+| `rule_warnings_json`       | TEXT       | JSON array of the deterministic quant/validation rules that FLAGGED this rec at generation time, e.g. `[{"code":"confidence_floor","detail":"60% below the 62% floor","severity":"warn"}]`. `code` is a stable enum: `quant_declined` / `neg_ev` / `confidence_floor` / `whipsaw` / `self_contradiction` / `heat_budget` / `validator_fail` / `fallback_sized`. NULL when the rec was clean. Classified by `_classifyRuleWarnings(r)` in `analysis.js` from the rec's ephemeral `_ruleWarnings` strings + flags (`_confidenceHeld`, `_fallbackSized`, `_budgetBlocked/_budgetScaled`); auto-repaired issues (`_validatorFixed`) are deliberately EXCLUDED (fixed ≠ overridden → no learning signal). Fed into the scrutinize prompt and aggregated by `rule_override_efficacy()`. Backfillable for pre-feature rows (only NULLs) via `/api/learning/outcome`. *(current session)* |
 
 > **Note on `loss_quality`:** This is a *computed property*, not a stored column. It is derived at calibration time from existing fields:
 > - `exit_reason = 'protective_stop'` → **good** loss (deliberate capital defence, excluded from confidence calibration)
@@ -100,6 +101,7 @@ All learning data lives in `asx_trader.db` (SQLite, WAL mode).
    - `POST /api/learning/log` — creates partial record, returns `id`
    - Stores `rec._learningId`, persists `debate_summary`, `prompt_hash`, `entry_signals_json` (signal snapshot), `debate_synthesis_winner`
    - BUY/TOP_UP: persists `primary_entry_driver` (Sprint 67). SELL/TRIM: persists `thesis_verdict` from `computeThesisDrift()` (Sprint 68)
+   - Persists `rule_warnings_json` from `_classifyRuleWarnings(r)` when any deterministic quant/validation rule flagged the rec (NULL when clean) *(current session)*
 
 2. **Trade Executed** (`recommendations.js` → `markExecuted()`)
    - `POST /api/learning/outcome` — updates entry price, outcome fields
@@ -375,6 +377,70 @@ The pre-existing **Sell Decision Tracker** (Sprint 37, see below) validated `sel
 
 ---
 
+## Failed-Quant-Rule Capture & Rule Override Efficacy *(current session)*
+
+Closes a second feedback loop — not over Claude's *conviction* (that's calibration) but over the **deterministic quant/validation rules** themselves. When a rule flags a rec and the user overrides it (executes anyway), did that pay off? If breached-and-taken trades keep winning, the rule is **too strict**; if they keep losing, the rule was **right**.
+
+### Why this shipped
+Before this, the rules that fire during `analysis.js` post-processing — the quant engine declining to size (`kellyFrac ≤ 0`, liquidity), a negative-EV gate, a below-confidence-floor flag, a whipsaw/self-contradiction warning, a heat-budget block — surfaced only as ephemeral `_ruleWarnings` strings on the rec card. They were **never persisted**, so (a) the local-LLM scrutinize pass reviewed a flagged rec as if it were clean, and (b) there was no way to learn whether a given rule was empirically too conservative. The data to answer "was overriding this rule right?" existed (the override happened, the outcome flowed through `markExecuted`) — only the *which-rule-fired* link was missing.
+
+### The stable taxonomy (`_classifyRuleWarnings`)
+`_classifyRuleWarnings(r)` in `analysis.js` maps a rec's `_ruleWarnings` strings + boolean flags into `{code, detail, severity}` objects. The `code` enum is the join key and **must stay in sync across four sites** — the classifier (`analysis.js`), the label map (`_RULE_CODE_LABELS`, `routes/learning.py`), the scrutinize prompt (`routes/debate.py`), and `db.py`'s column comment (CLAUDE.md gotcha #92):
+
+| `code` | Fires when | Severity |
+|---|---|---|
+| `quant_declined` | quant engine declined to size (Kelly ≤ 0, liquidity) or fell back to min-trade sizing | block |
+| `neg_ev` | engine net-EV ≤ 0 at sized qty, or target ≤ entry high | block |
+| `confidence_floor` | confidence below the floor (`_confidenceHeld`) | warn |
+| `whipsaw` | direction flip vs a near-identical recent setup | warn |
+| `self_contradiction` | reasoning text contradicts the action (validator) | warn |
+| `heat_budget` | heat-budget block/scale (`_budgetBlocked`/`_budgetScaled`) | warn |
+| `validator_fail` | any other unrepaired validator business-rule breach | warn |
+
+Auto-repaired issues (`_validatorFixed`) are **deliberately excluded** — a rule that was silently fixed carries no "should I have overridden it?" signal.
+
+### Flow
+```
+analysis.js logRecsToLearningLoop()         routes/debate.py debate_scrutinize()      routes/learning.py rule_override_efficacy()
+──────────────────────────────────          ─────────────────────────────────────     ────────────────────────────────────────────
+_classifyRuleWarnings(r) → rule_warnings_json   reads rule_warnings_json, flattens     cross-tabs breached outcomes by code vs
+persisted on the learning event at log time  →  it into the critic prompt so the    →  the whole-book baseline; CI-gated verdict
+(NULL when the rec was clean)                   local LLM WEIGHS the flags rather       (too_strict / validated / inconclusive).
+                                                than reviewing a flagged rec blind.     Win-rate/avg-P&L from CLOSED trades only.
+```
+
+### Closed vs open vs skipped (the P&L rule)
+`rule_override_efficacy()` splits every breached rec three ways:
+- **closed** — an executed disposal with a realized outcome (`win`/`loss`/`breakeven`). These are the ONLY events that feed win-rate, avg realized P&L, and the verdict.
+- **open** — an executed BUY/TOP_UP whose parcel has **not been sold**. It carries **no realized P&L** (a purchase realizes nothing until it's sold), so it is counted separately in `open_n` and contributes zero to the statistics. The card's drill-down shows its **live mark-to-market** since entry instead (computed client-side from `state.liveSignals`).
+- **skipped** — flagged but not executed (`skipped_n`) — the rule's deterrent value.
+
+The verdict (`too_strict` if the breached-and-closed WR's Wilson 95% CI lies entirely **above** baseline; `validated` if entirely **below**; else `inconclusive`) is gated by `_ci_excludes()` + `min_n` (default 12 closed trades), matching the same statistical rigor as the calibration nudges.
+
+### Three feedback surfaces
+1. **Scrutinize prompt** — `debate_scrutinize()` appends a "rules that FLAGGED this rec" line so the local critic weighs each flag (framed as "weigh whether each flag is a real problem or an over-strict heuristic", not "reject").
+2. **Learning page card** — 🧪 **Rule Override Efficacy** (`renderRuleEfficacyCard()`): one row per rule with Closed/Open/Skipped counts, win-rate, realized P&L, and verdict badge; each row expands (`toggleRuleEff`) to a per-trade drill-down (date, ticker, action, state badge, entry price, and P&L — realized for closed, live-unrealized for open entries, — for skipped).
+3. **Portfolio prompt nudge** — `analysis.js` fetches the efficacy endpoint and, for decisive verdicts only, injects a compact `RULE-OVERRIDE CALIBRATION` line (`"confidence_floor" has been OVER-CAUTIOUS (overrides won X% vs Y% baseline over N closed trades) — do not over-penalise…`) so Claude leans toward or away from flagged setups.
+
+### Journal mirror (Phase 4)
+`markExecuted()` stamps `ruleWarnings` + `overrodeRules` onto the BUY/TOP_UP journal row (persisted via the `trade_journal.rule_warnings_json` column — an explicit-column table with no `extra_json` passthrough, so it is wired through both `db_save` and `db_load`). The Journal page renders a `⚠ override` badge next to the ticker and an "Executed despite failed rule(s)" block in the expandable drawer.
+
+### Backfill
+Pre-feature events have NULL `rule_warnings_json`. `_backfillRuleWarningsOnce()` runs once per session on the Learning page: it reuses the **same** `_classifyRuleWarnings` classifier over `state.recommendations` + `state.recHistory` (whose `_ruleWarnings` survive in `extra_json`) and patches each event via `/api/learning/outcome` (`rule_warnings_json` is in `_ALLOWED_OUTCOME_COLS`). No duplicated classifier logic; going-forward recs already carry it from INSERT time.
+
+---
+
+## Master Date-Window Filter *(current session)*
+
+A single global window selector at the top of the Learning page (`_llWindowBar()` → `30d / 90d / 6M / 1Y / All`, default **90d**, stored in `state._llWindowDays`) so years of history never dump hundreds of rows. Deliberately a **master** control, not per-card filters (which drift out of sync and clutter the page).
+
+- **Applies to** the dated transaction-LIST cards only: **Recent Events** (client-side filter via `_llWithinWindow()` — it rides the shared `/stats` payload and can't take a param), **Sell Decision Tracker** and **Buy/Top-Up Decision Tracker** (backend `?days=N` via `_llWindowParam()`).
+- **Deliberately ignores** it: every aggregate/stat card (win-rates, calibration, thesis matrix, factor win-rates, Rule Override verdicts) — full history is the learning signal, so date-filtering them would defeat the purpose. The **Untagged** work-queue is also exempt (hiding old untagged losses would let them escape classification).
+- **Window replaces the count cap.** When `?days=N` is present, `_days_window_sql()` filters `timestamp` to the last N days AND relaxes the per-card `limit` (25→up to 500) so a window shows *everything* in it; **All** keeps the count cap so it never floods.
+- Changing the window calls `renderPage()` (full re-render so every dated card refetches). Trackers stay visible with a "no events" note when a window filters them empty (a vanished card is never mistaken for missing data).
+
+---
+
 ## Deterministic Post-Mortem Tagging & Skill Scoring *(Sprint 70)*
 
 **Why this replaced the LLM tagger.** Through Sprint 69, `error_type` and `skill_score` were produced by a local Ollama model (default `qwen3:9b`, degrading to as small as `gemma3:2b`) reading a single flattened trade-summary line. That model was *structurally blind* to what it was judging — it never saw the price path between entry and exit, the in-hold market context, or any news/catalyst — yet was asked to assign timing tags (`stop_too_tight` vs `thesis_broken`) and a 0–10 skill-vs-luck score that those distinctions depend on. The five guardrail layers bolted on top (grammar-constrained JSON, vocabulary validation, logical sanity-check stripping, a deterministic `thesis_broken` rescue, and a human tag-review gate) were themselves evidence the core was unreliable. And `skill_score`/`success_tags` reached the live Claude prompt with *no* review at all — `skill_score` even re-weighted every other calibration statistic.
@@ -448,8 +514,9 @@ Modifiers (clamped 0–10): `target_hit` +0.5 · disciplined `stop_hit` loss +0.
 | `GET /api/learning/calibration`         | Read   | Decay-weighted, shock-excluded calibration block (5-min TTL, thread-safe `_calib_lock`). `?deep=1` adds exemplars, per-driver playbook, cross-tabs, `⚠SELL→ROSE` line; `exemplars` on a separate field (never truncated). *(Sprint 71 Phase 3)* |
 | `GET /api/learning/calibration-stats`   | Read   | Brier score + reliability-diagram bins `{brier_score, n, bins:[{range,lo,hi,n,mean_confidence,actual_win_rate}]}` |
 | `GET /api/learning/digest-data`         | Read   | Structured failure data for the postmortem digest `{recent_failures, regime_stats, overall_wins, error_dist, exit_dist}` |
-| `GET /api/learning/sell-outcomes`       | Read   | Executed SELL/TRIM events with `sell_primary_driver` set and per-event `sell_verify_verdict` badges. `?limit=N` (default 30, max 100), `?action=SELL\|TRIM\|all` filters by action, `?force=1` triggers immediate re-resolve (`_resolve_sell_outcomes`, `_resolve_exit_quality_tags`, `_resolve_deterministic_tags`, `_resolve_mae_mfe`, capped 10/call). Rows now also carry `holding_period_days`, `regime`/`regime_at_execution`, `sector`, `skill_score`, `exit_quality_tag`, `mae_pct`/`mfe_pct`, `thesis_verdict`, `error_type`, `bull_case`/`bear_case` *(Sprint 37; deepened current session)* |
-| `GET /api/learning/buy-outcomes`        | Read   | Executed, closed BUY/TOP_UP events (`outcome_status IS NOT NULL`) — the entry-side complement to `sell-outcomes`. Same `?limit`/`?force` conventions; `?action=BUY\|TOP_UP\|all`. Returns `primary_entry_driver`, `thesis_verdict`, P&L/`outcome_status`, `holding_period_days`, `regime`/`regime_at_execution`, `sector`, `skill_score`, `exit_quality_tag` (cascaded from a later SELL/TRIM, if any), `mae_pct`/`mfe_pct`, `error_type`, `bull_case`/`bear_case`. Zero new columns, zero new resolvers — reads fields other endpoints already compute *(current session)* |
+| `GET /api/learning/sell-outcomes`       | Read   | Executed SELL/TRIM events with `sell_primary_driver` set and per-event `sell_verify_verdict` badges. `?limit=N` (default 30, max 100), `?action=SELL\|TRIM\|all` filters by action, `?force=1` triggers immediate re-resolve (`_resolve_sell_outcomes`, `_resolve_exit_quality_tags`, `_resolve_deterministic_tags`, `_resolve_mae_mfe`, capped 10/call), **`?days=N`** applies the Learning-page master window (`_days_window_sql()` — filters `timestamp` to last N days and relaxes the count cap so the window bounds the set). Rows now also carry `holding_period_days`, `regime`/`regime_at_execution`, `sector`, `skill_score`, `exit_quality_tag`, `mae_pct`/`mfe_pct`, `thesis_verdict`, `error_type`, `bull_case`/`bear_case` *(Sprint 37; deepened + `?days` current session)* |
+| `GET /api/learning/buy-outcomes`        | Read   | Executed, closed BUY/TOP_UP events (`outcome_status IS NOT NULL`) — the entry-side complement to `sell-outcomes`. Same `?limit`/`?force`/**`?days`** conventions; `?action=BUY\|TOP_UP\|all`. Returns `primary_entry_driver`, `thesis_verdict`, P&L/`outcome_status`, `holding_period_days`, `regime`/`regime_at_execution`, `sector`, `skill_score`, `exit_quality_tag` (cascaded from a later SELL/TRIM, if any), `mae_pct`/`mfe_pct`, `error_type`, `bull_case`/`bear_case`. Zero new columns, zero new resolvers — reads fields other endpoints already compute *(current session)* |
+| `GET /api/learning/rule-override-efficacy` | Read | Per failed-rule-`code` cross-tab: WR + avg realized P&L of breached-and-**closed** trades vs the whole-book baseline, with a Wilson-CI + `min_n`(default 12)-gated verdict `too_strict` / `validated` / `inconclusive`. Splits `closed_n` / `open_n` / `skipped_n` — **open BUY/TOP_UP carry NO realized P&L** (only a sale realizes it). Returns `baseline:{n,win_rate,avg_pnl_aud}`, `min_n`, and `rules[]` each with a capped `events[]` drill-down (`id, ticker, action, state:closed\|open\|skipped, realized_pnl_aud, realized_pnl_pct, entry_price, timestamp`). Only breached recs appear; clean recs are absent *(current session)* |
 | `GET /api/learning/lessons`             | Read   | Scoped lessons matching `?ticker=X&sector=Y&regime=Z&adl=<float>&asx_vol=<float>` (cap 4); filtered by `breadth_scope` column; injected into Claude user messages *(Sprint 39, breadth-scope Sprint 44)* |
 | `POST /api/learning/lessons`            | Write  | Create a lesson `{lesson_text, ticker?, sector?, regime?, source, breadth_scope?}` *(Sprint 39)* |
 | `GET /api/learning/thesis-drift`        | Read   | `{n_manual, n_target, avg_manual_pct, avg_target_pct, nudge}` — requires n≥5 per bucket; backed by `_compute_thesis_drift(conn)` *(Sprint 45)* |
@@ -484,6 +551,7 @@ Modifiers (clamped 0–10): `target_hit` +0.5 · disciplined `stop_hit` loss +0.
 ## Learning Loop Display Page
 
 **Key Sections:**
+- **Master date-window filter** *(current session)* — `30d/90d/6M/1Y/All` selector (default 90d) at the top of the page; narrows the dated list cards (Recent Events, Buy/Sell Trackers). Stat/aggregate cards ignore it. See "Master Date-Window Filter" above.
 - Summary cards (overall win rate, high-confidence WR, prompt version)
 - Calibration accuracy table (per confidence band, decay-weighted, n<5 warnings)
 - **Calibration Quality card** *(Sprint 26):* shows per-band verdict (🟢 noise / 🟡 uncertain / 🔴 signal) with statistical significance badges (Z-score, p_noise, ESS). Ollama's qualitative analysis shown per band. Card loads with `cache_only=1` — shows last cached result immediately. "▶ Run debate" button appears when no cached result exists; "Refresh" button forces `force=1` re-run. Manual-only since hotfix a888eec (auto-trigger from analysis removed)
@@ -493,6 +561,7 @@ Modifiers (clamped 0–10): `target_hit` +0.5 · disciplined `stop_hit` loss +0.
 - Failure Patterns (exit reason distribution + error tag counts, shock excluded)
 - **Sell Decision Tracker card** *(Sprint 37; deepened current session):* executed SELL/TRIM events with `sell_primary_driver` set. All/Sell/Trim filter bar (`setDtFilter('sell', …)`) makes the SELL-vs-TRIM distinction explicit via a colour-coded action badge, previously indistinguishable in the UI. Row columns: date, ticker, action badge, driver, holding period, regime, P&L, exit-quality chip (`exit_into_strength`/`exit_after_reversal_confirmed`/`exit_into_weakness`/`exit_neutral`), skill-score chip, 30-day sell-verify verdict (🟢 validated / 🔴 invalidated / — inconclusive). `▸` expand toggle reveals sector, both regime columns, entry/exit price, MAE/MFE, error tags, secondary factors/urgency, and Claude's own `bull_case`/`bear_case` text. "↺ Check Now" button triggers `?force=1` re-resolve. See "Decision Trackers" section above for full design rationale
 - **Buy/Top-Up Decision Tracker card** *(current session):* the entry-side mirror of the above — new card, new `GET /api/learning/buy-outcomes` endpoint. All/Buy/Top-Up filter bar. Row columns: date, ticker, action badge, `primary_entry_driver`, holding period, regime, P&L + outcome, `thesis_verdict` chip (5-state — did the entry thesis hold to exit?), exit-quality chip, skill-score chip. Same expandable detail row and "↺ Check Now" re-resolve as the Sell tracker. Answers "did BUY/TOP_UP entries actually play out the way the entry driver predicted?" — a question the pre-existing Thesis Accuracy Matrix answers in aggregate but this answers per-trade
+- **Rule Override Efficacy card** *(current session):* 🧪 `renderRuleEfficacyCard()` fetches `GET /api/learning/rule-override-efficacy`. One row per failed-rule `code` with **Closed / Open / Skipped** counts, win-rate (closed only), realized P&L (closed only — an open BUY/TOP_UP shows no realized P&L), and a verdict badge (`⚠ Too strict?` / `✓ Rule was right` / `— Insufficient data`). Each row expands (`toggleRuleEff`) to a per-trade drill-down: date, ticker, action, state badge, entry price, and P&L (realized for closed, **live mark-to-market since entry** for open entries via `_ruleEffLivePrice()`, — for skipped). Hidden entirely until at least one breached rec is logged; a one-time `_backfillRuleWarningsOnce()` populates it from history on first visit. See "Failed-Quant-Rule Capture & Rule Override Efficacy" above
 - **Execution Alpha card** *(Sprint 63):* actual exits vs simulated mechanical exits (stop/target/15-bar time-stop) — three tiles (actual avg, mechanical avg, alpha pp) + verdict banner; each page visit lazily resolves up to 5 pending events
 - **Thesis Accuracy Matrix card** *(Sprint 68):* `renderThesisMatrixCard()` fetches `GET /api/learning/thesis-matrix` and renders entry-driver × verdict (`validated`/`invalidated`/`irrelevant`) cells showing avg P&L%, win rate, and n, plus the `insight` line. Mobile `.tbl-stack` layout; empty-state message until trades close. A SELL/TRIM rec card also shows a **Thesis Check** box (Bought-because / Now / colour-coded verdict) from `rec._thesisCheck`
 - **Lessons card** *(Sprint 39):* list of scoped trading lessons with ticker/sector/regime scope badges; "Add Lesson" form; delete button per lesson
@@ -838,6 +907,10 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
 | Priority-ordered calibration token budget (Sprint 31) | Parts appended in priority order (conf bands first, per-ticker last) means dropping from the end always removes the least critical information. A hard ceiling as safety net prevents mid-sentence truncation even if a single part is unusually long |
 | `risk_management_score` dropped | Redundant — `skill_score` + error tags already cover this |
 | Lessons Database ✅ *(Sprint 39)* | `trading_lessons` table with scoped keys (ticker/sector/regime). `GET /api/learning/lessons?ticker=X&sector=Y&regime=Z` returns up to 4 matching lessons injected as `LESSONS_BLOCK` in every Claude user message. CRUD: `POST /api/learning/lessons`, `DELETE /api/learning/lesson/<id>`. |
+| Rule-override P&L from CLOSED trades only | A BUY/TOP_UP realizes nothing until its parcel is sold — attributing a realized P&L (or a win/loss) to a still-open override would be fabricating an outcome. Open entries are counted separately (`open_n`) with a live mark-to-market for context; win-rate, avg P&L, and the verdict use only closed disposals. Mirrors how the calibration loop already treats open positions |
+| `_classifyRuleWarnings` reuses one classifier across capture + backfill | The rule taxonomy could have been re-derived in Python for a backend backfill, but that would add a 5th enum-sync site (gotcha #92). Instead the going-forward path and the one-time historical backfill both call the single JS classifier, so the enum lives in exactly one place per language |
+| Master date window, not per-card filters | Per-card date pickers (8+ of them) drift out of sync and clutter the page. One global window is how a user actually thinks ("show me this quarter"). The window also *replaces* the count cap when active, so a window shows everything in it while "All" stays bounded — the caps alone already prevent hundreds of rows, but the window makes the bound intent-driven rather than an arbitrary "last 25" |
+| Date window excludes stat/aggregate cards | Win-rates, calibration, and verdicts need full history to be the learning signal; filtering them to 90d would throw away the statistical power the loop exists to accumulate. Only the transaction-LIST displays are windowed |
 
 ---
 
@@ -963,6 +1036,7 @@ INFO   [PostMortem] event#N (TICKER) → parse failure via <model> | raw: ...
     - **Phase 2:** multi-tag `error_type` (comma-joined, ordered most→least specific); new tags `early_exit`, `oversized`, `undersized`, partly-deterministic `missed_catalyst`; empirical `stop_too_tight` via MAE/MFE (stop-pierce + 50% MFE recovery); skill-score path-quality modifier (±0.5 for deep-MAE/clean-win); counterfactual stop validation (`_resolve_stop_tag_counterfactual`, `_compute_stop_tag_precision`); `⚠STOP_TAG_UNRELIABLE` self-suppression; `GET /api/learning/stop-tag-precision`; `compute_skill_score_fallback()` (lower-trust, NOT wired in).
     - **Phase 3:** `_calib_compute(..., deep=False)` with deep/light split; deep adds per-driver playbook (`_compute_driver_playbook`), driver×regime + setup_score cross-tabs (`_compute_driver_regime_xtab`, `_compute_setup_bucket_xtab`), `⚠SELL→ROSE` negative-confirmation line (`_compute_sell_negative_confirmation`), and `exemplars` field (`_compute_exemplars`, 2–3 losses + 1–2 wins, never truncated); `_entry_signature()` compact per-trade signature; char budget 400/600 → 900/1100 deep; `deep` is part of TTL cache key; `fetchCalibrationBlock(..., {deep:true})` in full portfolio path; `buildExemplarsBlock()` + `window._calibExemplars` in `learning-loop.js`.
     - **Sector analysis:** sector always recorded (fallback: `holding?.sector || liveSignals[ticker]?.sector`); `_resolve_missing_sectors(conn)` backfills from `core.SECTOR_MAP`; calibration sector lines market-relative (`SECTOR:NN%WR vs mkt MM%`); Wilson-CI-gated `✓strong`/`⚠underperform`; `by_sector` in `/api/learning/stats`; same-sector exemplar preference. *(Sprint 71)*
+12. ✅ **Failed-Quant-Rule Capture & Rule Override Efficacy** — `rule_warnings_json` column + `_classifyRuleWarnings()` stable taxonomy; fed into the scrutinize prompt; `GET /api/learning/rule-override-efficacy` cross-tabs breached-and-**closed** outcomes vs baseline (Wilson-CI + `min_n` gated `too_strict`/`validated`/`inconclusive`) with closed/open/skipped split and per-rule `events[]` drill-down; 🧪 Learning card with live mark-to-market for open entries; `RULE-OVERRIDE CALIBRATION` prompt nudge; journal `⚠ override` mirror; one-time `_backfillRuleWarningsOnce()`. **Master date-window filter** (`_llWindowBar`, `_days_window_sql`) on the dated list cards. *(current session)*
 
 ---
 
