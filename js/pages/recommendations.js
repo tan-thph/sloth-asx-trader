@@ -1856,6 +1856,13 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount, execMo
     // what the chart looked like when the trade was filled (not just when Claude
     // generated the rec, which may have been hours earlier).
     const execEntrySignals = _snapshotLiveTechnicals(rec.ticker, tradePrice);
+    // Phase 4: if the user executed despite one or more failed quant rules, stamp
+    // the breach onto the journal row so the drawer shows "executed despite: …"
+    // and the trade is auditable as a rule override. The structured learning
+    // signal lives on the learning event (rule_warnings_json); this is the
+    // human-facing mirror on the trade record.
+    const _overrides = Array.isArray(rec._ruleWarnings)
+      ? rec._ruleWarnings.map(w => String(w).slice(0, 160)) : [];
     tradeEntry = {
       id: nextJournalId(), date: today, ticker: rec.ticker, action: rec.action,
       qty, entryPrice: tradePrice, exitPrice: null, fees,
@@ -1864,6 +1871,7 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount, execMo
       recId: rec.id, recExecuted: true, timestamp: time,
       entrySignals: execEntrySignals, regime: execRegime,
       mode,
+      ...(_overrides.length ? { ruleWarnings: _overrides, overrodeRules: true } : {}),
     };
   }
 

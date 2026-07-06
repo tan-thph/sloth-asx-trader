@@ -780,6 +780,32 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     } catch { /* non-fatal */ }
   }
 
+  // ── Rule-override calibration nudge ──────────────────────────────────────────
+  // Feeds back the empirical verdict on the deterministic quant rules: when the
+  // user overrode a flagged rule and executed anyway, did it work out? Only
+  // statistically-decisive verdicts (too_strict / validated) are surfaced so
+  // Claude can lean toward or away from the flagged setups — a closed learning
+  // loop over the rules themselves. Silently skipped until enough data exists.
+  let _ruleNudgeBlock = '';
+  if (state.serverOk) {
+    try {
+      const _rr = await fetch(`${API}/api/learning/rule-override-efficacy`);
+      if (_rr.ok) {
+        const _rd = await _rr.json();
+        const decisive = (_rd.rules || []).filter(r => r.verdict === 'too_strict' || r.verdict === 'validated');
+        if (decisive.length) {
+          const lines = decisive.map(r => {
+            const dir = r.verdict === 'too_strict'
+              ? `has been OVER-CAUTIOUS (overrides won ${r.win_rate}% vs ${_rd.baseline?.win_rate}% baseline over ${r.executed_n} trades) — do not over-penalise a setup solely because it trips this rule`
+              : `has been RELIABLE (overrides won only ${r.win_rate}% vs ${_rd.baseline?.win_rate}% baseline over ${r.executed_n} trades) — treat this flag as a genuine warning`;
+            return `- "${r.label}" ${dir}.`;
+          });
+          _ruleNudgeBlock = `\n\nRULE-OVERRIDE CALIBRATION (empirical, from this user's own executed overrides):\n${lines.join('\n')}`;
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
   // ── Inject cached debate results (read-only — never starts new debates) ──────
   // Only uses results already in the client-side cache from user-initiated debates.
   // To run debates, use the Debate Engine on the Learning page.
@@ -841,7 +867,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   const fullUserMessage = userMessage
     .replace('__REGIME_PLACEHOLDER__', regimeLine)
     .replace('__CONF_PLACEHOLDER__', ((_regimeResult.confidence ?? 0) * 100).toFixed(0) + '%')
-    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote + _exemplarsBlock + _lessonsBlock)
+    .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote + _exemplarsBlock + _lessonsBlock + _ruleNudgeBlock)
     .replace('__STOP_MULT_PLACEHOLDER__', String(_regimeStopMult))
     + _debatePreamble;
 
@@ -1859,6 +1885,57 @@ function _splitRecsByParcels(recs, cgtParcels, liveSignals, brokerage) {
   return result;
 }
 
+// ── Failed-quant-rule classifier ─────────────────────────────────────────────
+// Maps a rec's ephemeral UI warnings (_ruleWarnings strings) + explicit boolean
+// flags into a STABLE, queryable taxonomy persisted on the learning event
+// (rule_warnings_json). The `code` enum is the join key for
+// _resolve_rule_override_efficacy() (routes/learning.py) — keep it in sync there
+// and in the scrutinize prompt (routes/debate.py). Auto-repaired issues
+// (_validatorFixed) are deliberately EXCLUDED: they were fixed, not overridden,
+// so they carry no "was the rule too strict?" signal.
+function _classifyRuleWarnings(r) {
+  const out = [];
+  const seen = new Set();
+  const push = (code, detail, severity) => {
+    if (seen.has(code)) return;              // one entry per code (dominant detail wins)
+    seen.add(code);
+    out.push({ code, detail: String(detail || '').slice(0, 160), severity });
+  };
+  // Explicit flags first (most reliable), then fall back to string patterns for
+  // sites that only push a _ruleWarnings message.
+  const warns = Array.isArray(r._ruleWarnings) ? r._ruleWarnings : [];
+  const find  = re => warns.find(w => re.test(w));
+
+  if (r._budgetBlocked || r._budgetScaled) {
+    push('heat_budget', r._budgetNote || 'heat budget constraint',
+         r._budgetBlocked ? 'block' : 'warn');
+  }
+  const declined = find(/declined to size/i);
+  if (declined || r._fallbackSized) {
+    push('quant_declined', declined || 'quant engine declined to size', 'block');
+  }
+  const negEv = find(/net-EV|cannot profit|≤ entry high/i);
+  if (negEv) push('neg_ev', negEv, 'block');
+
+  if (r._confidenceHeld || find(/below the \d+% floor/i)) {
+    push('confidence_floor', find(/below the \d+% floor/i) || 'below confidence floor', 'warn');
+  }
+  const whip = find(/contradicts your own/i);
+  if (whip) push('whipsaw', whip, 'warn');
+
+  const contradiction = find(/reasoning says .* but action=/i);
+  if (contradiction) push('self_contradiction', contradiction, 'warn');
+
+  // Any remaining warning string that didn't match a specific code → generic
+  // validator failure (schema / business-rule breach kept via flag-don't-drop).
+  for (const w of warns) {
+    if (!/declined to size|net-EV|cannot profit|≤ entry high|below the \d+% floor|contradicts your own|reasoning says .* but action=/i.test(w)) {
+      push('validator_fail', w, 'warn');
+    }
+  }
+  return out;
+}
+
 // ── Learning Loop: log recommendations to backend ────────────────────────────
 // Fire-and-forget: called after cappedDedupedRecs is finalised.
 // Stores _learningId on each rec so markExecuted / markSkipped can update it.
@@ -2013,6 +2090,13 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         })(),
         debate_summary:           _debateSummary,
         entry_signals_json,
+        // Failed-quant-rule capture (Phase 2): structured, queryable taxonomy of
+        // the deterministic warnings that fired on this rec. NULL when clean so the
+        // efficacy resolver only scores breached recs.
+        rule_warnings_json:       (() => {
+          const rw = _classifyRuleWarnings(r);
+          return rw.length ? JSON.stringify(rw) : null;
+        })(),
         debate_synthesis_winner,
         // Sprint 29: SELL/TRIM structured decision tags (set by Claude at generation time)
         ...(r.action === 'SELL' || r.action === 'TRIM' ? {

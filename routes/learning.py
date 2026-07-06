@@ -976,8 +976,9 @@ def learning_log():
                      tags, trade_thesis,
                      sell_primary_driver, sell_secondary_factors, sell_urgency,
                      alternative_ticker, primary_entry_driver, thesis_verdict,
-                     bull_case, bear_case, calibrated_confidence, trade_mode)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     bull_case, bear_case, calibrated_confidence, trade_mode,
+                     rule_warnings_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -1024,6 +1025,11 @@ def learning_log():
                 # never treated as a real outcome. Paper events still calibrate
                 # the model but at a discounted weight in _calib_compute().
                 data.get("trade_mode") or "paper",
+                # Failed-quant-rule capture (structured JSON array). Accept either a
+                # pre-serialized string or a list/dict and normalise to a JSON string.
+                (data.get("rule_warnings_json")
+                 if isinstance(data.get("rule_warnings_json"), (str, type(None)))
+                 else json.dumps(data.get("rule_warnings_json"))),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -5076,6 +5082,145 @@ def sell_outcomes():
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
         return jsonify({"ok": True, "events": [dict(r) for r in rows]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# Stable rule-code enum — kept in sync with _classifyRuleWarnings() (js/analysis.js)
+# and the scrutinize prompt (routes/debate.py). Human labels for the Learning card.
+_RULE_CODE_LABELS = {
+    "quant_declined":    "Quant engine declined to size",
+    "neg_ev":            "Negative expected value",
+    "confidence_floor":  "Below confidence floor",
+    "whipsaw":           "Whipsaw / self-contradiction",
+    "self_contradiction":"Reasoning contradicts action",
+    "heat_budget":       "Heat budget constraint",
+    "validator_fail":    "Validator rule failure",
+    "fallback_sized":    "Fallback min-trade sizing",
+}
+
+
+@bp.route("/api/learning/rule-override-efficacy", methods=["GET"])
+def rule_override_efficacy():
+    """Did overriding a failed quant rule pay off?
+
+    For every executed, closed rec that carried a deterministic rule warning
+    (rule_warnings_json), cross-tab its outcome by rule `code` against the
+    whole-book baseline win-rate. The verdict answers the user's question — was
+    the rule right, too strict, or has the market moved?
+
+      too_strict  — breached-and-taken trades won SIGNIFICANTLY MORE than baseline
+                    (Wilson 95% CI entirely above the baseline WR). The rule is
+                    over-cautious in the current environment; consider relaxing it.
+      validated   — breached-and-taken trades won SIGNIFICANTLY LESS than baseline
+                    (CI entirely below). The rule correctly flags losers — keep it.
+      inconclusive — CI spans baseline / n below the floor. Not enough signal yet.
+
+    Also reports how many breached recs were SKIPPED (deterrent value) alongside
+    how many were executed. Gated by the same _MIN_NUDGE_N raw-count floor and
+    Wilson-CI significance test used elsewhere so a 3-of-5 fluke stays quiet.
+
+    Query params: min_n (default _MIN_NUDGE_N) — raw executed-count floor for a
+    non-inconclusive verdict.
+    """
+    try:
+        min_n = int(request.args.get("min_n", 12))
+    except (TypeError, ValueError):
+        min_n = 12
+
+    try:
+        with get_db() as conn:
+            # Baseline: all executed, closed recs (rule-agnostic).
+            base_rows = conn.execute("""
+                SELECT outcome_status, realized_pnl_aud
+                FROM ai_learning_events
+                WHERE was_executed = 1
+                  AND outcome_status IN ('win','loss','breakeven')
+            """).fetchall()
+
+            # All recs that carried a rule warning (executed or not).
+            flagged_rows = conn.execute("""
+                SELECT was_executed, outcome_status, realized_pnl_aud, rule_warnings_json
+                FROM ai_learning_events
+                WHERE rule_warnings_json IS NOT NULL
+                  AND rule_warnings_json != ''
+                  AND rule_warnings_json != '[]'
+            """).fetchall()
+
+        base_n = len(base_rows)
+        base_wins = sum(1 for r in base_rows if (r["outcome_status"] or "") == "win")
+        base_wr = (base_wins / base_n) if base_n else None
+        base_pnls = [r["realized_pnl_aud"] for r in base_rows if r["realized_pnl_aud"] is not None]
+        base_avg_pnl = round(sum(base_pnls) / len(base_pnls), 2) if base_pnls else None
+
+        # Aggregate per rule code. A rec can carry >1 code; it counts once per code.
+        agg: dict[str, dict] = {}
+        for row in flagged_rows:
+            try:
+                warns = json.loads(row["rule_warnings_json"] or "[]")
+            except Exception:
+                continue
+            if not isinstance(warns, list):
+                continue
+            codes = {w.get("code") for w in warns if isinstance(w, dict) and w.get("code")}
+            for code in codes:
+                a = agg.setdefault(code, {
+                    "executed_n": 0, "executed_wins": 0, "executed_losses": 0,
+                    "skipped_n": 0, "pnls": [],
+                })
+                if row["was_executed"]:
+                    status = (row["outcome_status"] or "")
+                    if status in ("win", "loss", "breakeven"):
+                        a["executed_n"] += 1
+                        if status == "win":
+                            a["executed_wins"] += 1
+                        elif status == "loss":
+                            a["executed_losses"] += 1
+                        if row["realized_pnl_aud"] is not None:
+                            a["pnls"].append(row["realized_pnl_aud"])
+                    # executed-but-still-open recs contribute no outcome yet
+                else:
+                    a["skipped_n"] += 1
+
+        rules = []
+        for code, a in agg.items():
+            n = a["executed_n"]
+            wins = a["executed_wins"]
+            wr = (wins / n) if n else None
+            avg_pnl = round(sum(a["pnls"]) / len(a["pnls"]), 2) if a["pnls"] else None
+            wilson = _wilson_ci(wins, n) if n else None
+            verdict = "inconclusive"
+            if base_wr is not None and n >= min_n:
+                if _ci_excludes(wins, n, base_wr):
+                    # CI entirely on one side of baseline → significant.
+                    verdict = "too_strict" if (wr or 0) > base_wr else "validated"
+            rules.append({
+                "code":           code,
+                "label":          _RULE_CODE_LABELS.get(code, code),
+                "executed_n":     n,
+                "executed_wins":  wins,
+                "executed_losses": a["executed_losses"],
+                "skipped_n":      a["skipped_n"],
+                "win_rate":       round(wr * 100, 1) if wr is not None else None,
+                "avg_pnl_aud":    avg_pnl,
+                "wilson_ci":      wilson,
+                "verdict":        verdict,
+            })
+
+        # Most-actionable first: too_strict, then validated, then by executed_n.
+        _order = {"too_strict": 0, "validated": 1, "inconclusive": 2}
+        rules.sort(key=lambda r: (_order.get(r["verdict"], 3), -r["executed_n"]))
+
+        return jsonify({
+            "ok": True,
+            "baseline": {
+                "n": base_n,
+                "win_rate": round(base_wr * 100, 1) if base_wr is not None else None,
+                "avg_pnl_aud": base_avg_pnl,
+            },
+            "min_n": min_n,
+            "rules": rules,
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

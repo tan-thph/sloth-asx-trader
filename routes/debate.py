@@ -214,7 +214,16 @@ def _call_ollama(model: str, prompt: str, timeout: int = 45, retries: int = 1,
                     body = resp.text[:120]
                 return {"ok": False,
                         "error": f"Model not found — run: ollama pull <model>. Detail: {body}"}
-            return {"ok": False, "error": f"Ollama HTTP {resp.status_code}"}
+            # Any other error (400/500/etc) — surface Ollama's own error message.
+            # E.g. a 400 "\"model\" does not support chat/generate" means the local
+            # model's manifest is missing its chat template (broken/incomplete pull) —
+            # `ollama rm <model> && ollama pull <model>` fixes it.
+            try:
+                body = resp.json().get("error", "")
+            except Exception:
+                body = resp.text[:200]
+            detail = f": {body}" if body else ""
+            return {"ok": False, "error": f"Ollama HTTP {resp.status_code}{detail}"}
         except requests.exceptions.ConnectionError:
             return {"ok": False, "error": "Ollama not running — run: ollama serve"}
         except requests.exceptions.Timeout:
@@ -2254,7 +2263,7 @@ def debate_scrutinize():
                       suggested_target, rr_ratio, sector, regime,
                       rationale_summary, trade_thesis, bull_case, bear_case,
                       primary_entry_driver, sell_primary_driver,
-                      entry_signals_json, market_context
+                      entry_signals_json, market_context, rule_warnings_json
                FROM ai_learning_events WHERE id=?""",
             (ev_id,)
         ).fetchone()
@@ -2271,6 +2280,28 @@ def debate_scrutinize():
 
     signals_str = _flatten_entry_signals(row["entry_signals_json"] or "")
     macro_str   = _flatten_market_context(row["market_context"] or "")
+
+    # Failed-quant-rule context: the deterministic sizing/validation rules that
+    # fired on this rec. Without this the critic reviews a flagged rec (e.g. a
+    # confidence-floor breach or a Kelly-declined size) as if it were clean — the
+    # exact blind spot this feed closes. Kept terse; the critic should WEIGH these,
+    # not reflexively reject (the rules are heuristics, sometimes too strict).
+    rules_str = ""
+    try:
+        _rw = json.loads(row["rule_warnings_json"] or "[]")
+        if isinstance(_rw, list) and _rw:
+            _items = "; ".join(
+                f"{w.get('code', '?')} ({w.get('severity', 'warn')}): {w.get('detail', '')}".strip()
+                for w in _rw if isinstance(w, dict)
+            )
+            if _items:
+                rules_str = (
+                    "Quant/validation rules that FLAGGED this rec (the analyst chose to "
+                    "surface it anyway for human review — weigh whether each flag is a real "
+                    f"problem or an over-strict heuristic): {_items}"
+                )
+    except Exception:
+        rules_str = ""
 
     summary = (
         f"{action} {row['ticker']} ({row['sector'] or 'unknown sector'}), "
@@ -2291,6 +2322,7 @@ def debate_scrutinize():
         + (f"Steelman (the analyst's own case for the opposing view): {steelman}\n" if steelman else "")
         + (f"{signals_str}\n" if signals_str else "")
         + (f"{macro_str}\n" if macro_str else "")
+        + (f"{rules_str}\n" if rules_str else "")
         + "\n"
         "Weigh the case on both sides:\n"
         "- Does the technical AND fundamental/macro data, taken together, support the call? "

@@ -390,6 +390,16 @@ _LE_MIGRATIONS = [
     # whether the calibration layer actually improves prediction, rather than just
     # assuming it does. NULL when no nudge was applied (adjusted == original).
     ("calibrated_confidence", "REAL"),
+    # Failed-quant-rule capture: the deterministic rule warnings that fired on this
+    # rec at generation time (js/analysis.js logRecsToLearningLoop). JSON array of
+    # {code, detail, severity} — code is a stable enum (quant_declined | neg_ev |
+    # confidence_floor | whipsaw | self_contradiction | heat_budget | validator_fail |
+    # fallback_sized). NULL/[] when the rec was clean. Fed into the scrutinize prompt
+    # (routes/debate.py) so the local critic sees which rules were breached, and
+    # aggregated by _resolve_rule_override_efficacy() (routes/learning.py) which
+    # cross-tabs breached-AND-executed recs' outcomes vs baseline to judge whether a
+    # rule is `too_strict` (breached-and-won) or `validated` (breached-and-lost).
+    ("rule_warnings_json", "TEXT"),
 ]
 
 
@@ -521,6 +531,13 @@ def init_db():
             # js/utils.js). A NULL/missing value is treated as paper by every
             # consumer, so no fake trade can ever leak into tax by omission.
             ("mode",               "TEXT"),
+            # Failed-quant-rule override marker (Phase 4): JSON array of the human
+            # warning strings that fired on the rec when the user executed it
+            # anyway. NULL on clean trades. Purely for the Journal drawer's
+            # "executed despite: …" note — the structured learning signal lives on
+            # ai_learning_events.rule_warnings_json. Set on BUY/TOP_UP rows by
+            # markExecuted() (js/pages/recommendations.js).
+            ("rule_warnings_json", "TEXT"),
         ):
             if col not in tj_cols:
                 conn.execute(f"ALTER TABLE trade_journal ADD COLUMN {col} {defn}")

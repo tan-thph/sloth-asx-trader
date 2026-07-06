@@ -284,7 +284,10 @@ function renderJournal() {
                 <td class="text-xs text-muted">${t.timestamp||'&mdash;'}</td>
                 <td><strong>${t.ticker}</strong>${isRealTrade(t)
                   ? '<span class="badge" style="margin-left:4px;font-size:9px;background:#16a34a22;color:#16a34a" title="Live/real trade — counts toward CGT, real cash & real performance">● LIVE</span>'
-                  : '<span class="badge badge-drp" style="margin-left:4px;font-size:9px" title="Paper trade — excluded from CGT, real cash & real performance; feeds calibration only">◦ PAPER</span>'}</td>
+                  : '<span class="badge badge-drp" style="margin-left:4px;font-size:9px" title="Paper trade — excluded from CGT, real cash & real performance; feeds calibration only">◦ PAPER</span>'}${
+                  (t.overrodeRules && Array.isArray(t.ruleWarnings) && t.ruleWarnings.length)
+                    ? `<span class="badge" style="margin-left:4px;font-size:9px;background:#b4530922;color:#b45309" title="Executed despite ${t.ruleWarnings.length} failed quant rule(s):&#10;${escapeHTML(t.ruleWarnings.join('\n'))}">⚠ override</span>`
+                    : ''}</td>
                 <td>${actionBadge(t.action)}</td>
                 <td>${t.qty}</td>
                 <td>$${fmt(t.entryPrice)}</td>
@@ -503,9 +506,19 @@ function _buildJournalDetailHTML(t, matchedRec, lid) {
     ${detObj?.ai_confidence != null ? `<div style="font-size:11px;color:var(--text-tertiary)">conf: ${Math.round(detObj.ai_confidence*100)}%</div>` : ''}
   </div>`;
 
+  // Rule-override block — surfaced when the trade was executed despite one or
+  // more failed quant rules (Phase 4). Makes the override auditable next to the
+  // outcome so the user can judge, in hindsight, whether the rule was worth it.
+  const overrideHtml = (t.overrodeRules && Array.isArray(t.ruleWarnings) && t.ruleWarnings.length)
+    ? `<div style="min-width:200px">
+        <div class="text-xs" style="margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em;color:#b45309">⚠ Executed despite failed rule${t.ruleWarnings.length>1?'s':''}</div>
+        ${t.ruleWarnings.map(w => `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px">• ${escapeHTML(String(w))}</div>`).join('')}
+      </div>`
+    : '';
+
   const loading = (det === 'pending') ? '<div class="text-xs text-muted">Loading trade detail…</div>' : '';
   return `${loading}<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;min-width:0">
-    ${thesisHtml}${sigHtml}${outcomeHtml}</div>`;
+    ${thesisHtml}${sigHtml}${outcomeHtml}${overrideHtml}</div>`;
 }
 
 function setJournalFilterKey(key, value) {

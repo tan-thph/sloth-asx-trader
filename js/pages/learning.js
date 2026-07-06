@@ -208,6 +208,8 @@ async function renderLearningPage(gen) {
   renderSellOutcomesCard().catch(() => {});
   // Async: load buy/top-up decision tracker card (entry-side complement)
   renderBuyOutcomesCard().catch(() => {});
+  // Async: load rule-override efficacy card (were failed quant rules too strict?)
+  renderRuleEfficacyCard().catch(() => {});
   // Async: load thesis drift analytics card (Sprint 45)
   renderThesisDriftCard().catch(() => {});
   // Async: load thesis accuracy matrix card (Phase 2+3)
@@ -1207,6 +1209,9 @@ function _renderLearningContent(d, brier) {
   // ── Buy/Top-Up Decision Tracker card (async — filled by renderBuyOutcomesCard()) ──
   const buyOutcomesPlaceholder = `<div id="ll-buy-outcomes-card" class="card section-gap" style="min-height:60px"></div>`;
 
+  // ── Rule Override Efficacy card (async — filled by renderRuleEfficacyCard()) ──
+  const ruleEfficacyPlaceholder = `<div id="ll-rule-efficacy-card" class="section-gap"></div>`;
+
   // ── Thesis Drift card (async — filled by renderThesisDriftCard()) ──
   const thesisDriftPlaceholder = `<div id="ll-thesis-drift-card"></div>`;
 
@@ -1244,7 +1249,7 @@ function _renderLearningContent(d, brier) {
     realVsPaperCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
     `<div id="ll-factor-winrates-card" style="display:none"></div>` +
     recentCard + failedCard + debateInsightsCard +
-    digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + thesisDriftPlaceholder +
+    digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + ruleEfficacyPlaceholder + thesisDriftPlaceholder +
     thesisMatrixPlaceholder + execAlphaPlaceholder + debateCollapsible;
 }
 
@@ -3510,6 +3515,82 @@ async function refreshSellOutcomes() {
     await renderSellOutcomesCard();
     toast('Sell outcomes refreshed', 'success');
   } catch { toast('Error refreshing sell outcomes', 'error'); }
+}
+
+// ── Rule Override Efficacy card ───────────────────────────────────────────────
+// Answers "when I overrode a failed quant rule, was I right?" For each rule code,
+// the win-rate + avg P&L of breached-AND-executed trades vs the whole-book
+// baseline, with a Wilson-CI-gated verdict (too_strict / validated / inconclusive)
+// from GET /api/learning/rule-override-efficacy. Hidden entirely until at least
+// one breached rec has been logged, so a clean history shows no clutter.
+async function renderRuleEfficacyCard() {
+  const el = document.getElementById('ll-rule-efficacy-card');
+  if (!el || !state.serverOk) return;
+
+  let data;
+  try {
+    const r = await fetch(`${API}/api/learning/rule-override-efficacy`);
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  const rules = (data && data.rules) || [];
+  if (!rules.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+
+  const base = data.baseline || {};
+  const VS = {
+    too_strict:   { bg: '#fef3c7', fg: '#b45309', icon: '⚠', label: 'Too strict?' },
+    validated:    { bg: '#dcfce7', fg: '#15803d', icon: '✓', label: 'Rule was right' },
+    inconclusive: { bg: '#f3f4f6', fg: '#6b7280', icon: '—', label: 'Insufficient data' },
+  };
+
+  const rows = rules.map(r => {
+    const vs = VS[r.verdict] || VS.inconclusive;
+    const wr = r.win_rate != null ? `${r.win_rate.toFixed(0)}%` : '—';
+    const ciTxt = Array.isArray(r.wilson_ci) ? ` <span style="font-size:10px;color:var(--text-muted)">CI ${r.wilson_ci[0].toFixed(0)}–${r.wilson_ci[1].toFixed(0)}</span>` : '';
+    const pnl = r.avg_pnl_aud != null
+      ? `<span style="color:${r.avg_pnl_aud >= 0 ? 'var(--up,#15803d)' : 'var(--down,#dc2626)'}">${r.avg_pnl_aud >= 0 ? '+' : ''}$${fmt(Math.abs(r.avg_pnl_aud))}</span>`
+      : '—';
+    return `<tr style="border-bottom:1px solid var(--border-light);font-size:12px">
+      <td style="padding:5px 8px;font-weight:600">${escapeHTML(r.label || r.code)}</td>
+      <td style="padding:5px 8px;text-align:right">${r.executed_n}<span style="font-size:10px;color:var(--text-muted)"> exec</span></td>
+      <td style="padding:5px 8px;text-align:right;color:var(--text-muted)">${r.skipped_n}<span style="font-size:10px"> skip</span></td>
+      <td style="padding:5px 8px;text-align:right">${wr}${ciTxt}</td>
+      <td style="padding:5px 8px;text-align:right">${pnl}</td>
+      <td style="padding:5px 8px"><span style="padding:2px 7px;border-radius:3px;font-size:11px;font-weight:600;background:${vs.bg};color:${vs.fg}">${vs.icon} ${vs.label}</span></td>
+    </tr>`;
+  }).join('');
+
+  const baseTxt = base.win_rate != null
+    ? `Baseline (all executed trades): <strong>${base.win_rate.toFixed(0)}% WR</strong> over ${base.n} trades${base.avg_pnl_aud != null ? `, avg ${base.avg_pnl_aud >= 0 ? '+' : ''}$${fmt(Math.abs(base.avg_pnl_aud))}/trade` : ''}.`
+    : 'Baseline win-rate not yet available (need closed executed trades).';
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title" style="margin-bottom:6px">🧪 Rule Override Efficacy (${rules.length})</div>
+      <p class="text-xs text-muted" style="margin-bottom:8px">
+        When a deterministic quant/validation rule flagged a rec and you executed it anyway, did it pay off?
+        <strong>Too strict?</strong> = breached trades beat baseline (rule may be over-cautious).
+        <strong>Rule was right</strong> = breached trades underperformed (keep the rule).
+        Verdicts fire only past ${data.min_n || 12} executed trades with a statistically clear gap. ${baseTxt}
+      </p>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead>
+            <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
+              <th style="text-align:left;padding:4px 8px">Rule</th>
+              <th style="text-align:right;padding:4px 8px">Executed</th>
+              <th style="text-align:right;padding:4px 8px">Skipped</th>
+              <th style="text-align:right;padding:4px 8px">Win rate</th>
+              <th style="text-align:right;padding:4px 8px">Avg P&amp;L</th>
+              <th style="text-align:left;padding:4px 8px">Verdict</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 // ── Buy/Top-Up Decision Tracker card ──────────────────────────────────────────

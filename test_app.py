@@ -10460,5 +10460,130 @@ class TestAnnouncementScanTimezone(unittest.TestCase):
         self.assertGreaterEqual(now.replace(tzinfo=None), _dt.utcnow())
 
 
+class TestRuleOverrideEfficacy(unittest.TestCase):
+    """Failed-quant-rule capture + /api/learning/rule-override-efficacy.
+
+    Covers Phase 1+2 (persist rule_warnings_json, feed scrutinize) and Phase 3
+    (efficacy endpoint) of the rule-override learning feature.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+        # The in-memory DB is a module-level singleton shared across every test
+        # class; record the current max event id so tearDownClass can delete
+        # exactly the rows this class inserts (a closed win here would otherwise
+        # trip TestSprint5's empty-DB digest assertion).
+        with _test_get_db() as conn:
+            cls._id_floor = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM ai_learning_events"
+            ).fetchone()[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        with _test_get_db() as conn:
+            conn.execute("DELETE FROM ai_learning_events WHERE id > ?", (cls._id_floor,))
+        asx_server.get_db = _orig_get_db
+
+    def _log(self, **over):
+        payload = {
+            "event_type": "recommendation", "ticker": "ANZ", "regime": "sideways",
+            "recommendation": "TOP_UP", "ai_confidence": 0.6, "was_executed": False,
+        }
+        payload.update(over)
+        r = self.client.post("/api/learning/log", data=json.dumps(payload),
+                             content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        return json.loads(r.data)["id"]
+
+    def test_log_persists_rule_warnings_json(self):
+        """POST /api/learning/log must store rule_warnings_json (string or list)."""
+        rw = [{"code": "confidence_floor", "detail": "60% below the 62% floor", "severity": "warn"}]
+        ev_id = self._log(rule_warnings_json=rw)
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT rule_warnings_json FROM ai_learning_events WHERE id=?", (ev_id,)
+            ).fetchone()
+        self.assertIsNotNone(row[0])
+        parsed = json.loads(row[0])
+        self.assertEqual(parsed[0]["code"], "confidence_floor")
+
+    def test_efficacy_endpoint_shape(self):
+        resp = self.client.get("/api/learning/rule-override-efficacy")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("ok"))
+        for key in ("baseline", "rules", "min_n"):
+            self.assertIn(key, body)
+        self.assertIsInstance(body["rules"], list)
+
+    def test_efficacy_aggregates_executed_and_skipped(self):
+        """A breached-and-executed win + a breached-and-skipped rec must be
+        tallied under the right code with the right executed/skipped counts."""
+        rw = json.dumps([{"code": "neg_ev", "detail": "engine net-EV <= 0", "severity": "block"}])
+        # Executed + closed win
+        won = self._log(ticker="QBE", rule_warnings_json=rw, was_executed=True)
+        self.client.post("/api/learning/outcome", data=json.dumps({
+            "id": won, "was_executed": True, "outcome_status": "win",
+            "realized_pnl_aud": 200.0, "realized_pnl_pct": 5.0,
+        }), content_type="application/json")
+        # Skipped (never executed)
+        self._log(ticker="QBE", rule_warnings_json=rw, was_executed=False)
+
+        body = json.loads(self.client.get("/api/learning/rule-override-efficacy").data)
+        neg = next((r for r in body["rules"] if r["code"] == "neg_ev"), None)
+        self.assertIsNotNone(neg, "neg_ev code should appear in efficacy rules")
+        self.assertGreaterEqual(neg["executed_n"], 1)
+        self.assertGreaterEqual(neg["skipped_n"], 1)
+        self.assertGreaterEqual(neg["executed_wins"], 1)
+        # Below the min_n floor → verdict stays inconclusive (no premature nudge).
+        self.assertEqual(neg["verdict"], "inconclusive")
+
+    def test_clean_rec_absent_from_efficacy(self):
+        """A rec with no rule_warnings_json must not create a rules row."""
+        self._log(ticker="CBA", was_executed=True)  # clean, no warnings
+        body = json.loads(self.client.get("/api/learning/rule-override-efficacy").data)
+        # CBA carried no code, so no code was invented for it.
+        self.assertNotIn("cba", [r["code"] for r in body["rules"]])
+
+
+class TestRuleWarningSourcePresence(unittest.TestCase):
+    """Source-level guards for the rule-warning capture wiring across files."""
+
+    def _src(self, rel):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            return f.read()
+
+    def test_analysis_classifier_and_payload(self):
+        src = self._src("js/analysis.js")
+        self.assertIn("_classifyRuleWarnings", src)
+        self.assertIn("rule_warnings_json:", src)
+
+    def test_scrutinize_prompt_includes_rules(self):
+        src = self._src("routes/debate.py")
+        self.assertIn("rule_warnings_json", src)
+        self.assertIn("rules_str", src)
+
+    def test_recommendations_stamps_override(self):
+        src = self._src("js/pages/recommendations.js")
+        self.assertIn("overrodeRules", src)
+        self.assertIn("ruleWarnings", src)
+
+    def test_journal_renders_override_badge(self):
+        src = self._src("js/pages/journal.js")
+        self.assertIn("overrodeRules", src)
+
+    def test_learning_page_renders_efficacy_card(self):
+        src = self._src("js/pages/learning.js")
+        self.assertIn("renderRuleEfficacyCard", src)
+
+    def test_db_has_rule_warnings_columns(self):
+        src = self._src("db.py")
+        self.assertIn('"rule_warnings_json"', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

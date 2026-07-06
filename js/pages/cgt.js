@@ -7,6 +7,17 @@ if (!window._cgtFilter) window._cgtFilter = {
   parcel:   { ticker: '', discount: 'all', minHeld: 0, mode: 'all' }
 };
 
+// Dates in this app are stored DD-MM-YYYY (see todayStr(), utils.js); parseDate()
+// already knows how to read that (with a native-Date fallback for anything else).
+// Returns the Australian FY-start year for a date string, or null if unparseable.
+function _dateFY(dateStr) {
+  const d = typeof parseDate === 'function' ? parseDate(dateStr) : new Date(dateStr);
+  if (!d || isNaN(d)) return null;
+  const yr = d.getFullYear(), mo = d.getMonth() + 1; // 1-12
+  return mo >= 7 ? yr : yr - 1;
+}
+function _saleDateFY(saleDate) { return _dateFY(saleDate); }
+
 function setCgtDisposalFilter(key, value) {
   window._cgtFilter.disposal[key] = value;
   renderPage();
@@ -69,9 +80,8 @@ function exportDisposalCSV() {
   }
   if (f.ticker) rows = rows.filter(d => d.ticker.includes(f.ticker.toUpperCase()));
   if (f.yearFY !== 'all') {
-    const fyS = f.yearFY + '-07-01';
-    const fyE = (parseInt(f.yearFY) + 1) + '-06-30';
-    rows = rows.filter(d => d.saleDate >= fyS && d.saleDate <= fyE);
+    const fyNum = parseInt(f.yearFY);
+    rows = rows.filter(d => _saleDateFY(d.saleDate) === fyNum);
   }
   if (f.outcome !== 'all') rows = rows.filter(d => f.outcome === 'gain' ? d.grossGain >= 0 : d.grossGain < 0);
   const h = 'SaleDate,Ticker,SalePrice,SaleQty,Proceeds,ParcelDate,CostPerShare,CostBase,SaleFee,GrossGain,CGTDiscount,NetGain,HeldDays,50%Eligible,ParcelID\n';
@@ -235,19 +245,21 @@ function renderCGT() {
     <!-- ① DISPOSAL HISTORY (filtered, collapsible) -->
     ${(()=>{
       const f = window._cgtFilter.disposal;
-      // Derive available FY years from disposal data
-      const fyYears = [...new Set(disposals.map(d => {
-        const yr = parseInt((d.saleDate||'').slice(0,4));
-        const mo = parseInt((d.saleDate||'').slice(5,7));
-        return mo >= 7 ? yr : yr - 1;
-      }))].sort().reverse();
+      // Derive available FY years from all trade activity (disposals + open/closed
+      // parcel acquisition dates), plus always include the current FY, so the
+      // dropdown reflects actual trading history instead of a fixed range.
+      const nowFY = _dateFY(today);
+      const fyYearSet = new Set(disposals.map(d => _dateFY(d.saleDate)));
+      parcels.forEach(p => fyYearSet.add(_dateFY(p.date)));
+      fyYearSet.add(nowFY);
+      fyYearSet.delete(null);
+      const fyYears = [...fyYearSet].sort().reverse();
       // Apply filters
       let fDisposals = disposals.slice();
       if (f.ticker) fDisposals = fDisposals.filter(d => d.ticker.includes(f.ticker.toUpperCase()));
       if (f.yearFY !== 'all') {
-        const fyS = f.yearFY + '-07-01';
-        const fyE = (parseInt(f.yearFY) + 1) + '-06-30';
-        fDisposals = fDisposals.filter(d => d.saleDate >= fyS && d.saleDate <= fyE);
+        const fyNum = parseInt(f.yearFY);
+        fDisposals = fDisposals.filter(d => _saleDateFY(d.saleDate) === fyNum);
       }
       if (f.outcome !== 'all') fDisposals = fDisposals.filter(d => f.outcome === 'gain' ? d.grossGain >= 0 : d.grossGain < 0);
       if (f.sortBy === 'date_asc')    fDisposals.sort((a,b) => a.saleDate.localeCompare(b.saleDate));

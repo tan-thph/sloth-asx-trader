@@ -128,8 +128,9 @@ def db_save():
                     INSERT INTO trade_journal
                         (id, date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status,
                          rec_id, rec_executed, close_date, account, sector, parcel_id, disposal_ids, notes, thesis,
-                         entry_signals_json, exit_signals_json, regime, parcel, parcel_open_date, mode)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         entry_signals_json, exit_signals_json, regime, parcel, parcel_open_date, mode,
+                         rule_warnings_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     t.get("id"),
                     t.get("date"), t.get("timestamp"), t["ticker"], t["action"],
@@ -146,6 +147,11 @@ def db_save():
                     # Paper/real firewall — default 'paper' so a mode-less row can
                     # never be persisted as real (isRealTrade() invariant).
                     t.get("mode") or "paper",
+                    # Failed-quant-rule override marker (Phase 4). Accept a list or a
+                    # pre-serialized string; NULL when the trade was clean.
+                    (t.get("ruleWarnings")
+                     if isinstance(t.get("ruleWarnings"), (str, type(None)))
+                     else json.dumps(t.get("ruleWarnings"))),
                 ))
 
         # --- rec history ---
@@ -264,6 +270,12 @@ def db_load():
                 # Paper/real firewall — default 'paper' for any legacy/mode-less row
                 # so it's never treated as real by the isRealTrade() invariant.
                 "mode": (row["mode"] if "mode" in row.keys() else None) or "paper",
+                # Failed-quant-rule override marker (Phase 4). Reconstruct the list +
+                # the overrodeRules convenience flag the frontend renders from.
+                **((lambda _rw: {"ruleWarnings": _rw, "overrodeRules": True}
+                   if _rw else {})(
+                    json.loads(row["rule_warnings_json"])
+                    if ("rule_warnings_json" in row.keys() and row["rule_warnings_json"]) else None)),
             })
 
         rec_history = []
