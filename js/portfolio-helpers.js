@@ -5,6 +5,17 @@
 // Data source: chart_data from liveSignals (close prices, last 90 days from backend)
 // Called: after each signal refresh; result stored in state.criticalAlerts
 
+// All portfolio rows for a ticker, across accounts AND modes (FIXES #7).
+// The alert engine must not use bare getPortfolioHolding(ticker) — that
+// returns the FIRST array match, so with a ticker held real+paper (or in two
+// accounts) the banner's value/P&L and the sell pre-fill could reflect the
+// wrong book, and a zero-share first row could suppress the alert entirely.
+function _holdingsForTicker(ticker) {
+  const symbol = (ticker || '').toUpperCase();
+  return state.portfolio.filter(h =>
+    h.ticker === symbol && (h.shares || 0) >= _SHARE_EPSILON);
+}
+
 function computeCriticalAlerts() {
   const newAlerts = {};
   const signals = state.liveSignals || {};
@@ -12,9 +23,9 @@ function computeCriticalAlerts() {
 
   for (const [ticker, s] of Object.entries(signals)) {
     if (s.error || !s.chart_data || s.chart_data.length < 2) continue;
-    // Only alert for current portfolio holdings (not watchlist)
-    const holding = getPortfolioHolding(ticker);
-    if (!holding || holding.shares < _SHARE_EPSILON) continue;
+    // Only alert for current portfolio holdings (not watchlist) — any book:
+    // a price crash matters to a paper position too (it's graded on it).
+    if (!_holdingsForTicker(ticker).length) continue;
 
     const closes = s.chart_data.map(d => d.close).filter(v => v > 0);
     if (closes.length < 2) continue;
@@ -97,9 +108,13 @@ function renderCriticalAlertBanners() {
     const desc = isSingleDay
       ? `${ticker} dropped ${Math.abs(pctStr)}% in a single session (from $${fmt(a.fromPrice)} → $${fmt(a.toPrice)}). This meets the flash-crash threshold. Consider selling to protect capital.`
       : `${ticker} has closed lower for 3 consecutive days, falling ${Math.abs(pctStr)}% cumulatively (from $${fmt(a.fromPrice)} → $${fmt(a.toPrice)}). Momentum is firmly negative.`;
-    const holding = getPortfolioHolding(ticker);
-    const posValue = holding ? fmt(holding.shares * holding.currentPrice) : '—';
-    const unrealPnl = holding ? holding.gain : null;
+    // Aggregate across all books (accounts + modes) so the banner reflects the
+    // full exposure, not whichever row happened to be first (FIXES #7).
+    const _rows = _holdingsForTicker(ticker);
+    const posValue = _rows.length
+      ? fmt(_rows.reduce((s, h) => s + (h.shares || 0) * (h.currentPrice || 0), 0)) : '—';
+    const unrealPnl = _rows.length
+      ? _rows.reduce((s, h) => s + (Number(h.gain) || 0), 0) : null;
     return `
     <div class="critical-alert-banner">
       <div class="alert-icon">${isSingleDay ? '⚡' : '📉'}</div>
@@ -143,15 +158,27 @@ function renderCriticalAlertBanners() {
 }
 
 function quickSellFromAlert(ticker) {
-  // Navigate to pending recs filtered to this ticker, or open journal
-  const holding = getPortfolioHolding(ticker);
-  if (!holding) { toast(`No holding found for ${ticker}`, 'error'); return; }
+  // Navigate to pending recs filtered to this ticker, or open journal.
+  // Multi-book aware (FIXES #7): with the ticker held in several accounts/
+  // modes, show the per-book breakdown and pre-fill the LARGEST book's qty —
+  // a sell can never cross books (mode+account-scoped parcel matching), so
+  // pre-filling the aggregate would just guarantee a failed match. The
+  // journal's askTradeMode() + account field still confirm the exact book.
+  const _rows = _holdingsForTicker(ticker);
+  if (!_rows.length) { toast(`No holding found for ${ticker}`, 'error'); return; }
+  const holding = _rows.reduce((a, b) => ((b.shares || 0) > (a.shares || 0) ? b : a));
+  const _breakdown = _rows.length > 1
+    ? '\nHeld in multiple books:\n' + _rows.map(h =>
+        `  · ${h.account || 'personal'} / ${isRealTrade(h) ? 'LIVE' : 'paper'}: ${h.shares} sh @ avg $${fmt(h.avgPrice)}`
+      ).join('\n') + `\n\nPre-filling the largest book (${holding.account || 'personal'} / ${isRealTrade(holding) ? 'LIVE' : 'paper'}).\n`
+    : '';
   const confirmed = confirm(
     `🚨 CRITICAL SELL — ${ticker}\n\n` +
     `You hold ${holding.shares} shares @ avg $${fmt(holding.avgPrice)}.\n` +
     `Current price: $${fmt(holding.currentPrice)}\n` +
-    `Estimated proceeds: $${fmt(holding.shares * holding.currentPrice)}\n\n` +
-    `This will open the Trade Journal to log a manual SELL. Continue?`
+    `Estimated proceeds: $${fmt(holding.shares * holding.currentPrice)}\n` +
+    _breakdown +
+    `\nThis will open the Trade Journal to log a manual SELL. Continue?`
   );
   if (!confirmed) return;
   showPage('journal');

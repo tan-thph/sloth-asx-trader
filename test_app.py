@@ -6000,6 +6000,412 @@ class TestHoldOutcomeTracking(unittest.TestCase):
         conn.execute("DELETE FROM ai_learning_events")
         conn.commit()
 
+    # ── HOLD dedupe window on POST /api/learning/log ─────────────────────────
+    # HOLDs re-fire for every holding on every analysis run; without a
+    # per-ticker window guard the event volume (and the _resolve_hold_outcomes
+    # yfinance queue, capped 5/call) grows linearly with run frequency.
+
+    def _log(self, client, **overrides):
+        payload = {"event_type": "recommendation", "ticker": "HLD.AX",
+                   "recommendation": "HOLD", "ai_confidence": 0.6,
+                   "was_executed": False}
+        payload.update(overrides)
+        r = client.post("/api/learning/log", data=json.dumps(payload),
+                        content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        return json.loads(r.data)
+
+    def test_hold_relog_within_window_is_deduped(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+            client = asx_server.app.test_client()
+            first = self._log(client)
+            second = self._log(client)
+            self.assertTrue(second.get("deduped"))
+            self.assertEqual(second["id"], first["id"])
+            with _test_get_db() as conn:
+                n = conn.execute("SELECT COUNT(*) FROM ai_learning_events "
+                                 "WHERE ticker='HLD.AX'").fetchone()[0]
+            self.assertEqual(n, 1)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_hold_relog_after_window_creates_new_event(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+            client = asx_server.app.test_client()
+            first = self._log(client)
+            with _test_get_db() as conn:
+                conn.execute(
+                    "UPDATE ai_learning_events SET timestamp="
+                    "datetime('now', '-10 days') WHERE id=?", (first["id"],))
+                conn.commit()
+            second = self._log(client)
+            self.assertFalse(second.get("deduped"))
+            self.assertNotEqual(second["id"], first["id"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_hold_dedupe_is_per_ticker_and_hold_only(self):
+        """A HOLD for a different ticker, and a BUY for the same ticker,
+        must both still insert normally inside the window."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+            client = asx_server.app.test_client()
+            self._log(client)
+            other = self._log(client, ticker="OTHER.AX")
+            self.assertFalse(other.get("deduped"))
+            buy1 = self._log(client, recommendation="BUY",
+                             suggested_stop=1.0, suggested_target=2.0)
+            buy2 = self._log(client, recommendation="BUY",
+                             suggested_stop=1.0, suggested_target=2.0)
+            self.assertFalse(buy2.get("deduped"))
+            self.assertNotEqual(buy1["id"], buy2["id"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+
+class TestFixes5And7MultiAccountAndAlerts(unittest.TestCase):
+    """FIXES.md #5 + #7 (2026-07-06): multi-account parent reconciliation and
+    multi-book alert lookups. JS behavior is covered by vitest
+    (paper-real-firewall.test.js); these lock the source-level contracts the
+    same way the HOLD-logging tests do."""
+
+    def test_parent_reconciliation_not_gated_off_for_multi_account(self):
+        """The old `positionClosed && _distinctAccts.length <= 1` gate skipped
+        parent BUY/TOP_UP learning-event reconciliation entirely for any ticker
+        held in two accounts, leaving those events outcome='open' forever."""
+        with open(os.path.join(ROOT, "js", "pages", "recommendations.js"),
+                  encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("positionClosed && _distinctAccts.length", src)
+        # Parents are now resolved per-account via their executed journal rows.
+        self.assertIn("_parentInSellAccount", src)
+        idx = src.find("const _parentInSellAccount")
+        body = src[idx:idx + 600]
+        self.assertIn("t.recId === pr.id", body)
+        self.assertIn("sellAccount", body)
+        self.assertIn("'RECLASSIFY'", body)  # parcel rows mutate action in place (gotcha #79)
+
+    def test_alert_engine_uses_multi_book_lookup(self):
+        """computeCriticalAlerts / banners / quickSellFromAlert must not use the
+        first-match getPortfolioHolding(ticker) — mode/account-blind (FIXES #7)."""
+        with open(os.path.join(ROOT, "js", "portfolio-helpers.js"),
+                  encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("function _holdingsForTicker", src)
+        for fn in ("function computeCriticalAlerts",
+                   "function renderCriticalAlertBanners",
+                   "function quickSellFromAlert"):
+            idx = src.find(fn)
+            self.assertGreater(idx, -1, fn)
+            body = src[idx:idx + 2500]
+            self.assertIn("_holdingsForTicker(", body, fn)
+            self.assertNotIn("getPortfolioHolding(ticker)", body, fn)
+
+    def test_sync_triggers_entry_driver_backfill(self):
+        """IMPROVEMENTS #1: syncClosedTradesToLearningLoop() must fire the
+        idempotent entry-driver backfill so the driver column can't rot again."""
+        with open(os.path.join(ROOT, "js", "pages", "performance.js"),
+                  encoding="utf-8") as f:
+            src = f.read()
+        idx = src.find("async function syncClosedTradesToLearningLoop")
+        body = src[idx:src.find("function computeReconciledRecHistory")]
+        self.assertIn("/api/learning/backfill-entry-drivers", body)
+
+
+class TestRealisticPaperFills(unittest.TestCase):
+    """IMPROVEMENTS #10 — realistic paper fills. Behaviour is covered by vitest
+    (paper-real-firewall.test.js); this locks the wiring + the cross-language
+    parity of the slippage model with the backend (core.adv_slippage +
+    routes.learning._SLIP_REGIME_MULT), which must never silently drift."""
+
+    def test_helpers_exist_and_execution_is_paper_gated(self):
+        with open(os.path.join(ROOT, "js", "utils.js"), encoding="utf-8") as f:
+            utils = f.read()
+        self.assertIn("function paperFillPrice(", utils)
+        self.assertIn("function _advSlippageRate(", utils)
+        with open(os.path.join(ROOT, "js", "pages", "recommendations.js"), encoding="utf-8") as f:
+            recs = f.read()
+        # Must gate on BOTH the firewall (real never slipped) and the setting.
+        idx = recs.find("paperFillPrice(")
+        window = recs[max(0, idx - 400):idx + 200]
+        self.assertIn("!isRealTrade(mode)", window)
+        self.assertIn("paperRealisticFills", window)
+
+    def test_js_slippage_tiers_match_backend(self):
+        """The JS ADV tiers must equal core.adv_slippage at the tier boundaries,
+        and the JS regime multipliers must equal routes.learning._SLIP_REGIME_MULT."""
+        from core import adv_slippage
+        from routes.learning import _SLIP_REGIME_MULT
+        # Backend tier values the JS mirrors.
+        self.assertEqual(adv_slippage(20_000_000), 0.0005)
+        self.assertEqual(adv_slippage(5_000_000), 0.0010)
+        self.assertEqual(adv_slippage(1_000_000), 0.0020)
+        self.assertEqual(adv_slippage(100_000), 0.0035)
+        self.assertEqual(adv_slippage(None), 0.0035)
+        with open(os.path.join(ROOT, "js", "utils.js"), encoding="utf-8") as f:
+            utils = f.read()
+        idx = utils.find("function _advSlippageRate(")
+        body = utils[idx:idx + 400]
+        for tier in ("0.0005", "0.0010", "0.0020", "0.0035"):
+            self.assertIn(tier, body, f"JS missing tier {tier}")
+        # Regime multipliers parity.
+        self.assertEqual(_SLIP_REGIME_MULT, {"highVol": 1.5, "riskOff": 1.25, "panic": 2.0})
+        jidx = utils.find("const _SLIP_REGIME_MULT")
+        jbody = utils[jidx:jidx + 120]
+        for frag in ("highVol: 1.5", "riskOff: 1.25", "panic: 2.0"):
+            self.assertIn(frag, jbody, f"JS regime mult missing {frag}")
+
+
+class TestGoLiveReadiness(unittest.TestCase):
+    """GET /api/learning/go-live-readiness — paper-validation scorecard."""
+
+    def _clean(self, conn):
+        conn.execute("DELETE FROM ai_learning_events")
+        conn.execute("DELETE FROM calibration_snapshots")
+        conn.commit()
+
+    def _seed(self, conn, n, *, win_rate, pnl_win, pnl_loss, regimes, drivers,
+              conf=0.7):
+        """Insert n closed executed BUYs alternating win/loss to hit win_rate."""
+        import itertools
+        reg_cycle = itertools.cycle(regimes)
+        drv_cycle = itertools.cycle(drivers)
+        n_win = round(n * win_rate)
+        for i in range(n):
+            is_win = i < n_win
+            conn.execute("""INSERT INTO ai_learning_events
+                (event_type, ticker, recommendation, was_executed, outcome_status,
+                 realized_pnl_pct, ai_confidence, regime, primary_entry_driver, timestamp)
+                VALUES ('recommendation',?,'BUY',1,?,?,?,?,?,datetime('now'))""",
+                (f"T{i}.AX", "win" if is_win else "loss",
+                 pnl_win if is_win else pnl_loss, conf,
+                 next(reg_cycle), next(drv_cycle)))
+        conn.commit()
+
+    def test_empty_is_not_ready_all_warn_or_fail(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+            d = json.loads(asx_server.app.test_client()
+                           .get("/api/learning/go-live-readiness").data)
+            self.assertTrue(d["ok"])
+            self.assertEqual(d["n_closed"], 0)
+            self.assertEqual(d["overall"], "not_ready")   # sample size fails at 0
+            self.assertEqual(len(d["criteria"]), 5)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_strong_paper_record_is_ready(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+                # 60 trades, 65% win, +6% wins / -3% losses (payoff 2:1 → break-even
+                # ~33%, easily cleared), 3 regimes, 3 drivers all profitable, conf
+                # matches WR so Brier is low.
+                self._seed(conn, 60, win_rate=0.65, pnl_win=6.0, pnl_loss=-3.0,
+                           regimes=["riskOn", "trend", "sideways"],
+                           drivers=["mean_reversion", "momentum_breakout", "trend_pullback"],
+                           conf=0.65)
+            d = json.loads(asx_server.app.test_client()
+                           .get("/api/learning/go-live-readiness").data)
+            self.assertEqual(d["overall"], "ready", d["criteria"])
+            self.assertEqual(d["n_pass"], 5)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_negative_edge_fails_the_edge_criterion(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+                # 50 trades but a losing system: 40% win, small wins big losses.
+                self._seed(conn, 50, win_rate=0.40, pnl_win=2.0, pnl_loss=-5.0,
+                           regimes=["riskOn", "trend", "sideways"],
+                           drivers=["mean_reversion", "momentum_breakout"])
+            d = json.loads(asx_server.app.test_client()
+                           .get("/api/learning/go-live-readiness").data)
+            edge = next(c for c in d["criteria"] if c["key"] == "edge")
+            self.assertEqual(edge["status"], "fail")
+            self.assertEqual(d["overall"], "not_ready")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_friction_haircut_flips_a_marginal_edge(self):
+        """A wafer-thin edge that clears break-even with zero friction should
+        fail once the haircut is applied — the whole point of the scorecard."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+                # 50/50 win rate, symmetric ±0.20% — expectancy ~0 before costs.
+                self._seed(conn, 60, win_rate=0.50, pnl_win=0.20, pnl_loss=-0.20,
+                           regimes=["riskOn", "trend", "sideways"],
+                           drivers=["mean_reversion", "momentum_breakout"])
+            c = asx_server.app.test_client()
+            d0 = json.loads(c.get("/api/learning/go-live-readiness?friction_bps=0").data)
+            d30 = json.loads(c.get("/api/learning/go-live-readiness?friction_bps=30").data)
+            e0  = next(x for x in d0["criteria"] if x["key"] == "edge")
+            e30 = next(x for x in d30["criteria"] if x["key"] == "edge")
+            # With a 30bps haircut on a ±20bps system, every trade goes negative →
+            # the edge criterion must be worse (fail) than the frictionless view.
+            self.assertEqual(e30["status"], "fail")
+            self.assertNotEqual(e30["status"], "pass")
+            self.assertEqual(d30["friction_bps"], 30)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_single_regime_warns_or_fails_coverage(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+                self._seed(conn, 45, win_rate=0.60, pnl_win=5.0, pnl_loss=-3.0,
+                           regimes=["riskOn"], drivers=["mean_reversion", "momentum_breakout"])
+            d = json.loads(asx_server.app.test_client()
+                           .get("/api/learning/go-live-readiness").data)
+            reg = next(c for c in d["criteria"] if c["key"] == "regimes")
+            self.assertEqual(reg["status"], "fail")   # only 1 regime
+            self.assertIn(d["overall"], ("not_ready",))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+
+class TestPaperBookReset(unittest.TestCase):
+    """IMPROVEMENTS #7 — paper book reset. Behavior is fully covered by vitest
+    (paper-real-firewall.test.js); this locks the source-level wiring: the core
+    lives in utils.js (so the firewall suite tests it) and the Settings UI calls
+    it, and the delete predicate is explicit-paper (never isRealTrade-based)."""
+
+    def test_reset_core_in_utils_and_ui_in_settings(self):
+        with open(os.path.join(ROOT, "js", "utils.js"), encoding="utf-8") as f:
+            utils = f.read()
+        self.assertIn("function resetPaperBook(", utils)
+        self.assertIn("function _isExplicitPaper(", utils)
+        # The delete predicate must be explicit mode==='paper', NOT isRealTrade
+        # (a missing mode is ambiguous and must be preserved on delete).
+        idx = utils.find("function _isExplicitPaper(")
+        body = utils[idx:idx + 200]
+        self.assertIn("mode === 'paper'", body)
+        with open(os.path.join(ROOT, "js", "pages", "settings.js"), encoding="utf-8") as f:
+            settings = f.read()
+        self.assertIn("function resetPaperBookUI(", settings)
+        self.assertIn("resetPaperBook()", settings)
+        self.assertIn('onclick="resetPaperBookUI()"', settings)
+
+
+class TestLearningCoverage(unittest.TestCase):
+    """GET /api/learning/coverage — data-hygiene coverage strip (IMPROVEMENTS #3)."""
+
+    def _clean(self, conn):
+        conn.execute("DELETE FROM ai_learning_events")
+        conn.execute("DELETE FROM trading_lessons")
+        conn.commit()
+
+    def test_empty_db_is_ok_with_zero_closed(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+            r = asx_server.app.test_client().get("/api/learning/coverage")
+            self.assertEqual(r.status_code, 200)
+            d = json.loads(r.data)
+            self.assertTrue(d["ok"])
+            self.assertEqual(d["n_closed"], 0)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_coverage_math_and_queues(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+                # 2 closed BUYs: one fully captured, one bare.
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, was_executed, outcome_status,
+                     primary_entry_driver, thesis_verdict, mae_pct, error_type, timestamp)
+                    VALUES ('recommendation','AAA','BUY',1,'loss',
+                            'momentum_breakout','invalidated',-4.0,'thesis_broken',
+                            datetime('now'))""")
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, was_executed, outcome_status, timestamp)
+                    VALUES ('recommendation','BBB','BUY',1,'loss', datetime('now'))""")
+                # 1 win without success_tags.
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, was_executed, outcome_status, timestamp)
+                    VALUES ('recommendation','CCC','SELL',1,'win', datetime('now'))""")
+                # 1 executed event never graded, 90 days old → stuck_open_60d.
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, was_executed, outcome_status, timestamp)
+                    VALUES ('recommendation','DDD','BUY',1,NULL, datetime('now','-90 days'))""")
+                # 1 skipped rec with stop+target → virtual_pending.
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, was_executed, outcome_status,
+                     suggested_stop, suggested_target, timestamp)
+                    VALUES ('recommendation','EEE','BUY',0,'skipped',1.0,2.0, datetime('now','-5 days'))""")
+                # 1 HOLD, unresolved.
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, was_executed, timestamp)
+                    VALUES ('recommendation','FFF','HOLD',0, datetime('now'))""")
+                conn.commit()
+            d = json.loads(asx_server.app.test_client().get("/api/learning/coverage").data)
+            self.assertTrue(d["ok"])
+            self.assertEqual(d["n_closed"], 3)
+            cov, q = d["coverage"], d["queues"]
+            self.assertEqual(cov["entry_driver"],   {"covered": 1, "total": 2, "pct": 50.0})
+            self.assertEqual(cov["thesis_verdict"], {"covered": 1, "total": 2, "pct": 50.0})
+            self.assertEqual(cov["mae_mfe"],        {"covered": 1, "total": 2, "pct": 50.0})
+            self.assertEqual(cov["error_type"],     {"covered": 1, "total": 2, "pct": 50.0})
+            # Win with no success_tags → 0/1; SELL with no exit_signals → 0/1.
+            self.assertEqual(cov["success_tags"]["covered"], 0)
+            self.assertEqual(cov["exit_signals"], {"covered": 0, "total": 1, "pct": 0.0})
+            self.assertEqual(q["stuck_open_60d"], 1)
+            self.assertEqual(q["virtual_pending"], 1)
+            # 5-day-old pending rec → ~25 days until the 30d gate.
+            self.assertIsNotNone(q["days_until_virtual"])
+            self.assertGreaterEqual(q["days_until_virtual"], 24)
+            self.assertEqual(q["hold_events"], 1)
+            self.assertEqual(q["hold_resolved"], 0)
+            self.assertEqual(q["lessons"], 0)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_empty_denominator_yields_none_pct(self):
+        """No eligible population must report pct=None, never 0% (a false alarm)."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type, ticker, recommendation, was_executed, outcome_status, timestamp)
+                    VALUES ('recommendation','AAA','SELL',1,'win', datetime('now'))""")
+                conn.commit()
+            d = json.loads(asx_server.app.test_client().get("/api/learning/coverage").data)
+            self.assertIsNone(d["coverage"]["entry_driver"]["pct"])   # zero closed BUY/TOP_UP
+            self.assertIsNone(d["coverage"]["error_type"]["pct"])     # zero losses
+        finally:
+            asx_server.get_db = _orig_get_db
+
 
 class TestSprint70DeterministicTagging(unittest.TestCase):
     """Sprint 70 — deterministic post-mortem tagging + skill scoring driven by the
@@ -8138,6 +8544,7 @@ class TestDayTradeTraining(unittest.TestCase):
             "ALTER TABLE model_state ADD COLUMN mae_oos REAL",
             "ALTER TABLE model_state ADD COLUMN n_test INTEGER",
             "ALTER TABLE model_state ADD COLUMN cv_method TEXT",
+            "ALTER TABLE trade_snapshots ADD COLUMN trade_mode TEXT",
         ]:
             try:
                 cls._dt_conn.execute(_sql)
@@ -8191,6 +8598,45 @@ class TestDayTradeTraining(unittest.TestCase):
         })
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.get_json()["ok"])
+
+    def test_save_snapshot_persists_trade_mode(self):
+        """trade_mode is stored verbatim for real/paper; anything else → NULL
+        (IMPROVEMENTS #4 — only an explicit paper tag down-weights training)."""
+        for sent, expected in [("paper", "paper"), ("real", "real"),
+                               ("weird", None), (None, None)]:
+            body = {"ticker": "TST.AX", "entry_date": "2026-06-08",
+                    "entry_price": 10.0, "qty": 1, "trade_type": "swing"}
+            if sent is not None:
+                body["trade_mode"] = sent
+            sid = self.client.post("/api/daytrading/snapshot", json=body).get_json()["id"]
+            with self._rdtt.get_dt_db() as conn:
+                got = conn.execute("SELECT trade_mode FROM trade_snapshots WHERE id=?",
+                                   (sid,)).fetchone()[0]
+            self.assertEqual(got, expected, f"sent={sent!r}")
+
+    def test_ridge_uniform_weight_equals_unweighted(self):
+        """The money-safe claim: with all weights 1.0 the weighted fit is
+        bit-identical to the unweighted fit, so the all-real corpus is unchanged."""
+        import numpy as np
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((40, 3))
+        y = X @ np.array([1.5, -0.7, 0.3]) + 0.2
+        w0, b0 = self._rdtt._ridge_regression(X, y)
+        w1, b1 = self._rdtt._ridge_regression(X, y, sample_weight=np.ones(len(y)))
+        np.testing.assert_allclose(w0, w1)
+        self.assertAlmostEqual(b0, b1)
+
+    def test_ridge_downweighting_pulls_fit_toward_upweighted_group(self):
+        """Down-weighting a divergent group must move the fit away from it."""
+        import numpy as np
+        # 20 rows say slope +2; 20 divergent rows say slope -2.
+        x = np.concatenate([np.linspace(-1, 1, 20), np.linspace(-1, 1, 20)])
+        y = np.concatenate([2 * x[:20], -2 * x[20:]])
+        X = x.reshape(-1, 1)
+        w_eq, _ = self._rdtt._ridge_regression(X, y)                      # ~0 (cancels)
+        sw = np.concatenate([np.ones(20), 0.5 * np.ones(20)])            # trust the +2 group
+        w_dn, _ = self._rdtt._ridge_regression(X, y, sample_weight=sw)
+        self.assertGreater(w_dn[0], w_eq[0])   # pulled toward +2
 
     def test_save_snapshot_missing_ticker_returns_400(self):
         """POST without ticker must return 400."""

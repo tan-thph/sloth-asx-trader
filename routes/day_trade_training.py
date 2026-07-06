@@ -73,6 +73,31 @@ def _row_to_dict(row):
     return dict(row) if row else None
 
 
+def _ridge_regression(X, y, lr=0.01, epochs=2000, l2=0.05, sample_weight=None):
+    """Ridge regression (weighted MSE + L2) via gradient descent, pure numpy.
+
+    sample_weight (IMPROVEMENTS #4): per-row weight on the squared error. Paper
+    day-trades get 0.5 so their perfect-fill, zero-slippage outcomes don't train
+    the model as strongly as real fills. When every weight is 1.0 (the current
+    all-real/all-legacy corpus) this is IDENTICAL to the old unweighted fit —
+    weighted GD with uniform weights reduces exactly to unweighted GD.
+    """
+    import numpy as np
+    n, p = X.shape
+    w = np.zeros(p)
+    b = 0.0
+    sw = np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=float)
+    sw_sum = float(sw.sum()) or 1.0
+    for _ in range(epochs):
+        predictions = np.dot(X, w) + b
+        error       = (predictions - y) * sw   # weight each residual
+        dw = np.dot(X.T, error) / sw_sum + l2 * w
+        db = float(np.sum(error) / sw_sum)
+        w -= lr * dw
+        b -= lr * db
+    return w, b
+
+
 def _resolve_shadow_outcomes(conn):
     """
     Compute r_multiple for shadow records old enough to have played out.
@@ -192,6 +217,7 @@ def dt_snapshot_save():
 
     COLS = (
         "ticker action trade_type record_type shadow_reason target stop_loss hold_days confidence regime "
+        "trade_mode "
         "entry_date entry_price qty "
         "rsi_14 rsi_9 macd_hist bb_pct_b bb_bandwidth atr_14 atr_pct "
         "price_vs_sma20 price_vs_sma50 price_vs_sma200 "
@@ -202,6 +228,10 @@ def dt_snapshot_save():
     ).split()
 
     vals = {c: d.get(c) for c in COLS}
+    # Normalise trade_mode to the firewall vocabulary — only an explicit 'paper'
+    # is stored as paper; anything else (incl. missing) stays NULL = full weight.
+    vals["trade_mode"] = "paper" if vals.get("trade_mode") == "paper" else (
+        "real" if vals.get("trade_mode") == "real" else None)
 
     # Validate required fields
     if not vals.get("ticker") or not vals.get("entry_date"):
@@ -209,7 +239,8 @@ def dt_snapshot_save():
 
     # Cast numeric fields
     NUMERIC = {c for c in COLS if c not in ("ticker", "action", "trade_type", "record_type",
-                                              "shadow_reason", "regime", "entry_date", "sector")}
+                                              "shadow_reason", "regime", "trade_mode",
+                                              "entry_date", "sector")}
     for c in NUMERIC:
         vals[c] = _safe(vals[c])
 
@@ -535,6 +566,13 @@ def _train_model_impl(conn):
             y.append(float(rm))
         y = np.array(y)
 
+        # ── Per-row training weight (IMPROVEMENTS #4) ────────────────────────
+        # Paper rows → 0.5 (optimistic perfect fills); real/legacy(NULL) → 1.0.
+        # All-1.0 today, so no behavior change until paper day-trades are tagged.
+        sample_w = np.array([0.5 if r.get("trade_mode") == "paper" else 1.0
+                             for r in rows])
+        n_paper = int(sum(1 for r in rows if r.get("trade_mode") == "paper"))
+
         # ── Mean imputation for NaN cells ────────────────────────────────────
         with _warnings.catch_warnings():
             _warnings.simplefilter("ignore", RuntimeWarning)
@@ -563,26 +601,14 @@ def _train_model_impl(conn):
 
         ics = [_spearman(X_raw[:, i], y) for i in range(len(feat_list))]
 
-        # ── Ridge regression (MSE + L2, pure numpy) ──────────────────────────
-        # Defined here so _fit_and_predict_fold (OOS block below) can call it.
-        def _ridge_regression(X, y, lr=0.01, epochs=2000, l2=0.05):
-            n, p = X.shape
-            w = np.zeros(p)
-            b = 0.0
-            for _ in range(epochs):
-                predictions = np.dot(X, w) + b
-                error       = predictions - y
-                dw = np.dot(X.T, error) / n + l2 * w
-                db = float(np.mean(error))
-                w -= lr * dw
-                b -= lr * db
-            return w, b
+        # Ridge regression is module-level (_ridge_regression) so it can be
+        # unit-tested directly — see the weighted-fit tests in test_app.py.
 
         # ── Out-of-sample evaluation (§0.I) ──────────────────────────────────
         # Fit transforms on train rows only to avoid leakage; collect held-out
         # predictions across folds; then refit on all rows for deployment.
 
-        def _fit_and_predict_fold(X_tr_raw, y_tr, X_te_raw):
+        def _fit_and_predict_fold(X_tr_raw, y_tr, X_te_raw, sw_tr=None):
             """Standardise + impute on train only; return OOS predictions."""
             # Impute train NaNs
             with _warnings.catch_warnings():
@@ -600,7 +626,7 @@ def _train_model_impl(conn):
             tr_stds[tr_stds < 1e-9] = 1.0
             Xtr = (Xtr - tr_means) / tr_stds
             Xte = (Xte - tr_means) / tr_stds
-            w, b = _ridge_regression(Xtr, y_tr)
+            w, b = _ridge_regression(Xtr, y_tr, sample_weight=sw_tr)
             return np.dot(Xte, w) + b
 
         n = len(rows)
@@ -621,6 +647,7 @@ def _train_model_impl(conn):
                 oos_preds[test_start:test_end] = _fit_and_predict_fold(
                     X_raw[:train_end], y[:train_end],
                     X_raw[test_start:test_end],
+                    sw_tr=sample_w[:train_end],
                 )
         else:
             # Single chronological holdout: train on first 70%, test on last 30%
@@ -628,6 +655,7 @@ def _train_model_impl(conn):
             split = int(n * 0.70)
             oos_preds[split:] = _fit_and_predict_fold(
                 X_raw[:split], y[:split], X_raw[split:],
+                sw_tr=sample_w[:split],
             )
 
         # Compute OOS metrics on held-out rows only
@@ -645,8 +673,8 @@ def _train_model_impl(conn):
             cv_method = 'insufficient'
             n_test = 0
 
-        # ── Final model fit — all rows ────────────────────────────────────────
-        weights, bias = _ridge_regression(X, y)
+        # ── Final model fit — all rows (paper down-weighted) ─────────────────
+        weights, bias = _ridge_regression(X, y, sample_weight=sample_w)
 
         # ── Metrics (R², MAE) ────────────────────────────────────────────────
         y_pred    = np.dot(X, weights) + bias
@@ -696,6 +724,7 @@ def _train_model_impl(conn):
         results["models"][scope] = {
             "ok":         True,
             "n_samples":  len(rows),
+            "n_paper":    n_paper,   # rows down-weighted 0.5× (IMPROVEMENTS #4)
             "n_positive": n_positive,
             "r2_score":   r2_score,
             "mae_score":  mae_score,

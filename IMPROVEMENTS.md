@@ -46,27 +46,25 @@ The user asked "what is working and what is not". Assessment from the live data 
 
 ### 1. Run (and then automate) the entry-driver backfill
 **Files:** `routes/learning.py` (`/api/learning/backfill-entry-drivers`), Learning page
-**Status:** Open
+**Status:** Resolved (2026-07-06) — backfill has been run (0/24 closed events now missing `primary_entry_driver`, was 23/24), and `syncClosedTradesToLearningLoop()` now fires the endpoint (fire-and-forget, idempotent) at the end of every sync so the column can't silently rot again.
 
 One `POST /api/learning/backfill-entry-drivers` call fills `primary_entry_driver` on historical rows from stored entry signals. Today 23/24 closed events lack it, which empties three whole analytics surfaces (driver × regime × sector matrix, driver × thesis matrix, capital-efficiency-by-driver) and starves `computeThesisDrift()`'s entry context. Suggest: invoke it once now, then call it opportunistically at the end of `syncClosedTradesToLearningLoop()` (idempotent, cheap) so it can never silently rot again.
 
 ### 2. Seed the lessons loop from the postmortem digest
 **Files:** Learning page digest flow, `POST /api/learning/lessons`
-**Status:** Open
+**Status:** Resolved (verified 2026-07-06 — already shipped as the **AI Lesson Generator** card on the Learning page: `generateTradingLessons()` pulls `GET /api/learning/lesson-source` + macro history + local-critic track record, asks Claude for 3–6 one-sentence scoped lessons as JSON, validates scopes, and persists each via `POST /api/learning/lessons` with `source:'ai_digest'`.) The table is empty only because the button has never been clicked — **user action: Learning page → AI Lesson Generator → Generate Lessons** (works at the current n=24 closed).
 
 The entire lesson life-cycle (scoped injection into prompts, before/after effectiveness scoring, `⚠LESSON_DRAG` nudge) is built and tested but has zero rows. The AI Postmortem Digest already produces exactly the material lessons need. Add a per-insight "save as lesson" button on digest output (pre-filled ticker/sector/regime scope) so lessons accrue as a by-product of a monthly ritual the scheduler already reminds about, rather than requiring free-form manual entry nobody does.
 
 ### 3. Learning-loop coverage panel ("data hygiene at a glance")
 **Files:** `js/pages/learning.js`
-**Status:** Open
+**Status:** Resolved (2026-07-06) — new `GET /api/learning/coverage` (read-only COUNT queries, no resolvers triggered) + "🧹 Capture Coverage" strip at the top of the Learning page: per-capture fill rates (error tags, win tags, entry driver, thesis verdict, MAE/MFE, exit signals — green ≥80% / amber ≥50% / red below; `pct=None` when the eligible population is empty so an empty denominator never reads as a 0% alarm) and work-queue chips (stuck-open >60d, virtual pending with days-until-eligible, HOLD resolved, lessons). Each cell's tooltip names the fixing action. Tests in `TestLearningCoverage`.
 
 The starvation gaps above were only findable by SQL. Add a small coverage strip to the Learning page: % of closed events with error_type / driver / thesis_verdict / MAE-MFE / exit_signals, count of events stuck `open` >60d, and days until virtual-outcome eligibility. Each cell links to the fixing action (backfill endpoint, untagged list, sync button). This turns silent decay into a visible checklist.
 
 ### 4. Grade paper trades against real-fill friction in day-trade ML
-**Files:** `day_trade_db.py`, `routes/day_trade_training.py`
-**Status:** Open
-
-Day-trade training snapshots don't record trade mode; paper fills (perfect price, zero slippage) train the Ridge models with the same weight as real fills. Once real day-trades exist, add `trade_mode` to snapshots and either down-weight paper rows (as `_calib_compute` already does with 0.5×) or add it as a feature. Low priority until real day-trade volume exists.
+**Files:** `day_trade_db.py`, `routes/day_trade_training.py`, `js/dt-training.js`
+**Status:** Resolved (2026-07-06) — `trade_mode` column added to `trade_snapshots` (migration); captured on snapshot save (`dtSaveSnapshot` sends the position's mode; only explicit `real`/`paper` stored, else NULL); and the Ridge training now applies a per-row `sample_weight` — paper rows 0.5×, real/legacy(NULL) 1.0× — threaded through both the final fit and every walk-forward/holdout fold. `_ridge_regression()` was lifted to module scope so the weighting is unit-tested directly: **uniform weights are bit-identical to the old unweighted fit** (proven — so the current all-real/legacy corpus is completely unchanged; the down-weighting is dormant until paper day-trades are tagged), and down-weighting a divergent group provably pulls the fit toward the up-weighted group. `n_paper` surfaced per model in the train response. Tests in `TestDayTradeTraining`.
 
 ### 5. Surface save failures (non-409) to the user
 **Files:** `js/api.js` (`saveStateToDb`)
@@ -75,19 +73,34 @@ Day-trade training snapshots don't record trade mode; paper fills (perfect price
 `saveStateToDb()` swallows every non-409 failure silently, which is how FIXES.md #2 (every save failing on a UNIQUE violation) could go unnoticed indefinitely. One-shot toast + a persistent "unsaved changes" indicator when ≥2 consecutive saves fail. Keep the silent path for transient single failures.
 
 ### 6. Mode filter completeness sweep on remaining aggregations
-**Files:** `js/pages/dashboard.js`, `js/scheduler.js` (drawdown monitor), `js/alerts.js`
-**Status:** Open
-
-The core paths (portfolio, CGT, journal, performance, NAV, charts) are correctly mode-aware. A few peripheral consumers still aggregate mode-blind: critical-alert engine (FIXES.md #7), drawdown alert (reads NAV — real-only, fine — but verify the alert copy when paper view is active), and Telegram alert payloads. Do a one-pass sweep with a checklist against gotcha #88's surface list after the FIXES.md #1–#3 migration lands, since some of these are currently masked by the all-paper data.
+**Files:** `js/pages/dashboard.js`, `js/pages/performance.js`, `js/portfolio-helpers.js`
+**Status:** Resolved (2026-07-06; Telegram out of scope per user) — swept all peripheral consumers against gotcha #88's surface list:
+- **Dashboard** — already mode-aware (routes through `mergedPortfolio()`/`viewCash()`/`paperPortfolioValue()`, driven by `portfolioViewMode`). No change needed.
+- **Critical-alert engine** — made multi-book aware in FIXES #7.
+- **Performance drawdown** (the one real gap) — the drawdown alert banner and the Current/Max Drawdown metric cards are computed from real NAV (`netWorth`) but were rendering in **all** views including Paper, mixing a real-money drawdown in with paper P&L. Now gated on `vm !== 'paper'` (`_showDd`), matching how the equity curve was already hidden in Paper view.
+- **Telegram** — out of scope (user opted out).
 
 ### 7. Paper book reset button
 **Files:** `js/pages/settings.js` / portfolio page
-**Status:** Open
-
-Paper trading exists to experiment, but there's no way to wipe the paper book (close paper parcels/journal rows, restore `paperCash` to `paperStartCash`) without touching real data. A "Reset paper book" action with a confirm dialog makes the sandbox actually reusable — and is itself a good end-to-end test of the firewall (it must provably delete zero real rows; assert via `isRealTrade` filter and add a vitest).
+**Status:** Resolved (2026-07-06) — `resetPaperBook()` in `js/utils.js` + a "Reset paper book" card in Settings (`resetPaperBookUI()`, preview-then-confirm). It removes explicit-`mode==='paper'` rows from portfolio/parcels/journal/disposals/recHistory, drops day-trade & intraday positions linked to a removed paper parcel (or explicitly paper), clears each snapshot's `paperValue` (real NAV fields untouched), and restores `paperCash` to `paperStartCash`. **Real-safety invariant:** the delete predicate is explicit-paper, NOT `isRealTrade` — a *missing* mode is ambiguous (possible un-backfilled real history) and is preserved, so no real or untagged row is ever deleted. Proven by 4 vitest cases in `paper-real-firewall.test.js` (real + untagged survive; linked positions drop; cash restored; real cash untouched); source-guard in `TestPaperBookReset`.
 
 ### 8. Test coverage for the firewall's persistence boundary
 **Files:** `test_app.py`, `tests/paper-real-firewall.test.js`
 **Status:** Open — companion to FIXES.md #1/#2
 
 The existing firewall vitest suite covers in-memory invariants (`isRealTrade`, cash routing, parcel scoping) but nothing crosses the client↔server persistence boundary, which is exactly where the real/paper distinction was lost. Add: (a) Python round-trip test — save a dual-mode ticker, load, assert both rows and their modes survive; (b) vitest — `_validHolding` preserves `mode`; (c) Python test — EOFY pack contains real disposals after a mixed-mode save.
+
+### 9. Go-live readiness scorecard
+**Files:** `routes/learning.py` (`_compute_go_live_readiness`, `GET /api/learning/go-live-readiness`), `js/pages/learning.js` (`renderGoLiveCard`)
+**Status:** Resolved (2026-07-06) — the user is running a ≥6-month paper validation before funding live trading; this turns "is the model capable?" into an objective 🎯 Go-Live Readiness card (top of the Learning page). Five friction-adjusted criteria → `ready`/`almost`/`not_ready`:
+1. **Sample size** ≥40 closed (warn ≥20).
+2. **Regime coverage** ≥3 distinct regimes (an edge in one regime isn't proven).
+3. **Calibration honesty** — `|mean stated confidence − actual win rate| ≤ 7pp`. Deliberately NOT Brier: Brier's irreducible `p(1−p)` floor (a perfectly honest 65%-win model scores 0.2275) makes a <0.20 bar unachievable and would punish honesty. The gap is 0 exactly when confidence matches reality — which is what feeds Kelly sizing.
+4. **Edge survives friction** — each trade's P&L haircut `?friction_bps` (default 30 = 0.30% round-trip, since paper fills are frictionless), then the Wilson 95% CI lower bound of the win rate must exceed the payoff-ratio break-even. Catches a marginal edge that only exists because paper ignores spread/slippage.
+5. **Profitable entry archetypes** — ≥2 `primary_entry_driver`s with positive post-cost expectancy at n≥5 each.
+
+Thresholds are module constants (`_GOLIVE_*`), tunable. Verified against the live DB: currently `almost` (2/5) — calibration honesty already passes (65.4% stated vs 62.5% actual, 2.9pp gap) and the edge passes after friction; sample size, regime coverage, and per-driver n are the gaps that 6 months of paper trading will fill. Tests in `TestGoLiveReadiness` (strong record → ready; negative edge → fail; friction flips a marginal edge; single regime → fail).
+
+### 10. Realistic paper fills
+**Files:** `js/utils.js` (`paperFillPrice`, `_advSlippageRate`), `js/pages/recommendations.js` (`markExecuted`), `js/pages/settings.js`, `js/pages/learning.js`
+**Status:** Resolved (2026-07-06) — so the paper book fills like the market will, not at a frictionless target. On execution of an AI rec, a **paper** fill is slipped adversely (BUY/TOP_UP pays up, SELL/TRIM receives down) by the **same model the backtester and virtual-outcome resolvers already use**: ADV-tier one-way rate (0.05–0.35% by 20-day turnover) × regime multiplier (highVol 1.5×, riskOff 1.25×, panic 2×). Everything downstream — cost basis, journal, P&L, learning-loop `realized_pnl_pct` — then reflects real friction. **Firewall-safe:** gated on `!isRealTrade(mode)`, so a real trade always books at the price the user actually got; a cross-language parity test (`TestRealisticPaperFills`) pins the JS tiers/multipliers to `core.adv_slippage` + `_SLIP_REGIME_MULT`. Toggle in Settings → Paper trading (`paperRealisticFills`, **default on**); a toast discloses the modeled slippage on each fill. The go-live scorecard reads the setting and passes `friction_bps=0` when it's on, so friction isn't double-counted (the P&L already contains it). **Scope:** the AI-rec execution path (`markExecuted`) — where validation trades enter/exit. Manual journal entries (user asserts their own fill) and the separate day-trade subsystem are intentionally not slipped; extend later if wanted. 5 vitest cases (adverse direction, ADV tiers, regime widening, invalid-input passthrough, backend parity).

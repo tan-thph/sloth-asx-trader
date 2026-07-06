@@ -181,6 +181,12 @@ def init_dt_db():
             # column above — lets analysis compare regime-at-entry vs regime-at-exit
             # instead of only ever seeing the entry snapshot.
             "ALTER TABLE trade_snapshots ADD COLUMN regime_at_close TEXT",
+            # Paper/real firewall (gotcha #88) for the ML corpus (IMPROVEMENTS #4):
+            # paper day-trades fill at a perfect price with zero slippage, so they
+            # are systematically optimistic and should not train the model with the
+            # same weight as real fills. 'real' | 'paper' | NULL (legacy/unknown →
+            # treated as full weight, never down-weighted on assumption).
+            "ALTER TABLE trade_snapshots ADD COLUMN trade_mode TEXT",
         ]
         for _sql in _migrations:
             try:

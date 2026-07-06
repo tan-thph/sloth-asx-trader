@@ -1744,7 +1744,9 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount, execMo
 
   const qty        = (execQty  !== undefined && !isNaN(execQty)  && execQty  > 0) ? execQty  : (rec.qty || 10);
   const fees       = (execFee  !== undefined && !isNaN(execFee))                  ? execFee  : state.settings.brokerage;
-  const tradePrice = (execPrice !== undefined && !isNaN(execPrice) && execPrice > 0) ? execPrice : (rec.priceRange?.[0] ?? 0);
+  // tradePrice is `let` because realistic paper fills (below) may slip it after
+  // the regime + liquidity are known.
+  let tradePrice   = (execPrice !== undefined && !isNaN(execPrice) && execPrice > 0) ? execPrice : (rec.priceRange?.[0] ?? 0);
   const isReducing = rec.action === 'SELL' || rec.action === 'TRIM';
 
   // Ensure live signals are available before snapshotting — state.liveSignals
@@ -1779,6 +1781,24 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount, execMo
   // if the live read is for some reason unavailable.
   const execRegime = (state.currentRegime && state.currentRegime.regime)
     || (typeof state._lastRegime === 'string' ? state._lastRegime : null);
+
+  // Realistic paper fills (IMPROVEMENTS #10): model the spread + market impact a
+  // live order crosses, so the paper book isn't optimistic vs live. PAPER ONLY —
+  // a real trade already booked at the price the user actually got. Gated on the
+  // paperRealisticFills setting (default ON; set false for clean legacy fills).
+  // Slips the fill AFTER regime + liveSignals (adv_20) are resolved above so the
+  // rate is liquidity- and regime-aware, exactly like the backend resolvers.
+  if (!isRealTrade(mode) && state.settings?.paperRealisticFills !== false
+      && typeof paperFillPrice === 'function' && tradePrice > 0) {
+    const _adv = state.liveSignals?.[rec.ticker]?.adv_20;
+    const _slipped = paperFillPrice(tradePrice, rec.action, _adv, execRegime);
+    if (_slipped !== tradePrice) {
+      const _dir = (rec.action === 'BUY' || rec.action === 'TOP_UP') ? 'paid up' : 'received down';
+      const _bps = Math.abs((_slipped / tradePrice - 1) * 10000).toFixed(0);
+      toast(`Paper fill: ${rec.ticker} ${_dir} to $${fmt(_slipped)} (modeled ${_bps}bps slippage)`, 'info');
+      tradePrice = _slipped;
+    }
+  }
 
   let tradeEntry;
   let realizedPnl = null;   // will be set for SELL/TRIM when holding exists
@@ -2024,14 +2044,33 @@ async function markExecuted(id, execPrice, execFee, execQty, execAccount, execMo
         // (e.g. 'personal') still holds shares of the same ticker.
         const remaining = getPortfolioHolding(rec.ticker, sellAccount, mode);
         const positionClosed = !remaining || (remaining.shares || 0) <= 0;
-        if (positionClosed && _distinctAccts.length <= 1) {
+        if (positionClosed) {
+          // Multi-account tickers (FIXES #5): recHistory parents carry no
+          // account marker, but their executed journal rows do. When the
+          // ticker is held in more than one account, only reconcile parents
+          // whose BUY/TOP_UP journal row sits in the account being closed —
+          // the old `_distinctAccts.length <= 1` gate skipped reconciliation
+          // entirely, leaving those parent events outcome='open' forever.
+          // A parent with no matching journal row stays open (conservative:
+          // it may belong to the other, still-open account). Includes
+          // RECLASSIFY since parcel rows mutate action in place (gotcha #79).
+          const _parentInSellAccount = (pr) => {
+            if (_distinctAccts.length <= 1) return true;  // unambiguous
+            return (state.tradeJournal || []).some(t =>
+              t.recId === pr.id &&
+              (t.action === 'BUY' || t.action === 'TOP_UP' || t.action === 'RECLASSIFY') &&
+              (t.account || 'personal') === sellAccount &&
+              (t.mode || 'paper') === mode
+            );
+          };
           const parentRecs = (state.recHistory || []).filter(r =>
             r.ticker === rec.ticker &&
             r._learningId &&
             r._learningId !== rec._learningId &&
             r.outcome === 'open' &&
             (r.action === 'BUY' || r.action === 'TOP_UP') &&
-            (r.mode || 'paper') === mode   // only reconcile same-mode parents (gotcha #88)
+            (r.mode || 'paper') === mode &&   // only reconcile same-mode parents (gotcha #88)
+            _parentInSellAccount(r)
           );
           for (const pr of parentRecs) {
             // Compute per-entry outcome so a TOP_UP at a higher price than exit

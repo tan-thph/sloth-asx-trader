@@ -401,6 +401,33 @@ python3 asx_server.py</pre>
     </div>
 
     <div class="card">
+      <div class="card-title">Paper trading</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0">
+        <div>
+          <div style="font-size:13px;font-weight:600">Realistic paper fills</div>
+          <div class="text-xs text-muted">Model the bid-ask spread &amp; market impact a live order crosses, so paper P&amp;L isn't optimistic vs live. A paper BUY fills slightly higher, a SELL slightly lower — rate scales with the stock's liquidity (0.05–0.35%) and the regime (higher in volatile/panic markets). <strong>Real trades are never touched.</strong> Recommended on while validating for live.</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" ${state.settings.paperRealisticFills !== false ? 'checked' : ''}
+            onchange="updateSetting('paperRealisticFills', this.checked); scheduleSave()">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Reset paper book</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+        Wipe the paper-trading sandbox — paper holdings, parcels, journal rows,
+        disposals, recs and linked day-trade positions — and restore paper cash to
+        your configured starting balance. <strong>Real records are never touched:</strong>
+        only rows explicitly marked <em>paper</em> are removed; anything real or
+        untagged is preserved. Shows a preview before deleting anything.
+      </div>
+      <button class="btn btn-sm btn-danger" onclick="resetPaperBookUI()">Reset paper book…</button>
+      <div id="settings-paper-reset-result" style="font-size:12px;margin-top:8px"></div>
+    </div>
+
+    <div class="card">
       <div class="card-title">What's New</div>
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Release history — most recent first</div>
 
@@ -578,6 +605,44 @@ async function backfillLegacyModes() {
   } catch (e) {
     setOut(`<span class="text-danger">Error: ${escapeHTML(e.message)}</span>`);
   }
+}
+
+// Reset the paper sandbox (IMPROVEMENTS #7). Preview counts first (computed the
+// same way resetPaperBook() removes them — explicit mode==='paper' only), confirm,
+// then apply + persist. resetPaperBook() lives in utils.js so its real-safety
+// invariant is unit-tested by the firewall vitest suite.
+function resetPaperBookUI() {
+  const out = document.getElementById('settings-paper-reset-result');
+  const setOut = (html) => { if (out) out.innerHTML = html; };
+  const _isPaper = (typeof _isExplicitPaper === 'function')
+    ? _isExplicitPaper : (x => !!x && x.mode === 'paper');
+  const nP = (state.portfolio    || []).filter(_isPaper).length;
+  const nK = (state.cgtParcels   || []).filter(_isPaper).length;
+  const nJ = (state.tradeJournal || []).filter(_isPaper).length;
+  const nD = (state.cgtDisposals || []).filter(_isPaper).length;
+  const nR = (state.recHistory   || []).filter(_isPaper).length;
+  if (nP + nK + nJ + nD + nR === 0) {
+    setOut('<span class="text-success">Nothing to reset — no paper records found.</span>');
+    return;
+  }
+  const seed = Number(state.settings?.paperStartCash) || 100000;
+  const msg = `Delete the paper sandbox:\n\n`
+    + `  • ${nP} paper holding(s)\n`
+    + `  • ${nK} paper CGT parcel(s)\n`
+    + `  • ${nJ} paper journal row(s)\n`
+    + `  • ${nD} paper disposal(s)\n`
+    + `  • ${nR} paper recommendation(s)\n\n`
+    + `Paper cash resets to $${fmt(seed)}. Real records are NOT touched.\n\n`
+    + `This cannot be undone. Proceed?`;
+  if (!confirm(msg)) { setOut('<span class="text-muted">Cancelled — nothing changed.</span>'); return; }
+
+  const s = resetPaperBook();
+  scheduleSave();
+  if (typeof renderPage === 'function') renderPage();
+  toast('Paper book reset ✓', 'success');
+  setOut(`<span class="text-success">✓ Removed ${s.portfolio} holdings, ${s.parcels} parcels, `
+    + `${s.journal} journal rows, ${s.disposals} disposals, ${s.recHistory} recs, `
+    + `${s.positions} day-trade position(s). Paper cash restored to $${fmt(seed)}.</span>`);
 }
 
 async function loadProxyKeyStatus() {

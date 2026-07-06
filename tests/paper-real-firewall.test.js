@@ -285,3 +285,164 @@ describe('_validHolding preserves mode across the load sanitiser (FIXES #1)', ()
     expect(_validHolding({ ticker: 'BHP', mode: 'REAL' }).mode).toBe('paper'); // case-sensitive
   });
 });
+
+describe('critical-alert engine is multi-book aware (FIXES #7)', () => {
+  beforeEach(resetState);
+
+  it('_holdingsForTicker returns every account/mode row, skipping zero-share rows', () => {
+    state.portfolio = [
+      { ticker: 'WDS', shares: 0,  avgPrice: 30, currentPrice: 25, account: 'personal', mode: 'real' },
+      { ticker: 'WDS', shares: 10, avgPrice: 30, currentPrice: 25, account: 'trading',  mode: 'real' },
+      { ticker: 'WDS', shares: 5,  avgPrice: 28, currentPrice: 25, account: 'trading',  mode: 'paper' },
+      { ticker: 'BHP', shares: 3,  avgPrice: 40, currentPrice: 45, account: 'personal', mode: 'real' },
+    ];
+    const rows = _holdingsForTicker('WDS');
+    expect(rows.length).toBe(2);            // zero-share personal row excluded
+    expect(rows.every(h => h.ticker === 'WDS')).toBe(true);
+  });
+
+  it('fires the alert even when only a NON-first portfolio row holds shares', () => {
+    // Old bug: getPortfolioHolding(ticker) returned the first match (0 shares)
+    // → `continue` → the crash on the actually-held book went un-alerted.
+    state.portfolio = [
+      { ticker: 'ZIP', shares: 0,   avgPrice: 2, currentPrice: 1.6, account: 'personal', mode: 'real' },
+      { ticker: 'ZIP', shares: 100, avgPrice: 2, currentPrice: 1.6, account: 'trading',  mode: 'paper' },
+    ];
+    state.criticalAlerts = {};
+    state.liveSignals = { ZIP: { chart_data: [{ close: 2.0 }, { close: 1.6 }] } }; // −20% day
+    const alerts = computeCriticalAlerts();
+    expect(alerts.ZIP).toBeDefined();
+    expect(alerts.ZIP.type).toBe('single_day');
+  });
+
+  it('does not alert on tickers with no held book at all', () => {
+    state.portfolio = [];
+    state.criticalAlerts = {};
+    state.liveSignals = { ZIP: { chart_data: [{ close: 2.0 }, { close: 1.6 }] } };
+    expect(computeCriticalAlerts().ZIP).toBeUndefined();
+  });
+});
+
+describe('resetPaperBook wipes only the paper sandbox (IMPROVEMENTS #7)', () => {
+  beforeEach(() => {
+    resetState();
+    global.state.recHistory = [];
+    global.state.portfolioHistory = [];
+    global.state.intraday = { openPositions: [] };
+    global.state.dayTrading = { recommendations: [] };
+    global.state.settings = { paperStartCash: 50000 };
+    global.state.paperCash = 12345;
+    global.state._paperCashSeeded = true;
+  });
+
+  it('removes explicit-paper rows, preserves real AND untagged rows', () => {
+    state.portfolio = [
+      { ticker: 'CBA', shares: 10, mode: 'real' },
+      { ticker: 'BHP', shares: 5,  mode: 'paper' },
+      { ticker: 'WOW', shares: 3 },                 // untagged → ambiguous → keep
+    ];
+    state.cgtParcels = [
+      { id: 1, ticker: 'CBA', mode: 'real' },
+      { id: 2, ticker: 'BHP', mode: 'paper' },
+    ];
+    state.tradeJournal = [
+      { id: 1, ticker: 'CBA', mode: 'real' },
+      { id: 2, ticker: 'BHP', mode: 'paper' },
+      { id: 3, ticker: 'WOW' },                     // untagged → keep
+    ];
+    state.cgtDisposals = [{ id: 1, mode: 'paper' }, { id: 2, mode: 'real' }];
+    state.recHistory   = [{ id: 1, mode: 'paper' }, { id: 2, mode: 'real' }, { id: 3 }];
+
+    const s = resetPaperBook();
+
+    expect(s).toMatchObject({ portfolio: 1, parcels: 1, journal: 1, disposals: 1, recHistory: 1 });
+    // Real + untagged survive; explicit paper gone.
+    expect(state.portfolio.map(h => h.ticker).sort()).toEqual(['CBA', 'WOW']);
+    expect(state.tradeJournal.map(j => j.id).sort()).toEqual([1, 3]);
+    expect(state.cgtParcels.map(p => p.id)).toEqual([1]);
+    expect(state.cgtDisposals.map(d => d.id)).toEqual([2]);
+    expect(state.recHistory.map(r => r.id).sort()).toEqual([2, 3]);
+    // The money-critical invariant: nothing real was deleted.
+    expect(state.portfolio.every(h => h.mode !== 'paper')).toBe(true);
+  });
+
+  it('drops day-trade/intraday positions linked to a removed paper parcel', () => {
+    state.cgtParcels = [{ id: 7, ticker: 'ZIP', mode: 'paper' },
+                        { id: 8, ticker: 'CBA', mode: 'real' }];
+    state.intraday.openPositions = [
+      { id: 'a', ticker: 'ZIP', parcelId: 7 },      // linked to removed paper parcel
+      { id: 'b', ticker: 'CBA', parcelId: 8 },      // real parcel → keep
+    ];
+    state.dayTrading.recommendations = [
+      { id: 'r1', ticker: 'XYZ', mode: 'paper' },   // explicit paper → drop
+      { id: 'r2', ticker: 'CBA', mode: 'real' },
+    ];
+    const s = resetPaperBook();
+    expect(s.positions).toBe(2);
+    expect(state.intraday.openPositions.map(p => p.id)).toEqual(['b']);
+    expect(state.dayTrading.recommendations.map(r => r.id)).toEqual(['r2']);
+  });
+
+  it('resets paperCash to paperStartCash and clears only paperValue on snapshots', () => {
+    state.portfolioHistory = [
+      { date: '2026-07-01', netWorth: 5000, portfolioValue: 4000, cash: 1000, paperValue: 800 },
+    ];
+    resetPaperBook();
+    expect(state.paperCash).toBe(50000);
+    expect(state._paperCashSeeded).toBe(true);
+    const snap = state.portfolioHistory[0];
+    expect('paperValue' in snap).toBe(false);        // paper curve cleared
+    expect(snap.netWorth).toBe(5000);                 // real NAV untouched
+    expect(snap.cash).toBe(1000);
+  });
+
+  it('touches no real cash', () => {
+    state.cash = 9999;
+    resetPaperBook();
+    expect(state.cash).toBe(9999);
+  });
+});
+
+describe('realistic paper fills — paperFillPrice (IMPROVEMENTS #10)', () => {
+  it('BUY/TOP_UP fills UP, SELL/TRIM fills DOWN (adverse)', () => {
+    // adv >= 10M → 0.05% one-way, no regime bump.
+    expect(paperFillPrice(100, 'BUY', 20e6, 'riskOn')).toBeCloseTo(100.05, 4);
+    expect(paperFillPrice(100, 'TOP_UP', 20e6, 'riskOn')).toBeCloseTo(100.05, 4);
+    expect(paperFillPrice(100, 'SELL', 20e6, 'riskOn')).toBeCloseTo(99.95, 4);
+    expect(paperFillPrice(100, 'TRIM', 20e6, 'riskOn')).toBeCloseTo(99.95, 4);
+  });
+
+  it('rate scales down with liquidity (ADV tiers)', () => {
+    const buy = (adv) => paperFillPrice(100, 'BUY', adv, 'riskOn') - 100;
+    expect(buy(20e6)).toBeCloseTo(0.05, 4);   // 0.05%
+    expect(buy(5e6)).toBeCloseTo(0.10, 4);    // 0.10%
+    expect(buy(1e6)).toBeCloseTo(0.20, 4);    // 0.20%
+    expect(buy(100e3)).toBeCloseTo(0.35, 4);  // 0.35% thin
+    expect(buy(null)).toBeCloseTo(0.35, 4);   // unknown → conservative thin tier
+  });
+
+  it('regime multiplier widens slippage in volatile/panic markets', () => {
+    // thin tier 0.35% × panic 2.0 = 0.70%
+    expect(paperFillPrice(100, 'BUY', 100e3, 'panic')).toBeCloseTo(100.70, 4);
+    // 0.35% × highVol 1.5 = 0.525%
+    expect(paperFillPrice(100, 'BUY', 100e3, 'highVol')).toBeCloseTo(100.525, 4);
+    // 0.05% × riskOff 1.25 = 0.0625%
+    expect(paperFillPrice(100, 'SELL', 20e6, 'riskOff')).toBeCloseTo(100 * (1 - 0.000625), 4);
+  });
+
+  it('returns the price unchanged on invalid inputs', () => {
+    expect(paperFillPrice(0, 'BUY', 20e6, 'riskOn')).toBe(0);
+    expect(paperFillPrice(-5, 'BUY', 20e6, 'riskOn')).toBe(-5);
+    expect(paperFillPrice(NaN, 'BUY', 20e6, 'riskOn')).toBeNaN();
+  });
+
+  it('mirrors the backend tiers exactly (0.05/0.10/0.20/0.35 + 1.5/1.25/2.0)', () => {
+    expect(_advSlippageRate(10e6)).toBe(0.0005);
+    expect(_advSlippageRate(2e6)).toBe(0.0010);
+    expect(_advSlippageRate(500e3)).toBe(0.0020);
+    expect(_advSlippageRate(499e3)).toBe(0.0035);
+    expect(_SLIP_REGIME_MULT.highVol).toBe(1.5);
+    expect(_SLIP_REGIME_MULT.riskOff).toBe(1.25);
+    expect(_SLIP_REGIME_MULT.panic).toBe(2.0);
+  });
+});

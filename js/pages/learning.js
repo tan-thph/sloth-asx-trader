@@ -260,6 +260,10 @@ async function renderLearningPage(gen) {
   renderExecutionAlphaCard().catch(() => {});
   // Async: load tag accuracy card (Gap 6)
   renderTagAccuracyCard().catch(() => {});
+  // Async: load data-hygiene coverage strip (IMPROVEMENTS #3)
+  renderCoverageCard().catch(() => {});
+  // Async: load go-live readiness scorecard
+  renderGoLiveCard().catch(() => {});
   // Async: load entry signal factor analysis card
   renderFactorWinRatesCard().catch(() => {});
 }
@@ -1287,7 +1291,13 @@ function _renderLearningContent(d, brier) {
       </div>
     </details>`;
 
-  return introNote + _llWindowBar() + summaryCards + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
+  // ── Coverage strip (async — filled by renderCoverageCard(); IMPROVEMENTS #3) ──
+  const coveragePlaceholder = `<div id="ll-coverage-card"></div>`;
+
+  // ── Go-live readiness scorecard (async — filled by renderGoLiveCard()) ──
+  const goLivePlaceholder = `<div id="ll-golive-card"></div>`;
+
+  return introNote + _llWindowBar() + summaryCards + goLivePlaceholder + coveragePlaceholder + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard +
     realVsPaperCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
@@ -1295,6 +1305,126 @@ function _renderLearningContent(d, brier) {
     recentCard + failedCard + debateInsightsCard +
     digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + ruleEfficacyPlaceholder + thesisDriftPlaceholder +
     thesisMatrixPlaceholder + execAlphaPlaceholder + debateCollapsible;
+}
+
+// ── Data-hygiene coverage strip (IMPROVEMENTS #3) ─────────────────────────────
+// The loop's worst silent failure mode is capture decay: a column stops being
+// filled and the analytics built on it quietly empty (this is how NULL entry
+// drivers blanked three whole cards for weeks). This strip makes each capture's
+// fill-rate — and the work queues that fix them — visible at a glance.
+async function renderCoverageCard() {
+  const el = document.getElementById('ll-coverage-card');
+  if (!el) return;
+  let d;
+  try {
+    const r = await fetch(`${API}/api/learning/coverage`);
+    d = await r.json();
+  } catch (_) { return; }
+  if (!d?.ok || !d.n_closed) { el.innerHTML = ''; return; }
+
+  const cov = d.coverage || {}, q = d.queues || {};
+  const cell = (label, c, hint) => {
+    if (!c) return '';
+    const pct = c.pct;
+    const color = pct == null ? 'var(--text-muted)'
+      : pct >= 80 ? 'var(--up, #22c55e)'
+      : pct >= 50 ? '#f59e0b' : '#ef4444';
+    const val = pct == null ? '—' : `${c.covered}/${c.total}`;
+    return `<div style="text-align:center;min-width:86px" title="${escapeHTML(hint)}">
+      <div style="font-size:15px;font-weight:700;color:${color}">${val}</div>
+      <div class="text-xs text-muted">${label}</div>
+    </div>`;
+  };
+  const chip = (label, text, warn, hint) => `
+    <span class="text-xs" title="${escapeHTML(hint)}" style="padding:2px 8px;border-radius:10px;white-space:nowrap;
+      border:1px solid ${warn ? '#f59e0b' : 'var(--border)'};color:${warn ? '#b45309' : 'var(--text-secondary)'}">
+      ${label}: <strong>${text}</strong></span>`;
+
+  const holdText = q.hold_events ? `${q.hold_resolved}/${q.hold_events}` : 'none yet';
+  const virtText = q.virtual_pending
+    ? `${q.virtual_pending}${q.days_until_virtual != null ? ` (eligible in ${q.days_until_virtual}d)` : ''}`
+    : '0';
+
+  el.innerHTML = `
+    <div class="card section-gap">
+      <div class="flex-between">
+        <div class="card-title" style="margin:0">🧹 Capture Coverage <span class="text-xs text-muted" style="font-weight:400">(of closed trades — hover a cell for the fixing action)</span></div>
+      </div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px">
+        ${cell('Error tags', cov.error_type, 'Losses/breakevens with an error_type. Fix: deterministic tagger fills these lazily; use "Classify All Untagged" (Recent Events) for the pre-capture remainder.')}
+        ${cell('Win tags', cov.success_tags, 'Wins with success_tags. Fix: deterministic success tagger fills lazily; 🏆 button for manual.')}
+        ${cell('Entry driver', cov.entry_driver, 'Closed BUY/TOP_UP with primary_entry_driver. Fix: auto-backfills on every Learning Loop Sync (Performance page).')}
+        ${cell('Thesis verdict', cov.thesis_verdict, 'Closed BUY/TOP_UP with a thesis_verdict. Not backfillable — needs exit-time signals; fills as positions close via SELL/TRIM recs.')}
+        ${cell('MAE/MFE', cov.mae_mfe, 'Closed BUY/TOP_UP with path stats. Lazy resolver, 5 per calibration fetch — fills over time on its own.')}
+        ${cell('Exit signals', cov.exit_signals, 'Closed SELL/TRIM with an exit snapshot. Captured at execution by markExecuted() — a gap here means executions bypassed the rec card.')}
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        ${chip('Stuck open >60d', q.stuck_open_60d ?? 0, (q.stuck_open_60d ?? 0) > 0, 'Executed events never graded — almost always a missed Sync. Fix: Performance page → Sync to Learning Loop.')}
+        ${chip('Virtual pending', virtText, false, 'Unexecuted recs awaiting the 30-day virtual-outcome gate; resolve automatically after that.')}
+        ${chip('HOLD resolved', holdText, false, 'HOLD passivity grading (30-day lag, ±8% band). Accumulates from analysis runs.')}
+        ${chip('Lessons', q.lessons ?? 0, (q.lessons ?? 0) === 0, 'Scoped lessons injected into future prompts. Fix: AI Lesson Generator card below → Generate Lessons.')}
+      </div>
+    </div>`;
+}
+
+// ── Go-live readiness scorecard ───────────────────────────────────────────────
+// Turns "is the model good enough to trade live?" into an objective checklist.
+// The user is running a ≥6-month paper validation first; this scores the paper
+// track record against friction-adjusted bars (paper fills are frictionless, so
+// every P&L criterion haircuts costs before judging). Read-only.
+async function renderGoLiveCard() {
+  const el = document.getElementById('ll-golive-card');
+  if (!el) return;
+  // Avoid double-counting friction: when Realistic Paper Fills is ON, each paper
+  // trade's P&L already includes per-trade slippage, so the scorecard must NOT
+  // also apply its flat haircut (pass friction_bps=0). When OFF, fills are clean
+  // and the haircut is what accounts for real-world friction (default 30bps).
+  const _realistic = state.settings?.paperRealisticFills !== false;
+  const _fb = _realistic ? 0 : 30;
+  let d;
+  try {
+    const r = await fetch(`${API}/api/learning/go-live-readiness?friction_bps=${_fb}`);
+    d = await r.json();
+  } catch (_) { return; }
+  if (!d || !d.ok) { el.innerHTML = ''; return; }
+
+  const OVERALL = {
+    ready:     { label: 'READY TO GO LIVE', color: '#16a34a', bg: 'rgba(22,163,74,0.08)', icon: '🟢' },
+    almost:    { label: 'ALMOST — keep paper trading', color: '#d97706', bg: 'rgba(217,119,6,0.08)', icon: '🟡' },
+    not_ready: { label: 'NOT READY — keep paper trading', color: '#dc2626', bg: 'rgba(220,38,38,0.08)', icon: '🔴' },
+  };
+  const o = OVERALL[d.overall] || OVERALL.not_ready;
+  const chip = { pass: ['✓', '#16a34a'], warn: ['~', '#d97706'], fail: ['✗', '#dc2626'] };
+
+  const rows = (d.criteria || []).map(c => {
+    const [mark, col] = chip[c.status] || chip.fail;
+    return `
+      <div style="display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border)">
+        <span style="color:${col};font-weight:800;font-size:15px;line-height:1.3;min-width:14px">${mark}</span>
+        <div style="flex:1">
+          <div style="font-weight:600;font-size:13px">${escapeHTML(c.label)}</div>
+          <div class="text-xs text-muted" style="margin-top:1px">${escapeHTML(c.detail || '')}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="card section-gap" style="border-left:3px solid ${o.color}">
+      <div class="flex-between" style="flex-wrap:wrap;gap:6px">
+        <div class="card-title" style="margin:0">🎯 Go-Live Readiness</div>
+        <span style="font-weight:700;font-size:12px;color:${o.color};background:${o.bg};padding:3px 10px;border-radius:12px">
+          ${o.icon} ${o.label} · ${d.n_pass}/${d.n_total}
+        </span>
+      </div>
+      <div class="text-xs text-muted" style="margin:6px 0 2px">
+        Paper track record scored against live-trading bars.
+        ${_realistic
+          ? `Realistic paper fills are <strong>on</strong>, so per-trade spread &amp; slippage is already baked into these P&amp;L figures (scorecard haircut 0bps to avoid double-counting).`
+          : `Realistic paper fills are <strong>off</strong>, so P&amp;L criteria haircut ${d.friction_bps}bps/trade — real spread &amp; slippage would erode a frictionless paper edge.`}
+        Thresholds are conservative by design.
+      </div>
+      ${rows}
+    </div>`;
 }
 
 // ── Postmortem digest — AI summary of recent failure patterns ─────────────────

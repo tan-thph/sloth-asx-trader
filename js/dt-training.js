@@ -133,6 +133,11 @@ function dtSaveSnapshot(rec, tradeType, signals, macroData, entryPrice, execQty,
     trade_type:    tradeType || 'swing',
     record_type:   (opts && opts.record_type)   || 'executed',
     shadow_reason: (opts && opts.shadow_reason) || null,
+    // Paper/real firewall for the ML corpus (IMPROVEMENTS #4). Only an explicit
+    // 'real'/'paper' is sent; a missing mode stays null so the backend leaves it
+    // at full training weight rather than assuming paper. Executed day-trade
+    // positions carry mode (gotcha #75/#88); shadows have none → null.
+    trade_mode:    (opts && opts.trade_mode) || (rec.mode === 'real' ? 'real' : rec.mode === 'paper' ? 'paper' : null),
     target:      rec.target   || null,
     stop_loss:   rec.stopLoss || null,
     hold_days:   rec.holdDays || null,

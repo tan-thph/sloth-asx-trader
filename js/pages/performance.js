@@ -312,7 +312,12 @@ function renderPerformance() {
     _ddCurrent = _ddPeak > 0 ? Math.max(0, (_ddPeak - lastNw) / _ddPeak * 100) : 0;
   }
   const ddAlertPct = Number(state.settings.drawdownAlertPct) || 10;
-  const ddAlertActive = _ddCurrent > 0 && _ddCurrent >= ddAlertPct;
+  // Drawdown is derived from netWorth (real NAV, always real-only per gotcha #88),
+  // so like the equity curve it must NOT surface in Paper view — a real-money
+  // drawdown alert next to paper P&L is the exact mode-mixing IMPROVEMENTS #6
+  // flags. Gate both the banner and the metric cards on the view mode.
+  const _showDd = vm !== 'paper';
+  const ddAlertActive = _showDd && _ddCurrent > 0 && _ddCurrent >= ddAlertPct;
 
   const confBuckets=[0.5,0.6,0.7,0.8,0.9].map(c=>{
     const b=_recsInView.filter(r=>r.confidence>=c&&r.confidence<c+0.1&&r.outcome!=='open'&&r.outcome!=='skipped');
@@ -367,7 +372,7 @@ function renderPerformance() {
       <div class="metric-card"><div class="metric-label">Execution Rate</div><div class="metric-value">${fmt(execRate,0)}%</div><div class="metric-sub">${execRecIds.size} of ${_recsInView.length} recs</div></div>
       <div class="metric-card"><div class="metric-label">Realised P&L</div><div class="metric-value ${realised>=0?'up':'down'}">${sign(realised)}$${fmt(Math.abs(realised))}</div></div>
       <div class="metric-card"><div class="metric-label">Fees Paid</div><div class="metric-value">$${fmt(totalFees)}</div></div>
-      ${ph.length > 1 ? `
+      ${ph.length > 1 && _showDd ? `
       <div class="metric-card">
         <div class="metric-label">Current Drawdown</div>
         <div class="metric-value ${_ddCurrent > ddAlertPct ? 'down' : _ddCurrent > 5 ? '' : 'up'}">${_ddCurrent > 0 ? '-' : ''}${_ddCurrent.toFixed(1)}%</div>
@@ -937,6 +942,18 @@ async function syncClosedTradesToLearningLoop() {
 
   scheduleSave();
   toast(`Learning Loop sync: ${updated} outcomes updated, ${logged} historical trades logged`, 'success');
+
+  // Opportunistic entry-driver backfill (IMPROVEMENTS #1): sync just wrote /
+  // updated historical events whose primary_entry_driver may be NULL (the
+  // sync payloads don't carry it), and NULL drivers silently empty the
+  // driver-matrix / thesis-matrix / capital-efficiency analytics. The
+  // endpoint is idempotent (fills NULLs only, deterministic classifier over
+  // stored entry signals, no Claude spend), so riding every manual sync
+  // keeps the column from rotting again. Fire-and-forget.
+  fetch(`${API}/api/learning/backfill-entry-drivers`, { method: 'POST' })
+    .then(r => r.json())
+    .then(d => { if (d?.updated) console.info(`[LearningSync] entry-driver backfill: ${d.updated} filled`); })
+    .catch(() => {});
 }
 
 // ── Outcome reconciliation ────────────────────────────────────────────────────

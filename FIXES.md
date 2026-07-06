@@ -59,7 +59,7 @@ Per the `isRealTrade()` invariant, missing mode ⇒ paper. So **every save→rel
 
 ## 3. [CRITICAL — data, not code] No migration for pre-firewall records — the user's entire real history is now invisible to every real-only surface
 
-**Status:** Resolved (tool shipped; user must run it once) — `POST /api/portfolio/backfill-modes` (dry-run first) marks all holdings/journal/parcels/disposals/recs/learning-events real, preserving the 2 explicitly-paper parcels + anything linked to them. UI: Settings → Data maintenance → "Reclassify legacy records as real…". Bumps `_state_version` + reloads state so the migration can't be clobbered back to paper.
+**Status:** VOID — do NOT run the backfill. The user confirmed (2026-07-06) that **every trade currently in the app is genuinely paper** — there is no pre-firewall *real* history to recover. The all-`paper` tagging is therefore correct, not a data-loss bug, and the 03-07 NAV snapshot showing real PV=$0 (finding #1/#6) is the *right* answer (no real holdings exist → real NAV is just cash). Running `POST /api/portfolio/backfill-modes` here would be actively harmful: it would fabricate real disposals in the EOFY/CGT tax surfaces and inject a fictitious real book into the NAV series. The tool remains available (Settings → Data maintenance) for the eventual real→live transition, but must stay unrun while the book is all-paper. The mode-persistence *code* fix (finding #1, gotcha #91) is still correct and necessary — it's what will keep real and paper separate once live trading begins.
 **Files:** data in `asx_trader.db`; migration touchpoints in `db.py`, plus a one-time UI/endpoint
 
 **Problem:** The firewall ships with "missing mode ⇒ paper", which is the correct fail-safe **for new records**, but nothing migrated the existing book. Live DB today:
@@ -81,7 +81,7 @@ Per the `isRealTrade()` invariant, missing mode ⇒ paper. So **every save→rel
 
 ## 4. [MEDIUM] HOLD recommendations are never logged — the entire HOLD-outcome feature is structurally dead
 
-**Status:** Resolved — `runPortfolioAnalysis()` now concatenates the stripped HOLDs back into the `logRecsToLearningLoop([...cappedDedupedRecs, ..._holdRecs], …)` call (`js/analysis.js`), so HOLDs reach `ai_learning_events` as `was_executed=0`. The logger already tolerates their missing target/stop/qty.
+**Status:** Resolved — `runPortfolioAnalysis()` now concatenates the stripped HOLDs back into the `logRecsToLearningLoop([...cappedDedupedRecs, ..._holdRecs], …)` call (`js/analysis.js`), so HOLDs reach `ai_learning_events` as `was_executed=0`. The logger already tolerates their missing target/stop/qty. **Follow-up (2026-07-06):** server-side dedupe added to `POST /api/learning/log` — HOLDs re-fire for every holding on every analysis run, so without a guard a daily-analysed 15-stock book logs ~450 HOLD events/month (each needing a yfinance fetch in `_resolve_hold_outcomes`, capped 5/call). Now at most one HOLD event per ticker per `_HOLD_DEDUP_DAYS` (7d); the duplicate returns the existing id with `deduped: true`. Tests in `TestHoldOutcomeTracking`.
 **Files:** `js/analysis.js` (:1412 HOLD filter, :1663 `logRecsToLearningLoop(cappedDedupedRecs, …)`), `routes/learning.py` (`_resolve_hold_outcomes` :2726)
 
 **Problem:** `runPortfolioAnalysis()` strips HOLD recs at line 1412 (`filteredRecs = recs.filter(r => … !== 'HOLD')`) and every downstream set (`conflictFreeRecs` → `cappedDedupedRecs`) derives from it — including the one passed to `logRecsToLearningLoop()`. So no HOLD event has ever reached `ai_learning_events` (confirmed live: recommendation distribution is BUY 3 / TOP_UP 6 / SELL 13 / TRIM 19 — zero HOLD). Meanwhile `_resolve_hold_outcomes()` selects `WHERE recommendation = 'HOLD'` — permanently zero rows. The `hold_outcomes` stats block, the `virtual_hold_miss/virtual_hold_correct` resolution, and the `⚠HOLD_TOO_PASSIVE` calibration nudge (CLAUDE.md gotcha #85, documented as shipped) can never fire. The model is never graded on its passivity.
@@ -92,7 +92,7 @@ Per the `isRealTrade()` invariant, missing mode ⇒ paper. So **every save→rel
 
 ## 5. [MEDIUM] Multi-account tickers never reconcile parent BUY/TOP_UP learning events
 
-**Status:** Open
+**Status:** Resolved (2026-07-06) — the `_distinctAccts.length <= 1` gate is removed; parents are resolved per-account via `_parentInSellAccount()`: a parent BUY/TOP_UP is reconciled iff a journal row with its `recId` sits in `sellAccount` (+ same mode; includes `RECLASSIFY` per gotcha #79). A parent with no matching journal row stays open (conservative — it may belong to the other, still-open account). Source-guard test in `TestFixes5And7MultiAccountAndAlerts`.
 **File:** `js/pages/recommendations.js` (`markExecuted`, `if (positionClosed && _distinctAccts.length <= 1)` ~:1992)
 
 **Problem:** The parent-event reconciliation block (grades all open BUY/TOP_UP learning events when a position fully closes) is gated on `_distinctAccts.length <= 1`. For any ticker held in two accounts, fully closing one account's position skips reconciliation entirely — the parent events stay `outcome='open'` forever, exactly the calibration-pollution failure the 2026-06-25 audit's finding #2 fixed for the account-scoping half. The `<= 1` gate was presumably added as a conservative guard because recHistory parents carry no account marker, but the result is a permanent blind spot instead of an occasional misattribution.
@@ -116,7 +116,7 @@ Per the `isRealTrade()` invariant, missing mode ⇒ paper. So **every save→rel
 
 ## 7. [LOW] `quickSellFromAlert()` / critical-alert P&L use mode- and account-blind holding lookups
 
-**Status:** Open
+**Status:** Resolved (2026-07-06) — new `_holdingsForTicker()` helper returns every account/mode row (skipping zero-share rows). `computeCriticalAlerts()` alerts if ANY book holds shares (the old first-match lookup could hit a zero-share row and suppress the alert); banner value/P&L aggregate across all books; `quickSellFromAlert()` shows a per-book breakdown and pre-fills the LARGEST book's qty (pre-filling the aggregate would guarantee a failed mode-scoped sell match) — the journal's `askTradeMode()` + account field still confirm the exact book. Vitest coverage in `paper-real-firewall.test.js`; source guard in `TestFixes5And7MultiAccountAndAlerts`.
 **File:** `js/portfolio-helpers.js` (`computeCriticalAlerts` :16, `renderCriticalAlertBanners` :100, `quickSellFromAlert` :147)
 
 **Problem:** All three call `getPortfolioHolding(ticker)` bare — first array match wins regardless of account/mode. With a ticker held both real and paper (or in two accounts), the alert banner's "Position value / Unrealised P&L" and the pre-filled SELL qty can reflect the *wrong* book (e.g. pre-filling a real SELL with the paper lot's share count). Alerting on paper holdings at all is also debatable.

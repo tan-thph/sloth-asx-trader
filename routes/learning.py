@@ -987,6 +987,27 @@ def learning_log():
     try:
         with get_db() as conn:
             _expire_old_events(conn)   # L3: side-effect on write, not GET
+            # HOLD dedupe: HOLDs are re-generated for every holding on every
+            # analysis run (unlike actionable recs, which get executed or
+            # superseded), so without a window guard a daily-analysed 15-stock
+            # book logs ~450 HOLD events/month — each needing its own yfinance
+            # fetch in _resolve_hold_outcomes (capped 5/call, queue grows faster
+            # than it drains) and repeated tickers dominating the hold_outcomes
+            # miss-rate. One HOLD per ticker per window is the same passivity
+            # signal; return the existing event id so the client's _learningId
+            # bookkeeping still works.
+            if (data.get("recommendation") == "HOLD"
+                    and data.get("event_type", "recommendation") == "recommendation"):
+                cutoff = (datetime.now() - timedelta(days=_HOLD_DEDUP_DAYS)) \
+                    .strftime("%Y-%m-%d %H:%M:%S")
+                dup = conn.execute("""
+                    SELECT id FROM ai_learning_events
+                     WHERE recommendation = 'HOLD' AND ticker = ?
+                       AND timestamp >= ?
+                     ORDER BY id DESC LIMIT 1
+                """, (data.get("ticker"), cutoff)).fetchone()
+                if dup:
+                    return jsonify({"ok": True, "id": dup["id"], "deduped": True})
             conn.execute("""
                 INSERT INTO ai_learning_events
                     (event_type, ticker, regime, prompt_version, agent_type,
@@ -1433,6 +1454,287 @@ def learning_untagged():
                 LIMIT ?
             """, (limit,)).fetchall()
         return jsonify({"ok": True, "events": [dict(r) for r in rows], "count": len(rows)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/coverage")
+def learning_coverage():
+    """Data-hygiene coverage for the Learning page coverage strip (IMPROVEMENTS #3).
+
+    The learning loop's biggest silent failure mode is *capture decay*: a
+    column stops being filled (dead input, never-run backfill, resolver
+    starvation) and every analytics surface built on it quietly empties.
+    Historically these gaps were only findable by ad-hoc SQL. This endpoint
+    reports, per capture, how much of the eligible population actually has
+    the data, plus the work-queue counts (stuck-open events, pending virtual
+    resolutions, lessons). Read-only, cheap (COUNT queries only), no lazy
+    resolvers triggered — it measures state, it doesn't change it.
+
+    Each coverage entry: {covered, total, pct} where pct is None when the
+    eligible population is empty (no denominator ≠ 0% coverage).
+    """
+    def _cov(covered, total):
+        return {"covered": covered, "total": total,
+                "pct": round(covered / total * 100, 1) if total else None}
+    try:
+        with get_db() as conn:
+            def _n(sql, args=()):
+                return conn.execute(sql, args).fetchone()[0]
+
+            closed = "outcome_status IN ('win','loss','breakeven') AND was_executed = 1"
+            entry  = "recommendation IN ('BUY','TOP_UP')"
+            exits  = "recommendation IN ('SELL','TRIM')"
+            T = "ai_learning_events"
+
+            n_closed      = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed}")
+            n_loss_be     = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND outcome_status IN ('loss','breakeven')")
+            n_loss_tagged = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND outcome_status IN ('loss','breakeven') AND error_type IS NOT NULL AND error_type != ''")
+            n_wins        = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND outcome_status = 'win'")
+            n_wins_tagged = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND outcome_status = 'win' AND success_tags IS NOT NULL AND success_tags != ''")
+            n_ce          = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND {entry}")
+            n_ce_driver   = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND {entry} AND primary_entry_driver IS NOT NULL")
+            n_ce_thesis   = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND {entry} AND thesis_verdict IS NOT NULL")
+            n_ce_maemfe   = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND {entry} AND mae_pct IS NOT NULL")
+            n_cx          = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND {exits}")
+            n_cx_exitsig  = _n(f"SELECT COUNT(*) FROM {T} WHERE {closed} AND {exits} AND exit_signals_json IS NOT NULL")
+
+            # Work queues -----------------------------------------------------
+            # Executed but never graded — after 60d these are almost always a
+            # missed Sync (Performance page), not a genuinely open position.
+            stale_cutoff = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
+            n_stuck_open = _n(f"""SELECT COUNT(*) FROM {T}
+                WHERE was_executed = 1
+                  AND (outcome_status IS NULL OR outcome_status = 'open')
+                  AND timestamp < ?""", (stale_cutoff,))
+            # Unexecuted recs awaiting the 30d virtual-outcome gate (needs
+            # stop+target — HOLDs have their own resolver below).
+            n_virtual_pending = _n(f"""SELECT COUNT(*) FROM {T}
+                WHERE was_executed = 0 AND virtual_outcome IS NULL
+                  AND suggested_stop IS NOT NULL AND suggested_target IS NOT NULL
+                  AND recommendation != 'HOLD'""")
+            oldest_pending = conn.execute(f"""SELECT MIN(timestamp) FROM {T}
+                WHERE was_executed = 0 AND virtual_outcome IS NULL
+                  AND suggested_stop IS NOT NULL AND suggested_target IS NOT NULL
+                  AND recommendation != 'HOLD'""").fetchone()[0]
+            days_until_virtual = None
+            if oldest_pending:
+                try:
+                    age = (datetime.now() - datetime.fromisoformat(oldest_pending.replace(" ", "T"))).days
+                    days_until_virtual = max(0, 30 - age)
+                except (ValueError, TypeError):
+                    pass
+            n_hold          = _n(f"SELECT COUNT(*) FROM {T} WHERE recommendation = 'HOLD'")
+            n_hold_resolved = _n(f"SELECT COUNT(*) FROM {T} WHERE recommendation = 'HOLD' AND virtual_outcome IS NOT NULL")
+            n_lessons       = _n("SELECT COUNT(*) FROM trading_lessons")
+
+        return jsonify({
+            "ok": True,
+            "n_closed": n_closed,
+            "coverage": {
+                "error_type":     _cov(n_loss_tagged, n_loss_be),
+                "success_tags":   _cov(n_wins_tagged, n_wins),
+                "entry_driver":   _cov(n_ce_driver, n_ce),
+                "thesis_verdict": _cov(n_ce_thesis, n_ce),
+                "mae_mfe":        _cov(n_ce_maemfe, n_ce),
+                "exit_signals":   _cov(n_cx_exitsig, n_cx),
+            },
+            "queues": {
+                "stuck_open_60d":     n_stuck_open,
+                "virtual_pending":    n_virtual_pending,
+                "days_until_virtual": days_until_virtual,
+                "hold_events":        n_hold,
+                "hold_resolved":      n_hold_resolved,
+                "lessons":            n_lessons,
+            },
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── Go-live readiness scorecard thresholds (tunable) ─────────────────────────
+# Turns "is the model good enough to trade live?" into a checklist. The user is
+# running a ≥6-month PAPER validation before funding real trades; this scores
+# the paper track record against objective bars. Paper fills are frictionless
+# (brokerage only, no spread/slippage), so every P&L-based criterion applies a
+# per-trade friction haircut first — a paper edge inside costs is not a real edge.
+_GOLIVE_MIN_CLOSED       = 40      # closed trades before an edge estimate is trustworthy
+_GOLIVE_WARN_CLOSED      = 20      # amber floor
+_GOLIVE_MIN_REGIMES      = 3       # edge must hold across market states, not one
+# Calibration HONESTY = |mean stated confidence − actual win rate|. This is the
+# reliability gap, NOT Brier: Brier has an irreducible p(1−p) floor (a perfectly
+# honest 65%-win model still scores 0.2275), so a Brier<0.20 bar is unachievable
+# for any 55–70% system and would punish honesty. The gap has no such floor —
+# it's 0 exactly when confidence matches reality, which is what feeds Kelly sizing.
+_GOLIVE_MAX_CALIB_GAP    = 0.07    # ≤7pp between stated confidence and actual WR
+_GOLIVE_WARN_CALIB_GAP   = 0.12
+_GOLIVE_FRICTION_BPS      = 30     # round-trip haircut per trade (0.30%) — ASX200 tier
+_GOLIVE_MIN_POS_DRIVERS  = 2       # entry archetypes with positive post-cost expectancy
+_GOLIVE_MIN_DRIVER_N     = 5       # per-driver sample floor
+
+
+def _mean(xs):
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _compute_go_live_readiness(conn, friction_bps=_GOLIVE_FRICTION_BPS):
+    """Score the (paper) track record against the go-live bars. Pure read.
+
+    Returns {ok, n_closed, friction_bps, overall, n_pass, n_total, criteria[]}.
+    Each criterion: {key, label, status: pass|warn|fail, detail, value, target}.
+    """
+    haircut = friction_bps / 100.0   # bps → percentage points (30 bps = 0.30 pp)
+
+    rows = conn.execute("""
+        SELECT outcome_status, realized_pnl_pct, regime, primary_entry_driver,
+               ai_confidence, recommendation
+        FROM ai_learning_events
+        WHERE was_executed = 1
+          AND outcome_status IN ('win','loss','breakeven')
+    """).fetchall()
+    rows = [dict(r) for r in rows]
+    n_closed = len(rows)
+
+    crit = []
+
+    # 1 — Sample size ---------------------------------------------------------
+    if n_closed >= _GOLIVE_MIN_CLOSED:
+        s1 = "pass"
+    elif n_closed >= _GOLIVE_WARN_CLOSED:
+        s1 = "warn"
+    else:
+        s1 = "fail"
+    crit.append({"key": "sample", "label": "Sample size",
+                 "status": s1, "value": n_closed, "target": _GOLIVE_MIN_CLOSED,
+                 "detail": f"{n_closed} closed trades (need {_GOLIVE_MIN_CLOSED}+ for a trustworthy edge estimate)"})
+
+    # 2 — Regime coverage -----------------------------------------------------
+    regimes = {r["regime"] for r in rows if r["regime"]}
+    n_reg = len(regimes)
+    s2 = "pass" if n_reg >= _GOLIVE_MIN_REGIMES else "warn" if n_reg == 2 else "fail"
+    crit.append({"key": "regimes", "label": "Regime coverage",
+                 "status": s2, "value": n_reg, "target": _GOLIVE_MIN_REGIMES,
+                 "detail": (f"{n_reg} distinct regime(s): {', '.join(sorted(regimes)) or 'none'} "
+                            f"(need {_GOLIVE_MIN_REGIMES}+ — an edge in one regime isn't proven)")})
+
+    # 3 — Calibration honesty (confidence vs actual WR) -----------------------
+    wl = [r for r in rows if r["outcome_status"] in ("win", "loss")
+          and r["ai_confidence"] is not None]
+    n_wl = len(wl)
+    if n_wl:
+        mean_conf = _mean([float(r["ai_confidence"]) for r in wl])
+        actual_wr = sum(1 for r in wl if r["outcome_status"] == "win") / n_wl
+        gap = abs(mean_conf - actual_wr)
+        brier = sum((float(r["ai_confidence"]) - (1.0 if r["outcome_status"] == "win" else 0.0)) ** 2
+                    for r in wl) / n_wl   # kept for the detail line only
+    else:
+        mean_conf = actual_wr = gap = brier = None
+    # Brier trend: earliest vs latest daily snapshot (secondary signal only).
+    snaps = conn.execute(
+        "SELECT brier_score FROM calibration_snapshots WHERE brier_score IS NOT NULL "
+        "ORDER BY snapshot_date ASC").fetchall()
+    trend = None
+    if len(snaps) >= 2:
+        first_b, last_b = snaps[0]["brier_score"], snaps[-1]["brier_score"]
+        trend = "improving" if last_b <= first_b + 0.005 else "worsening"
+    if gap is None or n_wl < _GOLIVE_WARN_CLOSED:
+        s3 = "warn"
+    elif gap <= _GOLIVE_MAX_CALIB_GAP and trend != "worsening":
+        s3 = "pass"
+    elif gap <= _GOLIVE_WARN_CALIB_GAP:
+        s3 = "warn"
+    else:
+        s3 = "fail"
+    crit.append({"key": "calibration", "label": "Calibration honesty",
+                 "status": s3,
+                 "value": round(gap * 100, 1) if gap is not None else None,
+                 "target": round(_GOLIVE_MAX_CALIB_GAP * 100, 1),
+                 "detail": ((f"Stated confidence {round(mean_conf*100,1)}% vs actual win-rate "
+                             f"{round(actual_wr*100,1)}% → {round(gap*100,1)}pp gap "
+                             f"(target ≤{round(_GOLIVE_MAX_CALIB_GAP*100)}pp; Brier {round(brier,3)}, trend {trend or 'n/a'})")
+                            if gap is not None else
+                            f"Need {_GOLIVE_WARN_CLOSED}+ win/loss with confidence to judge (have {n_wl})")})
+
+    # 4 — Edge survives friction (win-rate CI vs break-even) ------------------
+    adj = [(float(r["realized_pnl_pct"]) - haircut) for r in rows
+           if r["realized_pnl_pct"] is not None]
+    wins = [a for a in adj if a > 0]
+    losses = [a for a in adj if a < 0]
+    n_wl2 = len(wins) + len(losses)
+    expectancy = round(_mean(adj), 3) if adj else None
+    p_lo = break_even = p_pt = None
+    if n_wl2 >= 1:
+        ci = _wilson_ci(len(wins), n_wl2)
+        p_lo = ci[0] / 100.0 if ci else None
+        p_pt = len(wins) / n_wl2
+        avg_win = _mean(wins)
+        avg_loss = _mean([abs(x) for x in losses])
+        break_even = avg_loss / (avg_win + avg_loss) if (avg_win + avg_loss) > 0 else 0.0
+    if p_lo is None or break_even is None or n_closed < _GOLIVE_WARN_CLOSED:
+        s4 = "warn"
+    elif p_lo > break_even:
+        s4 = "pass"
+    elif p_pt is not None and p_pt > break_even:
+        s4 = "warn"   # point estimate clears it but the CI doesn't yet
+    else:
+        s4 = "fail"
+    crit.append({"key": "edge", "label": "Edge survives friction",
+                 "status": s4,
+                 "value": round(p_lo * 100, 1) if p_lo is not None else None,
+                 "target": round(break_even * 100, 1) if break_even is not None else None,
+                 "detail": (f"After {friction_bps}bps/trade haircut: win-rate {round(p_pt*100,1) if p_pt is not None else '—'}% "
+                            f"(95% CI low {round(p_lo*100,1) if p_lo is not None else '—'}%) vs break-even "
+                            f"{round(break_even*100,1) if break_even is not None else '—'}%; "
+                            f"expectancy {expectancy if expectancy is not None else '—'}%/trade")})
+
+    # 5 — Per-driver expectancy (post-friction) -------------------------------
+    by_driver = {}
+    for r in rows:
+        d = r["primary_entry_driver"]
+        if not d or r["realized_pnl_pct"] is None:
+            continue
+        by_driver.setdefault(d, []).append(float(r["realized_pnl_pct"]) - haircut)
+    eligible = {d: v for d, v in by_driver.items() if len(v) >= _GOLIVE_MIN_DRIVER_N}
+    positive = {d: _mean(v) for d, v in eligible.items() if _mean(v) > 0}
+    n_pos = len(positive)
+    if n_pos >= _GOLIVE_MIN_POS_DRIVERS:
+        s5 = "pass"
+    elif n_pos == 1 or len(eligible) < _GOLIVE_MIN_POS_DRIVERS:
+        s5 = "warn"
+    else:
+        s5 = "fail"
+    crit.append({"key": "drivers", "label": "Profitable entry archetypes",
+                 "status": s5, "value": n_pos, "target": _GOLIVE_MIN_POS_DRIVERS,
+                 "detail": (f"{n_pos} driver(s) with positive post-cost expectancy "
+                            f"(n≥{_GOLIVE_MIN_DRIVER_N} each) of {len(eligible)} eligible: "
+                            f"{', '.join(sorted(positive)) or 'none yet'}")})
+
+    n_pass = sum(1 for c in crit if c["status"] == "pass")
+    if any(c["status"] == "fail" for c in crit):
+        overall = "not_ready"
+    elif n_pass == len(crit):
+        overall = "ready"
+    else:
+        overall = "almost"
+
+    return {"ok": True, "n_closed": n_closed, "friction_bps": friction_bps,
+            "overall": overall, "n_pass": n_pass, "n_total": len(crit),
+            "criteria": crit}
+
+
+@bp.route("/api/learning/go-live-readiness")
+def learning_go_live_readiness():
+    """Go-live readiness scorecard — is the paper track record strong enough to
+    fund live trading? Read-only; five friction-adjusted criteria (see
+    _compute_go_live_readiness). ?friction_bps=N overrides the per-trade haircut."""
+    try:
+        fb = request.args.get("friction_bps", _GOLIVE_FRICTION_BPS)
+        try:
+            fb = max(0, min(200, int(fb)))
+        except (TypeError, ValueError):
+            fb = _GOLIVE_FRICTION_BPS
+        with get_db() as conn:
+            return jsonify(_compute_go_live_readiness(conn, fb))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -2607,6 +2909,12 @@ def learning_calibration_efficacy():
 # the symbol comes back, e.g. a relisting) rather than either starving the
 # batch forever (the original bug) or being silently blacklisted forever.
 _FETCH_RETRY_DAYS = 7
+
+# HOLD dedupe window (days) for POST /api/learning/log: at most one logged
+# HOLD event per ticker per window. HOLDs re-fire on every analysis run, so
+# without this the event volume (and the _resolve_hold_outcomes fetch queue)
+# grows linearly with run frequency while adding no new passivity signal.
+_HOLD_DEDUP_DAYS = 7
 
 
 def _mark_fetch_failed(conn, row_id) -> None:

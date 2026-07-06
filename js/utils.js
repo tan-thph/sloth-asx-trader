@@ -282,6 +282,116 @@ function adjustCashForMode(delta, mode) {
   }
 }
 
+// ── resetPaperBook (IMPROVEMENTS #7) ─────────────────────────────────────────
+// Wipe the paper sandbox — paper holdings, parcels, journal rows, disposals,
+// recs and linked day-trade positions — and restore paperCash to paperStartCash,
+// WITHOUT touching a single real record.
+//
+// Safety: this is a DELETE, so the fail-safe direction is INVERTED from
+// isRealTrade(). isRealTrade treats a missing mode as paper (keep it out of
+// tax); for deletion we must do the opposite — only an EXPLICIT `mode==='paper'`
+// is removed. A missing/undefined mode is ambiguous (it may be un-backfilled
+// real history from before the firewall shipped, gotcha #91) and is PRESERVED.
+// So the invariant is provable: no row with isRealTrade(x)===true, and no row
+// with an absent mode, is ever deleted. Run the legacy→real backfill first if
+// you want untagged history excluded from the sandbox.
+//
+// Returns a summary of how many rows were removed from each surface.
+function _isExplicitPaper(x) {
+  return !!x && x.mode === 'paper';
+}
+
+function resetPaperBook() {
+  const summary = { portfolio: 0, parcels: 0, journal: 0, disposals: 0,
+                    recHistory: 0, positions: 0 };
+
+  // Collect the ids of paper parcels being removed so we can also drop any
+  // day-trade / intraday position linked to them (positions carry parcelId
+  // from creation, gotcha #75). Do this BEFORE mutating cgtParcels.
+  const _removedParcelIds = new Set(
+    (state.cgtParcels || []).filter(_isExplicitPaper).map(p => p.id)
+  );
+
+  const _filter = (key) => {
+    const arr = state[key];
+    if (!Array.isArray(arr)) return;
+    const before = arr.length;
+    state[key] = arr.filter(x => !_isExplicitPaper(x));
+    summary[key] = before - state[key].length;
+  };
+  _filter('portfolio');
+  _filter('cgtParcels');   // note: summary key handled below
+  _filter('tradeJournal');
+  _filter('cgtDisposals');
+  _filter('recHistory');
+  // _filter wrote counts under the state keys; normalise to the summary shape.
+  summary.parcels    = summary.cgtParcels   || 0;
+  summary.journal    = summary.tradeJournal || 0;
+  summary.disposals  = summary.cgtDisposals || 0;
+  delete summary.cgtParcels; delete summary.tradeJournal; delete summary.cgtDisposals;
+
+  // Day-trade + intraday positions: remove any whose own mode is explicit paper
+  // OR whose parcelId points at a parcel we just removed (a paper position that
+  // predates per-position mode tagging still links to a paper parcel).
+  const _dropPos = (arr) => {
+    if (!Array.isArray(arr)) return arr;
+    const before = arr.length;
+    const kept = arr.filter(p =>
+      !_isExplicitPaper(p) && !(p && _removedParcelIds.has(p.parcelId)));
+    summary.positions += before - kept.length;
+    return kept;
+  };
+  if (state.intraday)   state.intraday.openPositions       = _dropPos(state.intraday.openPositions);
+  if (state.dayTrading) state.dayTrading.recommendations   = _dropPos(state.dayTrading.recommendations);
+
+  // Clear the paper equity curve without touching the real NAV series: paperValue
+  // is a separate per-snapshot field (gotcha #88), so nulling it leaves
+  // netWorth/portfolioValue/cash — the real basis — intact.
+  if (Array.isArray(state.portfolioHistory)) {
+    for (const snap of state.portfolioHistory) {
+      if (snap && 'paperValue' in snap) delete snap.paperValue;
+    }
+  }
+
+  // Restore the sandbox cash pool to its configured starting balance.
+  state.paperCash = Number(state.settings?.paperStartCash) || 100000;
+  state._paperCashSeeded = true;
+
+  return summary;
+}
+
+// ── Realistic paper fills (IMPROVEMENTS #10) ─────────────────────────────────
+// Model the bid-ask spread + market impact a live order would cross, so the
+// paper book's P&L isn't systematically optimistic vs what live trading would
+// achieve. Single source of truth mirrors the backend exactly: the ADV-tier
+// one-way rate (core.adv_slippage) × the regime multiplier (_SLIP_REGIME_MULT
+// in routes/learning.py). Keep the tiers and multipliers in sync with both.
+//
+// PAPER ONLY: real trades book at the price the user actually got (which already
+// includes whatever fill they achieved), so they are never slipped. The caller
+// (markExecuted) gates on isRealTrade(mode) + the paperRealisticFills setting.
+const _SLIP_REGIME_MULT = { highVol: 1.5, riskOff: 1.25, panic: 2.0 };
+
+function _advSlippageRate(advAud) {
+  const a = Number(advAud);
+  if (!isFinite(a) || a <= 0) return 0.0035;   // thin-name / unknown tier (conservative)
+  if (a >= 10000000) return 0.0005;   // 0.05%
+  if (a >= 2000000)  return 0.0010;   // 0.10%
+  if (a >= 500000)   return 0.0020;   // 0.20%
+  return 0.0035;                      // 0.35%
+}
+
+// Adverse fill: a BUY/TOP_UP pays UP (crosses the ask), a SELL/TRIM receives
+// DOWN (crosses the bid). Returns the slipped price (rounded to 4dp) or the
+// original price unchanged when inputs are invalid.
+function paperFillPrice(price, action, advAud, regime) {
+  const p = Number(price);
+  if (!isFinite(p) || p <= 0) return price;
+  const rate = _advSlippageRate(advAud) * (_SLIP_REGIME_MULT[regime] || 1);
+  const buyish = action === 'BUY' || action === 'TOP_UP';
+  return +(p * (buyish ? (1 + rate) : (1 - rate))).toFixed(4);
+}
+
 // ── mergeLiveMacro ────────────────────────────────────────────────────────────
 // Merge fresh live market numbers into state.macroData WITHOUT wiping the AI
 // brief fields — those are only replaced by a successful new AI run.
