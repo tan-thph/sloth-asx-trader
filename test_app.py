@@ -1379,6 +1379,78 @@ class TestStage4ActiveFeedback(unittest.TestCase):
         self.assertIn("debate.synthesis", src)
 
 
+class TestScrutinizeNumbersGuard(unittest.TestCase):
+    """Deterministic R:R facts + numbers-discipline guard on the scrutinize path.
+
+    Regression for the 2026-07-07 CSL incident: the local critic disputed a correct
+    stored R:R of 1.77 and fabricated 0.11 (it confused the +11.8% upside for the ratio).
+    """
+
+    def test_computed_facts_recovers_csl_rr_and_entry(self):
+        """CSL #63 shape: TOP_UP, stop 114.79, target 138.9, rr 1.77, no captured entry.
+        Must surface R:R verbatim and recover the implied entry (~123.5) + upside/downside."""
+        from routes.debate import _rec_computed_facts
+        s = _rec_computed_facts({
+            "recommendation": "TOP_UP", "suggested_stop": 114.79,
+            "suggested_target": 138.9, "rr_ratio": 1.77, "actual_entry_price": None,
+        })
+        self.assertIn("Risk:Reward = 1.77:1", s)
+        self.assertIn("123.4", s)             # implied entry recovered ≈ 123.49
+        self.assertIn("+12.5% upside", s)
+        self.assertIn("-7.0% downside", s)
+        self.assertIn("do NOT recompute", s)
+
+    def test_computed_facts_prefers_captured_entry(self):
+        from routes.debate import _rec_computed_facts
+        s = _rec_computed_facts({
+            "recommendation": "BUY", "suggested_stop": 100.0,
+            "suggested_target": 120.0, "rr_ratio": 2.0, "actual_entry_price": 110.0,
+        })
+        self.assertIn("Risk:Reward = 2.00:1", s)
+        self.assertIn("110.00", s)
+
+    def test_computed_facts_no_derived_pct_for_exits(self):
+        """SELL/TRIM: give raw levels only, never a direction-derived percentage."""
+        from routes.debate import _rec_computed_facts
+        s = _rec_computed_facts({
+            "recommendation": "SELL", "suggested_stop": 130.0,
+            "suggested_target": 110.0, "rr_ratio": 1.5, "actual_entry_price": None,
+        })
+        self.assertIn("Risk:Reward = 1.50:1", s)
+        self.assertNotIn("upside", s)
+        self.assertNotIn("downside", s)
+
+    def test_computed_facts_empty_when_no_numbers(self):
+        """No stop/target/rr → emit nothing rather than a shaky number."""
+        from routes.debate import _rec_computed_facts
+        s = _rec_computed_facts({
+            "recommendation": "HOLD", "suggested_stop": None,
+            "suggested_target": None, "rr_ratio": None, "actual_entry_price": None,
+        })
+        self.assertEqual(s, "")
+
+    def test_computed_facts_drops_nan(self):
+        from routes.debate import _rec_computed_facts
+        s = _rec_computed_facts({
+            "recommendation": "BUY", "suggested_stop": float("nan"),
+            "suggested_target": 120.0, "rr_ratio": float("nan"), "actual_entry_price": None,
+        })
+        self.assertNotIn("nan", s.lower())
+        self.assertNotIn("Risk:Reward", s)   # rr was NaN → omitted
+
+    def test_scrutinize_prompt_wires_facts_and_discipline(self):
+        """The scrutinize + postmortem prompts must inject the facts block and the
+        numbers-discipline directive so the model can't invent figures."""
+        with open(os.path.join(ROOT, "routes/debate.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_NUMBERS_DISCIPLINE", src)
+        self.assertIn("NUMBERS DISCIPLINE", src)
+        self.assertIn("facts_str = _rec_computed_facts(row)", src)
+        self.assertIn("{facts_str}\\n", src)     # facts injected into the prompt
+        # discipline reused beyond scrutinize (postmortem taggers cite numbers)
+        self.assertGreaterEqual(src.count("+ _NUMBERS_DISCIPLINE"), 2)
+
+
 class TestDebateImprovements(unittest.TestCase):
     """Regression tests for D1–D7 debate engine improvements."""
 

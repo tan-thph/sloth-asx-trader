@@ -759,7 +759,8 @@ def _pm_build_prompt(summary: str, rationale: str, exit_hint: str,
         "\n"
         'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"2-3 sentences explaining '
         'the root cause with specific numbers from the trade (entry, stop, target, P&L, confidence)"}\n'
-        "No markdown, no explanation outside JSON."
+        "No markdown, no explanation outside JSON.\n\n"
+        + _NUMBERS_DISCIPLINE
     )
 
 
@@ -1615,7 +1616,8 @@ def debate_postmortem_debate():
             "Root-cause rule: if stop_too_tight explains poor_rr, use stop_too_tight only.\n"
             "\n"
             'Reply with JSON only: {"error_type":"TAG1,TAG2","reason":"why you chose these tags over the alternative, citing specific numbers"}\n'
-            "No markdown, no explanation outside JSON."
+            "No markdown, no explanation outside JSON.\n\n"
+            + _NUMBERS_DISCIPLINE
         )
 
         # Run synthesis through model_b (the non-incumbent).
@@ -2222,6 +2224,77 @@ def debate_skill():
     })
 
 
+# Shared directive that stops local models from inventing/recomputing figures.
+# The CSL incident (2026-07-07): the critic disputed a correct stored R:R of 1.77
+# and substituted a fabricated "0.11" (it had confused the +11.8% upside for the
+# ratio). Small models must quote the given numbers, never derive their own.
+_NUMBERS_DISCIPLINE = (
+    "NUMBERS DISCIPLINE (critical): Every figure you cite MUST appear verbatim in the "
+    "data above. Do NOT calculate, estimate, convert, or invent any number — the "
+    "Risk:Reward, percentages, prices and indicators are already computed for you. If a "
+    "number you want to mention is not given above, write 'not provided' or omit it "
+    "entirely — never guess. A single fabricated number invalidates your whole review."
+)
+
+
+def _rec_computed_facts(row) -> str:
+    """Deterministic, pre-computed numeric facts for the critic so the local LLM never
+    has to (and is told never to) do its own arithmetic. Uses the quant engine's stored
+    rr_ratio verbatim and derives implied entry / upside% / downside% from stop+target+rr
+    for longs (BUY/TOP_UP). Returns '' when the inputs are missing/invalid — deliberately
+    emitting nothing rather than a shaky number. Pure + unit-testable (accepts any mapping).
+    """
+    def _num(x):
+        try:
+            f = float(x)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f else None  # drop NaN
+
+    try:
+        action = (row["recommendation"] or "").upper()
+    except Exception:
+        return ""
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
+    stop   = _num(row["suggested_stop"])   if "suggested_stop"   in keys else None
+    target = _num(row["suggested_target"]) if "suggested_target" in keys else None
+    rr     = _num(row["rr_ratio"])         if "rr_ratio"         in keys else None
+    entry  = _num(row["actual_entry_price"]) if "actual_entry_price" in keys else None
+    is_long = action in ("BUY", "TOP_UP")
+
+    # For a long, R:R = (target-entry)/(entry-stop). If entry wasn't captured, recover it
+    # exactly from the stored ratio: entry = stop + (target-stop)/(1+rr).
+    if (entry is None and is_long and rr and rr > 0
+            and stop is not None and target is not None and target > stop):
+        entry = stop + (target - stop) / (1.0 + rr)
+
+    parts = []
+    if rr is not None:
+        parts.append(f"Risk:Reward = {rr:.2f}:1")
+    if (is_long and entry and entry > 0 and stop is not None and target is not None
+            and target > entry > stop):
+        up_pct = (target - entry) / entry * 100.0
+        dn_pct = (entry - stop) / entry * 100.0
+        parts.append(
+            f"implied entry ~{entry:.2f}, target {target:.2f} (+{up_pct:.1f}% upside), "
+            f"stop {stop:.2f} (-{dn_pct:.1f}% downside)"
+        )
+    elif target is not None or stop is not None:
+        # Non-long or missing entry: give the raw levels only, no derived percentages
+        # (direction-aware math omitted rather than risk a wrong number).
+        lv = []
+        if target is not None: lv.append(f"target {target:.2f}")
+        if stop is not None:   lv.append(f"stop {stop:.2f}")
+        if lv: parts.append(", ".join(lv))
+
+    if not parts:
+        return ""
+    return (
+        "COMPUTED FACTS — already calculated by the system; treat as ground truth and "
+        "quote verbatim, do NOT recompute or dispute: " + "; ".join(parts) + "."
+    )
+
+
 @bp.route("/api/debate/scrutinize", methods=["POST"])
 def debate_scrutinize():
     """
@@ -2307,16 +2380,18 @@ def debate_scrutinize():
         f"{action} {row['ticker']} ({row['sector'] or 'unknown sector'}), "
         f"confidence {conf_str}, regime {row['regime'] or '?'}"
         + (f", driver={driver}" if driver else "")
-        + (f", target={row['suggested_target']}" if row["suggested_target"] is not None else "")
-        + (f", stop={row['suggested_stop']}" if row["suggested_stop"] is not None else "")
-        + (f", R:R={row['rr_ratio']:.2f}" if row["rr_ratio"] is not None else "")
     )
+
+    # Deterministic numeric facts (R:R, implied entry, upside/downside %) computed in
+    # Python so the local model never does — and is told never to do — its own arithmetic.
+    facts_str = _rec_computed_facts(row)
 
     prompt = (
         "You are an independent second reviewer giving a balanced verdict on another "
         "analyst's ASX trade recommendation before it is acted on. Your job is to reach "
         "the RIGHT call, not to find fault — a well-supported rec deserves 'agree'.\n\n"
         f"Recommendation: {summary}\n"
+        + (f"{facts_str}\n" if facts_str else "")
         + (f"Rationale: {row['rationale_summary']}\n" if row["rationale_summary"] else "")
         + (f"Thesis: {thesis}\n" if thesis else "")
         + (f"Steelman (the analyst's own case for the opposing view): {steelman}\n" if steelman else "")
@@ -2341,7 +2416,8 @@ def debate_scrutinize():
         '"confidence_adj":0.0}\n'
         "confidence_adj is how you would nudge the analyst's stated confidence (decimal, e.g. -0.10 for "
         "-10pp): 0 when you agree, a small negative for minor concerns, a larger negative only for a "
-        "material flaw, and a small positive if the rec looks if anything under-confident. No markdown."
+        "material flaw, and a small positive if the rec looks if anything under-confident. No markdown.\n\n"
+        + _NUMBERS_DISCIPLINE
     )
 
     t0 = time.time()
