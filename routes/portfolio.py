@@ -322,7 +322,11 @@ def db_load():
             except Exception:
                 settings[row["key"]] = row["value"]
 
-        has_data = bool(portfolio or trade_journal or rec_history or settings)
+        # `settings` deliberately EXCLUDED: a wiped DB still carries settings, and
+        # counting them made an empty-portfolio DB report hasData=true, so a good tab
+        # that hit a 409 would reload and overwrite its own in-memory holdings with the
+        # empty DB — the self-perpetuating wipe of 2026-07-07. Only real user data counts.
+        has_data = bool(portfolio or trade_journal or rec_history)
 
         blobs = {}
         for row in conn.execute("SELECT key, value FROM blob_store").fetchall():

@@ -131,8 +131,22 @@ async function _handleSaveConflict() {
   finally { _conflictReloading = false; }
 }
 
+// True when in-memory state holds any real user data (holdings, journal, or recs).
+// A tab that never finished loading — or a stale tab whose state was reset — holds
+// all-empty arrays. Persisting that blank state wipes the DB (the 2026-07-07
+// incident, where a stale tab's unguarded unload-save overwrote 21 holdings + 72
+// journal rows). We refuse to auto-save a fully-blank state; an intentional
+// full-clear still lands because it goes through forceSave paths.
+function _hasAnyUserData() {
+  return !!((state.portfolio && state.portfolio.length) ||
+            (state.tradeJournal && state.tradeJournal.length) ||
+            (state.recHistory && state.recHistory.length));
+}
+
 async function saveStateToDb() {
   if (!state.serverOk) return;
+  // Wipe-guard: never let an auto-save clobber the DB with an all-blank state.
+  if (!_hasAnyUserData()) return;
   try {
     const _resp = await fetch(`${API}/api/db/save`, {
       method: 'POST',
@@ -254,6 +268,12 @@ async function loadStateFromDb() {
     // Track the server's version even on an empty DB so the very first save
     // carries a correct baseVersion (guards the fresh-install race too).
     if (typeof data.stateVersion === 'number') _stateVersion = data.stateVersion;
+    // Settings are applied even when hasData is false — a settings-only DB (new user
+    // who set preferences before adding holdings) must still restore. hasData now
+    // reflects real user data only (portfolio/journal/recs), not settings.
+    if (data.settings && Object.keys(data.settings).length) {
+      state.settings = {...state.settings, ...data.settings};
+    }
     if (!data.hasData) return false;
 
     if (data.portfolio !== undefined)    state.portfolio    = _validArray(data.portfolio).map(_validHolding).filter(Boolean);
@@ -261,9 +281,6 @@ async function loadStateFromDb() {
     if (data.recHistory !== undefined)   state.recHistory   = _validArray(data.recHistory).filter(r => (r.action||'').toUpperCase() !== 'HOLD');
     if (data.cash != null)               state.cash         = _validNumber(data.cash, 0);
     if (data.paperCash != null)          state.paperCash    = _validNumber(data.paperCash, 0);
-    if (data.settings && Object.keys(data.settings).length) {
-      state.settings = {...state.settings, ...data.settings};
-    }
     if (data.activityLog != null) {
       _schedulerLog = data.activityLog;
     }

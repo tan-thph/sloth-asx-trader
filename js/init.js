@@ -39,9 +39,16 @@ async function initApp() {
   window.addEventListener('beforeunload', () => {
     clearTimeout(_saveTimer);  // flush any pending debounce immediately
     if (!state.serverOk) return;
+    // Wipe-guard + version guard: a stale/blank tab closing must NOT clobber the DB.
+    // This unload-save previously omitted baseVersion (server skipped the concurrency
+    // guard → unconditional overwrite) AND fired on empty state → it wiped 21 holdings
+    // on 2026-07-07. Now it carries baseVersion (409s if the DB moved on) and refuses
+    // to fire on a fully-blank in-memory state.
+    if (!_hasAnyUserData()) return;
     try {
       const body = JSON.stringify({
-        cash: state.cash, portfolio: state.portfolio,
+        baseVersion: _stateVersion,
+        cash: state.cash, paperCash: state.paperCash, portfolio: state.portfolio,
         tradeJournal: state.tradeJournal, recHistory: state.recHistory,
         recommendations: state.recommendations, settings: state.settings,
         activityLog: _schedulerLog, portfolioHistory: state.portfolioHistory,
