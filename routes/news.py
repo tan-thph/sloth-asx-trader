@@ -511,7 +511,12 @@ def ollama_start():
         if sys.platform == "win32":
             subprocess.Popen(
                 ["ollama", "serve"],
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                # DETACHED_PROCESS + CREATE_NO_WINDOW: no console for `ollama serve`
+                # itself AND none inherited by the model-runner children it spawns
+                # (the "many blank terminals" flashing during local-LLM use).
+                creationflags=(subprocess.DETACHED_PROCESS
+                               | subprocess.CREATE_NEW_PROCESS_GROUP
+                               | subprocess.CREATE_NO_WINDOW),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

@@ -18,6 +18,10 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
+
+# On Windows, console executables (nvidia-smi) flash a console window unless
+# CREATE_NO_WINDOW is set. 0 on non-Windows is a valid no-op creationflags value.
+_NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -48,6 +52,7 @@ def detect_gpu() -> dict:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=5,
+            creationflags=_NO_WINDOW_FLAGS,   # no console flash on Windows
         )
         if r.returncode == 0 and r.stdout.strip() and "[N/A]" not in r.stdout:
             parts = r.stdout.strip().split("\n")[0].split(", ")
@@ -954,6 +959,9 @@ final = min(10.0, sum of applicable steps)>,\
             "prompt":  prompt,
             "stream":  True,
             "format":  "json",
+            "keep_alive": "10m",   # keep model in VRAM between article classifications
+                                   # so Ollama does not unload/respawn the runner per
+                                   # article (each respawn flashes a console on Windows)
             "options": options,
         }
         raw_parts: list[str] = []       # chunk["response"] tokens (the JSON answer)
