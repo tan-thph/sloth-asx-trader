@@ -185,3 +185,39 @@ describe('_applyHeatBudget', () => {
     expect(blocked).toBe(0);
   });
 });
+
+// ── _classifyRuleWarnings: Critic-B codes (tier2_rec, factor_thin) ────────────
+
+describe('_classifyRuleWarnings — Critic B codes', () => {
+  it('maps the _tier2Rec flag to a tier2_rec code', () => {
+    const codes = _classifyRuleWarnings({ _tier2Rec: true, _ruleWarnings: [] }).map(w => w.code);
+    expect(codes).toContain('tier2_rec');
+  });
+
+  it('maps a Tier-2 warning string to tier2_rec (not validator_fail)', () => {
+    const out = _classifyRuleWarnings({
+      _ruleWarnings: ['Tier-2 data only: CSL was shown as a compressed one-line summary — fabrication risk.'],
+    });
+    const codes = out.map(w => w.code);
+    expect(codes).toContain('tier2_rec');
+    expect(codes).not.toContain('validator_fail');
+  });
+
+  it('maps the _factorThin flag to a factor_thin code', () => {
+    const codes = _classifyRuleWarnings({ _factorThin: 1, _ruleWarnings: [] }).map(w => w.code);
+    expect(codes).toContain('factor_thin');
+  });
+
+  it('maps a thin-basis warning string to factor_thin (not validator_fail)', () => {
+    const out = _classifyRuleWarnings({
+      _ruleWarnings: ['Thin non-technical basis: 1 [FUNDAMENTAL]/[MACRO] factor(s) (<3) — technicals are tie-breakers only (Rule 5).'],
+    });
+    const codes = out.map(w => w.code);
+    expect(codes).toContain('factor_thin');
+    expect(codes).not.toContain('validator_fail');
+  });
+
+  it('a clean rec produces no codes', () => {
+    expect(_classifyRuleWarnings({ _ruleWarnings: [] })).toEqual([]);
+  });
+});

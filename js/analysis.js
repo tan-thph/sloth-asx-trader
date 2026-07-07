@@ -305,6 +305,12 @@ async function runAnalysis() {
   // Build indicator context (full detail per ticker)
   let indicatorCtx = '';
   const loaded = allTickers.filter(t=>state.liveSignals[t]&&!state.liveSignals[t].error);
+  // Tickers that receive a FULL Tier-1 indicator block (vs the compressed Tier-2
+  // one-liner). A BUY/TOP_UP citing detailed momentum/fundamentals on a ticker
+  // NOT in this set is fabricating — the data was never in the prompt (Critic B,
+  // 2026-07: CSL TOP_UP cited MACD/fwdPE from a Tier-2 summary). Used by the
+  // fabrication guard in the rec post-processing pass below.
+  const _tier1Tickers = new Set(loaded.filter(t => _isCandidate(state.liveSignals[t], t)));
   if(loaded.length) {
     // ASX200 5d return for relative-strength baseline (from macro data)
     const _asx200_5d = state.macroData?.asx200_5d_return ?? null;
@@ -1024,6 +1030,42 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         };
       });
     }
+
+    // ── Tier-2 fabrication guard (Critic B, 2026-07) ─────────────────────────────
+    // A BUY/TOP_UP on a ticker rendered only as a compressed Tier-2 one-liner
+    // (RSI/score/trend + "no active setup") means Claude is adding risk on a
+    // ticker whose detailed momentum/fundamentals it never saw — the surface
+    // where it fabricates indicator values (the CSL TOP_UP citing MACD/fwdPE not
+    // in the prompt). Flag-don't-drop: surface once + persist to the learning
+    // event so rule-override efficacy can grade whether these recs underperform.
+    recs = recs.map(r => {
+      const action = (r.action || '').toUpperCase();
+      if (action !== 'BUY' && action !== 'TOP_UP') return r;
+      const sig = state.liveSignals[r.ticker];
+      if (!sig || sig.error) return r;                 // no-data case handled elsewhere
+      if (_tier1Tickers.has(r.ticker)) return r;       // full block was shown — legit
+      const warn = `Tier-2 data only: ${r.ticker} was shown as a compressed one-line summary (no full indicator/fundamentals block) — verify every cited factor against the prompt before executing (fabrication risk).`;
+      return { ...r, _tier2Rec: true, _ruleWarnings: [...(r._ruleWarnings || []), warn] };
+    });
+
+    // ── Factor-typing count (Critic B, 2026-07) ──────────────────────────────────
+    // Rule 5 requires ≥3 independent NON-TECHNICAL factors for a BUY/TOP_UP;
+    // factorsUsed entries are now type-tagged [FUNDAMENTAL]/[MACRO]/[TECHNICAL]/
+    // [RISK] so the count is checkable. Only [FUNDAMENTAL]+[MACRO] count toward
+    // the 3. Soft flag (not a drop) — the override-efficacy loop decides
+    // empirically whether thin-factor recs lose enough to promote this to a hard
+    // gate. An entirely untagged response can't be assessed, so it isn't punished.
+    recs = recs.map(r => {
+      const action = (r.action || '').toUpperCase();
+      if (action !== 'BUY' && action !== 'TOP_UP') return r;
+      const factors = Array.isArray(r.factorsUsed) ? r.factorsUsed : [];
+      const tagged  = factors.filter(f => /^\s*\[(FUNDAMENTAL|MACRO|TECHNICAL|RISK)\]/i.test(f));
+      if (!tagged.length) return r;                    // untagged — can't assess
+      const nonTech = factors.filter(f => /^\s*\[(FUNDAMENTAL|MACRO)\]/i.test(f)).length;
+      if (nonTech >= 3) return r;
+      const warn = `Thin non-technical basis: ${nonTech} [FUNDAMENTAL]/[MACRO] factor(s) (<3) — technicals are tie-breakers only (Rule 5).`;
+      return { ...r, _factorThin: nonTech, _ruleWarnings: [...(r._ruleWarnings || []), warn] };
+    });
 
     // ── Deterministic SELL/TRIM sizing ──────────────────────────────────────────
     // Rule 4 makes Claude emit qty=0 for every action, but computeTradeParams()
@@ -1889,8 +1931,9 @@ function _splitRecsByParcels(recs, cgtParcels, liveSignals, brokerage) {
 // Maps a rec's ephemeral UI warnings (_ruleWarnings strings) + explicit boolean
 // flags into a STABLE, queryable taxonomy persisted on the learning event
 // (rule_warnings_json). The `code` enum is the join key for
-// _resolve_rule_override_efficacy() (routes/learning.py) — keep it in sync there
-// and in the scrutinize prompt (routes/debate.py). Auto-repaired issues
+// _resolve_rule_override_efficacy() (routes/learning.py) — keep it in sync with
+// _RULE_CODE_LABELS there. The scrutinize prompt (routes/debate.py) reads
+// code/detail generically, so new codes flow through it with no edit. Auto-repaired issues
 // (_validatorFixed) are deliberately EXCLUDED: they were fixed, not overridden,
 // so they carry no "was the rule too strict?" signal.
 function _classifyRuleWarnings(r) {
@@ -1926,10 +1969,16 @@ function _classifyRuleWarnings(r) {
   const contradiction = find(/reasoning says .* but action=/i);
   if (contradiction) push('self_contradiction', contradiction, 'warn');
 
+  const tier2 = find(/Tier-2 data only/i);
+  if (r._tier2Rec || tier2) push('tier2_rec', tier2 || 'rec on Tier-2 (compressed) ticker — fabrication risk', 'warn');
+
+  const factorThin = find(/Thin non-technical basis/i);
+  if (r._factorThin != null || factorThin) push('factor_thin', factorThin || 'fewer than 3 non-technical factors', 'warn');
+
   // Any remaining warning string that didn't match a specific code → generic
   // validator failure (schema / business-rule breach kept via flag-don't-drop).
   for (const w of warns) {
-    if (!/declined to size|net-EV|cannot profit|≤ entry high|below the \d+% floor|contradicts your own|reasoning says .* but action=/i.test(w)) {
+    if (!/declined to size|net-EV|cannot profit|≤ entry high|below the \d+% floor|contradicts your own|reasoning says .* but action=|Tier-2 data only|Thin non-technical basis/i.test(w)) {
       push('validator_fail', w, 'warn');
     }
   }

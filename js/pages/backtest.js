@@ -537,6 +537,11 @@ function _renderTechPanel() {
         Run a classic technical strategy against historical prices. Useful for benchmarking —
         compare whether the AI outperforms a simple rule-based approach on the same tickers.
       </p>
+      <p class="text-xs text-muted" style="margin-bottom:12px;opacity:0.85">
+        ⚠ Caveats: results have <strong>survivorship bias</strong> — you're testing tickers that exist
+        today, so delisted/failed names never appear and returns skew optimistic. The most recent bar
+        may still be <strong>forming</strong> (intraday), so treat the final signal as provisional.
+      </p>
       <div class="grid-2" style="gap:14px">
         <div class="form-row">
           <div class="form-label">Tickers (comma-separated)</div>
@@ -594,6 +599,22 @@ function _renderTechPanel() {
           <div class="text-xs text-muted" style="margin-top:4px">Auto: &gt;$10M ADV→0.05% · $2–10M→0.10% · $0.5–2M→0.20% · &lt;$0.5M→0.35%</div>
         </div>
       </div>
+      <div class="grid-2" style="gap:14px">
+        <div class="form-row">
+          <div class="form-label">Fill timing</div>
+          <select id="bt-fill-timing">
+            <option value="close" selected>Same-bar close</option>
+            <option value="next_open">Next bar's open (conservative)</option>
+          </select>
+          <div class="text-xs text-muted" style="margin-top:2px">Next-open avoids acting on a signal at the same price that produced it — closer to how an EOD system actually fills.</div>
+        </div>
+        <div class="form-row">
+          <div class="form-label">ATR protective stop (× ATR, 0 = off)</div>
+          <input type="number" value="0" id="bt-atr-stop" min="0" max="10" step="0.5"
+            title="Exit intrabar if price falls entry − N×ATR below the entry. 0 disables the overlay.">
+          <div class="text-xs text-muted" style="margin-top:2px">Overlays a hard stop on top of the strategy's own exit rule. Typical: 2–3× ATR.</div>
+        </div>
+      </div>
       <div class="flex-row mt-1">
         <button class="btn btn-primary" id="bt-run-btn" onclick="runBacktest()">▷ Run Backtest</button>
         ${!state.serverOk ? '<span class="text-xs text-danger">⚠ Backend server required</span>' : '<span class="text-xs text-muted">Powered by yfinance historical data</span>'}
@@ -612,6 +633,8 @@ async function runBacktest() {
   const brokerage = Number(document.getElementById('bt-brokerage').value) || state.settings.brokerage;
   const slippage_mode = document.getElementById('bt-slip-liq')?.checked ? 'liquidity' : 'flat';
   const slippage_pct = slippage_mode === 'liquidity' ? 0.10 : Number(document.getElementById('bt-slippage').value ?? 0.10);
+  const fill_timing = document.getElementById('bt-fill-timing')?.value || 'close';
+  const atr_stop_mult = Number(document.getElementById('bt-atr-stop')?.value) || 0;
 
   if (!tickers.length) { toast('Enter at least one ticker', 'error'); return; }
 
@@ -629,7 +652,7 @@ async function runBacktest() {
     const r = await fetch(`${API}/api/backtest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tickers, period, capital, strategy, brokerage, slippage_pct, slippage_mode }),
+      body: JSON.stringify({ tickers, period, capital, strategy, brokerage, slippage_pct, slippage_mode, fill_timing, atr_stop_mult }),
     });
     if (!r.ok) throw new Error('Server error ' + r.status);
     const res = await r.json();

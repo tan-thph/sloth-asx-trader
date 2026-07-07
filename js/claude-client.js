@@ -351,7 +351,7 @@ async function callClaude(agentType, userMessage, options = {}) {
           system_prompt: _sysText.slice(0, 50000),
           user_message:  _userText.slice(0, 50000),
           agent_type:    agentType,
-          model:         CLAUDE_MODEL,
+          model:         model,   // the model actually sent (options.model override or default) — NOT hardcoded
           usage,
           duration_ms:   Date.now() - _callStart,
         }),

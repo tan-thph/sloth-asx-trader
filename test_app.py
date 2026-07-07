@@ -1286,11 +1286,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_current(self):
-        """PROMPT_VERSION must be bumped to v15 after the fundamentals-over-technicals rule addition."""
+        """PROMPT_VERSION must be bumped to v16 after the factor-typing (Critic B) rule addition."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-06-v15'", src,
-                      "PROMPT_VERSION must be 2026-06-v15 after adding Rule 20 (fundamentals > technicals)")
+        self.assertIn("PROMPT_VERSION = '2026-07-v16'", src,
+                      "PROMPT_VERSION must be 2026-07-v16 after adding factor-typing tags to factorsUsed[]")
 
     def test_entry_driver_in_prompt(self):
         """Sprint 67: ANALYSIS_SYSTEM_PROMPT must require primary_entry_driver on BUYs."""
@@ -4171,6 +4171,97 @@ class TestSprint20WalkForward(unittest.TestCase):
             capture_output=True, text=True
         )
         self.assertEqual(result.returncode, 0, f"Syntax error:\n{result.stderr}")
+
+
+class TestBacktestRealismOptions(unittest.TestCase):
+    """Opt-in realism: next-bar-open fills + ATR protective stop overlay."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    @staticmethod
+    def _synthetic_hist():
+        """120 bars: steady rise to bar 60, a crash bar at 60, then flat.
+        Opens gap +0.5% above the prior close so open != close is observable."""
+        import pandas as pd
+        n = 120
+        closes, opens, highs, lows = [], [], [], []
+        for i in range(n):
+            if i < 60:
+                c = 15.0 + 0.05 * i
+            elif i == 60:
+                c = 11.0                      # ~26% single-bar crash close
+            else:
+                c = 11.0 + 0.02 * (i - 60)
+            o = c * 1.005                     # open gaps up vs its own close
+            hi = max(o, c) * 1.01
+            lo = (10.0 if i == 60 else min(o, c) * 0.99)   # crash bar pierces stop
+            closes.append(c); opens.append(o); highs.append(hi); lows.append(lo)
+        idx = pd.date_range("2023-01-02", periods=n, freq="B")
+        return pd.DataFrame({"Open": opens, "High": highs, "Low": lows,
+                             "Close": closes, "Volume": [200000] * n}, index=idx)
+
+    def _run(self, **extra):
+        import unittest.mock as _mock
+        import yfinance as yf
+        df = self._synthetic_hist()
+
+        class _FakeTicker:
+            def __init__(self, *a, **k): pass
+            def history(self, **kw):
+                return df
+
+        body = {"tickers": ["TEST"], "period": "1y", "capital": 50000,
+                "strategy": "buy_hold", "brokerage": 10}
+        body.update(extra)
+        with _mock.patch.object(yf, "Ticker", _FakeTicker):
+            r = self.client.post("/api/backtest", json=body)
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
+        return r.get_json()
+
+    def test_fill_timing_validated(self):
+        """fill_timing must reject unknown values."""
+        r = self.client.post("/api/backtest", json={
+            "tickers": ["CBA"], "strategy": "buy_hold", "fill_timing": "yesterday"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_atr_stop_mult_validated(self):
+        """atr_stop_mult outside 0–10 must return 400."""
+        r = self.client.post("/api/backtest", json={
+            "tickers": ["CBA"], "strategy": "buy_hold", "atr_stop_mult": 99})
+        self.assertEqual(r.status_code, 400)
+
+    def test_next_open_changes_entry_price(self):
+        """next_open must fill the buy_hold entry at the NEXT bar's open, which
+        differs from the close-mode entry (opens gap +0.5%)."""
+        close_res = self._run(fill_timing="close")["tickers"]["TEST"]
+        nopen_res = self._run(fill_timing="next_open")["tickers"]["TEST"]
+        close_entry = close_res["trades"][0]["entryPrice"]
+        nopen_entry = nopen_res["trades"][0]["entryPrice"]
+        self.assertNotEqual(close_entry, nopen_entry)
+        # next_open entry is strictly higher (opens gap up vs the prior close)
+        self.assertGreater(nopen_entry, close_entry)
+
+    def test_atr_stop_produces_stop_exit(self):
+        """A tight ATR stop must close the buy_hold position on the crash bar
+        with exitReason == 'atr_stop' (default buy_hold would stay open)."""
+        no_stop = self._run()["tickers"]["TEST"]
+        with_stop = self._run(atr_stop_mult=2.0)["tickers"]["TEST"]
+        # Without a stop, buy_hold never sells → the sole trade is still open.
+        self.assertTrue(no_stop["trades"][0].get("isOpen"))
+        # With the stop, there is a realised close tagged atr_stop.
+        reasons = [t.get("exitReason") for t in with_stop["trades"]]
+        self.assertIn("atr_stop", reasons)
+
+    def test_default_mode_unchanged(self):
+        """Omitting the new params must behave exactly like legacy close-fill."""
+        default_res = self._run()["tickers"]["TEST"]
+        explicit_res = self._run(fill_timing="close", atr_stop_mult=0)["tickers"]["TEST"]
+        self.assertEqual(default_res["finalValue"], explicit_res["finalValue"])
 
 
 class TestSprint19VitestInfrastructure(unittest.TestCase):
@@ -10764,11 +10855,11 @@ class TestCriticsAddressing(unittest.TestCase):
         self.assertIn("confirming", src,
                       "Rule 20 must explicitly label RSI/BB/MA as confirming signals, not primary drivers")
 
-    def test_prompt_version_v15(self):
-        """PROMPT_VERSION must be v15 after adding Rule 20."""
+    def test_prompt_version_v16(self):
+        """PROMPT_VERSION must be v16 after adding factor-typing tags (Critic B)."""
         src = self._read("js/prompts.js")
-        self.assertIn("PROMPT_VERSION = '2026-06-v15'", src,
-                      "PROMPT_VERSION must be bumped to 2026-06-v15")
+        self.assertIn("PROMPT_VERSION = '2026-07-v16'", src,
+                      "PROMPT_VERSION must be bumped to 2026-07-v16")
 
     # ── Problem 5/6: Financials sector module ──────────────────────────────
 

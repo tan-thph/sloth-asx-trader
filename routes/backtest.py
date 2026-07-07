@@ -12,7 +12,7 @@ import datetime as _dt
 import yfinance as yf
 from flask import Blueprint, jsonify, request
 
-from core import adv_slippage
+from core import adv_slippage, fetch_with_retry
 from indicators import (
     asx, safe_float,
     compute_rsi, compute_macd, compute_bollinger, compute_adx, compute_atr,
@@ -80,6 +80,18 @@ def backtest():
     except (ValueError, TypeError):
         return jsonify({"error": "slippage_pct must be a number"}), 400
 
+    # ── Realism options (opt-in; defaults preserve legacy same-bar-close behaviour) ──
+    fill_timing = data.get("fill_timing", "close")
+    if fill_timing not in ("close", "next_open"):
+        return jsonify({"error": "fill_timing must be 'close' or 'next_open'"}), 400
+
+    try:
+        atr_stop_mult = float(data.get("atr_stop_mult", 0))  # 0 = disabled
+        if atr_stop_mult < 0 or atr_stop_mult > 10:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "atr_stop_mult must be a number between 0 and 10"}), 400
+
     # ADV-tiered slippage hoisted to core.adv_slippage (§9.2) — shared with the
     # learning loop's virtual-outcome and execution-alpha resolvers.
     _adv_slippage = adv_slippage
@@ -104,6 +116,7 @@ def backtest():
             close = hist["Close"]
             high = hist["High"]
             low = hist["Low"]
+            open_ = hist["Open"]
             volume = hist["Volume"]
 
             # ── Per-ticker slippage (overrides flat rate when mode=liquidity) ──
@@ -127,13 +140,70 @@ def backtest():
             position = 0   # shares held
             entry_price = None
             entry_date = None
+            pending_buy = False    # next_open: signal fired last bar, fill at this open
+            pending_sell = False
             trades = []
+            equity_for_ticker = []   # daily portfolio value, built in the same pass
+
+            def _log_sell(exit_fill, ep, ed, qty, idx, reason):
+                """Append a closed-trade record and return the cash proceeds."""
+                proceeds = qty * exit_fill - brokerage
+                try:
+                    hold_days = (hist.index[idx] - hist.index[
+                        next(j for j in range(idx)
+                             if hist.index[j].strftime("%Y-%m-%d") == ed)
+                    ]).days if ed else 0
+                except StopIteration:
+                    hold_days = 0
+                trades.append({
+                    "ticker":     ticker.upper(),
+                    "entryDate":  ed,
+                    "exitDate":   close.index[idx].strftime("%Y-%m-%d"),
+                    "entryPrice": round(ep, 3),
+                    "exitPrice":  round(exit_fill, 3),
+                    "qty":        qty,
+                    "pnl":        round(proceeds - qty * ep, 2),
+                    "holdDays":   hold_days,
+                    "exitReason": reason,
+                })
+                return proceeds
 
             for i in range(50, len(close)):
                 price = close.iloc[i]
                 if math.isnan(float(price)) or price <= 0:
                     continue
                 date_str = close.index[i].strftime("%Y-%m-%d")
+                op = safe_float(open_.iloc[i], price)
+
+                # ── (a) next_open: execute orders that fired on the PRIOR bar ──────
+                if fill_timing == "next_open":
+                    if pending_sell and position > 0:
+                        fp = op * (1 - ticker_slip)
+                        cash += _log_sell(fp, entry_price, entry_date, position, i, "signal")
+                        position = 0; entry_price = None; entry_date = None
+                    pending_sell = False
+                    if pending_buy and position == 0 and cash > brokerage * 2:
+                        fp = op * (1 + ticker_slip)
+                        qty = int((cash - brokerage) / fp)
+                        if qty > 0:
+                            cash -= qty * fp + brokerage
+                            position = qty; entry_price = fp; entry_date = date_str
+                    pending_buy = False   # unfilled buy signals are dropped, not carried
+
+                # ── (b) intrabar ATR protective stop (fills same bar) ─────────────
+                if position > 0 and atr_stop_mult > 0:
+                    _atr_v = safe_float(atr.iloc[i], None)
+                    if _atr_v:
+                        stop_level = entry_price - atr_stop_mult * _atr_v
+                        if safe_float(low.iloc[i], price) <= stop_level:
+                            # Gap-through fills at the (worse) open; else at the stop.
+                            exit_ref = min(op, stop_level)
+                            fp = exit_ref * (1 - ticker_slip)
+                            cash += _log_sell(fp, entry_price, entry_date, position, i, "atr_stop")
+                            position = 0; entry_price = None; entry_date = None
+                            pending_sell = False
+                            equity_for_ticker.append({"date": date_str, "value": round(cash, 2)})
+                            continue
 
                 if strategy == "rsi_trend":
                     # Buy: RSI < 45 (mild short-term weakness) AND price > SMA50
@@ -199,8 +269,16 @@ def backtest():
                 else:
                     buy_sig = sell_sig = False
 
-                # Execute trades (entry cost includes slippage + brokerage; exit proceeds net both)
-                if buy_sig and position == 0 and cash > brokerage * 2:
+                # ── (d) signal execution ──────────────────────────────────────────
+                # close     → fill this bar's close (entry cost/exit proceeds net slippage+brokerage)
+                # next_open → defer the fill to the NEXT bar's open (handled in step (a))
+                if fill_timing == "next_open":
+                    if buy_sig and position == 0 and not pending_buy:
+                        pending_buy = True
+                    elif sell_sig and position > 0:
+                        pending_sell = True
+
+                elif buy_sig and position == 0 and cash > brokerage * 2:
                     fill_price = price * (1 + ticker_slip)
                     qty = int((cash - brokerage) / fill_price)
                     if qty > 0:
@@ -212,24 +290,12 @@ def backtest():
 
                 elif sell_sig and position > 0:
                     fill_price = price * (1 - ticker_slip)
-                    proceeds = position * fill_price - brokerage
-                    pnl = proceeds - (position * entry_price)
-                    cash += proceeds
-                    trades.append({
-                        "ticker": ticker.upper(),
-                        "entryDate": entry_date,
-                        "exitDate": date_str,
-                        "entryPrice": round(entry_price, 3),
-                        "exitPrice": round(fill_price, 3),
-                        "qty": position,
-                        "pnl": round(pnl, 2),
-                        "holdDays": (hist.index[i] - hist.index[
-                            next(j for j in range(i) if hist.index[j].strftime("%Y-%m-%d") == entry_date)
-                        ]).days if entry_date else 0,
-                    })
+                    cash += _log_sell(fill_price, entry_price, entry_date, position, i, "signal")
                     position = 0
                     entry_price = None
                     entry_date = None
+
+                equity_for_ticker.append({"date": date_str, "value": round(cash + position * price, 2)})
 
             # Final value: cash + open position at last price
             final_price = close.iloc[-1]
@@ -282,67 +348,6 @@ def backtest():
                 "trades": trades[-20:],  # last 20 trades for display
             }
             all_trades.extend(trades)
-
-            # Equity curve for this ticker (daily portfolio value)
-            equity_for_ticker = []
-            _cash = capital_per_ticker
-            _pos = 0
-            _ep = None
-            for i in range(50, len(close)):
-                price = close.iloc[i]
-                if math.isnan(float(price)) or price <= 0:
-                    continue
-                date_str = close.index[i].strftime("%Y-%m-%d")
-                # Same signal logic — simplified for equity curve
-                rsi_v = safe_float(rsi.iloc[i], 50)
-                macd_v = safe_float(macd_hist.iloc[i], 0)
-                macd_prev = safe_float(macd_hist.iloc[i-1], 0)
-                sma20_v = safe_float(sma_20.iloc[i], price)
-                adx_v = safe_float(adx.iloc[i], 0)
-                pdi_v = safe_float(plus_di.iloc[i], 0)
-                mdi_v = safe_float(minus_di.iloc[i], 0)
-                bb_l = safe_float(bb_lower.iloc[i], price)
-                bb_m = safe_float(bb_mid.iloc[i], price)
-
-                if strategy == "rsi_trend":
-                    _sma50e = safe_float(sma_50.iloc[i], None) or price
-                    buy_sig = rsi_v < 45 and price > _sma50e
-                    sell_sig = rsi_v > 70 or price < _sma50e * 0.97
-                elif strategy == "macd":
-                    buy_sig = macd_v > 0 and macd_prev <= 0
-                    sell_sig = macd_v < 0 and macd_prev >= 0
-                elif strategy == "bb_reversion":
-                    buy_sig = price <= bb_l * 1.005 and rsi_v < 40
-                    sell_sig = _pos > 0 and price >= bb_m * 0.995
-                elif strategy == "momentum":
-                    buy_sig = adx_v > 25 and pdi_v > mdi_v and price > safe_float(sma_50.iloc[i], price)
-                    sell_sig = adx_v < 20 or mdi_v > pdi_v
-                elif strategy == "buy_hold":
-                    buy_sig = _pos == 0 and i == 50
-                    sell_sig = False
-                elif strategy == "sma_crossover":
-                    _sf_cur  = safe_float(sma_20.iloc[i],   None) or price
-                    _ss_cur  = safe_float(sma_50.iloc[i],   None) or price
-                    _sf_prev = safe_float(sma_20.iloc[i-1], None) or price
-                    _ss_prev = safe_float(sma_50.iloc[i-1], None) or price
-                    buy_sig  = _sf_cur > _ss_cur and _sf_prev <= _ss_prev
-                    sell_sig = _sf_cur < _ss_cur and _sf_prev >= _ss_prev
-                else:
-                    buy_sig = sell_sig = False
-
-                if buy_sig and _pos == 0 and _cash > brokerage * 2:
-                    fp = price * (1 + ticker_slip)
-                    qty = int((_cash - brokerage) / fp)
-                    if qty > 0:
-                        _cash -= qty * fp + brokerage
-                        _pos = qty
-                        _ep = fp
-                elif sell_sig and _pos > 0:
-                    _cash += _pos * price * (1 - ticker_slip) - brokerage
-                    _pos = 0
-                    _ep = None
-
-                equity_for_ticker.append({"date": date_str, "value": round(_cash + _pos * price, 2)})
 
             if equity_for_ticker:
                 equity_curve.append({"ticker": ticker.upper(), "curve": equity_for_ticker})
@@ -609,8 +614,11 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
     trades = []
     equity = []
     warmup = max(50, slow + sig_period, trend_period, slow_period)
-    # Effective start: indicators need warmup bars; trade_from_idx may extend this for burn-in.
-    start_idx = min(warmup, trade_from_idx) if trade_from_idx > warmup else warmup
+    # Indicators need `warmup` bars before they're reliable; equity/trades only start
+    # once we're past both warmup AND the caller's burn-in cutoff. equity_start_idx is
+    # the local slice index of equity[0] so callers can map it back to a global date.
+    start_idx = warmup
+    equity_start_idx = max(warmup, trade_from_idx)
 
     for i in range(start_idx, n):
         price = prices[i]
@@ -708,6 +716,7 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
         "total_return_pct": total_return_pct,
         "win_rate": win_rate,
         "equity": equity,
+        "equity_start_idx": equity_start_idx,
     }
 
 
@@ -772,10 +781,10 @@ def backtest_walk_forward():
     min_warmup = 60  # bars needed before signals become reliable
 
     folds = []
-    oos_equity   = []          # combined out-of-sample equity curve
+    fold_segments = []         # per-fold OOS equity segments, chained after the loop
     oos_all_pnls = []
 
-    oos_capital = capital / n_splits  # each fold trades an equal share of capital
+    oos_capital = capital / n_splits  # each fold sizes trades off an equal share of capital
 
     for split_idx in range(n_splits):
         fold_start = split_idx * fold_size
@@ -798,7 +807,8 @@ def backtest_walk_forward():
         v_train = volume[fold_start:train_end]
 
         # Prepend burn-in bars from training window so indicators warm up before OOS trading.
-        BURNIN = 65  # enough to cover max warmup (max(50, slow+signal, trend_period))
+        # Must cover the widest warmup in _WF_PARAM_GRIDS (sma_crossover slow_period=100).
+        BURNIN = 110
         burn_start  = max(fold_start, test_start - BURNIN)
         actual_burnin = test_start - burn_start
 
@@ -827,11 +837,14 @@ def backtest_walk_forward():
 
         oos_all_pnls.extend([t["pnl"] for t in test_result["trades"]])
 
-        # Build OOS equity curve segment (equity list starts at trade_from_idx)
-        for j, val in enumerate(test_result["equity"]):
-            date_idx = test_start + j
-            dt = dates[date_idx] if date_idx < len(dates) else dates[-1]
-            oos_equity.append({"date": dt, "value": round(val, 2)})
+        # Stash the raw OOS equity segment; it starts at local index equity_start_idx
+        # within the burn-in-prefixed slice, i.e. global index burn_start + eq_start.
+        eq_start = test_result.get("equity_start_idx", actual_burnin)
+        fold_segments.append({
+            "global_start": burn_start + eq_start,
+            "equity":       test_result["equity"],
+            "final_value":  test_result["final_value"],
+        })
 
         folds.append({
             "fold":             split_idx + 1,
@@ -863,13 +876,24 @@ def backtest_walk_forward():
     oos_losses = [p for p in oos_all_pnls if p <= 0]
     oos_total_pnl = round(sum(oos_all_pnls), 2)
 
-    # Reconstruct combined OOS curve starting at 'capital'
+    # Reconstruct combined OOS curve starting at 'capital' by CHAINING the folds:
+    # each fold trades oos_capital in isolation, so we rebase its per-fold equity onto
+    # the running balance and compound fold-over-fold. Reporting only the last fold
+    # (the old bug) understated/overstated the true walk-forward return.
     oos_combined_curve = []
-    if oos_equity:
-        scale = capital / oos_capital  # scale up from per-fold capital
-        running = capital
-        for pt in oos_equity:
-            oos_combined_curve.append({"date": pt["date"], "value": round(pt["value"] * scale, 2)})
+    running = float(capital)
+    for seg in fold_segments:
+        eq = seg["equity"]
+        if not eq:
+            continue
+        for j, val in enumerate(eq):
+            date_idx = seg["global_start"] + j
+            dt = dates[date_idx] if date_idx < len(dates) else dates[-1]
+            oos_combined_curve.append({"date": dt, "value": round(running * val / oos_capital, 2)})
+        # Advance the running balance by this fold's realised multiplier (final_value
+        # reflects the forced close of any open position at fold end).
+        if oos_capital > 0:
+            running = running * seg["final_value"] / oos_capital
 
     # OOS Sharpe
     oos_sharpe = None
@@ -900,12 +924,10 @@ def backtest_walk_forward():
     except Exception:
         pass
 
-    # OOS total return from combined curve
+    # OOS total return = compounded fold-over-fold multiplier (running / starting capital).
     oos_return_pct = None
-    if oos_combined_curve:
-        start_val = oos_combined_curve[0]["value"]
-        end_val   = oos_combined_curve[-1]["value"]
-        oos_return_pct = round((end_val / start_val - 1) * 100, 2) if start_val > 0 else None
+    if fold_segments and capital > 0:
+        oos_return_pct = round((running / capital - 1) * 100, 2)
 
     return jsonify({
         "ok":             True,
@@ -959,6 +981,45 @@ def backtest_ai_replay():
 
     results = []
 
+    # ── Pre-fetch phase: one history call per ticker over the widest date range ──
+    # Previously each trade issued its own yf.Ticker().history() call, so N recs on
+    # K tickers meant N sequential fetches (40 recs / 8 tickers = 40 calls). Group by
+    # ticker and fetch once per ticker over [earliest entry − 5d, latest entry + horizon + 15d].
+    _ticker_windows = {}   # ticker -> [min_entry_date, max_entry_date]
+    for trade in trades_in:
+        _tk = (trade.get("ticker") or "").upper()
+        _act = (trade.get("action") or "").upper()
+        _ds = trade.get("date") or ""
+        if not _tk or not _ds or _act in ("HOLD", "WATCH"):
+            continue
+        try:
+            _p = _ds.split("-")
+            _ed = _dt.date(int(_p[2]), int(_p[1]), int(_p[0]))
+        except Exception:
+            continue
+        w = _ticker_windows.get(_tk)
+        if w is None:
+            _ticker_windows[_tk] = [_ed, _ed]
+        else:
+            if _ed < w[0]: w[0] = _ed
+            if _ed > w[1]: w[1] = _ed
+
+    hist_cache = {}   # ticker -> DataFrame (may be empty)
+    for _tk, (min_ed, max_ed) in _ticker_windows.items():
+        t_sym = asx(_tk)
+        start = (min_ed - _dt.timedelta(days=5)).strftime("%Y-%m-%d")
+        end   = (max_ed + _dt.timedelta(days=days + 15)).strftime("%Y-%m-%d")
+        try:
+            stk = yf.Ticker(t_sym)
+            # auto_adjust=False: nominal (unadjusted) prices so the forward exit price
+            # is on the same basis as the executedPrice captured at trade time (see below).
+            hist_cache[_tk] = fetch_with_retry(
+                stk.history, start=start, end=end, auto_adjust=False,
+                cache_key=f"ai_replay:{t_sym}:{start}:{end}",
+            )
+        except Exception as e:
+            hist_cache[_tk] = e   # sentinel: surfaced per-trade below
+
     for trade in trades_in:
         ticker     = (trade.get("ticker") or "").upper()
         action     = (trade.get("action") or "").upper()
@@ -981,25 +1042,19 @@ def backtest_ai_replay():
                             "note": "invalid date", "isHit": None})
             continue
 
-        # Fetch price history from entry date onward + buffer
-        t_sym = asx(ticker)
-        try:
-            stk  = yf.Ticker(t_sym)
-            start = (entry_date - _dt.timedelta(days=5)).strftime("%Y-%m-%d")
-            end   = (entry_date + _dt.timedelta(days=days + 15)).strftime("%Y-%m-%d")
-            # auto_adjust=False: nominal (unadjusted) prices so the forward exit price
-            # is on the same basis as the actual executedPrice captured at trade time.
-            # auto_adjust=True would adjust historical closes for dividends paid AFTER
-            # each bar's date, creating a mixed basis (nominal entry vs adjusted exit)
-            # that understates BUY returns by ~div_yield and overstates SELL returns.
-            hist  = stk.history(start=start, end=end, auto_adjust=False)
-            if hist.empty:
-                results.append({"ticker": ticker, "action": action, "entryDate": date_str,
-                                "note": "no price data", "isHit": None})
-                continue
-        except Exception as e:
+        # Pull this ticker's pre-fetched history (single call per ticker, above).
+        # auto_adjust=False keeps the forward exit price on the same nominal basis as
+        # the executedPrice captured at trade time; auto_adjust=True would adjust
+        # historical closes for dividends paid AFTER each bar, creating a mixed basis
+        # (nominal entry vs adjusted exit) that understates BUY / overstates SELL returns.
+        hist = hist_cache.get(ticker)
+        if isinstance(hist, Exception):
             results.append({"ticker": ticker, "action": action, "entryDate": date_str,
-                            "note": str(e)[:60], "isHit": None})
+                            "note": str(hist)[:60], "isHit": None})
+            continue
+        if hist is None or hist.empty:
+            results.append({"ticker": ticker, "action": action, "entryDate": date_str,
+                            "note": "no price data", "isHit": None})
             continue
 
         close = hist["Close"]

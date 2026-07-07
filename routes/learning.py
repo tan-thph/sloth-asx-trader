@@ -5435,6 +5435,8 @@ _RULE_CODE_LABELS = {
     "heat_budget":       "Heat budget constraint",
     "validator_fail":    "Validator rule failure",
     "fallback_sized":    "Fallback min-trade sizing",
+    "tier2_rec":         "Rec on Tier-2 (compressed) ticker",
+    "factor_thin":       "Fewer than 3 non-technical factors",
 }
 
 
