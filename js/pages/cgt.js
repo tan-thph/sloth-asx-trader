@@ -165,7 +165,9 @@ function renderCGT() {
   const urgentParcels = parcels.filter(p => {
     if (p.remainingQty <= 0 || !p.date) return false;
     const held = daysBetween(p.date, today);
-    if (held < 320 || held >= 365) return false;
+    // Discount applies only when held MORE than 365 days (matches the disposal
+    // calc's `held > 365` in matchSaleAgainstParcels). Keep warning at day 365.
+    if (held < 320 || held > 365) return false;
     const holding = getPortfolioHolding(p.ticker);
     const currentPrice = holding ? holding.currentPrice : 0;
     return currentPrice > p.costPerShare; // only warn if profitable
@@ -178,7 +180,7 @@ function renderCGT() {
         <div style="font-size:12px;color:#78350f">
           ${urgentParcels.map(p => {
             const held = daysBetween(p.date, today);
-            return `<strong>${p.ticker}</strong> — ${365 - held} day(s) until 50% discount (parcel #${p.id}, ${p.remainingQty} shares @ $${fmt(p.costPerShare)})`;
+            return `<strong>${p.ticker}</strong> — ${366 - held} day(s) until 50% discount (parcel #${p.id}, ${p.remainingQty} shares @ $${fmt(p.costPerShare)})`;
           }).join('<br>')}
         </div>
         <div style="font-size:11px;color:#92400e;margin-top:4px">Consider waiting before selling — early exit forfeits the 50% CGT discount.</div>
@@ -196,7 +198,12 @@ function renderCGT() {
   const now = new Date();
   const fyStart = now.getMonth() >= 6 ? `${now.getFullYear()}-07-01` : `${now.getFullYear()-1}-07-01`;
   // FY figures: REAL only — see realDisposals comment above.
-  const fyDisposals = realDisposals.filter(d => d.saleDate >= fyStart);
+  // BUGFIX: saleDate is stored DD-MM-YYYY (todayStr()), but fyStart is YYYY-MM-DD,
+  // so the old raw `d.saleDate >= fyStart` string compare matched on day-of-month
+  // digits vs year digits — silently pulling prior-FY disposals into the current-FY
+  // cards and dropping genuine current-FY ones. Compare by parsed FY-start year.
+  const _currentFY = _dateFY(today);
+  const fyDisposals = realDisposals.filter(d => _saleDateFY(d.saleDate) === _currentFY);
   const fyGross = fyDisposals.reduce((s,d)=>s+d.grossGain,0);
   const fyNet   = fyDisposals.reduce((s,d)=>s+d.netGain,0);
   const fyDisc  = fyDisposals.reduce((s,d)=>s+d.discount,0);
@@ -359,8 +366,8 @@ function renderCGT() {
         if (pf.ticker && !p.ticker.includes(pf.ticker.toUpperCase())) return;
         if (pf.discount !== 'all') {
           const held = daysBetween(p.date, today);
-          if (pf.discount === 'eligible' && held < 365) return;
-          if (pf.discount === 'ineligible' && held >= 365) return;
+          if (pf.discount === 'eligible' && held <= 365) return;
+          if (pf.discount === 'ineligible' && held > 365) return;
         }
         if ((pf.mode||'all') !== 'all' && (p.mode || 'paper') !== pf.mode) return;
         if (!filteredTickerMap[p.ticker]) filteredTickerMap[p.ticker] = [];
@@ -431,7 +438,7 @@ function renderCGT() {
               + '</tr></thead><tbody>';
             openParcels.sort((a,b)=>a.date.localeCompare(b.date)).forEach(p => {
               const held = daysBetween(p.date, today);
-              const eligible = held >= 365;
+              const eligible = held > 365;   // >365 matches the disposal calc (ATO: held MORE than 12mo)
               const costBase = p.remainingQty * p.costPerShare + (p.fees * p.remainingQty / p.qty);
               const proceeds = currentPrice ? p.remainingQty * currentPrice : null;
               const unrealPnl = proceeds != null ? proceeds - costBase : null;
@@ -449,7 +456,7 @@ function renderCGT() {
                 + '</td>'
                 + '<td data-label="Buy Date" class="text-xs">' + p.date + '</td>'
                 + '<td data-label="Held" class="text-xs">' + held + 'd</td>'
-                + '<td data-label="Discount?">' + (eligible ? '<span class="badge badge-executed">50% ✓</span>' : '<span class="badge badge-pending">' + (365-held) + 'd left</span>') + '</td>'
+                + '<td data-label="Discount?">' + (eligible ? '<span class="badge badge-executed">50% ✓</span>' : '<span class="badge badge-pending">' + (366-held) + 'd left</span>') + '</td>'
                 + '<td data-label="Original Qty">' + p.qty + '</td>'
                 + '<td data-label="Remaining"><strong>' + p.remainingQty + '</strong>' + (p.remainingQty < p.qty ? '<span class="text-xs text-muted"> (' + (p.qty-p.remainingQty) + ' sold)</span>' : '') + '</td>'
                 + '<td data-label="Cost/Share">$' + fmt(p.costPerShare) + '</td>'
@@ -563,7 +570,7 @@ function renderCGT() {
                     <td data-label="Cost Base">$${fmt(l.costBase)}</td>
                     <td data-label="Proceeds">$${fmt(l.proceeds)}</td>
                     <td data-label="Unr. Loss" class="text-danger" style="font-weight:600">−$${fmt(Math.abs(l.unrLoss))}</td>
-                    <td data-label="Held" class="text-xs">${held}d${held >= 365 ? ' <span class="badge badge-executed">CGT disc.</span>' : ''}</td>
+                    <td data-label="Held" class="text-xs">${held}d${held > 365 ? ' <span class="badge badge-executed">CGT disc.</span>' : ''}</td>
                     <td data-label="Wash-Sale?">${l.washSaleRisk ? '<span class="badge badge-pending" title="Bought same ticker in last 30 days — may trigger wash-sale rules">⚠ Risk</span>' : '<span class="text-xs text-muted">—</span>'}</td>
                   </tr>`;
                 }).join('')}
