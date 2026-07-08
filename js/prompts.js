@@ -677,8 +677,12 @@ const ANALYSIS_SYSTEM_PROMPT =
 // ── Day / swing trade scan ────────────────────────────────────────────────────
 // Returns a string so it can embed the brokerage setting at call time.
 
-// Used by the universe scanner inside the Day Trading page — a leaner variant
-// for tickers that already passed the client-side pre-filter.
+// ⚠ DORMANT — NOT the live strategy. The Day Trading scan is fully quantitative
+// (js/day-trading-analysis.js → _dtBuildRecs); no callClaude('universe') path exists.
+// Kept as a reference scaffold for re-activating a Claude confirm-layer. The signal-
+// combination rule stated below ("#1 + ≥2 of #2–5") intentionally approximates the
+// live default but the live per-signal AND-logic is the source of truth — reconcile
+// this text against _dtBuildRecs before ever wiring it back in.
 function getDayTradeUniverseScanPrompt() {
   return `You are a disciplined ASX swing-trader applying the quantitative confluence strategy below.
 Time horizon: 5–15 trading days per trade. You manage a ring-fenced swing allocation (see user message).
@@ -709,6 +713,10 @@ Each rec: { "ticker", "action":"BUY", "priceRange":[lo,hi], "target", "stopLoss"
 summary: MAX 150 chars. If none qualify: {"recs":[],"summary":"No valid setups."}`;
 }
 
+// ⚠ DORMANT — NOT the live strategy. See the banner on getDayTradeUniverseScanPrompt above.
+// The live swing strategy lives in _dtBuildRecs (js/day-trading-analysis.js) and is purely
+// quantitative; this prompt is only invoked if a Claude confirm-layer is re-wired. Its
+// "Signal #1 + ≥2 of #2–5" rule may drift from the live per-signal AND-logic — reconcile first.
 function getDayTradeSystemPrompt() {
   return `You are a disciplined ASX swing-trader applying the quantitative confluence strategy below.
 Time horizon: 5–15 trading days per trade. You manage a ring-fenced swing allocation (see user message).

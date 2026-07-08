@@ -3,11 +3,34 @@
 // Quantitative confluence strategy: 5–15 day swing trades.
 // Primary: BB reclaim. Confirms: RSI<35, Vol Z-Score, Fib zone, OBV div.
 // Stop: regime-aware stopAtrMult×ATR (2.5–4.0×, via quant engine).
+// Sizing: Kelly on the ridge model's expected-R (via _dtImpliedWinProb) once it has
+//   ≥ DT_ML_MIN_SAMPLES; otherwise the signal-count heuristic confidence.
 // Hard filters: ADV, SMA200, ADX, no catalyst.
 // NOTE: Fully quantitative — no Claude call. getDayTradeSystemPrompt /
 //       getDayTradeUniverseScanPrompt exist for potential future use but
 //       are not invoked by runDayTradeAnalysis() (_runPortfolioWatchlistScan/_runUniverseScan).
 // ============================================================
+
+// ── ML win-probability wiring ─────────────────────────────────────────────────
+// The trained ridge model (dt-training.js) predicts each setup's expected R-multiple.
+// Once it has enough samples, we feed that into Kelly sizing via the win-prob it
+// implies — replacing the naive signal-count heuristic that used to drive position
+// size. This closes the learning loop back into sizing/selection. MIN_SAMPLES sits a
+// buffer above the model's MIN_TRAIN_SAMPLES (30) so real size is never driven by the
+// flimsiest just-trainable model; the quant engine's Phase-1 Kelly cap (0.10 until 200
+// completed trades) is the second line of defence against over-sizing on an immature model.
+const DT_ML_MIN_SAMPLES = 40;
+
+// Invert a predicted expected-R into the Kelly win-probability it implies for a trade
+// whose reward:risk is `rrRatio` (b). A stop-out is −1R and target is +bR, so
+// E[R] = p·b − (1−p)·1 = p·(b+1) − 1  ⇒  p = (E[R]+1)/(b+1). Clamped to a sane band;
+// a non-positive raw result is floored to 0.02 so the quant engine still rejects it on
+// negative EV (rather than the misleading "winProb missing" path). Returns null when
+// inputs are unusable. Exposed for unit testing.
+function _dtImpliedWinProb(expectedR, rrRatio) {
+  if (expectedR == null || !isFinite(expectedR) || !(rrRatio > 0)) return null;
+  return Math.max(0.02, Math.min(0.95, (expectedR + 1) / (rrRatio + 1)));
+}
 
 // ── _dtPreFilterWithStats ─────────────────────────────────────────────────────
 // Same logic as _dtPreFilter() but returns rejection counts per filter so the UI
@@ -331,11 +354,32 @@ function _dtBuildRecs(candidates, ap, portCtx, regime, quantStats) {
     };
 
     if (typeof computeTradeParams === 'function') {
-      const qt = computeTradeParams(t, s, portCtx, {
+      // Base sizing pass with the heuristic confidence. target/stop/rrRatio are
+      // independent of winProb (only Kelly qty depends on it), so this pass also
+      // yields the rrRatio needed to invert the ML expected-R into a win-prob.
+      const qtProbe = computeTradeParams(t, s, portCtx, {
         winProb: confidence,
         expectedTimeToTarget: 8,
         priceRange: rec.priceRange,
       });
+
+      // ML override: once a sufficiently-trained ridge model exists, size off the
+      // win-prob its per-setup expected-R implies instead of the signal-count heuristic.
+      let _winProb = confidence, _mlExpectedR = null, _mlSized = false;
+      const _swingModel = (typeof _dtModel !== 'undefined' && _dtModel) ? _dtModel.swing : null;
+      const _mlReady = _swingModel && _swingModel.model_type === 'ridge'
+        && (_swingModel.n_samples || 0) >= DT_ML_MIN_SAMPLES
+        && typeof dtBuildFeatures === 'function' && typeof dtPredictLocal === 'function';
+      if (_mlReady && qtProbe.ok && qtProbe.rrRatio > 0) {
+        const _er = dtPredictLocal(dtBuildFeatures(s, state.macroData || {}), _swingModel);
+        const _p = _dtImpliedWinProb(_er, qtProbe.rrRatio);
+        if (_p != null) { _mlExpectedR = _er; _winProb = _p; _mlSized = true; }
+      }
+
+      // Re-size with the ML-implied win-prob when available; else reuse the base pass.
+      const qt = _mlSized
+        ? computeTradeParams(t, s, portCtx, { winProb: _winProb, expectedTimeToTarget: 8, priceRange: rec.priceRange })
+        : qtProbe;
       if (!qt.ok) {
         if (quantStats) {
           const cat = _dtCategorizeQuantReason(qt.reason);
@@ -345,6 +389,12 @@ function _dtBuildRecs(candidates, ap, portCtx, regime, quantStats) {
       }
       rec = { ...rec, qty: qt.qty, stopLoss: qt.stopLoss, target: qt.target,
               rrRatio: qt.rrRatio, riskAUD: qt.riskAUD, rewardAUD: qt.rewardAUD, _quantEngine: true };
+      if (_mlSized) {
+        rec._mlSized = true;
+        rec._mlWinProb = +_winProb.toFixed(3);
+        rec._mlExpectedR = +_mlExpectedR.toFixed(3);
+        rec.reasoning += ` · ML p=${(_winProb * 100).toFixed(0)}% (E[R]=${_mlExpectedR >= 0 ? '+' : ''}${_mlExpectedR.toFixed(2)}R)`;
+      }
     }
 
     if (!rec.rrRatio) {   // missing R:R is a data problem, not a togglable rule

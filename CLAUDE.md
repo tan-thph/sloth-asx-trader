@@ -103,6 +103,7 @@ config.js → utils.js → notifications.js → regime-engine.js → learning-lo
 | `js/charts.js` | `_fitCanvas()` (DPR-crisp), `chartColor(token, fallback)` (CSS custom props — never hardcode hex). Redraws on viewport-width change. |
 | `js/navigation.js` | `showPage()` + `renderPage()` with error boundary. |
 | `js/strategy.js` | `DT_FILTER` + `DT_AI_PARAMS`. `_ruleOn(paramsObj, key)` checks `enabled[key] !== false`. |
+| `js/day-trading-analysis.js` | Swing scan (quantitative, no Claude): `_dtPreFilter` → `_dtBuildRecs` → quant engine. **Kelly `winProb` comes from the ridge model's expected-R** (`_dtImpliedWinProb(E[R], rrRatio)` = `(E[R]+1)/(b+1)`, clamped 0.02–0.95) once `_dtModel.swing` is a `ridge` model with `n_samples ≥ DT_ML_MIN_SAMPLES` (40); else the signal-count heuristic. ML-sized recs carry `_mlSized/_mlWinProb/_mlExpectedR`. Non-positive E[R] floors p→0.02 so the quant engine rejects it on negative EV (model acts as selector too). `getDayTradeSystemPrompt`/`getDayTradeUniverseScanPrompt` are DORMANT scaffolds — not invoked; strategy is in `_dtBuildRecs`. |
 | `js/pages/signals.js` | `SIGNAL_RULES` (buy/sell/info types), `_computeSignalClusters()`, `_renderBreadthGauge()`, `_renderSectorHeatmap()`. See gotcha #89. |
 | `js/pages/portfolio.js` | `toggleLots()` sets `display:''` not `'table-row'` (mobile override). Per-lot account `<select>`. |
 
