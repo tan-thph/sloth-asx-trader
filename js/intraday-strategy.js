@@ -147,6 +147,31 @@ function _buildIntradayRecs(scanData) {
     // Try quant engine sizing first (requires daily signals for this ticker)
     let qty = null;
     const dailySig = state.liveSignals && state.liveSignals[ticker];
+
+    // Kelly win-prob: score-derived heuristic by default. Once a sufficiently-trained
+    // intraday ridge model exists, size off the win-prob its expected-R implies instead
+    // (mirrors the swing wiring). rrExtended is the take-profit R:R in the model's own
+    // stop R-units — the correct b for inverting expected-R → p. Feature vector must
+    // mirror the intraday snapshot builder (pages/day-trading.js executeIntraday): daily
+    // signals + {intraday_rsi, vwap_pct, volume_acceleration:null, score}.
+    let _winProb = Math.min(0.85, d.score / 100 * 0.85);
+    let _mlExpectedR = null, _mlSized = false;
+    const _iModel = (typeof _dtModel !== 'undefined' && _dtModel) ? _dtModel.intraday : null;
+    const _iMinN  = (typeof DT_ML_MIN_SAMPLES !== 'undefined') ? DT_ML_MIN_SAMPLES : 40;
+    if (_iModel && _iModel.model_type === 'ridge' && (_iModel.n_samples || 0) >= _iMinN
+        && rrExtended > 0 && typeof dtBuildFeatures === 'function'
+        && typeof dtPredictLocal === 'function' && typeof _dtImpliedWinProb === 'function') {
+      const _itSig = Object.assign({}, dailySig || {}, {
+        intraday_rsi:        d.intraday_rsi  ?? null,
+        vwap_pct:            d.pct_from_vwap ?? null,
+        volume_acceleration: null,
+        score:               d.score         ?? null,
+      });
+      const _er = dtPredictLocal(dtBuildFeatures(_itSig, state.macroData || {}), _iModel);
+      const _p  = _dtImpliedWinProb(_er, rrExtended);
+      if (_p != null) { _mlExpectedR = _er; _winProb = _p; _mlSized = true; }
+    }
+
     if (dailySig && typeof computeTradeParams === 'function') {
       try {
         const qt = computeTradeParams(
@@ -154,7 +179,7 @@ function _buildIntradayRecs(scanData) {
           { allocatedCash: allocated, portfolioValue: 0,
             brokerage: (state.settings && state.settings.brokerage) || 10,
             rbaRate: state.rbaRate || 4.35 },
-          { winProb: Math.min(0.85, d.score / 100 * 0.85),
+          { winProb: _winProb,
             expectedTimeToTarget: 1,
             priceRange: [entry, +(entry * 1.002).toFixed(3)],
             target }
@@ -168,6 +193,9 @@ function _buildIntradayRecs(scanData) {
       const stopDist = entry - stop;
       qty = stopDist > 0 ? Math.max(1, Math.floor(riskPerTrade / stopDist)) : 1;
     }
+
+    // Surface the ML win-prob as a chip when it drove sizing.
+    if (_mlSized) signals.push(`🤖 p${(_winProb * 100).toFixed(0)}%`);
 
     recs.push({
       id:            `IDT-${Date.now()}-${ticker}`,
@@ -183,6 +211,9 @@ function _buildIntradayRecs(scanData) {
       rrRatio,        // honest reversion R:R (reward to VWAP) — this is what the gate used
       rrExtended,     // R:R to the aspirational VWAP+NxATR take-profit (upside, display only)
       confidence:    +(Math.min(0.85, d.score / 100 * 0.85)).toFixed(2),
+      _mlSized,
+      _mlWinProb:    _mlSized ? +_winProb.toFixed(3) : undefined,
+      _mlExpectedR:  _mlSized ? +_mlExpectedR.toFixed(3) : undefined,
       intradayScore: d.score,
       qty,
       vwap:          d.vwap,
