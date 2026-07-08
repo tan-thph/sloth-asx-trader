@@ -1782,11 +1782,31 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     ];
     const structuredText = allParts.join('\n');
 
+    // Live enforcement of the Section 3B synthesis requirement: the portfolio path parses
+    // inline (it does not run the getValidatedAnalysisWithRepair loop), so if the model omits
+    // the required portfolioSynthesis while holdings exist, backfill factual book-level context
+    // (top-sector/top-name concentration + cash %) rather than showing an empty panel. Rotation
+    // judgement can't be faked, so this is clearly labelled facts-only — the model is still
+    // required to supply the real synthesis; this only degrades gracefully when it doesn't.
+    if (!portfolioSynthesis && Array.isArray(mp) && mp.length) {
+      const _pv = portfolioValue() || 0;
+      const _nw = totalNetWorth() || 1;
+      const _bySector = {};
+      mp.forEach(h => { const s = h.sector || '?'; _bySector[s] = (_bySector[s] || 0) + (h.value || 0); });
+      const _topSector = Object.entries(_bySector).sort((a, b) => b[1] - a[1])[0];
+      const _topName = [...mp].sort((a, b) => (b.value || 0) - (a.value || 0))[0];
+      const _cashPct = ((state.cash || 0) / _nw * 100).toFixed(0);
+      const _secPct = _topSector && _pv ? (_topSector[1] / _pv * 100).toFixed(0) : '0';
+      const _namePct = _topName && _pv ? ((_topName.value || 0) / _pv * 100).toFixed(0) : '0';
+      portfolioSynthesis = `[auto] Concentration: ${_topSector ? _topSector[0] : '?'} ${_secPct}% (top sector), ${_topName ? _topName.ticker : '?'} ${_namePct}% (top name). Cash ${_cashPct}% of net worth. Model omitted synthesis — factual context only.`;
+      console.warn('[analysis] portfolioSynthesis missing from response — backfilled deterministic concentration/cash facts');
+    }
+
     state.analysisLastSummary = {
       text: structuredText,         // plain-text fallback (backward compat)
       recs: summaryRecs,            // structured rows for rich rendering
       contextLine,                  // macro/cash context (untruncated)
-      portfolioSynthesis,           // book-level PM synthesis (Section 3B); null on legacy/empty
+      portfolioSynthesis,           // book-level PM synthesis (Section 3B); [auto] fallback if model omitted
       bracketNotes,                 // system notes array e.g. ['[⚠ N recs failed…]']
       date: todayStr(),
       time: nowSydney(),

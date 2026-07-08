@@ -275,6 +275,34 @@ describe('validateResponse', () => {
     const result = validateResponse(parsed, 0.62);
     expect(result.dataGaps).toContain('BHP data unavailable');
   });
+
+  it('forwards portfolioSynthesis and deferrals from the parsed object', () => {
+    const parsed = { recs: [], portfolioSynthesis: 'Materials 22%, cash 10%', deferrals: [{ ticker: 'BHP', reason: 'anti-churn' }] };
+    const result = validateResponse(parsed, 0.62);
+    expect(result.portfolioSynthesis).toBe('Materials 22%, cash 10%');
+    expect(result.deferrals).toHaveLength(1);
+  });
+
+  it('gates: requires portfolioSynthesis when holdings exist', () => {
+    global.state.portfolio = [{ ticker: 'BHP', shares: 100, avgPrice: 40 }];
+    const result = validateResponse({ recs: [], portfolioSynthesis: '' }, 0.62);
+    expect(result.errors.some(e => /portfolioSynthesis is required/.test(e))).toBe(true);
+    delete global.state.portfolio;
+  });
+
+  it('gate stays dormant when portfolio is empty', () => {
+    global.state.portfolio = [];
+    const result = validateResponse({ recs: [] }, 0.62);
+    expect(result.errors.some(e => /portfolioSynthesis is required/.test(e))).toBe(false);
+    delete global.state.portfolio;
+  });
+
+  it('gate passes when synthesis is present with holdings', () => {
+    global.state.portfolio = [{ ticker: 'BHP', shares: 100, avgPrice: 40 }];
+    const result = validateResponse({ recs: [], portfolioSynthesis: 'Materials 22% top sector; cash 10%; hold.' }, 0.62);
+    expect(result.errors.some(e => /portfolioSynthesis is required/.test(e))).toBe(false);
+    delete global.state.portfolio;
+  });
 });
 
 // ── _buildRepairMessage ───────────────────────────────────────────────────────
