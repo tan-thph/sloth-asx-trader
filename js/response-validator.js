@@ -555,24 +555,15 @@ function validateResponse(parsed, minConfidence) {
     validated.push(r);
   }
 
-  // Portfolio-synthesis gate: Section 3B synthesis is required whenever the book is non-empty.
-  // Feeds the repair loop (getValidatedAnalysisWithRepair) so a missing/blank synthesis triggers
-  // a regeneration attempt. Dormant when there are no holdings (nothing to synthesise).
-  const synthErrors = [];
-  const _hasHoldings = Array.isArray(state.portfolio) && state.portfolio.length > 0;
-  const _synth = (parsed?.portfolioSynthesis ?? '').trim();
-  if (_hasHoldings && !_synth) {
-    synthErrors.push('portfolioSynthesis is required when holdings exist (Section 3B) — provide concentration, sector rotation, a cash %, and what changed since last review.');
-  }
-
+  // Note: the book-level "portfolio synthesis" is now computed deterministically in
+  // analysis.js (concentration/cash + changes-since-last-review), not emitted by the model —
+  // so there is no synthesis field to validate here.
   return {
     recs:     validated,
     summary:  parsed?.summary  ?? null,
-    portfolioSynthesis: parsed?.portfolioSynthesis ?? null,
     dataGaps: parsed?.dataGaps ?? [],
-    deferrals: parsed?.deferrals ?? [],
     rejected,
-    errors:   [...rejected.flatMap(r => r.errors), ...synthErrors],
+    errors:   rejected.flatMap(r => r.errors),
   };
 }
 

@@ -4353,7 +4353,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 except Exception:
                     continue
 
-        # 7. Per-ticker memory — ESS≥2.5 AND |delta from overall WR| > 15pp
+        # 7. Per-ticker memory — ESS≥_ESS_MIN (6.0) AND |delta from overall WR| > 15pp
         if tickers_req and len(calib_rows) >= 5:
             overall_wr = _wwr(calib_rows)
             ticker_parts = []
@@ -4382,7 +4382,9 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         # (significance gate, gotcha #42) — the ✓/⚠ flag only shows when the
         # divergence clears the noise. Capped at 2 entries to stay within budget.
         if regime and len(calib_rows) >= 10:
-            overall_wr = _wwr(calib_rows) if "overall_wr" not in dir() else overall_wr
+            # _wwr is cheap + idempotent — assign unconditionally rather than the
+            # fragile `"overall_wr" not in dir()` guard (Audit I-6).
+            overall_wr = _wwr(calib_rows)
             sx_rows = [r for r in calib_rows if r["regime"] == regime and r["sector"]]
             sx_groups: dict = {}
             for r in sx_rows:

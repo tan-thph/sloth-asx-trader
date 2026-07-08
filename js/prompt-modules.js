@@ -39,7 +39,7 @@ Do NOT recommend TOP_UP within 5 days of a holdings's earnings date — results 
 
   MINING_SECTOR: `
 === MINING SECTOR RULES ===
-Iron ore < $90/t: reject any TOP_UP on BHP, RIO, FMG, MIN. Recommend HOLD or TRIM only.
+Iron ore < $90/t: do NOT recommend BUY/TOP_UP on BHP, RIO, FMG, MIN — hold existing positions or TRIM only.
 AUD/USD < 0.65: bias toward unhedged exporters (BHP, RIO, WDS, STO) — weak AUD inflates their AUD revenue.
 AUD/USD > 0.72: headwind for unhedged exporters — apply higher conviction bar for TOP_UP.
 `.trim(),
@@ -87,8 +87,9 @@ MACRO INTEGRATION (cite in factorsUsed[]):
   HIGH_VOL_REGIME: `
 === HIGH VOLATILITY REGIME ACTIVE ===
 Raise minimum confidence to 0.75 for all BUY and TOP_UP recommendations (from default 0.62).
-Reduce qty by 30% on all BUY/TOP_UP — use the quant engine output as the ceiling, not the floor.
-Stop distance: use 2.0×ATR (tighter than 2.5×) to limit dollar risk in gap scenarios.
+Position size and stop distance are set deterministically by the quant engine for this
+regime — do NOT adjust qty or the stop-ATR multiple yourself (Rule 4). Report the elevated
+risk in factorsUsed[]; the engine reduces size and widens/tightens the stop.
 Do NOT chase breakouts — wait for mean-reversion setups with clear support.
 `.trim(),
 

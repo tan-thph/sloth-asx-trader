@@ -14,9 +14,10 @@
 const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
 const _AGENT_MAX_TOKENS = {
-  // 8000 → 10000 (Sprint 68): the 2026-06-11 15:35 run reported out=8000 — the
-  // cap exactly — with 7 recs. Tool-schema input counts against max_tokens; a
-  // larger portfolio would truncate the tool input and fail the whole parse.
+  // Raised over time (8000 → 10000 Sprint 68 → 12000): the 2026-06-11 15:35 run
+  // reported out=8000 — the cap exactly — with 7 recs. Tool-schema input counts
+  // against max_tokens; a larger portfolio would truncate the tool input and fail
+  // the whole parse. 12000 leaves headroom for HOLD entries (Audit #8) too.
   portfolio: 12000,
   analyst:   5000,
   pm:        3000,
@@ -61,11 +62,18 @@ const _PORTFOLIO_TOOL = {
         type: 'array',
         items: {
           type: 'object',
-          required: ['ticker', 'action', 'priceRange', 'target', 'stopLoss',
-                     'qty', 'confidence', 'reasoning'],
+          // Audit #8 (2026-07-08): 'HOLD' re-admitted so existing holdings the
+          // model evaluates and chooses to keep are logged (the passivity signal
+          // — _resolve_hold_outcomes / ⚠HOLD_TOO_PASSIVE were structurally dead on
+          // the Claude path because the enum forbade HOLD). `required` narrowed to
+          // the fields EVERY action needs: a HOLD legitimately omits
+          // priceRange/target/stopLoss/qty (validator's requiredUnless:'HOLD'),
+          // and a BUY/SELL missing one degrades to a validator fix/drop rather
+          // than an API refusal — the documented intent of this minimal schema.
+          required: ['ticker', 'action', 'confidence', 'reasoning'],
           properties: {
             ticker:                { type: 'string', pattern: '^[A-Z0-9]{2,5}(\\.AX)?$' },
-            action:                { type: 'string', enum: ['BUY', 'SELL', 'TRIM', 'TOP_UP'] },
+            action:                { type: 'string', enum: ['BUY', 'SELL', 'TRIM', 'TOP_UP', 'HOLD'] },
             sector:                { type: 'string' },
             isWatchlist:           { type: 'boolean' },
             priceRange:            { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
@@ -91,6 +99,17 @@ const _PORTFOLIO_TOOL = {
             netProfit:             { type: 'number' },
             taxBenefitEstimate:    { type: ['number', 'null'] },
             grossedUpYield:        { type: ['number', 'null'] },
+            // Audit #10 (2026-07-08): primary_entry_driver is the keystone of the
+            // BUY/TOP_UP learning taxonomy (thesis matrix, driver playbook,
+            // driver×regime cross-tabs, computeThesisDrift all key off it). It was
+            // absent from the schema, so constrained decoding under-emitted it —
+            // the likely cause of the null-driver rows that needed the
+            // /backfill-entry-drivers endpoint. reallocationSuggestion was likewise
+            // undeclared. Static addition → one-time cache bust, then stable.
+            primary_entry_driver:  { type: ['string', 'null'],
+                                     enum: ['mean_reversion', 'momentum_breakout', 'trend_pullback',
+                                            'fundamental_value', 'macro_tailwind', null] },
+            reallocationSuggestion:{ type: ['string', 'null'] },
             primary_driver:        { type: 'string' },
             secondary_factors:     { type: 'array', items: { type: 'string' } },
             urgency:               { type: 'string', enum: ['immediate', 'routine', 'monitor'] },
@@ -293,7 +312,18 @@ async function callClaude(agentType, userMessage, options = {}) {
       continue;
     }
 
-    const data = await resp.json();
+    // Audit #14 (2026-07-08): guard the body parse. A proxy-side 5xx (waitress or
+    // an intermediary returning an HTML error page) makes resp.json() throw a
+    // SyntaxError that would escape the retry loop entirely — the exact failure
+    // class the backoff exists for. Treat a non-JSON body as a retryable error.
+    let data;
+    try {
+      data = await resp.json();
+    } catch (parseErr) {
+      lastErr = new Error(`Claude API returned a non-JSON body (HTTP ${resp.status})`);
+      console.warn(`[callClaude:${agentType}] non-JSON response (HTTP ${resp.status}) — retrying in ${RETRY_DELAYS[attempt + 1] ?? 0}ms`);
+      continue;
+    }
 
     if (data.error) {
       const errType = data.error.type || '';

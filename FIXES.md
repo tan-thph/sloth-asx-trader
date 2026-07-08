@@ -136,3 +136,151 @@ Per the `isRealTrade()` invariant, missing mode ⇒ paper. So **every save→rel
 | 5 | #5, #7 | Correctness hardening, lower blast radius |
 
 Also add to the suites: a Python round-trip test asserting `portfolio` save→load preserves `mode` for a dual-mode ticker (would have caught #1 and #2), and a vitest asserting `_validHolding` preserves `mode`.
+
+---
+
+# Audit 2026-07-08 — Claude API prompts + Learning Loop (planning/audit only, no code changed)
+
+Scope: (1) the Claude API call pipeline — `js/prompts.js`, `js/claude-client.js`, `js/prompt-modules.js`, prompt assembly + post-response processing in `js/analysis.js`; (2) the Learning Loop — `js/learning-loop.js`, `logRecsToLearningLoop()`, `routes/learning.py _calib_compute()`. Findings verified by reading source and cross-grepping writers/readers (no runtime verification this pass). Numbering continues from the 2026-07-03 audit.
+
+## 8. [HIGH] HOLD outcome tracking is dead again on the Claude path — the forced tool schema and Rule 5 both forbid HOLD
+
+**Status:** Open
+**Files:** `js/claude-client.js` (`_PORTFOLIO_TOOL` action enum ~:68), `js/prompts.js` (Rule 5 ~:76), `js/analysis.js` (`_holdRecs` ~:1750)
+
+**Problem:** FIXES #4 (2026-07-03) wired `_holdRecs` so HOLD recs reach `POST /api/learning/log`. But on the cloud path a HOLD can never exist to be logged:
+- `_PORTFOLIO_TOOL.input_schema` constrains `action` to `enum: ['BUY','SELL','TRIM','TOP_UP']` — with forced tool use (`tool_choice`), the API grammar-level blocks `HOLD`.
+- Rule 5 in `ANALYSIS_SYSTEM_PROMPT` explicitly instructs: "omit that ticker from recs[] entirely — do NOT add a HOLD entry. recs[] must contain only actionable trades".
+
+So `recs.filter(action === 'HOLD')` is always empty when `useLocalLLM` is off; `_resolve_hold_outcomes()`, the `hold_outcomes` stat, and the `⚠HOLD_TOO_PASSIVE` nudge only accumulate data from the local Ollama path (whose 5-action enum does include HOLD — `routes/debate.py:2831`). The FIXES #4 remediation is structurally inert for the primary (Claude) pipeline.
+
+**Fix (pick one, deliberately):**
+1. Re-admit HOLD: add `'HOLD'` to the tool enum and amend Rule 5 to distinguish "omit un-analysable watchlist tickers" from "emit an explicit HOLD (no target/stop/qty — `requiredUnless:'HOLD'` already handles this) for each *holding* you evaluated and chose to keep". The UI filter already strips HOLDs before rendering, and `POST /api/learning/log` already dedupes to one HOLD per ticker per 7d, so the blast radius is prompt+schema only. **Recommended** — it is the only way the passivity feedback loop gets data.
+2. Or accept HOLD-learning as local-only and remove/annotate the `⚠HOLD_TOO_PASSIVE` machinery + gotcha #85 so the next audit does not rediscover this.
+
+## 9. [HIGH] The VaR1d size reduction promised to Claude never runs — `signals.var_1d` has no writer
+
+**Status:** Open
+**Files:** `js/quant-engine.js` (~:148-160), `js/analysis.js` (quant post-processing ~:981-991, `_riskMetrics` ~:222-251), `js/prompts.js` (Rule 16), rules block (`analysis.js` ~:670 "VaR1d thresholds: <-3.5% → qty−25%; <-5.0% → qty−50%")
+
+**Problem:** `computeTradeParams()` implements the VaR modifier (`varMult` 0.75/0.50) off `signals.var_1d` — but a repo-wide grep shows **nothing ever writes `var_1d`** into `state.liveSignals` or the signals object passed in. The per-ticker VaR lives in `_riskMetrics[t].var_95` (fetched from `GET /api/risk` at the top of `runAnalysis()`) and is only used to build the prompt's risk table. Meanwhile the system prompt (Rule 16: "the quant engine will reduce position size") and the ACTIVE RULE OVERRIDES block explicitly promise the reductions. Net effect: high-VaR positions are sized as if VaR were normal, and Claude has been told not to compensate.
+
+**Fix:** in the quant post-processing loop in `analysis.js`, pass the fetched metric through:
+
+```js
+const qt = computeTradeParams(r.ticker,
+  { ...signals, var_1d: _riskMetrics[r.ticker]?.var_95 ?? null },
+  _portfolioCtx, {...});
+```
+
+(`_riskMetrics` is already in scope.) Add a Vitest asserting `varMult` fires at var_1d = −4 and −6.
+
+## 10. [MEDIUM] `primary_entry_driver` is missing from the forced tool schema — the keystone field of the entry-driver taxonomy is emitted only by luck
+
+**Status:** Open
+**Files:** `js/claude-client.js` (`_PORTFOLIO_TOOL.properties` ~:67-98)
+
+**Problem:** The schema declares `primary_driver`, `secondary_factors`, `urgency`, `alternativeTicker` (SELL-side tags) but **not** `primary_entry_driver` (BUY/TOP_UP side) and not `reallocationSuggestion`. `additionalProperties` defaults to true so the field *can* still arrive, but constrained decoding biases generation toward declared properties — this is the most likely cause of the historical null-driver rows that required `POST /api/learning/backfill-entry-drivers`. Everything downstream (thesis matrix, driver playbook, driver×regime cross-tabs, `computeThesisDrift`) keys off this field.
+
+**Fix:** add to the schema (static — one-time cache bust, then stable):
+
+```js
+primary_entry_driver:   { type: 'string', enum: ['mean_reversion','momentum_breakout','trend_pullback','fundamental_value','macro_tailwind'] },
+reallocationSuggestion: { type: ['string','null'] },
+```
+
+## 11. [MEDIUM] `ensembleConfidence` is direction-blind — a bullish indicator score *raises* the ensemble confidence of a SELL/TRIM
+
+**Status:** Open
+**Files:** `js/analysis.js` (~:1266-1273)
+
+**Problem:** `ensembleConfidence = 0.5×confidence + 0.5×(score/100)` for every rec. `score` is the bullish setup score (0–100). For SELL/TRIM, a strongly bullish score should *contradict* the exit, not reinforce it. As written, a SELL on a ticker scoring 85 gets a higher ensemble confidence than one scoring 30 — inverted. This pollutes `ensemble_confidence` in `ai_learning_events` and the `ensemble_divergence` stat for all exit recs.
+
+**Fix:** for SELL/TRIM blend with `(100 − indScore)/100`; leave BUY/TOP_UP as-is; leave HOLD unblended.
+
+## 12. [MEDIUM] `HIGH_VOL_REGIME` module contradicts the regime engine's stop policy and Rule 4
+
+**Status:** Open
+**Files:** `js/prompt-modules.js` (~:87-100), `js/regime-engine.js` (`stopAtrMult` map), `js/analysis.js` (ATR floor ~:1092-1114)
+
+**Problem:** In a highVol regime the model receives three mutually contradictory stop instructions in one request: the module says "Stop distance: use 2.0×ATR (tighter than 2.5×)", the ACTIVE RULE OVERRIDES line says `Stop ATR: 3×ATR14` (`getRegimeModifiers('highVol').stopAtrMult` = 3.0), and the post-response ATR floor then silently enforces 3.0× anyway. The module also says "Reduce qty by 30%" although Rule 4 mandates qty=0 (the engine sizes; any qty arithmetic is discarded). `MINING_SECTOR` similarly says "Recommend HOLD or TRIM only" although HOLD is banned/schema-blocked (finding #8). Conflicting instructions measurably degrade rule compliance across the board, not just on the conflicting rules.
+
+**Fix:** strip all stop/qty arithmetic from the regime/sector modules — keep only behavioural guidance (confidence floors, setup preferences, factors to cite). Stops and sizes are engine-owned; the modules should say so, not compete.
+
+## 13. [LOW] The JSON example in `ANALYSIS_SYSTEM_PROMPT` contradicts Rule 4 (`"qty": 50`) and contains a `//` comment inside JSON
+
+**Status:** Open
+**Files:** `js/prompts.js` (schema example ~:587-621)
+
+**Problem:** Rule 4 (and the field spec: `"qty": 0 // always 0`) mandates qty=0, but the worked example emits `"qty": 50`. Models imitate examples over rules when they conflict. The example also carries an inline `//` comment on the scenarios line — harmless under forced tool use, but it models invalid JSON for the no-tool escape hatch (`options.noTool`).
+
+**Fix:** set the example qty to 0 and move both comments outside the example block. Bump `PROMPT_VERSION`.
+
+## 14. [LOW] `callClaude()` retry loop is bypassed by non-JSON error bodies
+
+**Status:** Open
+**Files:** `js/claude-client.js` (~:296)
+
+**Problem:** `const data = await resp.json();` is unguarded. A proxy-side 502/504 (HTML body from waitress or an intermediary) throws a SyntaxError that escapes the retry loop entirely — the one failure class the backoff was built for. Network errors and 429/529 are handled; malformed bodies are not.
+
+**Fix:** wrap in try/catch; on parse failure set `lastErr = new Error('HTTP ' + resp.status + ' — non-JSON response')` and `continue`.
+
+## 15. [LOW] `netProfit`/EV gate computed at a qty that later shrinks — correlation sizing and heat budget run after the §8.2 recompute
+
+**Status:** Open
+**Files:** `js/analysis.js` (order: EV recompute ~:1324-1357 → `_applyCorrSizing` ~:1398-1411 → `_applyHeatBudget` ~:1417-1484)
+
+**Problem:** The engine-side net-EV gate and the displayed `netProfit`/`expectedProfit` are computed from the quant qty, but `_applyCorrSizing` (−30 %/−50 %) and the heat budget (`_budgetScaled`) can halve qty afterwards without recomputing. The rec card then shows a P&L inconsistent with its own qty, and a rec that would fail the EV gate at its *final* (post-correlation) qty passes it at the pre-correlation qty (brokerage is fixed, so smaller qty ⇒ worse net EV).
+
+**Fix:** extract the EV recompute into a helper and re-run it once after the last sizing mutation (post-heat-budget), or reorder so EV is the final step.
+
+## 16. [LOW] Whipsaw check runs a full calibration compute per rec ticker
+
+**Status:** Open
+**Files:** `js/analysis.js` (~:1209-1221), `routes/learning.py` (`learning_calibration` cache key ~:4635)
+
+**Problem:** For every unique rec ticker the whipsaw block fetches `GET /api/learning/calibration?tickers=<tk>&days=180` just to regex one per-ticker line out of the text block. Each cache miss runs `_calib_compute()` — including all eight lazy resolvers (yfinance-backed) — and inserts a per-ticker cache key (cache capped at 50, evicting the useful keys). With 6–8 recs this adds seconds of backend work per analysis for ~15 tokens of context, and only *flipped* tickers ever use the result.
+
+**Fix:** fetch the historical context only for recs that actually flipped direction (move the fetch below the flip check), or add a lightweight per-ticker WR endpoint instead of reusing the full calibration pipeline.
+
+---
+
+## Resolution log — 2026-07-08 (implemented + re-verified same day)
+
+All nine defects from the 2026-07-08 audit (#8–#16) were implemented and **re-verified after later agents bumped the prompt v17→v20**. Every fix survived that work intact. Suites green: **917 Python + 216 JS tests pass** (source-guard tests updated: enum now includes HOLD, PROMPT_VERSION guard → v20, ensemble guard asserts the direction-aware `100 - indScore` inversion).
+
+| # | Change | Files |
+|---|---|---|
+| 8 | `HOLD` re-admitted to `_PORTFOLIO_TOOL` action enum + `required` narrowed to `[ticker,action,confidence,reasoning]`; Rule 5 reworded to emit HOLD for evaluated-and-kept holdings (not watchlist); confidence-floor pass skips HOLD | `js/claude-client.js`, `js/prompts.js`, `js/analysis.js` |
+| 9 | `_riskMetrics[t].var_95` passed as `signals.var_1d` into `computeTradeParams()` so the Rule-16 VaR size reduction fires | `js/analysis.js` |
+| 10 | `primary_entry_driver` (enum) + `reallocationSuggestion` added to the tool schema | `js/claude-client.js` |
+| 11 | `ensembleConfidence` inverts the bullish setup score (`100 - indScore`) for SELL/TRIM | `js/analysis.js` |
+| 12 | Stripped 2.0×ATR stop + qty−30% arithmetic from `HIGH_VOL_REGIME`; `MINING_SECTOR` no longer says "HOLD or TRIM only" | `js/prompt-modules.js` |
+| 13 | Example `qty` set to 0; inline `//` comment removed | `js/prompts.js` |
+| 14 | `resp.json()` wrapped in try/catch inside the retry loop | `js/claude-client.js` |
+| 15 | `_recomputeBuyEv()` helper + final refresh pass so netProfit reflects post-correlation/heat-budget qty | `js/analysis.js` |
+| 16 | Whipsaw check fetches historical calibration only for tickers that flipped direction within 10d | `js/analysis.js` |
+
+IMPROVEMENTS I-6 also done: stale comments (portfolio maxTokens, ESS 2.5→6.0, `dir()` idiom, news 2d→3d).
+
+---
+
+## 17. [MEDIUM] `portfolioSynthesis` repeats the #10 gap — prompt-required + validator-enforced, but absent from the forced tool schema
+
+**Status:** Resolved (2026-07-08) — chose the lean option (2): the LLM `portfolioSynthesis` + Section 3B prompt block + validator gate were removed; the book snapshot is now computed **deterministically** in `analysis.js` (top-sector/top-name concentration + cash % + a compact changes-since-last-review tail) and rendered as "📊 Book snapshot". PROMPT_VERSION → v21. Suites green (213 JS + 917 PY).
+**Files:** `js/claude-client.js` (`_PORTFOLIO_TOOL` top-level `properties`/`required` ~:59-128), `js/prompts.js` (Section 3B / OUTPUT), `js/response-validator.js` (~:563), `js/analysis.js` (`[auto]` fallback ~:1834-1845)
+
+**Problem:** `portfolioSynthesis` is marked REQUIRED in the prompt, enforced by the validator (error when holdings exist), rendered on the Recommendations page, and has a deterministic `[auto]` backfill in analysis.js. But it is **not** declared in `_PORTFOLIO_TOOL.properties` and **not** in the top-level `required: ['recs','summary','dataGaps']`. Under forced tool use the model outputs only the tool input — an undeclared, non-required field is under-emitted (the exact #10 pattern). Result: the `[auto]` "Model omitted synthesis — factual context only." fallback likely fires most runs, so the elaborate qualitative PM view rarely reaches the user; the machinery mostly renders deterministic concentration/cash facts you already had.
+
+**Fix (pick one — the second is the lean choice):**
+1. Wire it: add `portfolioSynthesis: { type: 'string' }` and `deferrals` to the schema, add `portfolioSynthesis` to top-level `required`. 2-line change; makes the feature actually fire.
+2. If the qualitative synthesis isn't earning its complexity (validator + fallback + UI + prompt section), keep only the deterministic `[auto]` concentration/cash line and drop the model-generated version + its Section 3B prompt block. Simpler, and it's what the user usually sees anyway.
+
+## 18. [LOW] `deferrals[]` is dead output — the model is told to produce it but nothing consumes it
+
+**Status:** Resolved (2026-07-08) — `deferrals[]` removed entirely from the prompt (Shape + spec) and the validator; anti-churn/timing holdbacks fold back into `dataGaps[]` with a note. No consumer existed, so nothing downstream changed.
+**Files:** `js/prompts.js` (~:350, 540, 555, 557), `js/response-validator.js` (~:573)
+
+**Problem:** The prompt instructs the model to emit `deferrals: [{ticker, reason}]` (anti-churn/timing holdbacks split out of `dataGaps`). The validator passes it through, but **no code in `js/` reads or renders it** (grep: only prompts.js + the validator's pass-through). It is neither shown to the user nor logged to the learning loop — pure output-token spend with no consumer.
+
+**Fix (lean):** either drop `deferrals[]` from the prompt/output entirely (fold anti-churn holdbacks back into a summary note), or render it on the Recommendations page / log it as a deferral event if the intent was to track them. Do not leave it as an unconsumed required output.

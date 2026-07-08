@@ -1286,11 +1286,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_current(self):
-        """PROMPT_VERSION must be bumped to v16 after the factor-typing (Critic B) rule addition."""
+        """PROMPT_VERSION must be bumped to v17 after the Audit 2026-07-08 Rule 5 (HOLD) change."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-07-v16'", src,
-                      "PROMPT_VERSION must be 2026-07-v16 after adding factor-typing tags to factorsUsed[]")
+        self.assertIn("PROMPT_VERSION = '2026-07-v21'", src,
+                      "PROMPT_VERSION must be current (v20)")
 
     def test_entry_driver_in_prompt(self):
         """Sprint 67: ANALYSIS_SYSTEM_PROMPT must require primary_entry_driver on BUYs."""
@@ -9519,8 +9519,12 @@ class TestSellTrimSizingAndMacroRace(unittest.TestCase):
         ever computed inside the unwired validateResponse(), so learning events
         logged ensemble_confidence = null."""
         self.assertIn("ensembleConfidence", self.analysis_src)
-        self.assertIn("indScore / 100", self.analysis_src,
-                      "ensemble blend (0.5*conf + 0.5*score/100) missing from analysis.js")
+        self.assertIn("_dirScore / 100", self.analysis_src,
+                      "ensemble blend (0.5*conf + 0.5*dirScore/100) missing from analysis.js")
+        # Audit #11: the bullish setup score must be INVERTED for SELL/TRIM so a
+        # bullish reading contradicts (not reinforces) an exit.
+        self.assertIn("100 - indScore", self.analysis_src,
+                      "ensemble blend must invert the bullish score for SELL/TRIM (Audit #11)")
 
     def test_buy_net_ev_gate_is_engine_computed(self):
         """§8.2: the BUY neg-EV gate must use engine-computed netProfit at final qty,
@@ -9685,8 +9689,10 @@ class TestSprint62RemainingFilters(unittest.TestCase):
         self.assertIn("JSON.stringify(_toolBlock.input)", self.client)
 
     def test_tool_schema_enforces_enums(self):
-        """Schema must constrain action and urgency to closed vocabularies."""
-        self.assertIn("enum: ['BUY', 'SELL', 'TRIM', 'TOP_UP']", self.client)
+        """Schema must constrain action and urgency to closed vocabularies.
+        Audit #8 (2026-07-08): 'HOLD' re-admitted so evaluated-and-kept holdings
+        are logged for the passivity feedback loop."""
+        self.assertIn("enum: ['BUY', 'SELL', 'TRIM', 'TOP_UP', 'HOLD']", self.client)
         self.assertIn("enum: ['immediate', 'routine', 'monitor']", self.client)
 
     def test_tool_schema_is_static(self):
@@ -10856,10 +10862,10 @@ class TestCriticsAddressing(unittest.TestCase):
                       "Rule 20 must explicitly label RSI/BB/MA as confirming signals, not primary drivers")
 
     def test_prompt_version_v16(self):
-        """PROMPT_VERSION must be v16 after adding factor-typing tags (Critic B)."""
+        """PROMPT_VERSION must be current (v17 after the Audit 2026-07-08 Rule 5/HOLD change)."""
         src = self._read("js/prompts.js")
-        self.assertIn("PROMPT_VERSION = '2026-07-v16'", src,
-                      "PROMPT_VERSION must be bumped to 2026-07-v16")
+        self.assertIn("PROMPT_VERSION = '2026-07-v21'", src,
+                      "PROMPT_VERSION must be bumped to current (v20)")
 
     # ── Problem 5/6: Financials sector module ──────────────────────────────
 

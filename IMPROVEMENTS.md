@@ -104,3 +104,57 @@ Thresholds are module constants (`_GOLIVE_*`), tunable. Verified against the liv
 ### 10. Realistic paper fills
 **Files:** `js/utils.js` (`paperFillPrice`, `_advSlippageRate`), `js/pages/recommendations.js` (`markExecuted`), `js/pages/settings.js`, `js/pages/learning.js`
 **Status:** Resolved (2026-07-06) — so the paper book fills like the market will, not at a frictionless target. On execution of an AI rec, a **paper** fill is slipped adversely (BUY/TOP_UP pays up, SELL/TRIM receives down) by the **same model the backtester and virtual-outcome resolvers already use**: ADV-tier one-way rate (0.05–0.35% by 20-day turnover) × regime multiplier (highVol 1.5×, riskOff 1.25×, panic 2×). Everything downstream — cost basis, journal, P&L, learning-loop `realized_pnl_pct` — then reflects real friction. **Firewall-safe:** gated on `!isRealTrade(mode)`, so a real trade always books at the price the user actually got; a cross-language parity test (`TestRealisticPaperFills`) pins the JS tiers/multipliers to `core.adv_slippage` + `_SLIP_REGIME_MULT`. Toggle in Settings → Paper trading (`paperRealisticFills`, **default on**); a toast discloses the modeled slippage on each fill. The go-live scorecard reads the setting and passes `friction_bps=0` when it's on, so friction isn't double-counted (the P&L already contains it). **Scope:** the AI-rec execution path (`markExecuted`) — where validation trades enter/exit. Manual journal entries (user asserts their own fill) and the separate day-trade subsystem are intentionally not slipped; extend later if wanted. 5 vitest cases (adverse direction, ADV tiers, regime widening, invalid-input passthrough, backend parity).
+
+---
+
+# Audit 2026-07-08 — Claude API prompts + Learning Loop: enhancements
+
+Companion to the same-dated section in `FIXES.md` (defects live there). Overall verdict first, then itemised improvements.
+
+## Verdict — what is working well
+
+**Claude API pipeline:** architecturally strong. The static-system-prompt / dynamic-user-message split preserves prompt-cache hits; forced tool use (§8.5) eliminates the malformed-JSON class for the portfolio agent; every quantitative decision (Kelly sizing, stops, EV, calibration nudges, correlation, heat budget) is engine-side and deterministic, with Claude scoped to conviction/direction/tagging only — this is the correct division of labour and it is consistently enforced in post-processing. Logging (`ai_call_log`), retry/backoff, key hygiene, and the flag-don't-drop validator philosophy are all sound.
+
+**Learning Loop:** the statistical hygiene is genuinely above average for a system like this — Kish ESS floors, Wilson-CI gates, Mann-Whitney-gated skill weighting, decay half-lives keyed to regime, paper down-weighting that provably cancels in pure-paper phases, self-suppressing tags (`stop_too_tight` counterfactual precision), and a priority-ordered token budget with machine-readable adjustments computed independently of the truncated text. The n<30 base-rate prior is a nice touch. The main weaknesses are *feed starvation* (some resolvers structurally receive no data — FIXES #8) and a few direction/consistency bugs (FIXES #9, #11), not the statistics.
+
+## Improvements
+
+### I-1. Delete or wire the dead 3-phase pipeline (`ANALYST_SYSTEM_PROMPT`, `PM_SYSTEM_PROMPT`)
+
+`callClaude('analyst', …)` and `callClaude('pm', …)` have zero call sites — the "Phase 1/3" prompts in `js/prompts.js` (~:746-828) and their `_AGENT_MAX_TOKENS`/`_resolveSystemPrompt` entries are dead code. The PM prompt has also drifted: its `scenarios` shape is `[{"label","prob","outcome"}]` (array) vs the main schema's `{bull,base,bear}` object, and it tells the model to emit computed `qty`/`evNet` (contradicting the Rule-4 architecture). Either wire the pipeline or delete the prompts; if kept for future use, align the shapes now so the drift doesn't calcify.
+
+### I-2. Forced tool use for the macro agent
+
+Macro's `maxTokens` was raised 1800→3000 after a truncation-mid-string JSON failure. A `tool_choice`-forced `emit_macro_brief` tool (same pattern as §8.5) removes the parse-failure class entirely; macro already runs `noCache` once daily so there is no cache-stability concern. Low effort, kills a known recurring failure mode.
+
+### I-3. Log `scenarios` probabilities to the learning loop
+
+`logRecsToLearningLoop()` drops the `scenarios` object (bull/base/bear p+ret) at log time. Persisting it (one JSON column or riding `market_context`) would let calibration score the model's *probability distribution* (e.g. did bear cases hit at ~bear-p frequency?) instead of only the scalar confidence — a materially richer Brier/calibration signal for near-zero cost.
+
+### I-4. Grade the macro agent
+
+The morning macro brief emits `sentiment`, `sentimentConf`, `bullish` daily, but nothing ever scores it. A tiny resolver (compare against next-day ASX200 return, log to `calibration_snapshots`-style table) would close the loop on the second-most-important AI call in the app and reveal whether the `bullish < 35` Rule-12 BUY-blocker threshold is calibrated.
+
+### I-5. Consolidate redundant/overlapping prompt rules
+
+`ANALYSIS_SYSTEM_PROMPT` restates the same constraints in multiple places: Rules 17 and 19 both say Sharpe is backward-looking/never standalone; Rule 4's "qty=0" is re-explained inside Rules 15, 16, the field spec, and the ACTION DEFINITIONS. Caching makes tokens cheap, but duplicated rules with slightly different wording create ambiguity about which variant is authoritative (Rule 3 says "Stop-loss at stopAtrMultiple×ATR" while Rule 16 references "1.5×ATR" in the HIGH-DD note). One consolidation pass + `PROMPT_VERSION` bump; the calibration-trend chart will show whether compliance improves.
+
+### I-6. Stale comments / cosmetic drift (batch fix)
+
+- `js/claude-client.js` `_AGENT_MAX_TOKENS.portfolio` comment says "8000 → 10000" but the value is 12000.
+- `routes/learning.py` §7 comment says "ESS≥2.5" but the code gates on `_ESS_MIN` (6.0).
+- `routes/learning.py:4385` `overall_wr = _wwr(calib_rows) if "overall_wr" not in dir() else overall_wr` — fragile `dir()` idiom; assign unconditionally.
+- `routes/learning.py` sell-tag exclusion list includes `'position_sizing'`, which is not in the nine-driver taxonomy (harmless, but signals drift).
+- `js/analysis.js` NEWS SIGNALS header says "last 2d" but `fetchNews()` requests `days=3`; `fetchNews()` also builds its ticker list from unfiltered `mergedPortfolio()` while the analysis itself excludes `'trading'`-account holdings.
+
+### I-7. Day-trade prompts still have the AI doing sizing arithmetic
+
+`getDayTradeSystemPrompt()`/`getDayTradeUniverseScanPrompt()` instruct the model to compute `qty = floor(riskPerTrade / (2.5 × atr_14))` — the exact arithmetic-in-LLM pattern the portfolio path eliminated. `buildDtSystemArray()`'s comment notes the DT Claude path is currently dormant (scans are quantitative-only), so this is not live risk — but if the path is reactivated, route DT recs through `computeTradeParams()` and set qty=0 in the prompt, same as portfolio. Flag it in the prompt file header so reactivation doesn't ship the old pattern.
+
+### I-8. Consider a symmetric per-ticker nudge
+
+`_calib_compute` §7 applies per-ticker adjustments penalty-only (−0.10 on ⚠weak). That matches the documented rule, but a capped positive nudge (+0.05 at ✓strong, same ESS/delta gates) would make the per-ticker memory two-sided like the band nudges (which allow up to +0.10). Optional — the asymmetry may be a deliberate conservatism choice; if so, document it next to the band logic.
+
+### I-9. Retry budget for 529s is small
+
+`callClaude()`'s total backoff is ~7s across 4 attempts. Anthropic 529 (overloaded) bursts often outlast that. Consider a longer final delay (e.g. 0/1/4/15s) + jitter for the portfolio agent specifically — it is a user-initiated, once-per-run call where an extra 15s beats a failed analysis.

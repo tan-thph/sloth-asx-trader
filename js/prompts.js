@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-07-v20';
+const PROMPT_VERSION = '2026-07-v21';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -347,7 +347,7 @@ const ANALYSIS_SYSTEM_PROMPT =
        - Negative Sharpe ratio
        - Any degree of technical weakness (RSI, OBV, death cross, etc.)
        - "Moderate fundamental concern" without a qualifying disclosure above
-     If within the 7-day window and no catastrophe applies: omit the ticker from recs[] entirely, add to deferrals[] (NOT dataGaps[]) with reason "anti-churn: BUY was N days ago — TRIM deferred to [date]".
+     If within the 7-day window and no catastrophe applies: omit the ticker from recs[] entirely, add to dataGaps[] with note "anti-churn: BUY was N days ago — TRIM deferred to [date]".
   2. A SELL/TRIM is only justified if: (a) holding period > 1 day AND (b) one of: position weight > 15% requiring risk control, OR a genuine fundamental/macro regime shift that permanently damages the investment thesis.
   3. Prefer holding winners over taking profits at a price target — raise the target or hold for compounding. TRIM is acceptable if position weight exceeds 15% or the original thesis has materially changed.
   4. Before any SELL/TRIM: estimate net profit after round-trip brokerage (from account settings). If profit < $100 OR < 2% of position value, reject as wasteful churning.
@@ -407,31 +407,6 @@ const ANALYSIS_SYSTEM_PROMPT =
       (e.g. "Corr: ρ=0.87 with NAB — thesis driver is X, orthogonal to NAB's Y").
       Do NOT adjust confidence or qty numerically for correlation — the engine reduces size
       deterministically (−30% at |ρ|>0.70, −50% at |ρ|>0.85) after your response.
-
-  SECTION 3B — PORTFOLIO-LEVEL SYNTHESIS (think like a PM, not a stock screener)
-
-  After the per-holding analysis, step back and reason about the portfolio as ONE book. This is
-  emitted as the top-level portfolioSynthesis field (see Section 8) and MUST cover all four:
-
-    1. CONCENTRATION: Name the largest sector weight and the largest single-name weight (from the
-       holdings block). State whether either is stretched (sector > 30%, single name > 15%) and
-       whether any recommended trade worsens or relieves it. Flag correlated clusters as one bet
-       (e.g. "BHP+RIO+FMG = one iron-ore bet at 22% — treat as a single position for risk").
-    2. ROTATION: Given the ACTIVE_REGIME and sector relative-strength, which sector(s) should GAIN
-       capital and which should SHED it? Tie this to the actual recs — a SELL/TRIM should point at
-       where its capital rotates (matching the rec's reallocationSuggestion), and a BUY should say
-       which weakening area it is funded from. If no rotation is warranted, say so and why.
-    3. CASH STANCE: State a target cash level as a % of net worth and the DIRECTION (raise/deploy/hold)
-       with a one-clause reason tied to regime — not just "hold cash". E.g. "raise cash to ~12%: panic
-       regime, sizeMult suppressed, wait for breadth to turn" or "deploy — cash at 18% is a drag in a
-       confirmed risk-on trend". Cash is a position; give it a number.
-    4. WHAT CHANGED: If a CHANGES SINCE LAST REVIEW block is present (engine-computed price/regime/
-       stance diff vs the prior review), anchor your one-line what-changed to it — cite the specific
-       moves that matter (a regime flip, a holding that ran or fell hard, a name newly added/exited)
-       rather than re-deriving the whole book. If no such block is present (first review), say so briefly.
-
-  Keep it tight and decision-oriented (≤ 600 chars). This is judgement and synthesis — exactly the
-  work the deterministic engine cannot do — so it must add signal beyond restating the per-rec lines.
 
   SECTION 4 — INCOME & TAX RULES
 
@@ -537,7 +512,7 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   Return ONLY valid JSON. No markdown. No prose outside the JSON. No extra keys.
   Do NOT use literal { or } characters inside any string field value.
-  Shape: {"recs": [...], "summary": "string", "portfolioSynthesis": "string", "dataGaps": [...], "deferrals": [...]}
+  Shape: {"recs": [...], "summary": "string", "dataGaps": [...]}
 
   summary: MAX 400 chars. PLAIN TEXT ONLY — no JSON syntax, no arrays, no brackets, no field names.
            Violating this constraint (outputting JSON or array syntax inside summary) makes the response invalid.
@@ -545,18 +520,9 @@ const ANALYSIS_SYSTEM_PROMPT =
            Then one line for macro regime. Then one line for cash stance.
            If a calibration adjustment was applied, append: "Calibration: −0.10 applied to X%-band."
 
-  portfolioSynthesis: REQUIRED. MAX 600 chars. PLAIN TEXT. The Section 3B portfolio-level view:
-           concentration, rotation, cash stance (with a %), and what changed since last review.
-           This is book-level judgement, NOT a restatement of the per-rec summary lines. If the
-           portfolio is empty (no holdings), set it to "No holdings — synthesis N/A".
-
-  dataGaps: [{ticker, missingField}] for tickers where a rec was suppressed due to GENUINELY MISSING
-            OR STALE DATA (absent indicator, stale price). Empty array [] if none. Do NOT put
-            anti-churn/timing deferrals here — those go in deferrals[].
-
-  deferrals: [{ticker, reason}] for tickers deliberately held back for a POLICY/TIMING reason despite
-            having data — e.g. anti-churn ("BUY was 3d ago — TRIM deferred to [date]"), ex-div blackout,
-            CGT discount window. Empty array [] if none. Keep this separate from dataGaps.
+  dataGaps: [{ticker, missingField}] for tickers where a rec was suppressed due to missing/stale data
+            (absent indicator, stale price) OR a policy/timing hold (e.g. anti-churn: "BUY was 3d ago —
+            TRIM deferred to [date]", ex-div blackout, CGT window). Empty array [] if none.
 
   Each rec object — ALL fields required unless marked optional:
   {

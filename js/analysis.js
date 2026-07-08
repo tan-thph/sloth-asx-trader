@@ -899,6 +899,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
   // Claude focuses on NEW information (critics.md "focus on what changed") instead of
   // re-deriving the whole book. Engine-computed → no hallucination risk. Read here BEFORE
   // analysisLastSummary is overwritten at run end.
+  let _changesSummary = '';   // compact structural diff for the deterministic book snapshot (client display)
   const _changesBlock = (() => {
     const prior = state.analysisLastSummary && state.analysisLastSummary.review;
     if (!prior || !prior.prices) return '';
@@ -929,8 +930,16 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     const closed = prevTickers.filter(t => !curTickers.has(t));
     if (added.length)  lines.push(`NEW holdings since last review: ${added.join(', ')}.`);
     if (closed.length) lines.push(`EXITED since last review: ${closed.join(', ')}.`);
+    // Compact structural summary (regime flip + names added/exited) for the deterministic
+    // book snapshot shown to the user. Per-name price moves stay in the verbose prompt block
+    // only — the user already sees those on the rec cards.
+    const _sumParts = [];
+    if (prior.regime && _activeRegime && prior.regime !== _activeRegime) _sumParts.push(`regime ${prior.regime}→${_activeRegime}`);
+    if (added.length)  _sumParts.push(`new ${added.join('/')}`);
+    if (closed.length) _sumParts.push(`exited ${closed.join('/')}`);
+    _changesSummary = _sumParts.length ? ` Since last review (${daysSince}d): ${_sumParts.join('; ')}.` : '';
     if (!lines.length) return '';
-    return `\n\nCHANGES SINCE LAST REVIEW (${prevDate}${prevTime ? ' ' + prevTime : ''}, ${daysSince}d ago) — engine-computed diff; anchor your portfolioSynthesis "what changed" line to this and focus on NEW information, do not re-derive the whole book:\n${lines.join('\n')}`;
+    return `\n\nCHANGES SINCE LAST REVIEW (${prevDate}${prevTime ? ' ' + prevTime : ''}, ${daysSince}d ago) — engine-computed diff; focus on NEW information across your recommendations, do not re-derive the whole book:\n${lines.join('\n')}`;
   })();
 
   const fullUserMessage = userMessage
@@ -952,14 +961,12 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // Note: prompt+response logging is now handled automatically in callClaude()
 
     // ── Parse with safe parser, fall back to brace-depth recovery on failure ──
-    let recs = [], summary = null, portfolioSynthesis = null;
+    let recs = [], summary = null;
     const _parsed = parseClaudeJSON(text);
     if (_parsed.ok) {
       const d = _parsed.data;
       recs    = Array.isArray(d) ? d : (d.recs || []);
       summary = Array.isArray(d) ? null : (d.summary || null);
-      portfolioSynthesis = Array.isArray(d) ? null : (d.portfolioSynthesis || null);
-      if (portfolioSynthesis && portfolioSynthesis.length > 800) portfolioSynthesis = portfolioSynthesis.slice(0, 797) + '...';
       if (summary && summary.length > 600) summary = summary.slice(0, 597) + '...';
     } else {
       console.warn('parseClaudeJSON failed, attempting brace-depth recovery:', _parsed.error);
@@ -1823,15 +1830,15 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     ];
     const structuredText = allParts.join('\n');
 
-    // Live enforcement of the Section 3B synthesis requirement: the portfolio path parses
-    // inline (it does not run the getValidatedAnalysisWithRepair loop), so if the model omits
-    // the required portfolioSynthesis while holdings exist, backfill factual book-level context
-    // (top-sector/top-name concentration + cash %) rather than showing an empty panel. Rotation
-    // judgement can't be faked, so this is clearly labelled facts-only — the model is still
-    // required to supply the real synthesis; this only degrades gracefully when it doesn't.
+    // ── Deterministic book snapshot (replaces the old LLM portfolioSynthesis) ──
+    // A portfolio "synthesis" is mostly arithmetic — top-sector/top-name concentration,
+    // cash %, and what changed since last review — so it's computed exactly here rather than
+    // asking the model to narrate numbers it shouldn't compute (Rule 4 principle). Qualitative
+    // interpretation already lives in the per-rec risks/factorsUsed and the macro brief.
     // mergedPortfolio() entries carry no .value field — compute market value from shares × live price.
     const _holdingValue = h => (h.shares || 0) * (state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice ?? 0);
-    if (!portfolioSynthesis && Array.isArray(mp) && mp.length) {
+    let portfolioSynthesis = null;
+    if (Array.isArray(mp) && mp.length) {
       const _pv = mp.reduce((s, h) => s + _holdingValue(h), 0);
       const _nw = totalNetWorth() || 1;
       const _bySector = {};
@@ -1841,8 +1848,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       const _cashPct = ((state.cash || 0) / _nw * 100).toFixed(0);
       const _secPct = _topSector && _pv ? (_topSector[1] / _pv * 100).toFixed(0) : '0';
       const _namePct = _topName && _pv ? (_holdingValue(_topName) / _pv * 100).toFixed(0) : '0';
-      portfolioSynthesis = `[auto] Concentration: ${_topSector ? _topSector[0] : '?'} ${_secPct}% (top sector), ${_topName ? _topName.ticker : '?'} ${_namePct}% (top name). Cash ${_cashPct}% of net worth. Model omitted synthesis — factual context only.`;
-      console.warn('[analysis] portfolioSynthesis missing from response — backfilled deterministic concentration/cash facts');
+      portfolioSynthesis = `Concentration: ${_topSector ? _topSector[0] : '?'} ${_secPct}% (top sector), ${_topName ? _topName.ticker : '?'} ${_namePct}% (top name). Cash ${_cashPct}% of net worth.${_changesSummary}`;
     }
 
     // ── Persist a review snapshot for next run's CHANGES SINCE LAST REVIEW diff ──
@@ -1864,7 +1870,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       text: structuredText,         // plain-text fallback (backward compat)
       recs: summaryRecs,            // structured rows for rich rendering
       contextLine,                  // macro/cash context (untruncated)
-      portfolioSynthesis,           // book-level PM synthesis (Section 3B); [auto] fallback if model omitted
+      portfolioSynthesis,           // deterministic book snapshot (concentration/cash + changes since last review)
       review: _reviewSnapshot,      // prices/regime/recs snapshot → next run's what-changed diff
       bracketNotes,                 // system notes array e.g. ['[⚠ N recs failed…]']
       date: todayStr(),
