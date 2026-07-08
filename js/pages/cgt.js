@@ -3,9 +3,14 @@
 // ============================================================
 // ── CGT FILTER STATE & HELPERS ──────────────────────────────────────────────
 if (!window._cgtFilter) window._cgtFilter = {
-  disposal: { ticker: '', yearFY: 'all', outcome: 'all', sortBy: 'date_desc' },
+  disposal: { ticker: '', yearFY: 'all', outcome: 'all', sortBy: 'date_desc', mode: 'all' },
   parcel:   { ticker: '', discount: 'all', minHeld: 0, mode: 'all' }
 };
+// Back-compat: a persisted _cgtFilter from before the disposal Book filter existed
+// won't carry disposal.mode — default it so the dropdown and filter logic work.
+if (window._cgtFilter.disposal && window._cgtFilter.disposal.mode === undefined) {
+  window._cgtFilter.disposal.mode = 'all';
+}
 
 // Dates in this app are stored DD-MM-YYYY (see todayStr(), utils.js); parseDate()
 // already knows how to read that (with a native-Date fallback for anything else).
@@ -30,7 +35,7 @@ function resetCgtParcelFilter() {
 
 function resetCgtDisposalFilter() {
   if (!window._cgtFilter) window._cgtFilter = {};
-  window._cgtFilter.disposal = { ticker: '', yearFY: 'all', outcome: 'all', sortBy: 'date_desc' };
+  window._cgtFilter.disposal = { ticker: '', yearFY: 'all', outcome: 'all', sortBy: 'date_desc', mode: 'all' };
   renderPage();
 }
 
@@ -262,6 +267,10 @@ function renderCGT() {
         fDisposals = fDisposals.filter(d => _saleDateFY(d.saleDate) === fyNum);
       }
       if (f.outcome !== 'all') fDisposals = fDisposals.filter(d => f.outcome === 'gain' ? d.grossGain >= 0 : d.grossGain < 0);
+      // Book filter (paper/real firewall #88): display-only — the disposal list shows
+      // both books (with ●LIVE/◦PAPER badges); this narrows the view. Export/EOFY stay
+      // real-only regardless (exportDisposalCSV forces isRealTrade). Fail-safe: (d.mode||'paper').
+      if ((f.mode||'all') !== 'all') fDisposals = fDisposals.filter(d => (d.mode || 'paper') === f.mode);
       if (f.sortBy === 'date_asc')    fDisposals.sort((a,b) => a.saleDate.localeCompare(b.saleDate));
       else if (f.sortBy === 'gain_desc') fDisposals.sort((a,b) => b.netGain - a.netGain);
       else if (f.sortBy === 'gain_asc')  fDisposals.sort((a,b) => a.netGain - b.netGain);
@@ -269,7 +278,7 @@ function renderCGT() {
       const fGross = fDisposals.reduce((s,d)=>s+d.grossGain,0);
       const fDisc  = fDisposals.reduce((s,d)=>s+d.discount,0);
       const fNet   = fDisposals.reduce((s,d)=>s+d.netGain,0);
-      const hasFilter = f.ticker || f.yearFY !== 'all' || f.outcome !== 'all';
+      const hasFilter = f.ticker || f.yearFY !== 'all' || f.outcome !== 'all' || (f.mode||'all') !== 'all';
       const selS = 'style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:11px;font-family:var(--font)"';
       return '<div class="card section-gap">'
       + '<div class="flex-between" style="cursor:pointer;user-select:none" onclick="window._cgtCollapsed.disposals=!window._cgtCollapsed.disposals;renderPage()">'
@@ -290,6 +299,11 @@ function renderCGT() {
       + '<div><div class="form-label" style="margin-bottom:3px">Ticker</div><input type="text" placeholder="e.g. CBA" value="' + f.ticker + '" oninput="setCgtDisposalFilter(\'ticker\',this.value.toUpperCase())" style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:11px;width:80px"></div>'
       + '<div><div class="form-label" style="margin-bottom:3px">Financial Year</div><select onchange="setCgtDisposalFilter(\'yearFY\',this.value)" ' + selS + '><option value="all"' + (f.yearFY==='all'?' selected':'') + '>All years</option>' + fyYears.map(y => '<option value="'+y+'"' + (f.yearFY==y?' selected':'') + '>FY '+y+'/'+(y+1).toString().slice(-2)+'</option>').join('') + '</select></div>'
       + '<div><div class="form-label" style="margin-bottom:3px">Outcome</div><select onchange="setCgtDisposalFilter(\'outcome\',this.value)" ' + selS + '><option value="all"' + (f.outcome==='all'?' selected':'') + '>All</option><option value="gain"' + (f.outcome==='gain'?' selected':'') + '>Gains only</option><option value="loss"' + (f.outcome==='loss'?' selected':'') + '>Losses only</option></select></div>'
+      + '<div><div class="form-label" style="margin-bottom:3px">Book</div><select onchange="setCgtDisposalFilter(\'mode\',this.value)" ' + selS + '>'
+        + '<option value="all"' + ((f.mode||'all')==='all'?' selected':'') + '>All</option>'
+        + '<option value="real"' + (f.mode==='real'?' selected':'') + '>● Live</option>'
+        + '<option value="paper"' + (f.mode==='paper'?' selected':'') + '>◦ Paper</option>'
+        + '</select></div>'
       + '<div><div class="form-label" style="margin-bottom:3px">Sort</div><select onchange="setCgtDisposalFilter(\'sortBy\',this.value)" ' + selS + '><option value="date_desc"' + (f.sortBy==='date_desc'?' selected':'') + '>Newest first</option><option value="date_asc"' + (f.sortBy==='date_asc'?' selected':'') + '>Oldest first</option><option value="gain_desc"' + (f.sortBy==='gain_desc'?' selected':'') + '>Best gain</option><option value="gain_asc"' + (f.sortBy==='gain_asc'?' selected':'') + '>Worst gain</option></select></div>'
       + (hasFilter ? '<button class="btn btn-sm" onclick="resetCgtDisposalFilter()">✕ Clear</button>' : '')
       + '</div>' : '')
