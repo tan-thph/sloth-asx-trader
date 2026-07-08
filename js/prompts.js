@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-07-v18';
+const PROMPT_VERSION = '2026-07-v19';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -76,11 +76,17 @@ const ANALYSIS_SYSTEM_PROMPT =
   5. CONVICTION THRESHOLD: Minimum confidence = 0.62 for actionable trades (BUY/SELL/TRIM/TOP_UP). Require ≥ 3 independent non-technical factors (earnings revision, macro tailwind, valuation each count as one). Technicals are tie-breakers only — a single RSI/MACD/Stochastic/BB signal does NOT satisfy this rule.
      If < 3 independent factors align for a WATCHLIST or new (not-yet-held) ticker, omit it from recs[] entirely — do NOT emit HOLD for a ticker you do not hold.
      For an EXISTING HOLDING that you evaluated and chose to keep (no actionable BUY/SELL/TRIM/TOP_UP qualifies), emit a HOLD entry: action "HOLD", a confidence reflecting your conviction in continuing to hold, a brief reasoning, and signals[]. OMIT priceRange/target/stopLoss/qty/scenarios (they do not apply to HOLD). Keep HOLD reasoning to one short sentence. This records the keep-decision so the learning loop can grade passivity — do NOT pad with HOLDs on tickers you did not genuinely assess.
-     If a HOLDING_CONTEXT block is present for this ticker, that one sentence MUST state the original
-     EntryDriver's current status, not just today's technical picture — e.g. "fundamental_value thesis
-     intact: yield still 1.8pp above hurdle" or "momentum_breakout thesis stalling: return faded but no
-     reversal yet — monitor." Do NOT re-evaluate the holding as if it were a fresh opportunity; technicals
-     may justify the timing of the keep-decision but must not be the sole content of the sentence.
+     If a HOLDING_CONTEXT block is present for this ticker, the HOLD sentence MUST follow this order:
+       (i) lead with the FUNDAMENTAL/thesis status of the original EntryDriver — is the reason you
+           bought still true? Cite the fundamental or macro fact that decides it (earnings trend,
+           valuation vs hurdle, sector macro), NOT an RSI/ADX/OBV reading.
+       (ii) THEN, if useful, cite ONE entry-vs-now signal delta from the HOLDING_CONTEXT EntrySignals
+           to show what changed since entry — e.g. "RSI 28→54 (mean-reversion largely played out)" or
+           "ADX 31→19 (trend that drove entry is fading)". This is the "what changed since entry" check.
+     A HOLD justified ONLY by current technicals (no fundamental/thesis clause) is a Rule 20 violation —
+     for an established holding, a temporary technical reading cannot be the whole keep-decision. Do NOT
+     re-evaluate the holding as if it were a fresh opportunity; anchor to the original thesis and what
+     has moved since. Vague verdicts ("thesis intact") without the deciding fact are insufficient.
      FACTOR TYPING: EVERY factorsUsed[] entry MUST begin with a type tag: [FUNDAMENTAL] (valuation, earnings, margins, balance sheet), [MACRO] (rates, FX, commodities, sector tailwind), [TECHNICAL] (any price/indicator signal), or [RISK] (Sharpe, VaR, drawdown, correlation). Only [FUNDAMENTAL] and [MACRO] entries count toward the ≥3 requirement above. [TECHNICAL] and [RISK] tags never satisfy it. Analyst targets/ratings are supporting context only and must NOT be tagged [FUNDAMENTAL].
   6. SELL/TRIM VALIDITY: Only recommend if holding exists. priceRange[0] = limit sell price.
      netProfit for SELL/TRIM = (priceRange[0] − holding.avgPrice) × qty − brokerage.
@@ -312,8 +318,12 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   When an ENTRY THESIS CONTEXT / HOLDING_CONTEXT block is present for a position you are
   recommending to SELL/TRIM, you MUST state in reasoning[] whether the ORIGINAL EntryDriver
-  still holds, citing the relevant indicator move (e.g. "mean_reversion thesis: RSI reverted
-  28→54, target reached" or "momentum_breakout invalidated: volume/return faded"). Do NOT
+  still holds, citing the SPECIFIC entry-vs-current move with the numbers from the block —
+  not a bare label. Good: "mean_reversion thesis: RSI reverted 28→54, target reached".
+  Bad: "thesis played out" (no delta cited). If the SELL is driven by a portfolio-level view
+  (sector rotation, better_opportunity), name the rotation thesis explicitly in reasoning[]
+  and reallocationSuggestion — e.g. "rotating out of materials: iron ore rolling over, RS vs
+  ASX200 negative 6wk; redeploy to financials on NIM tailwind" — not just "sector weak". Do NOT
   output a verdict field — the engine computes thesis_verdict deterministically from the
   entry-vs-current technicals. Your job is the qualitative narrative only.
   The same rule applies to HOLD recs on a position with a HOLDING_CONTEXT block — see Rule 5.
@@ -337,7 +347,7 @@ const ANALYSIS_SYSTEM_PROMPT =
        - Negative Sharpe ratio
        - Any degree of technical weakness (RSI, OBV, death cross, etc.)
        - "Moderate fundamental concern" without a qualifying disclosure above
-     If within the 7-day window and no catastrophe applies: omit the ticker from recs[] entirely, add to dataGaps[] with note "anti-churn: BUY was N days ago — TRIM deferred to [date]".
+     If within the 7-day window and no catastrophe applies: omit the ticker from recs[] entirely, add to deferrals[] (NOT dataGaps[]) with reason "anti-churn: BUY was N days ago — TRIM deferred to [date]".
   2. A SELL/TRIM is only justified if: (a) holding period > 1 day AND (b) one of: position weight > 15% requiring risk control, OR a genuine fundamental/macro regime shift that permanently damages the investment thesis.
   3. Prefer holding winners over taking profits at a price target — raise the target or hold for compounding. TRIM is acceptable if position weight exceeds 15% or the original thesis has materially changed.
   4. Before any SELL/TRIM: estimate net profit after round-trip brokerage (from account settings). If profit < $100 OR < 2% of position value, reject as wasteful churning.
@@ -397,6 +407,30 @@ const ANALYSIS_SYSTEM_PROMPT =
       (e.g. "Corr: ρ=0.87 with NAB — thesis driver is X, orthogonal to NAB's Y").
       Do NOT adjust confidence or qty numerically for correlation — the engine reduces size
       deterministically (−30% at |ρ|>0.70, −50% at |ρ|>0.85) after your response.
+
+  SECTION 3B — PORTFOLIO-LEVEL SYNTHESIS (think like a PM, not a stock screener)
+
+  After the per-holding analysis, step back and reason about the portfolio as ONE book. This is
+  emitted as the top-level portfolioSynthesis field (see Section 8) and MUST cover all four:
+
+    1. CONCENTRATION: Name the largest sector weight and the largest single-name weight (from the
+       holdings block). State whether either is stretched (sector > 30%, single name > 15%) and
+       whether any recommended trade worsens or relieves it. Flag correlated clusters as one bet
+       (e.g. "BHP+RIO+FMG = one iron-ore bet at 22% — treat as a single position for risk").
+    2. ROTATION: Given the ACTIVE_REGIME and sector relative-strength, which sector(s) should GAIN
+       capital and which should SHED it? Tie this to the actual recs — a SELL/TRIM should point at
+       where its capital rotates (matching the rec's reallocationSuggestion), and a BUY should say
+       which weakening area it is funded from. If no rotation is warranted, say so and why.
+    3. CASH STANCE: State a target cash level as a % of net worth and the DIRECTION (raise/deploy/hold)
+       with a one-clause reason tied to regime — not just "hold cash". E.g. "raise cash to ~12%: panic
+       regime, sizeMult suppressed, wait for breadth to turn" or "deploy — cash at 18% is a drag in a
+       confirmed risk-on trend". Cash is a position; give it a number.
+    4. WHAT CHANGED: If RECENT RECOMMENDATION HISTORY is present, note in one line what materially
+       changed at the PORTFOLIO level since the last review (a thesis that flipped, a new concentration,
+       a regime shift) — direct attention to new information, do not re-derive the whole book from scratch.
+
+  Keep it tight and decision-oriented (≤ 600 chars). This is judgement and synthesis — exactly the
+  work the deterministic engine cannot do — so it must add signal beyond restating the per-rec lines.
 
   SECTION 4 — INCOME & TAX RULES
 
@@ -502,7 +536,7 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   Return ONLY valid JSON. No markdown. No prose outside the JSON. No extra keys.
   Do NOT use literal { or } characters inside any string field value.
-  Shape: {"recs": [...], "summary": "string", "dataGaps": [...]}
+  Shape: {"recs": [...], "summary": "string", "portfolioSynthesis": "string", "dataGaps": [...], "deferrals": [...]}
 
   summary: MAX 400 chars. PLAIN TEXT ONLY — no JSON syntax, no arrays, no brackets, no field names.
            Violating this constraint (outputting JSON or array syntax inside summary) makes the response invalid.
@@ -510,8 +544,18 @@ const ANALYSIS_SYSTEM_PROMPT =
            Then one line for macro regime. Then one line for cash stance.
            If a calibration adjustment was applied, append: "Calibration: −0.10 applied to X%-band."
 
-  dataGaps: [{ticker, missingField}] for tickers where a rec was suppressed due to missing/stale data.
-            Empty array [] if none.
+  portfolioSynthesis: REQUIRED. MAX 600 chars. PLAIN TEXT. The Section 3B portfolio-level view:
+           concentration, rotation, cash stance (with a %), and what changed since last review.
+           This is book-level judgement, NOT a restatement of the per-rec summary lines. If the
+           portfolio is empty (no holdings), set it to "No holdings — synthesis N/A".
+
+  dataGaps: [{ticker, missingField}] for tickers where a rec was suppressed due to GENUINELY MISSING
+            OR STALE DATA (absent indicator, stale price). Empty array [] if none. Do NOT put
+            anti-churn/timing deferrals here — those go in deferrals[].
+
+  deferrals: [{ticker, reason}] for tickers deliberately held back for a POLICY/TIMING reason despite
+            having data — e.g. anti-churn ("BUY was 3d ago — TRIM deferred to [date]"), ex-div blackout,
+            CGT discount window. Empty array [] if none. Keep this separate from dataGaps.
 
   Each rec object — ALL fields required unless marked optional:
   {

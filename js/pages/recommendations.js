@@ -419,7 +419,16 @@ function _renderSummaryBlock(summary, opts = {}) {
     body = `<p style="font-size:13px;line-height:1.75;color:var(--text-primary);white-space:pre-wrap;margin:0">${escapeHTML(summary.text)}</p>`;
   }
 
-  return `<div style="background:${bgColor};border-radius:var(--radius-md);padding:14px 16px;border-left:3px solid ${borderColor}">${header}${body}</div>`;
+  // Portfolio-level synthesis (Section 3B) — book-level PM view, distinct from the per-rec lines.
+  const _synth = (summary.portfolioSynthesis || '').trim();
+  const synthBlock = (_synth && !/^no holdings/i.test(_synth))
+    ? `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">
+         <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-tertiary);margin-bottom:3px">📊 Portfolio synthesis</div>
+         <p style="font-size:12px;color:var(--text-secondary);line-height:1.55;margin:0;white-space:pre-wrap">${escapeHTML(_synth)}</p>
+       </div>`
+    : '';
+
+  return `<div style="background:${bgColor};border-radius:var(--radius-md);padding:14px 16px;border-left:3px solid ${borderColor}">${header}${body}${synthBlock}</div>`;
 }
 
 // ── Shared rec-card body renderer ────────────────────────────────────────────

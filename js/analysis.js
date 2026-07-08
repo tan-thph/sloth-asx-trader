@@ -86,6 +86,29 @@ function _applyHeatBudget(recs, budgetAUD, consumed, source) {
   return { recs: out, scaled: scaledCount, blocked: blockedCount };
 }
 
+/**
+ * Recompute a BUY/TOP_UP rec's display EV from its CURRENT qty (Audit #15).
+ * Mirrors the §8.2 gate formula: gross reward − RBA opportunity cost − round-trip
+ * brokerage. Used to refresh netProfit/expectedProfit after correlation sizing and
+ * the heat budget shrink qty downstream of the original gate. Returns null when the
+ * rec lacks a usable entry/target (leave the existing numbers untouched).
+ * @returns {{expectedProfit:number, netProfit:number} | null}
+ */
+function _recomputeBuyEv(r, rbaRate, fees) {
+  const qty = Number(r.qty) || 0;
+  if (qty <= 0) return null;
+  const entryLo   = Array.isArray(r.priceRange) ? Number(r.priceRange[0]) : NaN;
+  const entryHigh = Array.isArray(r.priceRange) ? Number(r.priceRange[1]) : Number(r.target);
+  const entryMid  = isFinite(entryLo) && isFinite(entryHigh) ? (entryLo + entryHigh) / 2 : entryHigh;
+  const target    = Number(r.target);
+  if (!isFinite(entryMid) || entryMid <= 0 || !isFinite(target)) return null;
+  const grossReward = qty * (target - entryMid);
+  const oppCost = qty * entryMid * ((rbaRate || 4.35) / 100)
+                  * ((Number(r.expectedTimeToTarget) || 30) / 365);
+  const engineNet = grossReward - oppCost - 2 * (Number(fees) || 0);
+  return { expectedProfit: +grossReward.toFixed(2), netProfit: +engineNet.toFixed(2) };
+}
+
 // ============================================================
 // ANALYSIS ENGINE
 // ============================================================
@@ -543,7 +566,7 @@ Key drivers: ${(_m.keyDrivers||'n/a').slice(0,200)}${_macroMktLines}${_macroSect
     if (broad.length)   lines.push('Market-wide signals:', ...broad.map(fmtSignal));
 
     if (lines.length) {
-      newsOutlook = `\n\nNEWS SIGNALS (LLM-classified, last 2d — use to adjust conviction on impacted tickers):\n${lines.join('\n')}`;
+      newsOutlook = `\n\nNEWS SIGNALS (LLM-classified, last 3d — use to adjust conviction on impacted tickers):\n${lines.join('\n')}`;
     }
   }
 
@@ -888,12 +911,14 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // Note: prompt+response logging is now handled automatically in callClaude()
 
     // ── Parse with safe parser, fall back to brace-depth recovery on failure ──
-    let recs = [], summary = null;
+    let recs = [], summary = null, portfolioSynthesis = null;
     const _parsed = parseClaudeJSON(text);
     if (_parsed.ok) {
       const d = _parsed.data;
       recs    = Array.isArray(d) ? d : (d.recs || []);
       summary = Array.isArray(d) ? null : (d.summary || null);
+      portfolioSynthesis = Array.isArray(d) ? null : (d.portfolioSynthesis || null);
+      if (portfolioSynthesis && portfolioSynthesis.length > 800) portfolioSynthesis = portfolioSynthesis.slice(0, 797) + '...';
       if (summary && summary.length > 600) summary = summary.slice(0, 597) + '...';
     } else {
       console.warn('parseClaudeJSON failed, attempting brace-depth recovery:', _parsed.error);
@@ -983,7 +1008,16 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         if (action !== 'BUY' && action !== 'TOP_UP') return r;
         const signals = state.liveSignals[r.ticker];
         if (!signals || signals.error) return r;
-        const qt = computeTradeParams(r.ticker, signals, _portfolioCtx, {
+        // Audit #9 (2026-07-08): wire the per-ticker 1-day VaR into the quant
+        // engine. computeTradeParams() reads signals.var_1d to apply the Rule-16
+        // size reduction (−25% at <−3.5%, −50% at <−5.0%), but nothing ever
+        // populated it — the metric lives in _riskMetrics[t].var_95 (from
+        // GET /api/risk). Without this, high-VaR positions were sized as if VaR
+        // were normal while the prompt told Claude the engine would compensate.
+        const _tkrVar = _riskMetrics?.[r.ticker]?.var_95;
+        const _sigWithVar = (typeof _tkrVar === 'number')
+          ? { ...signals, var_1d: _tkrVar } : signals;
+        const qt = computeTradeParams(r.ticker, _sigWithVar, _portfolioCtx, {
           winProb: r.confidence ?? 0.6,
           expectedTimeToTarget: r.holdDays ?? 10,
           priceRange: r.priceRange,
@@ -1204,10 +1238,30 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
             }
           } catch (_) {}
         }));
-        // Pre-fetch historical calibration context for all unique tickers so the
-        // recs.map() below stays synchronous (avoids async-in-map pattern).
+        const isBuySide  = a => a === 'BUY' || a === 'TOP_UP';
+        const isSellSide = a => a === 'SELL' || a === 'TRIM';
+        // Audit #16 (2026-07-08): the historical-calibration context is only ever
+        // used on a rec that actually FLIPPED direction within 10 days — a small
+        // subset. Fetching it for EVERY unique ticker ran the full _calib_compute()
+        // pipeline (eight yfinance-backed resolvers) per ticker and thrashed the
+        // 50-entry backend cache with single-ticker keys. Restrict the fetch to the
+        // flip candidates so an analysis with 6-8 recs doesn't pay seconds of
+        // backend work for ~15 tokens that most recs never use.
+        const _flippedTickers = new Set();
+        for (const r of recs) {
+          const prior = recentMap[r.ticker];
+          if (!prior) continue;
+          const curAction   = (r.action || '').toUpperCase();
+          const priorAction = (prior.recommendation || '').toUpperCase();
+          const flipped = (isBuySide(curAction) && isSellSide(priorAction)) ||
+                          (isSellSide(curAction) && isBuySide(priorAction));
+          if (!flipped) continue;
+          const priorDate = prior.timestamp ? prior.timestamp.slice(0, 10) : null;
+          const daysSince = priorDate ? (Date.now() - new Date(priorDate).getTime()) / 86400000 : 999;
+          if (priorDate && daysSince <= 10) _flippedTickers.add(r.ticker);
+        }
         const whipsawCtxMap = {};
-        await Promise.all(uniqueTickers.map(async (tk) => {
+        await Promise.all([..._flippedTickers].map(async (tk) => {
           try {
             const hist = await fetch(`${API}/api/learning/calibration?tickers=${encodeURIComponent(tk)}&days=180`);
             if (hist.ok) {
@@ -1219,8 +1273,6 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
             }
           } catch (_) {}
         }));
-        const isBuySide  = a => a === 'BUY' || a === 'TOP_UP';
-        const isSellSide = a => a === 'SELL' || a === 'TRIM';
         recs = recs.map(r => {
           const prior = recentMap[r.ticker];
           if (!prior) return r;
@@ -1267,9 +1319,17 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       const sig = state.liveSignals?.[r.ticker] ?? state.liveSignals?.[r.ticker + '.AX'];
       const indScore = sig?.score;
       const hasValidScore = indScore != null && !Number.isNaN(indScore);
-      return { ...r, ensembleConfidence: hasValidScore
-        ? Math.round((0.5 * (r.confidence || 0) + 0.5 * (indScore / 100)) * 100) / 100
-        : r.confidence };
+      if (!hasValidScore) return { ...r, ensembleConfidence: r.confidence };
+      // Audit #11 (2026-07-08): `score` is the BULLISH setup score (0-100). For a
+      // SELL/TRIM a bullish score CONTRADICTS the exit, so it must be inverted
+      // before blending — otherwise a SELL on a ticker scoring 85 got a HIGHER
+      // ensemble confidence than one scoring 30 (backwards), polluting
+      // ensemble_confidence and the ensemble_divergence stat for every exit rec.
+      const _action = (r.action || '').toUpperCase();
+      const _dirScore = (_action === 'SELL' || _action === 'TRIM')
+        ? (100 - indScore) : indScore;
+      return { ...r, ensembleConfidence:
+        Math.round((0.5 * (r.confidence || 0) + 0.5 * (_dirScore / 100)) * 100) / 100 };
     });
 
     // ── Apply regime size modifiers ─────────────────────────────────────────────
@@ -1368,6 +1428,11 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     const MIN_CONFIDENCE = state.analysisConfig.rules?.minConfidence ?? 0.62;
     let lowConfFlagged = 0;
     recs = recs.map(r => {
+      // Audit #8 (2026-07-08): the 0.62 floor gates ACTIONABLE trades only. HOLD
+      // recs flow through here before filteredRecs strips them (they're logged via
+      // _holdRecs for passivity tracking) — flagging a HOLD as "below floor" is
+      // meaningless and would pollute the summary note + _confidenceHeld.
+      if ((r.action || '').toUpperCase() === 'HOLD') return r;
       if ((r.confidence || 0) < MIN_CONFIDENCE) {
         lowConfFlagged++;
         // §8.6: shadow-log BUY-side fails so the ML sees the unpruned distribution
@@ -1482,6 +1547,19 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         summary = (summary ? summary + ' ' : '') + `[Heat budget: ${parts.join('; ')}]`;
       }
     }
+
+    // ── Audit #15 (2026-07-08): refresh EV/netProfit at the FINAL qty ───────────
+    // The §8.2 net-EV gate computed netProfit/expectedProfit from the quant qty,
+    // but _applyCorrSizing (−30/−50%) and the heat budget (_budgetScaled) can shrink
+    // qty afterwards. Without this, the rec card showed a P&L inconsistent with its
+    // own displayed qty. Refresh the display numbers from the final qty for any
+    // engine-sized BUY/TOP_UP whose qty moved. Does not re-run the drop gate.
+    recs = recs.map(r => {
+      const action = (r.action || '').toUpperCase();
+      if ((action !== 'BUY' && action !== 'TOP_UP') || !r._netProfitEngine) return r;
+      const ev = _recomputeBuyEv(r, state.rbaRate || 4.35, fees);
+      return ev ? { ...r, expectedProfit: ev.expectedProfit, netProfit: ev.netProfit } : r;
+    });
 
     // FIX #3: conviction is derived client-side — no longer required from the model.
     // Compute it here for any downstream UI that references it.
@@ -1708,6 +1786,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       text: structuredText,         // plain-text fallback (backward compat)
       recs: summaryRecs,            // structured rows for rich rendering
       contextLine,                  // macro/cash context (untruncated)
+      portfolioSynthesis,           // book-level PM synthesis (Section 3B); null on legacy/empty
       bracketNotes,                 // system notes array e.g. ['[⚠ N recs failed…]']
       date: todayStr(),
       time: nowSydney(),

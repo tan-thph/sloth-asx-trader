@@ -558,7 +558,9 @@ function validateResponse(parsed, minConfidence) {
   return {
     recs:     validated,
     summary:  parsed?.summary  ?? null,
+    portfolioSynthesis: parsed?.portfolioSynthesis ?? null,
     dataGaps: parsed?.dataGaps ?? [],
+    deferrals: parsed?.deferrals ?? [],
     rejected,
     errors:   rejected.flatMap(r => r.errors),
   };
