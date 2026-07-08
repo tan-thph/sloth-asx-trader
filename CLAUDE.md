@@ -362,7 +362,7 @@ routes/learning.py _calib_compute() → decay-weighted WRs injected into next pr
 
 57. **`invalidationCondition` rendered as amber "⚡ Invalidated if" banner on rec card.** Vague triggers fail the repair loop.
 
-58. **Intraday stops/targets are ATR-based, not fixed-%.** `stop = entry − 1.5 × atr_5m`, `target = vwap + 2 × atr_5m`. Falls back to fixed-% only when `atr_5m` null.
+58. **Intraday stops/targets are ATR-based, not fixed-%.** `stop = entry − 1.5 × atr_5m`, `target = vwap + 2 × atr_5m` (aspirational take-profit). Falls back to fixed-% only when `atr_5m` null. **The R:R gate uses the HONEST reversion R:R** (`_intradayReversionRR` = reward-to-VWAP ÷ risk), NOT reward-to-extended-target — the old to-target gate was inflated by the ATR-overshoot term and passed almost everything. `rec.rrRatio` now carries the reversion value (gated on `minRrRatio`, default 1.0 for intraday — lower than swing's 2.0 because it's a conservative reversion basis); `rec.rrExtended` carries the to-target value for display. Falls back to reward-to-target when VWAP isn't above entry.
 
 59. **`thesis_verdict` has 5 states.** `validated`/`partially_validated`/`invalidated`/`reversed`/`irrelevant`. Scores: partially_validated+win=7, reversed+win=2, reversed+loss=1.
 

@@ -19,8 +19,12 @@ const INTRADAY_DEFAULTS = {
   vwapThreshold:   -0.3,  // price must be ≤ VWAP + this % (e.g. -0.3 = 0.3% below VWAP)
   rsiThreshold:    40,    // intraday RSI must be ≤ this value to qualify
   stopAtrMult:     1.5,   // stop = entry − N × ATR5m (when ATR available)
-  targetAtrMult:   2.0,   // target = VWAP + N × ATR5m (overrides fixed % when ATR available)
-  minRrRatio:      1.5,   // reject setups with R:R below this after computing stop/target
+  targetAtrMult:   2.0,   // take-profit = VWAP + N × ATR5m (aspirational upside, kept for exits)
+  minRrRatio:      1.0,   // reject setups whose REVERSION R:R (reward to VWAP, the reliable
+                          // mean-reversion target — NOT the aspirational VWAP+NxATR extension)
+                          // is below this. Lower than swing's 2.0 because intraday reversion
+                          // legitimately runs a tighter edge and the gate is now measured against
+                          // the conservative reward-to-VWAP, not the inflated reward-to-extension.
   // Every rule below can be individually ticked on/off (Day Trading -> Intraday
   // -> Rules, table with a checkbox per row) rather than only loosened by
   // threshold value. entryWindow/minScore/minRrRatio are independent gates;
@@ -38,6 +42,22 @@ const INTRADAY_DEFAULTS = {
     vwapThreshold: true, rsiThreshold: true, volRising: false, aboveOpen: false,
   },
 };
+
+// ── Honest reversion R:R ──────────────────────────────────────────────────────
+// The reliable reward for an intraday VWAP-discount trade is reversion to VWAP,
+// NOT the aspirational VWAP+NxATR take-profit. Measuring R:R to the extended target
+// inflated it by the ATR-overshoot term (reward = (VWAP−entry) + N×ATR vs risk =
+// 1.5×ATR ⇒ R:R ≥ N/1.5 before any reversion gap), so the gate passed almost
+// everything. Gate on reward-to-VWAP instead. Falls back to reward-to-target when
+// VWAP isn't above entry (e.g. the VWAP-discount rule was toggled off and price sits
+// above VWAP — no reversion edge to measure). Returns null when inputs are unusable.
+function _intradayReversionRR(entry, stop, vwap, target) {
+  const risk = entry - stop;
+  if (!(risk > 0)) return null;
+  const reward = (vwap != null && vwap > entry) ? (vwap - entry) : (target - entry);
+  if (!(reward > 0)) return null;
+  return +(reward / risk).toFixed(2);
+}
 
 // ── Build recs from scan results ──────────────────────────────────────────────
 
@@ -117,8 +137,11 @@ function _buildIntradayRecs(scanData) {
     // (stop >= entry) produce a thousands-to-one R:R that trivially passed minRrRatio.
     if (stop >= entry) continue;
 
-    // R:R gate — reject before sizing
-    const rrRatio = +((target - entry) / (entry - stop)).toFixed(1);
+    // R:R gate — reject before sizing. Gate on the HONEST reversion R:R (reward to
+    // VWAP), not the extended take-profit; rrExtended is kept for display/upside.
+    const rrExtended = +((target - entry) / (entry - stop)).toFixed(1);
+    const rrRatio = _intradayReversionRR(entry, stop, d.vwap, target);
+    if (rrRatio == null) continue;   // degenerate reward/risk — skip
     if (_ruleOn(ip, 'minRrRatio') && rrRatio < ip.minRrRatio) continue;
 
     // Try quant engine sizing first (requires daily signals for this ticker)
@@ -157,7 +180,8 @@ function _buildIntradayRecs(scanData) {
       priceRange:    [entry, +(entry * 1.002).toFixed(3)],
       target,
       stopLoss:      stop,
-      rrRatio,
+      rrRatio,        // honest reversion R:R (reward to VWAP) — this is what the gate used
+      rrExtended,     // R:R to the aspirational VWAP+NxATR take-profit (upside, display only)
       confidence:    +(Math.min(0.85, d.score / 100 * 0.85)).toFixed(2),
       intradayScore: d.score,
       qty,

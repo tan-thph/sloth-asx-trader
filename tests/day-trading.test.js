@@ -13,6 +13,8 @@ import { extractFunction } from './setup.js';
 
 // eslint-disable-next-line no-eval
 const _dtImpliedWinProb = eval('(' + extractFunction('js/day-trading-analysis.js', '_dtImpliedWinProb') + ')');
+// eslint-disable-next-line no-eval
+const _intradayReversionRR = eval('(' + extractFunction('js/intraday-strategy.js', '_intradayReversionRR') + ')');
 
 describe('_dtImpliedWinProb', () => {
   it('inverts E[R] = p*(b+1) - 1 exactly for a mid-range case', () => {
@@ -44,5 +46,32 @@ describe('_dtImpliedWinProb', () => {
     const lo = _dtImpliedWinProb(0.2, 3);
     const hi = _dtImpliedWinProb(1.2, 3);
     expect(hi).toBeGreaterThan(lo);
+  });
+});
+
+describe('_intradayReversionRR', () => {
+  // entry 99, stop 98 (risk 1), vwap 100.5 (reward to VWAP 1.5), target 102 (extended reward 3)
+  it('measures reward to VWAP, not to the extended take-profit', () => {
+    expect(_intradayReversionRR(99, 98, 100.5, 102)).toBeCloseTo(1.5, 2);   // NOT 3.0
+  });
+
+  it('is much stricter than the old to-target R:R (the whole point of the fix)', () => {
+    const rev = _intradayReversionRR(99, 98, 100.5, 102);      // 1.5
+    const ext = +((102 - 99) / (99 - 98)).toFixed(2);           // 3.0 — old inflated gate
+    expect(rev).toBeLessThan(ext);
+  });
+
+  it('falls back to reward-to-target when VWAP is not above entry', () => {
+    // vwap 98.5 ≤ entry 99 → no reversion edge; use (target−entry)/(entry−stop) = 3/1
+    expect(_intradayReversionRR(99, 98, 98.5, 102)).toBeCloseTo(3, 2);
+  });
+
+  it('returns null for a non-positive risk (stop at/above entry)', () => {
+    expect(_intradayReversionRR(99, 99, 100.5, 102)).toBeNull();
+    expect(_intradayReversionRR(99, 100, 100.5, 102)).toBeNull();
+  });
+
+  it('returns null when both reversion and target rewards are non-positive', () => {
+    expect(_intradayReversionRR(99, 98, 98.5, 98)).toBeNull();   // vwap<entry, target<entry
   });
 });

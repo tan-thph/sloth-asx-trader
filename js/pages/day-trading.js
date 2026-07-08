@@ -1104,7 +1104,7 @@ function _renderIntradaySetupsContent() {
                 <div style="font-size:11px;color:var(--text-muted);display:flex;gap:10px;flex-wrap:wrap">
                   <span>VWAP: $${r.vwap != null ? r.vwap.toFixed(3) : '—'} (${r.pctFromVwap != null ? r.pctFromVwap.toFixed(2) : '—'}%)</span>
                   ${r.intradayRsi != null ? `<span>RSI: ${r.intradayRsi}</span>` : ''}
-                  <span>R:R ${r.rrRatio}:1</span>
+                  <span title="Reversion R:R — reward to VWAP vs stop (the gated metric). Extended = R:R to the aspirational VWAP+ATR take-profit.">R:R ${r.rrRatio != null ? r.rrRatio : '?'}:1${r.rrExtended != null ? ` <span class="text-muted">(ext ${r.rrExtended}:1)</span>` : ''}</span>
                   <span class="text-xs text-muted">Gen: ${r.generatedAt}</span>
                 </div>
               </div>
