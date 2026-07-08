@@ -724,7 +724,7 @@ LIVE PORTFOLIO STATE:
 Holdings: ${portfolioJson}${_holdingCtxBlock}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
 RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
-${recCtx}${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${rulesCtx}${indicatorCtx}
+${recCtx}__CHANGES_PLACEHOLDER__${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${rulesCtx}${indicatorCtx}
 
 TASK:
 1. Read the CALIBRATION block above as context for your reasoning. Do NOT pre-adjust confidence scores — numeric band/per-ticker adjustments are applied by the engine after your response.
@@ -893,9 +893,50 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     ? `${_activeRegime}${_regimeTransitionNote}`
     : 'unknown';
 
+  // ── CHANGES SINCE LAST REVIEW ────────────────────────────────────────────────
+  // Deterministic diff of current market state vs the prior persisted review snapshot
+  // (state.analysisLastSummary.review, written at the end of the last run). Injected so
+  // Claude focuses on NEW information (critics.md "focus on what changed") instead of
+  // re-deriving the whole book. Engine-computed → no hallucination risk. Read here BEFORE
+  // analysisLastSummary is overwritten at run end.
+  const _changesBlock = (() => {
+    const prior = state.analysisLastSummary && state.analysisLastSummary.review;
+    if (!prior || !prior.prices) return '';
+    const prevDate = state.analysisLastSummary.date || '?';
+    const prevTime = state.analysisLastSummary.time || '';
+    const _pd = typeof parseDate === 'function' ? parseDate(prevDate) : new Date(prevDate);
+    const daysSince = _pd && !isNaN(_pd) ? Math.floor((Date.now() - _pd.getTime()) / 86400000) : '?';
+    const lines = [];
+    if (prior.regime && _activeRegime && prior.regime !== _activeRegime) {
+      lines.push(`REGIME FLIP: ${prior.regime} → ${_activeRegime}.`);
+    }
+    const curTickers = new Set(mp.map(h => h.ticker));
+    for (const h of mp) {
+      const prevPx = prior.prices[h.ticker];
+      const curPx = state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice;
+      const prevRec = prior.recs ? prior.recs[h.ticker] : null;
+      if (prevPx == null && !prevRec) continue;   // holding is new since last review — no prior data
+      const parts = [];
+      if (prevPx != null && curPx != null && prevPx > 0) {
+        const mv = (curPx / prevPx - 1) * 100;
+        parts.push(`px ${mv >= 0 ? '+' : ''}${mv.toFixed(1)}% since review`);
+      }
+      if (prevRec) parts.push(`last review: ${prevRec.action}${prevRec.confidence != null ? '@' + Math.round(prevRec.confidence * 100) + '%' : ''}`);
+      if (parts.length) lines.push(`${h.ticker}: ${parts.join(' | ')}`);
+    }
+    const prevTickers = Object.keys(prior.prices || {});
+    const added  = mp.map(h => h.ticker).filter(t => !prevTickers.includes(t));
+    const closed = prevTickers.filter(t => !curTickers.has(t));
+    if (added.length)  lines.push(`NEW holdings since last review: ${added.join(', ')}.`);
+    if (closed.length) lines.push(`EXITED since last review: ${closed.join(', ')}.`);
+    if (!lines.length) return '';
+    return `\n\nCHANGES SINCE LAST REVIEW (${prevDate}${prevTime ? ' ' + prevTime : ''}, ${daysSince}d ago) — engine-computed diff; anchor your portfolioSynthesis "what changed" line to this and focus on NEW information, do not re-derive the whole book:\n${lines.join('\n')}`;
+  })();
+
   const fullUserMessage = userMessage
     .replace('__REGIME_PLACEHOLDER__', regimeLine)
     .replace('__CONF_PLACEHOLDER__', ((_regimeResult.confidence ?? 0) * 100).toFixed(0) + '%')
+    .replace('__CHANGES_PLACEHOLDER__', _changesBlock)
     .replace('__CALIBRATION_PLACEHOLDER__', _calibrationNote + _exemplarsBlock + _lessonsBlock + _ruleNudgeBlock)
     .replace('__STOP_MULT_PLACEHOLDER__', String(_regimeStopMult))
     + _debatePreamble;
@@ -1788,25 +1829,43 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // (top-sector/top-name concentration + cash %) rather than showing an empty panel. Rotation
     // judgement can't be faked, so this is clearly labelled facts-only — the model is still
     // required to supply the real synthesis; this only degrades gracefully when it doesn't.
+    // mergedPortfolio() entries carry no .value field — compute market value from shares × live price.
+    const _holdingValue = h => (h.shares || 0) * (state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice ?? 0);
     if (!portfolioSynthesis && Array.isArray(mp) && mp.length) {
-      const _pv = portfolioValue() || 0;
+      const _pv = mp.reduce((s, h) => s + _holdingValue(h), 0);
       const _nw = totalNetWorth() || 1;
       const _bySector = {};
-      mp.forEach(h => { const s = h.sector || '?'; _bySector[s] = (_bySector[s] || 0) + (h.value || 0); });
+      mp.forEach(h => { const s = h.sector || '?'; _bySector[s] = (_bySector[s] || 0) + _holdingValue(h); });
       const _topSector = Object.entries(_bySector).sort((a, b) => b[1] - a[1])[0];
-      const _topName = [...mp].sort((a, b) => (b.value || 0) - (a.value || 0))[0];
+      const _topName = [...mp].sort((a, b) => _holdingValue(b) - _holdingValue(a))[0];
       const _cashPct = ((state.cash || 0) / _nw * 100).toFixed(0);
       const _secPct = _topSector && _pv ? (_topSector[1] / _pv * 100).toFixed(0) : '0';
-      const _namePct = _topName && _pv ? ((_topName.value || 0) / _pv * 100).toFixed(0) : '0';
+      const _namePct = _topName && _pv ? (_holdingValue(_topName) / _pv * 100).toFixed(0) : '0';
       portfolioSynthesis = `[auto] Concentration: ${_topSector ? _topSector[0] : '?'} ${_secPct}% (top sector), ${_topName ? _topName.ticker : '?'} ${_namePct}% (top name). Cash ${_cashPct}% of net worth. Model omitted synthesis — factual context only.`;
       console.warn('[analysis] portfolioSynthesis missing from response — backfilled deterministic concentration/cash facts');
     }
+
+    // ── Persist a review snapshot for next run's CHANGES SINCE LAST REVIEW diff ──
+    // Captures per-holding price + active regime + what we recommended this run, so the
+    // next full review can compute a deterministic what-changed block (see prompt build).
+    const _reviewSnapshot = { regime: _activeRegime || null, prices: {}, recs: {} };
+    mp.forEach(h => {
+      const px = state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice;
+      if (px != null) _reviewSnapshot.prices[h.ticker] = px;
+    });
+    // cappedDedupedRecs = actionable set (HOLDs stripped earlier); add HOLDs back from raw recs
+    // so next run knows we deliberately held a name last review, not just traded ones.
+    const _holdsForSnapshot = (Array.isArray(recs) ? recs : []).filter(r => r && r.action && r.action.toUpperCase() === 'HOLD');
+    [...cappedDedupedRecs, ..._holdsForSnapshot].forEach(r => {
+      if (r && r.ticker) _reviewSnapshot.recs[r.ticker] = { action: r.action, confidence: r.confidence ?? null };
+    });
 
     state.analysisLastSummary = {
       text: structuredText,         // plain-text fallback (backward compat)
       recs: summaryRecs,            // structured rows for rich rendering
       contextLine,                  // macro/cash context (untruncated)
       portfolioSynthesis,           // book-level PM synthesis (Section 3B); [auto] fallback if model omitted
+      review: _reviewSnapshot,      // prices/regime/recs snapshot → next run's what-changed diff
       bracketNotes,                 // system notes array e.g. ['[⚠ N recs failed…]']
       date: todayStr(),
       time: nowSydney(),

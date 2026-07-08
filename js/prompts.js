@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-07-v19';
+const PROMPT_VERSION = '2026-07-v20';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -425,9 +425,10 @@ const ANALYSIS_SYSTEM_PROMPT =
        with a one-clause reason tied to regime — not just "hold cash". E.g. "raise cash to ~12%: panic
        regime, sizeMult suppressed, wait for breadth to turn" or "deploy — cash at 18% is a drag in a
        confirmed risk-on trend". Cash is a position; give it a number.
-    4. WHAT CHANGED: If RECENT RECOMMENDATION HISTORY is present, note in one line what materially
-       changed at the PORTFOLIO level since the last review (a thesis that flipped, a new concentration,
-       a regime shift) — direct attention to new information, do not re-derive the whole book from scratch.
+    4. WHAT CHANGED: If a CHANGES SINCE LAST REVIEW block is present (engine-computed price/regime/
+       stance diff vs the prior review), anchor your one-line what-changed to it — cite the specific
+       moves that matter (a regime flip, a holding that ran or fell hard, a name newly added/exited)
+       rather than re-deriving the whole book. If no such block is present (first review), say so briefly.
 
   Keep it tight and decision-oriented (≤ 600 chars). This is judgement and synthesis — exactly the
   work the deterministic engine cannot do — so it must add signal beyond restating the per-rec lines.
