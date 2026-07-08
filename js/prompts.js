@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-07-v16';
+const PROMPT_VERSION = '2026-07-v18';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -73,7 +73,14 @@ const ANALYSIS_SYSTEM_PROMPT =
      (cash + holdings) in a single position — the engine enforces this hard. Your job is
      conviction (confidence ≥ 0.62), direction
      (priceRange, target, stopLoss), and SELL/TRIM tagging. Do not attempt to compute qty.
-  5. CONVICTION THRESHOLD: Minimum confidence = 0.62. Require ≥ 3 independent non-technical factors (earnings revision, macro tailwind, valuation each count as one). Technicals are tie-breakers only — a single RSI/MACD/Stochastic/BB signal does NOT satisfy this rule. If < 3 independent factors align, omit that ticker from recs[] entirely — do NOT add a HOLD entry. recs[] must contain only actionable trades (BUY/SELL/TRIM/TOP_UP).
+  5. CONVICTION THRESHOLD: Minimum confidence = 0.62 for actionable trades (BUY/SELL/TRIM/TOP_UP). Require ≥ 3 independent non-technical factors (earnings revision, macro tailwind, valuation each count as one). Technicals are tie-breakers only — a single RSI/MACD/Stochastic/BB signal does NOT satisfy this rule.
+     If < 3 independent factors align for a WATCHLIST or new (not-yet-held) ticker, omit it from recs[] entirely — do NOT emit HOLD for a ticker you do not hold.
+     For an EXISTING HOLDING that you evaluated and chose to keep (no actionable BUY/SELL/TRIM/TOP_UP qualifies), emit a HOLD entry: action "HOLD", a confidence reflecting your conviction in continuing to hold, a brief reasoning, and signals[]. OMIT priceRange/target/stopLoss/qty/scenarios (they do not apply to HOLD). Keep HOLD reasoning to one short sentence. This records the keep-decision so the learning loop can grade passivity — do NOT pad with HOLDs on tickers you did not genuinely assess.
+     If a HOLDING_CONTEXT block is present for this ticker, that one sentence MUST state the original
+     EntryDriver's current status, not just today's technical picture — e.g. "fundamental_value thesis
+     intact: yield still 1.8pp above hurdle" or "momentum_breakout thesis stalling: return faded but no
+     reversal yet — monitor." Do NOT re-evaluate the holding as if it were a fresh opportunity; technicals
+     may justify the timing of the keep-decision but must not be the sole content of the sentence.
      FACTOR TYPING: EVERY factorsUsed[] entry MUST begin with a type tag: [FUNDAMENTAL] (valuation, earnings, margins, balance sheet), [MACRO] (rates, FX, commodities, sector tailwind), [TECHNICAL] (any price/indicator signal), or [RISK] (Sharpe, VaR, drawdown, correlation). Only [FUNDAMENTAL] and [MACRO] entries count toward the ≥3 requirement above. [TECHNICAL] and [RISK] tags never satisfy it. Analyst targets/ratings are supporting context only and must NOT be tagged [FUNDAMENTAL].
   6. SELL/TRIM VALIDITY: Only recommend if holding exists. priceRange[0] = limit sell price.
      netProfit for SELL/TRIM = (priceRange[0] − holding.avgPrice) × qty − brokerage.
@@ -301,7 +308,7 @@ const ANALYSIS_SYSTEM_PROMPT =
 
   ─────────────────────────────────────────────────────────────────────────────
 
-  SECTION 2B — THESIS VALIDATION AT EXIT (context only)
+  SECTION 2B — THESIS VALIDATION AT EXIT AND ON HOLD (context only)
 
   When an ENTRY THESIS CONTEXT / HOLDING_CONTEXT block is present for a position you are
   recommending to SELL/TRIM, you MUST state in reasoning[] whether the ORIGINAL EntryDriver
@@ -309,6 +316,7 @@ const ANALYSIS_SYSTEM_PROMPT =
   28→54, target reached" or "momentum_breakout invalidated: volume/return faded"). Do NOT
   output a verdict field — the engine computes thesis_verdict deterministically from the
   entry-vs-current technicals. Your job is the qualitative narrative only.
+  The same rule applies to HOLD recs on a position with a HOLDING_CONTEXT block — see Rule 5.
 
   ─────────────────────────────────────────────────────────────────────────────
 
@@ -595,12 +603,12 @@ const ANALYSIS_SYSTEM_PROMPT =
         "priceRange": [44.20, 44.80],
         "target": 49.50,
         "stopLoss": 42.10,
-        "qty": 50,
+        "qty": 0,
         "tranches": 1,
         "orderType": "LIMIT",
         "limitPrice": 44.50,
         "confidence": 0.74,
-        "scenarios": { "bull": {"p": 0.30, "ret": 0.12}, "base": {"p": 0.50, "ret": 0.07}, "bear": {"p": 0.20, "ret": -0.04} },  // required for BUY/SELL/TRIM/TOP_UP (omit only for HOLD)
+        "scenarios": { "bull": {"p": 0.30, "ret": 0.12}, "base": {"p": 0.50, "ret": 0.07}, "bear": {"p": 0.20, "ret": -0.04} },
         "expectedTimeToTarget": 45,
         "factorsUsed": ["[FUNDAMENTAL] EPS momentum: 2Q beat trend (proxy — true 30d revision unavailable)", "[MACRO] AUD/USD weak — benefits unhedged exporter", "[FUNDAMENTAL] Valuation: fwdPE 10.2 vs sector 13.5x"],
         "reasoning": "Iron ore supply discipline + weak AUD drive EPS upgrade cycle. Technicals confirm.",
