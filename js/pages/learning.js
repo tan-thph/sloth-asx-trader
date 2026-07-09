@@ -264,6 +264,8 @@ async function renderLearningPage(gen) {
   renderCoverageCard().catch(() => {});
   // Async: load go-live readiness scorecard
   renderGoLiveCard().catch(() => {});
+  // Async: load the dedicated HOLD Decisions card (per-HOLD 30-day passivity review)
+  renderHoldDecisionsCard().catch(() => {});
   // Async: load entry signal factor analysis card
   renderFactorWinRatesCard().catch(() => {});
 }
@@ -291,6 +293,7 @@ function _renderLearningContent(d, brier) {
   const promptRegression  = d.prompt_regression  || null;  // Gap 5
   const phase8            = d.phase8             || null;  // Gap 2
   const nVirtualResolved  = d.n_virtual_resolved ?? 0;     // virtual outcomes resolved via OHLC scan
+  const holdOutcomes      = d.hold_outcomes       || null; // HOLD passivity calibration (miss/correct rate)
 
   // Cache events by id so viewStoredDebate() can look up postmortem_debate JSON
   // without an extra HTTP round-trip.
@@ -421,6 +424,50 @@ function _renderLearningContent(d, brier) {
 
     return `<div style="font-size:11px;color:${color};margin-bottom:8px">
       ${icon} ${label}${zProgressHtml}
+    </div>`;
+  })();
+
+  // ── HOLD Passivity Check — did held longs sit through a drawdown they should have cut? ──
+  // hold_outcomes comes from _resolve_hold_outcomes() (routes/learning.py, redesigned
+  // 2026-07-09): each HOLD is graded ≥30 days after generation on the ENDPOINT return
+  // over a fixed 20-trading-day forward window, direction-aware (a HOLD keeps a long, so
+  // only a sustained downside past a VOL-SCALED band is a 'virtual_hold_miss'; up/flat is
+  // 'virtual_hold_correct'). MIN_N mirrors _compute_hold_outcome_nudge()'s gate; the
+  // ⚠HOLD_TOO_PASSIVE nudge is CI-gated on top (Wilson lower bound > 50%), so a bare
+  // majority here does not by itself fire it.
+  const HOLD_OUTCOME_MIN_N = 12;
+  const holdOutcomesCard = (() => {
+    if (!holdOutcomes || !holdOutcomes.n) {
+      return `<div class="card section-gap">
+        <div class="card-title">HOLD Passivity Check</div>
+        <div class="text-xs text-muted">No resolved HOLDs yet — each HOLD needs ~30 days of price history before it's graded (did the held long sit through a drawdown it should have cut?). See the HOLD Decisions card below for per-ticker countdowns.</div>
+      </div>`;
+    }
+    const gated   = holdOutcomes.n < HOLD_OUTCOME_MIN_N;
+    const missPct = holdOutcomes.miss_rate ?? 0;
+    const flagged = !gated && missPct > 50;
+    const color   = gated ? '#6b7280' : flagged ? '#dc2626' : '#16a34a';
+    const barPct  = Math.min(100, Math.round((holdOutcomes.n / HOLD_OUTCOME_MIN_N) * 100));
+    return `<div class="card section-gap">
+      <div class="card-title">HOLD Passivity Check</div>
+      <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px">
+        <div><span style="font-size:20px;font-weight:700;color:${color}">${holdOutcomes.miss_rate}%</span> <span class="text-xs text-muted">sat through a sustained drawdown</span></div>
+        <div class="text-xs text-muted">${holdOutcomes.correct_rate}% held correctly · n=${holdOutcomes.n} resolved</div>
+      </div>
+      ${gated ? `
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="font-size:10px;color:var(--text-muted);white-space:nowrap">n=${holdOutcomes.n} / ${HOLD_OUTCOME_MIN_N} needed</div>
+          <div style="flex:1;max-width:120px;background:var(--bg-secondary);border-radius:3px;height:5px">
+            <div style="width:${barPct}%;height:5px;border-radius:3px;background:#6b7280"></div>
+          </div>
+          <div style="font-size:10px;color:var(--text-muted)">gated until n≥${HOLD_OUTCOME_MIN_N}</div>
+        </div>
+        <div class="text-xs text-muted" style="margin-top:4px">Below the minimum sample size — the ⚠HOLD_TOO_PASSIVE calibration nudge (injected into the next portfolio prompt) stays silent until enough HOLDs have resolved.</div>
+      ` : flagged ? `
+        <div class="text-xs" style="color:#dc2626">⚠ A majority of held longs sat through a sustained drawdown — if the Wilson CI clears 50%, the next portfolio analysis carries a HOLD_TOO_PASSIVE nudge telling Claude it's been too conservative.</div>
+      ` : `
+        <div class="text-xs" style="color:#16a34a">✓ Miss rate is healthy — patience is paying off here, no nudge active.</div>
+      `}
     </div>`;
   })();
 
@@ -638,6 +685,26 @@ function _renderLearningContent(d, brier) {
   };
   const successTypes = Object.entries(successPats.by_success_type || {})
     .sort((a, b) => b[1] - a[1]);
+  // Disciplined-hold duration + payoff (backend success_patterns.disciplined_hold_stats).
+  // How long the wins tagged "Disciplined Hold" (held ≥5d to target) actually ran,
+  // and what they paid. min/max suppressed below n=3 (small-sample noise).
+  const _dh = successPats.disciplined_hold_stats;
+  const disciplinedHoldRow = _dh ? `
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span title="Held through normal volatility; original thesis validated" style="font-size:11px;padding:1px 6px;border-radius:3px;font-weight:600;background:#05966922;color:#059669;white-space:nowrap">Disciplined Hold</span>
+          <span class="text-xs text-muted">how long they ran &amp; what they paid · n=${_dh.n}</span>
+        </div>
+        <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px">
+          <div><span class="text-xs text-muted">Holding period</span><br>
+            <span style="font-weight:600">${_dh.days_min != null ? `${_dh.days_min}` : '—'}<span class="text-xs text-muted"> min</span> · ${_dh.days_avg}<span class="text-xs text-muted"> avg</span> · ${_dh.days_max != null ? `${_dh.days_max}` : '—'}<span class="text-xs text-muted"> max days</span></span>
+          </div>
+          <div><span class="text-xs text-muted">Avg return</span><br>
+            <span style="font-weight:600;color:${(_dh.ret_avg ?? 0) >= 0 ? '#16a34a' : '#dc2626'}">${_dh.ret_avg != null ? `${_dh.ret_avg > 0 ? '+' : ''}${_dh.ret_avg}%` : '—'}</span>
+          </div>
+        </div>
+        ${_dh.n < 3 ? `<div class="text-xs text-muted" style="margin-top:4px">min/max hidden below n=3 (too few to be meaningful) — showing average only.</div>` : ''}
+      </div>` : '';
   const successCard = successTypes.length ? `
     <div class="card section-gap">
       <div class="card-title">Success Patterns</div>
@@ -670,6 +737,7 @@ function _renderLearningContent(d, brier) {
           <p class="text-xs text-muted" style="margin-top:6px">Tag wins using the 🏆 button on individual rows below.</p>
         </div>
       </div>
+      ${disciplinedHoldRow}
     </div>` : '';
 
   // ── Deepening stat cards ───────────────────────────────────────────────────
@@ -975,9 +1043,16 @@ function _renderLearningContent(d, brier) {
                 // Fix #18: virtual outcome chip — shows for unexecuted rows with resolved OHLC outcome
                 // Tooltip shows the effective calibration weight = 0.75 × speed_weight
                 // (speed_weight = min(1.0, 7/bars_to_resolution): fast hits closer to 1.0)
+                // Scoped to virtual_win/virtual_loss only (BUY/SELL/TRIM skipped-rec outcomes from
+                // _resolve_virtual_outcomes). HOLD's virtual_hold_miss/virtual_hold_correct (from the
+                // separate _resolve_hold_outcomes) get their own chip below in claudeTagsEl — they used
+                // to fall through this same ternary, which only tests `=== 'virtual_win'`, so BOTH
+                // hold outcomes rendered as an identical red "~L / stop hit" chip — backwards for
+                // virtual_hold_correct (the GOOD outcome) and nonsensical either way (a HOLD has no stop).
                 const _virtEffectiveWt = ev.virtual_speed_weight
                   ? (0.75 * ev.virtual_speed_weight).toFixed(2) : '0.75';
-                const virtualChip = (!ev.was_executed && ev.virtual_outcome && ev.virtual_outcome !== 'virtual_open')
+                const _isTradeVirtual = ev.virtual_outcome === 'virtual_win' || ev.virtual_outcome === 'virtual_loss';
+                const virtualChip = (!ev.was_executed && _isTradeVirtual)
                   ? `<span title="Virtual outcome (skipped rec): OHLC scan found ${ev.virtual_outcome === 'virtual_win' ? 'target hit' : 'stop hit'} — included at ${_virtEffectiveWt}× weight in calibration (speed factor: ${ev.virtual_speed_weight ?? '1.0'}${ev.virtual_slippage_applied != null ? `; slippage ${(ev.virtual_slippage_applied * 100).toFixed(2)}% applied` : ''})"
                        style="font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600;margin-left:3px;cursor:default;
                               background:${ev.virtual_outcome === 'virtual_win' ? '#f0fdf4' : '#fef2f2'};
@@ -1044,6 +1119,27 @@ function _renderLearningContent(d, brier) {
                     const dm = ENTRY_DRIVER_META[ev.primary_entry_driver]
                       || { label: ev.primary_entry_driver.replace(/_/g,' '), color: '#6b7280' };
                     return _chip(ev.primary_entry_driver, dm.label, dm.color, 'Entry driver');
+                  }
+                  // HOLD: _resolve_hold_outcomes() (routes/learning.py) only judges a HOLD once it's
+                  // ≥30 days old (needs runway to tell whether a real move was missed), so most HOLDs
+                  // sit at virtual_outcome=NULL for a while — show a countdown instead of a blank dash
+                  // so it reads as "not yet eligible", not "nothing captured".
+                  if ((ev.recommendation || '').toUpperCase() === 'HOLD') {
+                    if (ev.virtual_outcome === 'virtual_hold_correct') {
+                      return `<span title="Resolved 30d+ after this HOLD: price stayed within an 8% band — patience was the right call, nothing actionable existed."
+                                style="font-size:9px;padding:1px 5px;border-radius:2px;font-weight:600;white-space:nowrap;background:#16a34a20;color:#16a34a;border:1px solid #16a34a66">✓ correct hold</span>`;
+                    }
+                    if (ev.virtual_outcome === 'virtual_hold_miss') {
+                      return `<span title="Resolved 30d+ after this HOLD: price moved ≥8% in one direction — a BUY or SELL/TRIM likely would have captured it."
+                                style="font-size:9px;padding:1px 5px;border-radius:2px;font-weight:600;white-space:nowrap;background:#dc262620;color:#dc2626;border:1px solid #dc262666">✗ missed move</span>`;
+                    }
+                    if (ev.virtual_outcome === 'virtual_open') {
+                      return `<span title="Eligible for grading but price history could not be fetched (delisted, insufficient bars, or a fetch error)." style="color:var(--text-muted);font-size:10px">no data</span>`;
+                    }
+                    const _ageDays = ev.timestamp ? Math.floor((Date.now() - new Date(ev.timestamp).getTime()) / 86400000) : null;
+                    const _daysLeft = _ageDays != null ? Math.max(0, 30 - _ageDays) : null;
+                    return `<span title="${_daysLeft != null ? `Graded automatically ${_daysLeft} day(s) from now — needs 30 days of price history to judge whether a real move was missed.` : 'Not yet graded.'}"
+                              style="font-size:9px;padding:1px 5px;border-radius:2px;font-weight:500;white-space:nowrap;color:var(--text-muted);border:1px solid var(--border)">⏳ ${_daysLeft != null ? (_daysLeft > 0 ? `pending ${_daysLeft}d` : 'pending') : 'pending'}</span>`;
                   }
                   return `<span style="color:var(--text-muted);font-size:10px">—</span>`;
                 })();
@@ -1297,7 +1393,10 @@ function _renderLearningContent(d, brier) {
   // ── Go-live readiness scorecard (async — filled by renderGoLiveCard()) ──
   const goLivePlaceholder = `<div id="ll-golive-card"></div>`;
 
-  return introNote + _llWindowBar() + summaryCards + goLivePlaceholder + coveragePlaceholder + regressionBanner + phase8Note + calibCard + calibQualityPlaceholder +
+  // ── HOLD Decisions list (async — filled by renderHoldDecisionsCard()) ──
+  const holdDecisionsPlaceholder = `<div id="ll-hold-decisions-card"></div>`;
+
+  return introNote + _llWindowBar() + summaryCards + goLivePlaceholder + coveragePlaceholder + regressionBanner + phase8Note + holdOutcomesCard + holdDecisionsPlaceholder + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard +
     realVsPaperCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
@@ -1305,6 +1404,73 @@ function _renderLearningContent(d, brier) {
     recentCard + failedCard + debateInsightsCard +
     digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + ruleEfficacyPlaceholder + thesisDriftPlaceholder +
     thesisMatrixPlaceholder + execAlphaPlaceholder + debateCollapsible;
+}
+
+// ── HOLD Decisions card (per-HOLD 30-day passivity review) ────────────────────
+// HOLD recs never enter client rec state (analysis.js strips them from
+// filteredRecs) — this is the ONLY place the model's "keep holding" calls are
+// surfaced. Backed by GET /api/learning/hold-recs; each row shows the redesigned
+// _resolve_hold_outcomes() verdict (endpoint-based, direction-aware, vol-scaled)
+// once it's ≥30 days old, or a days-until-review countdown while pending.
+async function renderHoldDecisionsCard() {
+  const el = document.getElementById('ll-hold-decisions-card');
+  if (!el) return;
+  let d;
+  try {
+    const r = await fetch(`${API}/api/learning/hold-recs?limit=100`);
+    d = await r.json();
+  } catch { el.innerHTML = ''; return; }
+  if (!d || !d.ok || !Array.isArray(d.holds) || d.holds.length === 0) {
+    el.innerHTML = `<div class="card section-gap">
+      <div class="card-title">HOLD Decisions</div>
+      <div class="text-xs text-muted">No HOLD recommendations logged yet. HOLDs are the positions the model reviewed and chose to keep — they're logged separately from BUY/SELL/TRIM and graded 30 days later.</div>
+    </div>`;
+    return;
+  }
+
+  const _verdict = (h) => {
+    if (h.virtual_outcome === 'virtual_hold_correct')
+      return { icon: '✅', label: 'Held correctly', color: '#16a34a' };
+    if (h.virtual_outcome === 'virtual_hold_miss')
+      return { icon: '⚠️', label: 'Sat through drawdown', color: '#dc2626' };
+    if (h.virtual_outcome === 'virtual_open')
+      return { icon: '○', label: 'Not gradable', color: '#6b7280' };
+    if (h.days_until_review != null)
+      return { icon: '⏳', label: `Review in ${h.days_until_review}d`, color: '#d97706' };
+    return { icon: '·', label: 'Pending', color: '#6b7280' };
+  };
+
+  const rows = d.holds.map(h => {
+    const v = _verdict(h);
+    const conf = (h.confidence != null) ? `${Math.round(h.confidence * 100)}%` : '—';
+    const dateStr = (h.timestamp || '').slice(0, 10);
+    const reason = h.reasoning ? escapeHTML(h.reasoning) : '';
+    return `<tr>
+      <td data-label="Ticker" style="font-weight:600">${escapeHTML(h.ticker || '')}</td>
+      <td data-label="Date" class="text-xs text-muted">${dateStr}</td>
+      <td data-label="Conf">${conf}</td>
+      <td data-label="Regime" class="text-xs text-muted">${escapeHTML(h.regime || '—')}</td>
+      <td data-label="30-day review"><span style="color:${v.color};font-weight:600;white-space:nowrap">${v.icon} ${v.label}</span></td>
+      <td data-label="Rationale" class="text-xs text-muted" style="max-width:280px">${reason}</td>
+    </tr>`;
+  }).join('');
+
+  el.innerHTML = `<div class="card section-gap">
+    <div class="card-title">HOLD Decisions</div>
+    <p class="text-xs text-muted" style="margin-bottom:8px">
+      Positions the model reviewed and chose to <strong>keep</strong> — logged separately from actionable recs. The <strong>30-day review</strong> is the redesigned passivity check: endpoint return over a 20-trading-day forward window vs a volatility-scaled band (a held long that sat through a sustained drawdown = ⚠️; up or flat = ✅). ${d.resolved_n} of ${d.n} graded so far.
+    </p>
+    <div style="overflow-x:auto">
+      <table class="tbl tbl-stack" style="width:100%;font-size:13px">
+        <thead><tr>
+          <th style="text-align:left">Ticker</th><th style="text-align:left">Date</th>
+          <th style="text-align:left">Conf</th><th style="text-align:left">Regime</th>
+          <th style="text-align:left">30-day review</th><th style="text-align:left">Rationale</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
 }
 
 // ── Data-hygiene coverage strip (IMPROVEMENTS #3) ─────────────────────────────

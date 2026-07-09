@@ -1217,6 +1217,69 @@ def recent_rec():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/learning/hold-recs", methods=["GET"])
+def hold_recs():
+    """List logged HOLD recommendations with their 30-day passivity verdict.
+
+    GET /api/learning/hold-recs[?limit=N]   (default 100, cap 200)
+
+    HOLD recs never enter client rec state (analysis.js strips them from
+    filteredRecs before state.recommendations is built) — they live only here,
+    in ai_learning_events. This feeds the Learning-page "HOLD Decisions" card:
+    each carries its virtual_outcome once _resolve_hold_outcomes grades it
+    (≥30 days out), or a days-until-review countdown while still pending. The
+    verdict IS the "30-day price check as performance review" — endpoint-based,
+    direction-aware, vol-scaled (see _resolve_hold_outcomes).
+    """
+    try:
+        limit = min(200, max(1, int(request.args.get("limit", 100))))
+    except (TypeError, ValueError):
+        limit = 100
+    out = []
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT id, ticker, timestamp, ai_confidence, rationale_summary,
+                       regime, sector, virtual_outcome
+                  FROM ai_learning_events
+                 WHERE recommendation = 'HOLD'
+                 ORDER BY timestamp DESC
+                 LIMIT ?
+            """, (limit,)).fetchall()
+        now = datetime.now()
+        resolved_n = 0
+        for r in rows:
+            try:
+                ts = datetime.strptime((r["timestamp"] or "")[:19], "%Y-%m-%d %H:%M:%S")
+                age_days = (now - ts).days
+            except (ValueError, TypeError):
+                age_days = None
+            vo = r["virtual_outcome"]
+            resolved = vo in ("virtual_hold_miss", "virtual_hold_correct")
+            if resolved:
+                resolved_n += 1
+            reason = (r["rationale_summary"] or "").strip()
+            if len(reason) > 160:
+                reason = reason[:157] + "…"
+            out.append({
+                "id":                 r["id"],
+                "ticker":             r["ticker"],
+                "timestamp":          r["timestamp"],
+                "confidence":         r["ai_confidence"],
+                "regime":             r["regime"],
+                "sector":             r["sector"],
+                "reasoning":          reason,
+                "virtual_outcome":    vo,     # None | virtual_open | virtual_hold_miss | virtual_hold_correct
+                "resolved":           resolved,
+                "age_days":           age_days,
+                # HOLDs resolve ≥30 days after generation (runway for the forward window).
+                "days_until_review":  (max(0, 30 - age_days) if (not resolved and age_days is not None) else None),
+            })
+        return jsonify({"ok": True, "holds": out, "resolved_n": resolved_n, "n": len(out)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "holds": []}), 500
+
+
 @bp.route("/api/learning/trade-detail", methods=["GET"])
 def trade_detail():
     """Return rich per-trade detail for a set of learning-event ids.
@@ -1923,8 +1986,35 @@ def learning_stats():
                     tag = tag.strip()
                     if tag and tag != "none":
                         success_counts[tag] = success_counts.get(tag, 0) + 1
+            # Disciplined-hold duration + payoff (request 2026-07-09). The
+            # `disciplined_hold` success tag marks an executed WIN held ≥5 days
+            # that reached target (no premature exit) — distinct from HOLD recs.
+            # Surface how long those disciplined holds actually ran and what they
+            # paid, so "held patiently" has concrete numbers under it. Small-n
+            # gated: min/max are noise below 3, so expose avg-only there.
+            dh_rows = conn.execute("""
+                SELECT holding_period_days, realized_pnl_pct
+                  FROM ai_learning_events
+                 WHERE outcome_status = 'win'
+                   AND success_tags LIKE '%disciplined_hold%'
+            """).fetchall()
+            dh_days = [r["holding_period_days"] for r in dh_rows
+                       if r["holding_period_days"] is not None]
+            dh_rets = [r["realized_pnl_pct"] for r in dh_rows
+                       if r["realized_pnl_pct"] is not None]
+            disciplined_hold_stats = None
+            if dh_days:
+                n_dh = len(dh_days)
+                disciplined_hold_stats = {
+                    "n":        n_dh,
+                    "days_min": min(dh_days) if n_dh >= 3 else None,
+                    "days_avg": round(sum(dh_days) / n_dh, 1),
+                    "days_max": max(dh_days) if n_dh >= 3 else None,
+                    "ret_avg":  round(sum(dh_rets) / len(dh_rets), 2) if dh_rets else None,
+                }
             success_patterns = {
                 "by_success_type": dict(sorted(success_counts.items(), key=lambda x: -x[1])),
+                "disciplined_hold_stats": disciplined_hold_stats,
             }
 
             # Sprint 71 sector analysis: per-sector stats framed vs the whole-market
@@ -3060,34 +3150,81 @@ def _event_slippage(row) -> float:
     return adv_slippage(adv) * _SLIP_REGIME_MULT.get(regime, 1.0)
 
 
+# ── HOLD outcome resolution tuning (redesign 2026-07-09) ─────────────────────
+# The original resolver tagged a HOLD a "miss" if the largest |% move| from the
+# entry-day close exceeded a FLAT 8% ANYWHERE in an UNBOUNDED entry→today window.
+# Three biases made that near-worthless (see audit): (a) the window grew with
+# resolution lag, so miss-probability rose with age not model quality; (b) a
+# single transient spike counted (peak-based, no persistence); (c) an 8% move UP
+# on a correctly-held long was scored a "miss" identically to an 8% drawdown.
+# Combined, the ⚠HOLD_TOO_PASSIVE nudge would fire almost automatically once
+# n≥10, systematically pushing the model to trade more (over-trading bias).
+#
+# Redesign: a HOLD in this app is always a decision to KEEP AN EXISTING LONG
+# holding, so the meaningful passivity failure is "sat through a sustained
+# drawdown you should have de-risked". We therefore judge on:
+#   • a FIXED forward window of _HOLD_HORIZON_DAYS trading days from entry,
+#   • the ENDPOINT return (a transient dip that recovered is NOT a miss —
+#     persistence is required), and
+#   • a DIRECTION-AWARE, VOL-SCALED threshold (downside only; the band scales
+#     with the stock's own ATR so 8% means different things for a bank vs a
+#     small-cap miner). Upside/flat = the hold worked = virtual_hold_correct.
+_HOLD_HORIZON_DAYS = 20    # forward trading-day window a HOLD thesis must hold over
+_HOLD_VOL_K        = 1.0   # threshold = K × horizon-σ of the stock's own ATR
+_HOLD_THR_FLOOR    = 0.05  # never call a <5% drawdown a miss (noise floor)
+_HOLD_THR_CAP      = 0.20  # never demand >20% before flagging (very high-vol names)
+_HOLD_MIN_BARS     = 10    # too few forward bars to judge → leave unresolved
+# Raw-count floor for the behaviour-changing HOLD nudge. Mirrors the local
+# _MIN_NUDGE_N in _calib_compute() (Sprint 70) — same value, module-level so the
+# standalone _compute_hold_outcome_nudge() can share the gate.
+_MIN_NUDGE_N       = 12
+
+
+def _hold_move_threshold(entry_signals_json, fallback: float) -> float:
+    """Vol-scaled downside threshold for a HOLD, from the entry snapshot's daily
+    ATR%. Expected drift over H trading days ≈ atr_pct × √H; we flag a sustained
+    endpoint move beyond K× that. Falls back to a flat threshold when atr_pct is
+    unavailable (legacy rows without entry_signals_json)."""
+    try:
+        atr_pct = float(json.loads(entry_signals_json or "{}").get("atr_pct"))
+        if atr_pct <= 0:
+            return fallback
+        thr = _HOLD_VOL_K * (atr_pct / 100.0) * math.sqrt(_HOLD_HORIZON_DAYS)
+        return min(_HOLD_THR_CAP, max(_HOLD_THR_FLOOR, thr))
+    except (TypeError, ValueError, AttributeError):
+        return fallback
+
+
 def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> int:
-    """Lazy-evaluate HOLD recommendations for outcome signal.
+    """Lazy-evaluate HOLD recommendations for a passivity outcome signal.
 
     HOLD recs carry no suggested_stop/suggested_target (the validator's
     requiredUnless:'HOLD' rule means Claude/the quant engine never sizes a
     HOLD), so _resolve_virtual_outcomes()'s WHERE clause (which requires both
     NOT NULL) structurally never touches them. They get logged at generation
-    time and then sit orphaned forever — outcome_status NULL, excluded from
-    every calibration query that filters on outcome_status IN
-    ('win','loss','breakeven') — so the model is never calibrated on its own
-    passivity: was staying out correct, or did it miss a real move?
+    time and then sit orphaned forever unless resolved here — so the model is
+    never calibrated on its own passivity.
 
-    Algorithm per unresolved HOLD event ≥30 days old:
-      1. Fetch daily close history from the event's own date to today.
-      2. Find the largest |% move| from that entry-day close anywhere in the
-         window (either direction — a HOLD doesn't commit to a direction, so
-         a big move either way means something actionable was missed).
-      3. >= move_threshold (default 8%) -> 'virtual_hold_miss' (a real move
-         existed; BUY or SELL/TRIM likely would have captured it).
-      4. Otherwise -> 'virtual_hold_correct' (price stayed in a tight band;
-         patience was the right call, nothing actionable existed).
+    A HOLD is a decision to KEEP AN EXISTING LONG holding, so the outcome we
+    care about is direction-aware: did the position sit through a *sustained*
+    drawdown that should have prompted a TRIM/SELL?
+
+    Algorithm per unresolved HOLD event ≥30 days old (guarantees the full
+    forward window has elapsed):
+      1. Fetch daily closes for a BOUNDED window: entry date → entry + ~45
+         calendar days (comfortably covers _HOLD_HORIZON_DAYS trading bars).
+      2. Take the ENDPOINT return over the first _HOLD_HORIZON_DAYS bars after
+         entry (a transient dip that recovered is not a miss — persistence to
+         the horizon is required).
+      3. Threshold is VOL-SCALED off the entry snapshot's ATR% (falls back to
+         `move_threshold`). Endpoint return ≤ −threshold → 'virtual_hold_miss'
+         (held a long through a sustained loss). Otherwise (flat or up) →
+         'virtual_hold_correct' — the hold worked or patience was right.
 
     Writes to the existing virtual_outcome column, scoped to
     recommendation='HOLD' — these values never collide with the
     virtual_win/virtual_loss/virtual_open values _resolve_virtual_outcomes()
-    writes for BUY/SELL/TRIM, and the existing v_rows_raw calibration query
-    only selects virtual_win/virtual_loss, so this doesn't perturb existing
-    weighting logic.
+    writes for BUY/SELL/TRIM.
 
     Returns the number of events resolved this call.
     """
@@ -3095,7 +3232,7 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
     retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
     try:
         rows = conn.execute("""
-            SELECT id, ticker, timestamp
+            SELECT id, ticker, timestamp, entry_signals_json
             FROM ai_learning_events
             WHERE recommendation = 'HOLD'
               AND virtual_outcome IS NULL
@@ -3114,34 +3251,50 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
     except ImportError:
         return 0
 
+    def _mark_open(row_id):
+        conn.execute(
+            "UPDATE ai_learning_events SET virtual_outcome='virtual_open' WHERE id=?",
+            (row_id,))
+
     resolved = 0
     for row in rows:
         ticker = row["ticker"] or ""
         yf_sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
         start  = row["timestamp"][:10]  # YYYY-MM-DD
+        try:
+            start_dt = datetime.strptime(start, "%Y-%m-%d")
+        except ValueError:
+            _mark_open(row["id"]); resolved += 1
+            continue
+        # Bounded forward window: fix flaw (a) — the analysis window no longer
+        # grows with how late we get around to resolving the row.
+        end = (start_dt + timedelta(days=45)).strftime("%Y-%m-%d")
 
         try:
-            hist = yf.Ticker(yf_sym).history(start=start, interval="1d")
-            if hist.empty or len(hist) < 2:
-                conn.execute(
-                    "UPDATE ai_learning_events SET virtual_outcome='virtual_open' WHERE id=?",
-                    (row["id"],))
-                resolved += 1
+            hist = yf.Ticker(yf_sym).history(start=start, end=end, interval="1d")
+            if hist.empty or len(hist) < _HOLD_MIN_BARS:
+                _mark_open(row["id"]); resolved += 1
                 continue
         except Exception:
             _mark_fetch_failed(conn, row["id"])
             continue
 
-        entry_close = float(hist["Close"].iloc[0])
+        closes = hist["Close"]
+        entry_close = float(closes.iloc[0])
         if entry_close <= 0:
-            conn.execute(
-                "UPDATE ai_learning_events SET virtual_outcome='virtual_open' WHERE id=?",
-                (row["id"],)
-            )
-            conn.commit()
+            _mark_open(row["id"]); resolved += 1
             continue
-        max_pct = float(((hist["Close"] - entry_close) / entry_close).abs().max())
-        outcome = "virtual_hold_miss" if max_pct >= move_threshold else "virtual_hold_correct"
+
+        # Endpoint return over the fixed forward horizon (first H bars *after*
+        # entry). Persistence-based: a spike that reverted lands back near 0.
+        window = closes.iloc[1:_HOLD_HORIZON_DAYS + 1]
+        if window.empty:
+            _mark_open(row["id"]); resolved += 1
+            continue
+        ret_end = float((window.iloc[-1] - entry_close) / entry_close)
+
+        thr = _hold_move_threshold(row["entry_signals_json"], move_threshold)
+        outcome = "virtual_hold_miss" if ret_end <= -thr else "virtual_hold_correct"
         conn.execute(
             "UPDATE ai_learning_events SET virtual_outcome=? WHERE id=?",
             (outcome, row["id"]))
@@ -3152,9 +3305,12 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
 
 def _compute_hold_outcome_nudge(conn) -> str:
     """Single calibration nudge token from resolved HOLD outcomes (see
-    _resolve_hold_outcomes). n>=10 resolved HOLDs required before judging;
-    >50% miss rate emits a compact ⚠HOLD_TOO_PASSIVE token. A low miss rate
-    is not flagged — correct caution isn't a problem to nudge against."""
+    _resolve_hold_outcomes). Gated like every other behaviour-changing nudge in
+    this module (gotcha #42/#92): a raw-count floor of _MIN_NUDGE_N AND a Wilson
+    95% CI whose lower bound clears 50% — i.e. we're statistically confident the
+    MAJORITY of HOLDs sat through a sustained adverse move, not a lucky-sample
+    point estimate. A low or ambiguous miss rate is silent — correct caution
+    isn't a problem to nudge against."""
     row = conn.execute("""
         SELECT
             SUM(CASE WHEN virtual_outcome='virtual_hold_miss' THEN 1 ELSE 0 END) AS n_miss,
@@ -3164,12 +3320,14 @@ def _compute_hold_outcome_nudge(conn) -> str:
         WHERE recommendation = 'HOLD'
     """).fetchone()
     n_total = row["n_total"] or 0
-    if n_total < 10:
+    if n_total < _MIN_NUDGE_N:
         return ""
     n_miss = row["n_miss"] or 0
-    if (n_miss / n_total) > 0.5:
-        return f"⚠HOLD_TOO_PASSIVE({n_miss}/{n_total} HOLDs missed a >=8% move)"
-    return ""
+    # CI-gated majority: fire only when the whole 95% CI sits ABOVE 50%.
+    ci = _wilson_ci(n_miss, n_total)
+    if not ci or ci[0] <= 50.0:
+        return ""
+    return f"⚠HOLD_TOO_PASSIVE({n_miss}/{n_total} HOLDs sat through a sustained adverse move)"
 
 
 def _resolve_virtual_outcomes(conn) -> int:

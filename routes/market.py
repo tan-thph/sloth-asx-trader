@@ -34,7 +34,7 @@ from flask import Blueprint, jsonify, request
 
 from core import LOG_DIR, ttl_cache, fetch_with_retry, stooq_quote, log
 from db import get_db, log_failed_ticker
-from indicators import analyse_ticker, asx, safe_float
+from indicators import analyse_ticker, asx, safe_float, compute_adx
 
 
 bp = Blueprint("market", __name__)
@@ -302,25 +302,18 @@ def _macro_payload() -> dict:
             atr14   = float(np.mean(tr_list)) if tr_list else None
             atr_pct = float(atr14 / latest_price * 100) if atr14 and latest_price else None
 
+            # ADX: reuse the canonical Wilder implementation in indicators.py.
+            # This macro ADX feeds regime-engine.js's trend/sideways vote (gate at
+            # adx>25), so it MUST match the audit-fixed compute_adx — the old ad-hoc
+            # copy here used simple means + a single-snapshot DX (no Wilder smoothing,
+            # no +DM/-DM mutual-exclusivity), inflating the reading and mis-voting
+            # "trending" on choppy tape (same failure fixed in indicators.py 2026-07-09).
             adx_val = None
             try:
                 if len(close) >= 28:
-                    plus_dm  = np.maximum(np.diff(high.values[-28:]),  0)
-                    minus_dm = np.maximum(-np.diff(low.values[-28:]), 0)
-                    tr_vals  = np.array([
-                        max(float(high.iloc[-28+i]) - float(low.iloc[-28+i]),
-                            abs(float(high.iloc[-28+i]) - float(close.iloc[-29+i])),
-                            abs(float(low.iloc[-28+i])  - float(close.iloc[-29+i])))
-                        for i in range(1, 28)
-                    ])
-                    atr_sm = np.mean(tr_vals[-14:])
-                    pdi_sm = np.mean(plus_dm[-14:])
-                    mdi_sm = np.mean(minus_dm[-14:])
-                    if atr_sm > 0:
-                        pdi = 100 * pdi_sm / atr_sm
-                        mdi = 100 * mdi_sm / atr_sm
-                        dx  = 100 * abs(pdi - mdi) / (pdi + mdi) if (pdi + mdi) > 0 else 0
-                        adx_val = round(float(dx), 1)
+                    adx_series, _pdi, _mdi = compute_adx(high, low, close)
+                    _a = safe_float(adx_series.iloc[-1])
+                    adx_val = round(_a, 1) if _a is not None else None
             except Exception:
                 pass
 

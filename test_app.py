@@ -6071,10 +6071,32 @@ class TestHoldOutcomeTracking(unittest.TestCase):
         with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
             src = f.read()
         idx = src.find("def _resolve_hold_outcomes(")
-        body = src[idx:idx + 3500]
+        body = src[idx:idx + 5000]
         self.assertIn("recommendation = 'HOLD'", body)
         self.assertIn("virtual_hold_miss", body)
         self.assertIn("virtual_hold_correct", body)
+
+    def test_resolve_hold_outcomes_windowed_and_vol_scaled(self):
+        """Redesign 2026-07-09: the resolver must use a BOUNDED forward window
+        (end= on the fetch, not entry→today), an ENDPOINT return (persistence,
+        not a peak |move|), and a VOL-SCALED downside threshold off ATR% — not
+        the old flat 8% peak-in-unbounded-window rule."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        idx = src.find("def _resolve_hold_outcomes(")
+        body = src[idx:idx + 5000]
+        # Bounded fetch window (fixes the growing-window bias).
+        self.assertIn("end=end", body)
+        self.assertNotIn(".abs().max()", body)   # no more peak-based detection
+        # Endpoint return over a fixed horizon, direction-aware downside test.
+        self.assertIn("ret_end", body)
+        self.assertIn("_HOLD_HORIZON_DAYS", body)
+        self.assertIn("ret_end <= -thr", body)
+        # Vol-scaled threshold helper wired in.
+        self.assertIn("_hold_move_threshold(", body)
+        self.assertIn("def _hold_move_threshold(", src)
+        self.assertIn("atr_pct", src[src.find("def _hold_move_threshold("):
+                                      src.find("def _hold_move_threshold(") + 900])
 
     def test_compute_hold_outcome_nudge_below_n_gate_returns_empty(self):
         from routes.learning import _compute_hold_outcome_nudge
@@ -6083,7 +6105,7 @@ class TestHoldOutcomeTracking(unittest.TestCase):
         try:
             with _test_get_db() as conn:
                 self._clean_events(conn)
-                # Only 5 resolved HOLDs — below the n>=10 gate.
+                # Only 5 resolved HOLDs — below the _MIN_NUDGE_N raw-count floor.
                 for i in range(5):
                     conn.execute("""
                         INSERT INTO ai_learning_events
@@ -6095,51 +6117,79 @@ class TestHoldOutcomeTracking(unittest.TestCase):
             asx_server.get_db = _orig_get_db
 
     def test_compute_hold_outcome_nudge_fires_above_threshold(self):
-        """n>=10 and >50% miss rate must emit the ⚠HOLD_TOO_PASSIVE token."""
+        """n>=_MIN_NUDGE_N AND a Wilson-CI lower bound above 50% must emit the
+        ⚠HOLD_TOO_PASSIVE token (redesign 2026-07-09: CI-gated majority, not a
+        raw point estimate)."""
         from routes.learning import _compute_hold_outcome_nudge
         _install_in_memory_db()
         asx_server.init_db()
         try:
             with _test_get_db() as conn:
                 self._clean_events(conn)
-                for i in range(8):  # 8 misses
+                for i in range(12):  # 12 misses
                     conn.execute("""
                         INSERT INTO ai_learning_events
                           (event_type, ticker, recommendation, virtual_outcome, timestamp)
                         VALUES ('recommendation',?,'HOLD','virtual_hold_miss',?)
                     """, (f"M{i}.AX", f"2026-01-{10+i} 10:00:00"))
-                for i in range(2):  # 2 correct -> 8/10 = 80% miss rate
+                for i in range(2):  # 2 correct -> 12/14, Wilson lo ~54.7% > 50%
                     conn.execute("""
                         INSERT INTO ai_learning_events
                           (event_type, ticker, recommendation, virtual_outcome, timestamp)
                         VALUES ('recommendation',?,'HOLD','virtual_hold_correct',?)
-                    """, (f"C{i}.AX", f"2026-01-{20+i} 10:00:00"))
+                    """, (f"C{i}.AX", f"2026-02-{1+i} 10:00:00"))
                 nudge = _compute_hold_outcome_nudge(conn)
                 self.assertIn("HOLD_TOO_PASSIVE", nudge)
-                self.assertIn("8/10", nudge)
+                self.assertIn("12/14", nudge)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_compute_hold_outcome_nudge_majority_but_ci_spans_50_silent(self):
+        """A bare majority whose Wilson CI still straddles 50% must stay silent —
+        this is the fluke the old raw >50% point estimate wrongly nudged on."""
+        from routes.learning import _compute_hold_outcome_nudge
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                for i in range(7):  # 7 misses
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, virtual_outcome, timestamp)
+                        VALUES ('recommendation',?,'HOLD','virtual_hold_miss',?)
+                    """, (f"M{i}.AX", f"2026-01-{10+i} 10:00:00"))
+                for i in range(6):  # 6 correct -> 7/13 = 54% but CI spans 50%
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, virtual_outcome, timestamp)
+                        VALUES ('recommendation',?,'HOLD','virtual_hold_correct',?)
+                    """, (f"C{i}.AX", f"2026-02-{1+i} 10:00:00"))
+                self.assertEqual(_compute_hold_outcome_nudge(conn), "")
         finally:
             asx_server.get_db = _orig_get_db
 
     def test_compute_hold_outcome_nudge_low_miss_rate_silent(self):
-        """A low miss rate (correct caution) must not emit a nudge."""
+        """A low miss rate (correct caution) must not emit a nudge, even well
+        above the raw-count floor."""
         from routes.learning import _compute_hold_outcome_nudge
         _install_in_memory_db()
         asx_server.init_db()
         try:
             with _test_get_db() as conn:
                 self._clean_events(conn)
-                for i in range(2):
+                for i in range(3):  # 3 misses
                     conn.execute("""
                         INSERT INTO ai_learning_events
                           (event_type, ticker, recommendation, virtual_outcome, timestamp)
                         VALUES ('recommendation',?,'HOLD','virtual_hold_miss',?)
                     """, (f"M{i}.AX", f"2026-01-{10+i} 10:00:00"))
-                for i in range(8):
+                for i in range(12):  # 12 correct -> 3/15 = 20% miss
                     conn.execute("""
                         INSERT INTO ai_learning_events
                           (event_type, ticker, recommendation, virtual_outcome, timestamp)
                         VALUES ('recommendation',?,'HOLD','virtual_hold_correct',?)
-                    """, (f"C{i}.AX", f"2026-01-{20+i} 10:00:00"))
+                    """, (f"C{i}.AX", f"2026-02-{1+i} 10:00:00"))
                 self.assertEqual(_compute_hold_outcome_nudge(conn), "")
         finally:
             asx_server.get_db = _orig_get_db
@@ -6156,6 +6206,181 @@ class TestHoldOutcomeTracking(unittest.TestCase):
             self.assertIn("hold_outcomes", d)
             self.assertIn("n", d["hold_outcomes"])
             self.assertIn("miss_rate", d["hold_outcomes"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    # ── HOLD Decisions endpoint + disciplined-hold stats (2026-07-09) ────────
+
+    def test_hold_recs_endpoint_lists_holds_with_review_status(self):
+        """GET /api/learning/hold-recs surfaces logged HOLDs with a resolved flag
+        and a days-until-review countdown for unresolved ones."""
+        from datetime import datetime, timedelta
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type,ticker,recommendation,timestamp,ai_confidence)
+                    VALUES ('recommendation','AAA.AX','HOLD',?,0.6)""", (recent,))
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type,ticker,recommendation,timestamp,virtual_outcome)
+                    VALUES ('recommendation','BBB.AX','HOLD','2026-01-01 10:00:00','virtual_hold_miss')""")
+                conn.commit()
+            client = asx_server.app.test_client()
+            d = json.loads(client.get("/api/learning/hold-recs").data)
+            self.assertTrue(d["ok"])
+            holds = {h["ticker"]: h for h in d["holds"]}
+            self.assertIn("AAA.AX", holds)
+            self.assertIn("BBB.AX", holds)
+            self.assertFalse(holds["AAA.AX"]["resolved"])
+            self.assertEqual(holds["AAA.AX"]["days_until_review"], 29)
+            self.assertTrue(holds["BBB.AX"]["resolved"])
+            self.assertEqual(holds["BBB.AX"]["virtual_outcome"], "virtual_hold_miss")
+            self.assertIsNone(holds["BBB.AX"]["days_until_review"])
+            self.assertEqual(d["resolved_n"], 1)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_stats_disciplined_hold_stats_days_and_return(self):
+        """success_patterns.disciplined_hold_stats exposes days min/avg/max AND
+        avg return for wins tagged disciplined_hold (n≥3 → min/max shown)."""
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                for i, (hd, pnl) in enumerate([(10, 5.0), (20, 8.0), (30, 12.0)]):
+                    conn.execute("""INSERT INTO ai_learning_events
+                        (event_type,ticker,recommendation,outcome_status,success_tags,
+                         holding_period_days,realized_pnl_pct)
+                        VALUES ('recommendation',?,'BUY','win','disciplined_hold',?,?)""",
+                        (f"D{i}.AX", hd, pnl))
+                conn.commit()
+            client = asx_server.app.test_client()
+            d = json.loads(client.get("/api/learning/stats").data)
+            dh = d["success_patterns"]["disciplined_hold_stats"]
+            self.assertEqual(dh["n"], 3)
+            self.assertEqual(dh["days_min"], 10)
+            self.assertEqual(dh["days_max"], 30)
+            self.assertEqual(dh["days_avg"], 20.0)
+            self.assertAlmostEqual(dh["ret_avg"], 8.33, places=1)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_stats_disciplined_hold_small_n_hides_minmax(self):
+        """Below n=3 the min/max are suppressed (noise); avg still shown."""
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type,ticker,recommendation,outcome_status,success_tags,
+                     holding_period_days,realized_pnl_pct)
+                    VALUES ('recommendation','D0.AX','BUY','win','disciplined_hold',15,7.0)""")
+                conn.commit()
+            client = asx_server.app.test_client()
+            d = json.loads(client.get("/api/learning/stats").data)
+            dh = d["success_patterns"]["disciplined_hold_stats"]
+            self.assertEqual(dh["n"], 1)
+            self.assertIsNone(dh["days_min"])
+            self.assertIsNone(dh["days_max"])
+            self.assertEqual(dh["days_avg"], 15.0)
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    # ── Functional resolver tests (redesign 2026-07-09) ──────────────────────
+    # Drive _resolve_hold_outcomes end-to-end against a mocked yfinance history
+    # so the endpoint / direction / vol-scaling behaviour is exercised, not just
+    # asserted by source inspection.
+
+    @staticmethod
+    def _hist_from_closes(closes):
+        import pandas as pd
+        idx = pd.date_range("2026-01-05", periods=len(closes), freq="D")
+        return pd.DataFrame({"Close": closes}, index=idx)
+
+    def _resolve_one(self, closes, atr_pct=2.2):
+        """Insert a single >30d-old HOLD with the given ATR%, mock yfinance to
+        return `closes`, resolve, and return the written virtual_outcome."""
+        import unittest.mock as _mock
+        import yfinance as yf
+        from datetime import datetime, timedelta
+        from routes.learning import _resolve_hold_outcomes
+        old_ts = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
+        with _test_get_db() as conn:
+            self._clean_events(conn)
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, timestamp, entry_signals_json)
+                VALUES ('recommendation','ZZZ.AX','HOLD',?,?)
+            """, (old_ts, json.dumps({"atr_pct": atr_pct})))
+            conn.commit()
+            hist = self._hist_from_closes(closes)
+
+            class _FakeTicker:
+                def history(self, **kw):
+                    return hist
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                _resolve_hold_outcomes(conn)
+            return conn.execute(
+                "SELECT virtual_outcome FROM ai_learning_events WHERE ticker='ZZZ.AX'"
+            ).fetchone()[0]
+
+    def test_resolve_sustained_drawdown_is_miss(self):
+        """A long held through a sustained drawdown past the vol-scaled band
+        (atr_pct 2.2 → ~9.8% thr) that is still down at the horizon → miss."""
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            # 25 bars, gliding from 100 down to ~86 (−14% endpoint).
+            closes = [100 - i * 0.58 for i in range(25)]
+            self.assertEqual(self._resolve_one(closes), "virtual_hold_miss")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolve_transient_dip_that_recovers_is_correct(self):
+        """A deep mid-window dip (−20%) that RECOVERS to ~flat by the horizon is
+        NOT a miss — persistence to the endpoint is required (fixes the old
+        peak-based over-counting)."""
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            closes = [100.0]
+            for i in range(1, 11):   # dip down to ~80 by bar 10
+                closes.append(100 - i * 2.0)
+            for i in range(1, 15):   # recover back to ~100 by bar ~20
+                closes.append(80 + i * 1.45)
+            self.assertEqual(self._resolve_one(closes), "virtual_hold_correct")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolve_upside_move_is_correct_not_miss(self):
+        """An 8%+ move UP on a correctly-held long is direction-aware correct,
+        never a miss (the core conflation the old |move| rule got wrong)."""
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            closes = [100 + i * 0.6 for i in range(25)]   # ~+14% endpoint
+            self.assertEqual(self._resolve_one(closes), "virtual_hold_correct")
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolve_vol_scaling_shifts_threshold(self):
+        """The same −8% endpoint is a miss for a low-vol name (thr floored ~5%)
+        but correct for a high-vol name (thr raised well above 8%)."""
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            closes = [100 - i * 0.34 for i in range(25)]  # ~−8.1% endpoint
+            self.assertEqual(self._resolve_one(closes, atr_pct=0.8),
+                             "virtual_hold_miss")      # thr floored at 5%
+            self.assertEqual(self._resolve_one(closes, atr_pct=4.0),
+                             "virtual_hold_correct")   # thr ~17.9% > 8%
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_resolve_insufficient_bars_marks_open(self):
+        """Fewer than _HOLD_MIN_BARS forward bars → unresolvable → virtual_open."""
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            self.assertEqual(self._resolve_one([100, 99, 98, 97]),
+                             "virtual_open")
         finally:
             asx_server.get_db = _orig_get_db
 
