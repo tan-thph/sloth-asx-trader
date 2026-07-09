@@ -168,6 +168,7 @@ The count of confidence-band exclusions shows as `Nexcl` in the block prefix.
 7. Per-ticker stats: >15pp delta vs overall WR, ESS≥6.
 8. **Sector stats always framed as delta vs whole-market baseline** (`SECTOR:NN%WR vs mkt MM%(±Xpp,n=…)`), flagged only when ESS≥6 and the sector's Wilson CI excludes the market WR. `_resolve_missing_sectors()` backfills null sectors from `core.SECTOR_MAP`. Deep mode adds sector×regime interaction cross-tabs.
 9. Sell-tag validation: `⚠SELL_TAG:time_stop(n=4,val=25%)→CUTTING WINNERS` when a driver proves unreliable.
+9b. **Correlation-drag nudge**: `⚠CORR_DRAG(corr>0.7 entries X%WR n=N vs low-corr Y%WR n=M)` — buckets closed BUY/TOP_UP by `max_corr_to_holdings` (already captured in `market_context` JSON at generation time, the same check that halves/cuts new-position size) at the >0.7 cutoff, CI-gated on the high-corr bucket's Wilson interval vs the low-corr bucket's raw rate, both sides needing `_MIN_NUDGE_N`.
 10. Date range + regime labelled in the block header.
 11. Auto-expire (>120d → `expired`) runs on the write path only.
 

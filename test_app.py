@@ -1286,11 +1286,11 @@ class TestStage3PromptInstructions(unittest.TestCase):
     """Regression tests for Stage 3 — Prompt instructions."""
 
     def test_prompt_version_current(self):
-        """PROMPT_VERSION must be bumped to v17 after the Audit 2026-07-08 Rule 5 (HOLD) change."""
+        """PROMPT_VERSION must be bumped when Rule 5's HOLDING_CONTEXT wording changes."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-07-v21'", src,
-                      "PROMPT_VERSION must be current (v20)")
+        self.assertIn("PROMPT_VERSION = '2026-07-v22'", src,
+                      "PROMPT_VERSION must be current (v22)")
 
     def test_entry_driver_in_prompt(self):
         """Sprint 67: ANALYSIS_SYSTEM_PROMPT must require primary_entry_driver on BUYs."""
@@ -7425,6 +7425,230 @@ class TestSprint71Phase2(unittest.TestCase):
         self.assertIn("_score_data.get(\"rs_score\")", src)
 
 
+class TestCorrelationDragNudge(unittest.TestCase):
+    """Correlation-drag calibration nudge (2026-07-09 feedback item #2): does
+    the max_corr_to_holdings snapshot already captured in market_context JSON
+    at rec-generation time predict worse outcomes for new BUY/TOP_UP entries?
+    CI-gated (Wilson) two-bucket comparison, mirroring the rest of the CI-gated
+    nudges in _calib_compute()."""
+
+    @staticmethod
+    def _clean_events(conn):
+        conn.execute("DELETE FROM ai_learning_events")
+        conn.commit()
+
+    @staticmethod
+    def _insert(conn, ticker, action, outcome, corr, ts):
+        conn.execute("""
+            INSERT INTO ai_learning_events
+              (event_type, ticker, recommendation, outcome_status,
+               ai_confidence, market_context, was_executed, timestamp)
+            VALUES ('recommendation',?,?,?,0.6,?,1,?)
+        """, (ticker, action, outcome, json.dumps({"max_corr_to_holdings": corr}), ts))
+
+    def test_corr_drag_fires_on_clear_gap(self):
+        """15 high-corr entries at 20% WR vs 15 low-corr at 80% WR (n>=_MIN_NUDGE_N
+        each side, Wilson CI clearly excludes the low-corr rate) must emit CORR_DRAG."""
+        from routes.learning import _calib_compute
+        import unittest.mock as _mock
+        import yfinance as yf
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                for i in range(15):
+                    outcome = "win" if i < 3 else "loss"   # 3/15 = 20% WR
+                    self._insert(conn, f"H{i}.AX", "BUY", outcome, 0.85,
+                                 f"2026-05-{(i%27)+1:02d} 10:00:00")
+                for i in range(15):
+                    outcome = "win" if i < 12 else "loss"  # 12/15 = 80% WR
+                    self._insert(conn, f"L{i}.AX", "BUY", outcome, 0.2,
+                                 f"2026-05-{(i%27)+1:02d} 10:00:00")
+                conn.commit()
+
+            class _FakeTicker:
+                def history(self, **kw):
+                    import pandas as pd
+                    return pd.DataFrame()
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                result = _calib_compute("riskOn", "", "", 90)
+            self.assertIn("CORR_DRAG", result.get("block", ""))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_corr_drag_silent_below_min_n(self):
+        """Fewer than _MIN_NUDGE_N (12) rows in the high-corr bucket must stay silent
+        even with a stark win-rate gap — the comparison isn't trustworthy yet."""
+        from routes.learning import _calib_compute
+        import unittest.mock as _mock
+        import yfinance as yf
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                for i in range(5):   # below the floor
+                    self._insert(conn, f"H{i}.AX", "BUY", "loss", 0.9,
+                                 f"2026-05-{i+1:02d} 10:00:00")
+                for i in range(20):
+                    outcome = "win" if i < 16 else "loss"
+                    self._insert(conn, f"L{i}.AX", "BUY", outcome, 0.1,
+                                 f"2026-05-{(i%27)+1:02d} 10:00:00")
+                conn.commit()
+
+            class _FakeTicker:
+                def history(self, **kw):
+                    import pandas as pd
+                    return pd.DataFrame()
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                result = _calib_compute("riskOn", "", "", 90)
+            self.assertNotIn("CORR_DRAG", result.get("block", ""))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_corr_drag_silent_when_rates_comparable(self):
+        """Similar win rates across both buckets (CI overlaps) must stay silent —
+        a real gap is required, not just a raw split by correlation."""
+        from routes.learning import _calib_compute
+        import unittest.mock as _mock
+        import yfinance as yf
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                for i in range(15):
+                    outcome = "win" if i < 8 else "loss"   # 53% WR
+                    self._insert(conn, f"H{i}.AX", "BUY", outcome, 0.9,
+                                 f"2026-05-{(i%27)+1:02d} 10:00:00")
+                for i in range(15):
+                    outcome = "win" if i < 9 else "loss"   # 60% WR — no real gap
+                    self._insert(conn, f"L{i}.AX", "BUY", outcome, 0.1,
+                                 f"2026-05-{(i%27)+1:02d} 10:00:00")
+                conn.commit()
+
+            class _FakeTicker:
+                def history(self, **kw):
+                    import pandas as pd
+                    return pd.DataFrame()
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                result = _calib_compute("riskOn", "", "", 90)
+            self.assertNotIn("CORR_DRAG", result.get("block", ""))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_corr_drag_excludes_sell_trim_and_uncaptured_rows(self):
+        """SELL/TRIM rows and rows with no max_corr_to_holdings must never enter
+        either bucket — correlation-to-holdings is a new-money (BUY/TOP_UP) concept."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        idx = src.index("# 6d. Correlation-drag nudge")
+        body = src[idx:idx + 1600]
+        self.assertIn('r.get("recommendation") in ("BUY", "TOP_UP")', body)
+        self.assertIn("isinstance(_mcorr, (int, float))", body)
+
+
+class TestFeedback20260709(unittest.TestCase):
+    """Regression tests for the 2026-07-09 Learning Loop feedback pass:
+    #1 HOLDING_CONTEXT delta summary, #3 success-tag taxonomy alignment,
+    #4 Rule Override Efficacy promotion + verdict prominence.
+    (#2 correlation-drag nudge has its own TestCorrelationDragNudge class.)"""
+
+    def _read(self, relpath):
+        with open(os.path.join(ROOT, relpath), encoding="utf-8") as f:
+            return f.read()
+
+    # ── #1: HOLDING_CONTEXT delta summary ────────────────────────────────────
+    def test_holding_context_computes_delta_via_thesis_drift(self):
+        """HOLDING_CONTEXT must inject a computed entry->now Delta (reusing
+        computeThesisDrift), not just the raw entry-time-only EntrySignals —
+        the prompt asks Claude to cite this delta but previously gave it no
+        'now' value to compare against."""
+        src = self._read("js/analysis.js")
+        idx = src.index("Build HOLDING_CONTEXT block")
+        body = src[idx:idx + 2200]
+        self.assertIn("computeThesisDrift(", body)
+        self.assertIn("liveSnap", body)
+        self.assertIn("Delta:", body)
+        self.assertIn("drift.verdict", body)
+
+    def test_prompts_reference_computed_delta_not_self_derivation(self):
+        """Rule 5's HOLD-sentence instruction must point at the block's own
+        computed Delta rather than asking Claude to re-derive it from raw
+        EntrySignals (which carry no current value)."""
+        src = self._read("js/prompts.js")
+        self.assertIn("computed Delta", src)
+        self.assertIn("do not re-derive it yourself", " ".join(src.split()))
+
+    # ── #3: success-tag taxonomy alignment ───────────────────────────────────
+    def test_win_tag_meta_covers_deterministic_tags(self):
+        """WIN_TAG_META (js/pages/learning.js) must style all 5 tags the
+        deterministic auto-tagger can emit (_classify_success_tags_deterministic),
+        not only the 9 manual/LLM VALID_WIN_TAGS — clean_path/thesis_confirmed/
+        strong_process previously fell through to unstyled fallback text."""
+        src = self._read("js/pages/learning.js")
+        idx = src.index("const WIN_TAG_META = {")
+        body = src[idx:idx + 2200]
+        for tag in ("regime_aligned", "disciplined_hold", "clean_path",
+                    "thesis_confirmed", "strong_process"):
+            self.assertIn(f"{tag}:", body, f"WIN_TAG_META missing deterministic tag '{tag}'")
+
+    def test_deterministic_success_tags_match_backend_taxonomy(self):
+        """The 5 tags referenced in the JS meta map must be exactly the set
+        _classify_success_tags_deterministic can emit — catches future drift
+        in either direction."""
+        backend_src = self._read("routes/learning.py")
+        idx = backend_src.index("def _classify_success_tags_deterministic(")
+        doc = backend_src[idx:idx + 1200]
+        for tag in ("regime_aligned", "disciplined_hold", "clean_path",
+                    "thesis_confirmed", "strong_process"):
+            self.assertIn(tag, doc)
+
+    def test_recent_events_tag_colors_include_deterministic_only_tags(self):
+        """The Recent Events chip color map must also cover the 3
+        deterministic-only tags, not just the manual/LLM subset."""
+        src = self._read("js/pages/learning.js")
+        idx = src.index("const WIN_TAG_COLORS = {")
+        body = src[idx:idx + 400]
+        self.assertIn("clean_path:", body)
+        self.assertIn("thesis_confirmed:", body)
+        self.assertIn("strong_process:", body)
+
+    # ── #4: Rule Override Efficacy promotion + prominence ────────────────────
+    def test_rule_efficacy_card_promoted_near_top(self):
+        """ruleEfficacyPlaceholder must be assembled before the Confidence
+        Calibration table (calibCard), not after ~25 other cards near the
+        bottom of the page."""
+        src = self._read("js/pages/learning.js")
+        idx = src.index("return introNote + _llWindowBar()")
+        assembly = src[idx:idx + 400]
+        self.assertLess(
+            assembly.index("ruleEfficacyPlaceholder"),
+            assembly.index("calibCard"),
+            "Rule Override Efficacy card must sit before the calibration table, not buried below it"
+        )
+
+    def test_rule_efficacy_verdict_has_visual_prominence(self):
+        """The too_strict/validated verdict badge must render larger/bolder
+        than plain table text, and a headline strip must surface decisive
+        verdicts without requiring the user to scan the table."""
+        src = self._read("js/pages/learning.js")
+        idx = src.index("async function renderRuleEfficacyCard")
+        end = src.index("\n// ── Buy/Top-Up Decision Tracker card", idx)
+        body = src[idx:end]
+        self.assertIn("_decisiveStrip", body)
+        self.assertIn("font-weight:700", body)  # bumped from 600 (table-cell parity)
+
+    def test_rule_efficacy_only_placeholder_present_once(self):
+        """Moving the placeholder must not leave a duplicate id in the assembly."""
+        src = self._read("js/pages/learning.js")
+        idx = src.index("return introNote + _llWindowBar()")
+        end = src.index(";\n}", idx)
+        assembly = src[idx:end]
+        self.assertEqual(assembly.count("ruleEfficacyPlaceholder"), 1)
+
+
 class TestSprint41PlanAB(unittest.TestCase):
     """Sprint 41 — Plan A (regime-aware SELL/TRIM stop) + Plan B (high_60d/low_60d)."""
 
@@ -11087,10 +11311,10 @@ class TestCriticsAddressing(unittest.TestCase):
                       "Rule 20 must explicitly label RSI/BB/MA as confirming signals, not primary drivers")
 
     def test_prompt_version_v16(self):
-        """PROMPT_VERSION must be current (v17 after the Audit 2026-07-08 Rule 5/HOLD change)."""
+        """PROMPT_VERSION must be current (v22 after the HOLDING_CONTEXT delta-summary change)."""
         src = self._read("js/prompts.js")
-        self.assertIn("PROMPT_VERSION = '2026-07-v21'", src,
-                      "PROMPT_VERSION must be bumped to current (v20)")
+        self.assertIn("PROMPT_VERSION = '2026-07-v22'", src,
+                      "PROMPT_VERSION must be bumped to current (v22)")
 
     # ── Problem 5/6: Financials sector module ──────────────────────────────
 

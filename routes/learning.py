@@ -4105,7 +4105,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
                        realized_pnl_pct, rr_ratio, timestamp,
                        error_type, error_type_source, exit_reason, skill_score, success_tags,
-                       trade_mode
+                       trade_mode, recommendation, market_context
                 FROM ai_learning_events
                 WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
                 ORDER BY timestamp DESC LIMIT 300
@@ -4510,6 +4510,39 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                         break
                 except Exception:
                     continue
+
+        # 6d. Correlation-drag nudge — do new positions entered at HIGH correlation
+        # to existing holdings underperform? `max_corr_to_holdings` is captured in
+        # market_context JSON at generation time (the same check analysis.js already
+        # uses to halve/cut BUY/TOP_UP size — see §9.3) but was never read back into
+        # calibration. Real (non-virtual) closed BUY/TOP_UP only — correlation-to-
+        # holdings is a new-money concept, not meaningful for SELL/TRIM/HOLD, and
+        # virtual (never-executed) rows carry no market_context. 0.7 matches
+        # analysis.js's own "high correlation" cutoff. CI-gated on the high-corr
+        # bucket's Wilson interval vs the low-corr bucket's raw win rate so a small-n
+        # fluke can't drive it; both buckets need _MIN_NUDGE_N for the comparison to
+        # carry any weight.
+        _corr_rows = [r for r in rows_all if r.get("recommendation") in ("BUY", "TOP_UP")]
+        _hi_corr, _lo_corr = [], []
+        for r in _corr_rows:
+            try:
+                _mc = json.loads(r.get("market_context") or "{}")
+            except Exception:
+                _mc = {}
+            _mcorr = _mc.get("max_corr_to_holdings")
+            if not isinstance(_mcorr, (int, float)):
+                continue
+            (_hi_corr if abs(_mcorr) > 0.7 else _lo_corr).append(r)
+        if len(_hi_corr) >= _MIN_NUDGE_N and len(_lo_corr) >= _MIN_NUDGE_N:
+            _hi_wins = sum(1 for r in _hi_corr if r["outcome_status"] == "win")
+            _lo_wins = sum(1 for r in _lo_corr if r["outcome_status"] == "win")
+            _lo_wr   = _lo_wins / len(_lo_corr)
+            if _ci_excludes(_hi_wins, len(_hi_corr), _lo_wr):
+                _hi_wr = _hi_wins / len(_hi_corr) * 100
+                parts.append(
+                    f"⚠CORR_DRAG(corr>0.7 entries {_hi_wr:.0f}%WR n={len(_hi_corr)} vs "
+                    f"low-corr {_lo_wr*100:.0f}%WR n={len(_lo_corr)})→cut size or skip high-correlation adds"
+                )
 
         # 7. Per-ticker memory — ESS≥_ESS_MIN (6.0) AND |delta from overall WR| > 15pp
         if tickers_req and len(calib_rows) >= 5:

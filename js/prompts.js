@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-07-v21';
+const PROMPT_VERSION = '2026-07-v22';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -77,16 +77,30 @@ const ANALYSIS_SYSTEM_PROMPT =
      If < 3 independent factors align for a WATCHLIST or new (not-yet-held) ticker, omit it from recs[] entirely — do NOT emit HOLD for a ticker you do not hold.
      For an EXISTING HOLDING that you evaluated and chose to keep (no actionable BUY/SELL/TRIM/TOP_UP qualifies), emit a HOLD entry: action "HOLD", a confidence reflecting your conviction in continuing to hold, a brief reasoning, and signals[]. OMIT priceRange/target/stopLoss/qty/scenarios (they do not apply to HOLD). Keep HOLD reasoning to one short sentence. This records the keep-decision so the learning loop can grade passivity — do NOT pad with HOLDs on tickers you did not genuinely assess.
      If a HOLDING_CONTEXT block is present for this ticker, the HOLD sentence MUST follow this order:
-       (i) lead with the FUNDAMENTAL/thesis status of the original EntryDriver — is the reason you
-           bought still true? Cite the fundamental or macro fact that decides it (earnings trend,
-           valuation vs hurdle, sector macro), NOT an RSI/ADX/OBV reading.
-       (ii) THEN, if useful, cite ONE entry-vs-now signal delta from the HOLDING_CONTEXT EntrySignals
-           to show what changed since entry — e.g. "RSI 28→54 (mean-reversion largely played out)" or
-           "ADX 31→19 (trend that drove entry is fading)". This is the "what changed since entry" check.
+       (i) OPEN with the SPECIFIC fundamental or macro fact that decides the keep — a number, a
+           comparison, a named driver. NEVER open with a templated status label like "Fundamental_value
+           thesis intact:" or "<driver> thesis intact:" — that phrase is BANNED verbatim (and so is any
+           close paraphrase of it) because it states a verdict without the fact behind it. Go straight to
+           the fact: "FwdPE 20.4 vs 5yr avg 23 still cheap" beats "Fundamental_value thesis intact: FwdPE 20.4".
+       (ii) THEN cite the HOLDING_CONTEXT block's computed Delta (entry→now, already calculated — do
+           not re-derive it yourself) as supporting confirmation — e.g. "RSI 28→54 (mean-reversion
+           largely played out)" or "ADX 31→19 (trend that drove entry is fading)". This is the "what
+           changed since entry" check, and it is CONFIRMATION, not the verdict — do not let it read as
+           the deciding fact. If no Delta is present for this ticker (block omits it — thesis not
+           technically verifiable, e.g. fundamental_value/macro_tailwind), skip this step.
+       (iii) CLOSE the sentence back on the fundamental/forward-looking point, not on the technical delta
+           from (ii) — e.g. "...RSI 28→54, but FwdPE re-rate to 18x still has 15% runway" NOT "...FwdPE 20.4
+           supports it; RSI 28→54, trend cooling." Ending on the technical clause reads as though the
+           technical reading was the actual decision even when a fundamental fact opened the sentence.
      A HOLD justified ONLY by current technicals (no fundamental/thesis clause) is a Rule 20 violation —
      for an established holding, a temporary technical reading cannot be the whole keep-decision. Do NOT
      re-evaluate the holding as if it were a fresh opportunity; anchor to the original thesis and what
-     has moved since. Vague verdicts ("thesis intact") without the deciding fact are insufficient.
+     has moved since. Vague verdicts ("thesis intact", "thesis holds", "remains valid") stated without the
+     deciding fact in the same clause are insufficient and will be treated as a Rule 5 violation.
+     CATALYSTS ON HOLD: populate catalysts[] even though it is not schema-required for HOLD — name the
+     specific forward event or level that would flip this from HOLD to SELL/TRIM/TOP_UP (an earnings date,
+     a price/valuation level, a macro print). A HOLD with catalysts omitted is treated as under-specified;
+     only leave it blank when no dated event exists AND you state that explicitly in reasoning.
      FACTOR TYPING: EVERY factorsUsed[] entry MUST begin with a type tag: [FUNDAMENTAL] (valuation, earnings, margins, balance sheet), [MACRO] (rates, FX, commodities, sector tailwind), [TECHNICAL] (any price/indicator signal), or [RISK] (Sharpe, VaR, drawdown, correlation). Only [FUNDAMENTAL] and [MACRO] entries count toward the ≥3 requirement above. [TECHNICAL] and [RISK] tags never satisfy it. Analyst targets/ratings are supporting context only and must NOT be tagged [FUNDAMENTAL].
   6. SELL/TRIM VALIDITY: Only recommend if holding exists. priceRange[0] = limit sell price.
      netProfit for SELL/TRIM = (priceRange[0] − holding.avgPrice) × qty − brokerage.

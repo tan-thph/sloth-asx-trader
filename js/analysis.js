@@ -700,7 +700,11 @@ ${riskRows}`;
   })();
 
   const _acctLabel = state.activeAccount && state.activeAccount !== 'all' ? ` | Account: ${state.activeAccount.toUpperCase()}` : '';
-  // Build HOLDING_CONTEXT block: inject entry thesis per holding so Claude reasons thesis-aware
+  // Build HOLDING_CONTEXT block: inject entry thesis per holding so Claude reasons thesis-aware.
+  // Includes a computed entry→now DELTA (reusing computeThesisDrift's own `reason` string, e.g.
+  // "RSI 42→68, %b 0.31→0.72") so Claude compares real numbers instead of having to infer "now"
+  // from other prompt sections — prompts.js's Rule 5 already asks for this comparison but previously
+  // had no "now" value to cite, so it degraded to Claude guessing/reconstructing it.
   const _holdingCtxLines = mp
     .filter(h => entryContexts[h.ticker])
     .map(h => {
@@ -710,7 +714,18 @@ ${riskRows}`;
       const bbStr  = es.bb_pct_b != null ? `bb%b=${Number(es.bb_pct_b).toFixed(2)}` : '';
       const adxStr = es.adx_14   != null ? `adx=${es.adx_14}` : '';
       const sigs   = [rsiStr, bbStr, adxStr].filter(Boolean).join(', ');
-      return `HOLDING_CONTEXT: ${h.ticker} | EntryDriver: ${ec.primary_entry_driver || 'untagged'} | EntryDate: ${ec.entry_date || '?'} | EntrySignals: ${sigs || 'none'}`;
+      const _ls = state.liveSignals?.[h.ticker];
+      const liveSnap = _ls ? {
+        rsi_14:    _ls.rsi_14    ?? null,
+        bb_pct_b:  _ls.bb_pct_b  ?? null,
+        adx_14:    _ls.adx      ?? null,
+        return_5d: _ls.return_5d ?? null,
+      } : null;
+      const drift = (liveSnap && typeof computeThesisDrift === 'function')
+        ? computeThesisDrift(ec.primary_entry_driver, es, liveSnap)
+        : null;
+      const deltaStr = drift?.reason ? ` | Delta: ${drift.reason} (${drift.verdict})` : '';
+      return `HOLDING_CONTEXT: ${h.ticker} | EntryDriver: ${ec.primary_entry_driver || 'untagged'} | EntryDate: ${ec.entry_date || '?'} | EntrySignals: ${sigs || 'none'}${deltaStr}`;
     });
   const _holdingCtxBlock = _holdingCtxLines.length
     ? '\n\nENTRY THESIS CONTEXT (original buy rationale per holding):\n' + _holdingCtxLines.join('\n')
@@ -1780,15 +1795,24 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // Build structured summary from actual recs — never rely on AI free-text for this.
     // `summaryRecs` carries the full untruncated reasoning for rich card rendering.
     // `recLines` (truncated) is kept only for the plain-text `text` fallback field.
-    const summaryRecs = cappedDedupedRecs.map(r => ({
+    //
+    // HOLDs are appended here (display-only — `_badgeCls` in recommendations.js already
+    // has a 'HOLD' case that was previously dead code, since filteredRecs strips HOLD
+    // before it ever reaches cappedDedupedRecs/state.recommendations). This does NOT
+    // change what's executable: the Pending tab and state.recommendations still exclude
+    // HOLD everywhere they already did — this only surfaces Claude's HOLD reasoning in
+    // the read-only Analyst Summary card. recLines/toast/notification text is
+    // deliberately left sourced from cappedDedupedRecs only, so those stay uncluttered.
+    const _holdRecsForSummary = recs.filter(r => r.action && r.action.toUpperCase() === 'HOLD');
+    const summaryRecs = [...cappedDedupedRecs, ..._holdRecsForSummary].map(r => ({
       ticker: r.ticker,
       action: r.action,
       confidence: r.confidence,
       reasoning: reasoningText(r.reasoning).replace(/\n/g, ' ').trim(),
       _parcelLabel: r._parcelLabel || null,
     }));
-    const recLines = summaryRecs.map(r =>
-      `${r.ticker}: ${r.action}${r.reasoning ? ' — ' + smartTruncate(r.reasoning, 110) : ''}`
+    const recLines = cappedDedupedRecs.map(r =>
+      `${r.ticker}: ${r.action}${r.reasoning ? ' — ' + smartTruncate(reasoningText(r.reasoning), 110) : ''}`
     );
 
     // Extract [system notes] appended to summary string (e.g. confidence floor drops, conflicts)

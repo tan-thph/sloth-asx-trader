@@ -670,14 +670,28 @@ function _renderLearningContent(d, brier) {
     </div>` : '';
 
   // ── Success patterns ───────────────────────────────────────────────────────
+  // Two tag sources feed success_tags: the deterministic auto-tagger
+  // (_classify_success_tags_deterministic, routes/learning.py) emits
+  // regime_aligned/disciplined_hold/clean_path/thesis_confirmed/strong_process
+  // automatically on every closed win; the manual 🔬 skill-score button can
+  // additionally apply any of VALID_WIN_TAGS (routes/debate.py) — a wider,
+  // more qualitative set (catalyst_capture, confluence_entry, good_sizing,
+  // fundamental_value_entry, earnings_revision_driven, macro_tailwind_aligned,
+  // contrarian_mean_reversion) that isn't technically derivable from captured
+  // data alone. WIN_TAG_META must cover BOTH sets — the 3 deterministic-only
+  // tags (clean_path, thesis_confirmed, strong_process) were previously absent
+  // here and rendered as unstyled fallback text everywhere a real win carried them.
   const WIN_TAG_META = {
-    // Technical / timing drivers
+    // Deterministic (auto-tagged on every closed win, routes/learning.py)
+    regime_aligned:            { label: 'Regime Aligned',         color: '#8b5cf6', tip: 'Won in a pro-risk regime (riskOn/trend) and hit target — not a lucky exit' },
+    disciplined_hold:          { label: 'Disciplined Hold',       color: '#059669', tip: 'Held ≥5 days and reached target — no premature exit' },
+    clean_path:                { label: 'Clean Path',             color: '#0d9488', tip: 'Shallow drawdown relative to peak gain (MAE < 30% of MFE) — a confident, low-stress win' },
+    thesis_confirmed:          { label: 'Thesis Confirmed',       color: '#2563eb', tip: 'Entry thesis was validated or partially validated by the outcome' },
+    strong_process:            { label: 'Strong Process',         color: '#ca8a04', tip: 'Skill score ≥7 — good analysis, not just a favourable outcome' },
+    // Manual / LLM only (🔬 skill-score button, VALID_WIN_TAGS in routes/debate.py)
     catalyst_capture:          { label: 'Catalyst Capture',       color: '#3b82f6', tip: 'Trade captured a planned earnings/news/dividend event' },
-    regime_aligned:            { label: 'Regime Aligned',         color: '#8b5cf6', tip: 'Entry timing matched the active macro regime' },
     confluence_entry:          { label: 'Confluence Entry',       color: '#0891b2', tip: 'Multiple independent technical indicators aligned at entry' },
-    disciplined_hold:          { label: 'Disciplined Hold',       color: '#059669', tip: 'Held through normal volatility; original thesis validated' },
     good_sizing:               { label: 'Good Sizing',            color: '#d97706', tip: 'Position size was well-calibrated for conviction and risk' },
-    // Fundamental / macro drivers
     fundamental_value_entry:   { label: 'Value Entry',            color: '#16a34a', tip: 'Entered at cheap valuation — fwdPE/PB below sector; strong FCF yield' },
     earnings_revision_driven:  { label: 'Earnings Revision',      color: '#0369a1', tip: 'Win driven by beat/miss trend or analyst upgrade momentum' },
     macro_tailwind_aligned:    { label: 'Macro Tailwind',         color: '#7c3aed', tip: 'Commodity, rate, or AUD/USD move directly supported the sector thesis' },
@@ -1010,6 +1024,8 @@ function _renderLearningContent(d, brier) {
                   catalyst_capture: '#3b82f6', regime_aligned: '#8b5cf6',
                   confluence_entry: '#0891b2', disciplined_hold: '#059669',
                   good_sizing: '#d97706', none: '#6b7280',
+                  // Deterministic-only tags (see WIN_TAG_META above)
+                  clean_path: '#0d9488', thesis_confirmed: '#2563eb', strong_process: '#ca8a04',
                 };
                 const winTagState = ev.outcome_status !== 'win' ? 'na'
                   : (successTags.length && successTags[0] !== 'none') ? 'pattern'
@@ -1396,13 +1412,18 @@ function _renderLearningContent(d, brier) {
   // ── HOLD Decisions list (async — filled by renderHoldDecisionsCard()) ──
   const holdDecisionsPlaceholder = `<div id="ll-hold-decisions-card"></div>`;
 
-  return introNote + _llWindowBar() + summaryCards + goLivePlaceholder + coveragePlaceholder + regressionBanner + phase8Note + holdOutcomesCard + holdDecisionsPlaceholder + calibCard + calibQualityPlaceholder +
+  // Rule Override Efficacy promoted next to the other top-of-page scorecards
+  // (Go-Live Readiness, Coverage) — feedback: it's a load-bearing secondary
+  // calibration loop (are the deterministic quant rules themselves right?) and
+  // was previously buried 28th in this assembly, well below the Debate Engine's
+  // supplementary/optional material.
+  return introNote + _llWindowBar() + summaryCards + goLivePlaceholder + coveragePlaceholder + ruleEfficacyPlaceholder + regressionBanner + phase8Note + holdOutcomesCard + holdDecisionsPlaceholder + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard +
     realVsPaperCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
     `<div id="ll-factor-winrates-card" style="display:none"></div>` +
     recentCard + failedCard + debateInsightsCard +
-    digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + ruleEfficacyPlaceholder + thesisDriftPlaceholder +
+    digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + thesisDriftPlaceholder +
     thesisMatrixPlaceholder + execAlphaPlaceholder + debateCollapsible;
 }
 
@@ -3219,11 +3240,6 @@ async function renderLessonsCard() {
     }
   } catch { /* health chips are an enhancement, not required */ }
 
-  const WIN_TAG_COLORS = {
-    catalyst_capture: '#3b82f6', regime_aligned: '#8b5cf6',
-    confluence_entry: '#0891b2', disciplined_hold: '#059669',
-    good_sizing: '#d97706',
-  };
   const SOURCE_COLORS = { adjudicated: '#6d28d9', manual: '#0891b2' };
 
   const rows = lessons.map(l => {
@@ -4002,7 +4018,7 @@ async function renderRuleEfficacyCard() {
       <td style="padding:5px 8px;text-align:right;color:var(--text-muted)">${r.skipped_n}<span style="font-size:10px"> skip</span></td>
       <td style="padding:5px 8px;text-align:right">${wr}${ciTxt}</td>
       <td style="padding:5px 8px;text-align:right">${pnl}</td>
-      <td style="padding:5px 8px"><span style="padding:2px 7px;border-radius:3px;font-size:11px;font-weight:600;background:${vs.bg};color:${vs.fg}">${vs.icon} ${vs.label}</span></td>
+      <td style="padding:5px 8px"><span style="padding:3px 9px;border-radius:4px;font-size:12.5px;font-weight:700;background:${vs.bg};color:${vs.fg};white-space:nowrap;box-shadow:0 0 0 1px ${vs.fg}33 inset">${vs.icon} ${vs.label}</span></td>
     </tr>
     <tr id="rule-ev-${r.code}" style="display:${open ? '' : 'none'}">
       <td colspan="7" style="background:var(--bg-inset);padding:6px 10px">
@@ -4021,6 +4037,17 @@ async function renderRuleEfficacyCard() {
     ? `Baseline (all closed trades): <strong>${base.win_rate.toFixed(0)}% WR</strong> over ${base.n} trades${base.avg_pnl_aud != null ? `, avg ${base.avg_pnl_aud >= 0 ? '+' : ''}$${fmt(Math.abs(base.avg_pnl_aud))}/trade` : ''}.`
     : 'Baseline win-rate not yet available (need closed executed trades).';
 
+  // Headline strip — decisive verdicts (too_strict/validated) surfaced at a
+  // glance, since scanning a table column for the one rule worth acting on
+  // buries the signal this card exists to deliver.
+  const _tooStrict = rules.filter(r => r.verdict === 'too_strict');
+  const _validated  = rules.filter(r => r.verdict === 'validated');
+  const _decisiveStrip = (_tooStrict.length || _validated.length) ? `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      ${_tooStrict.map(r => `<span style="padding:4px 10px;border-radius:5px;font-size:12.5px;font-weight:700;background:${VS.too_strict.bg};color:${VS.too_strict.fg};box-shadow:0 0 0 1px ${VS.too_strict.fg}44 inset">⚠ ${escapeHTML(r.label || r.code)} may be too strict</span>`).join('')}
+      ${_validated.map(r => `<span style="padding:4px 10px;border-radius:5px;font-size:12.5px;font-weight:700;background:${VS.validated.bg};color:${VS.validated.fg};box-shadow:0 0 0 1px ${VS.validated.fg}44 inset">✓ ${escapeHTML(r.label || r.code)} confirmed right</span>`).join('')}
+    </div>` : `<div class="text-xs text-muted" style="margin-bottom:10px">No decisive verdicts yet — every rule is below the ${data.min_n || 12}-closed-trade floor or its CI still spans the baseline.</div>`;
+
   el.innerHTML = `
     <div class="card">
       <div class="card-title" style="margin-bottom:6px">🧪 Rule Override Efficacy (${rules.length})</div>
@@ -4030,6 +4057,7 @@ async function renderRuleEfficacyCard() {
         <strong>Too strict?</strong> = breached trades beat baseline. <strong>Rule was right</strong> = they underperformed.
         Verdicts fire only past ${data.min_n || 12} closed trades with a statistically clear gap. ${baseTxt}
       </p>
+      ${_decisiveStrip}
       <div style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse">
           <thead>
