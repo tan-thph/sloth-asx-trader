@@ -1779,7 +1779,7 @@ async function generateTradingLessons() {
 - Market risk: VIX ${_lvl(md.vix)} (${_chg(md.vix)}), ASX 20d vol ${md.asx_vol_20d ?? 'n/a'}, breadth(adv/decline) ${md.advance_decline_ratio ?? 'n/a'}
 - Commodities: gold ${_chg(md.gold)}, oil ${_chg(md.oil)}, copper ${_chg(md.copper)}, iron ore ${_chg(md.iron_ore)}
 - FX: AUD/USD ${_chg(md.aud_usd)}
-- SPI200 futures vs spot: ${md.spi200_futures_chg ?? 'n/a'}%, RBA cash rate: ${state.rbaRate ?? 'n/a'}%`;
+- RBA cash rate: ${state.rbaRate ?? 'n/a'}%`;
     const briefNarrative = (md.analysis || md.keyDrivers)
       ? `\nThis morning's AI macro brief: ${md.analysis || md.keyDrivers}`.slice(0, 600)
       : '';

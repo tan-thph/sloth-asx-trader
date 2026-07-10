@@ -178,41 +178,41 @@ function validateSellTags(rec, ctx) {
     };
     const droppedLabels = groundTruthDropped.map(t => _GT_LABELS[t] || t).join('; ');
     const driverLabel = (rec.primary_driver || 'unknown').replace(/_/g, ' ');
-    errors.push(`AI cited "${driverLabel}" but actual data doesn't support it: ${droppedLabels} — retry or skip`);
+    errors.push(`Tagged as "${driverLabel}", but your actual numbers don't back it up — ${droppedLabels}. Review before acting on this one.`);
   }
 
   // ── primary_driver: required, must be in closed vocabulary ─────────────────
   if (!rec.primary_driver) {
-    errors.push('SELL/TRIM requires primary_driver — choose one of: ' + [...SELL_PRIMARY_DRIVERS].join(', '));
+    errors.push('This SELL/TRIM has no stated reason (primary_driver) — Claude didn\'t say why it wants to exit.');
   } else if (!SELL_PRIMARY_DRIVERS.has(rec.primary_driver)) {
-    errors.push(`primary_driver "${rec.primary_driver}" is not in the allowed list. Valid: ${[...SELL_PRIMARY_DRIVERS].join(', ')}`);
+    errors.push(`This SELL/TRIM cites an unrecognised reason "${rec.primary_driver}" — not one of the standard exit reasons.`);
   }
 
   if (secondary.length > 3) {
-    errors.push(`secondary_factors has ${secondary.length} entries — maximum is 3. Remove the least specific tags.`);
+    errors.push(`This rec lists ${secondary.length} supporting factors — more than the 3-factor cap, likely padding out a thin case.`);
   }
   for (const tag of secondary) {
     if (!SELL_SECONDARY_FACTORS.has(tag)) {
-      errors.push(`secondary_factors "${tag}" not in allowed list. Valid: ${[...SELL_SECONDARY_FACTORS].join(', ')}`);
+      errors.push(`This rec cites an unrecognised supporting factor "${tag}" — not one of the standard tags.`);
     }
   }
 
   // ── urgency: required, must be in closed vocabulary ────────────────────────
   if (!rec.urgency) {
-    errors.push('SELL/TRIM requires urgency — one of: immediate, routine, monitor');
+    errors.push('This SELL/TRIM has no urgency rating — unclear whether it should be acted on now or just watched.');
   } else if (!SELL_URGENCY.has(rec.urgency)) {
-    errors.push(`urgency "${rec.urgency}" must be one of: immediate, routine, monitor`);
+    errors.push(`This SELL/TRIM has an unrecognised urgency rating "${rec.urgency}".`);
   } else if (rec.action === 'SELL' && rec.urgency === 'monitor') {
     // "monitor" means "conditions forming but not yet crystallised" — only valid for TRIM
     // where a partial exit can wait. SELL is an immediate/routine decisive exit.
-    errors.push('urgency "monitor" is only valid for TRIM — use "immediate" or "routine" for SELL');
+    errors.push('This is a full SELL marked urgency "monitor" — that\'s a "just watch it" rating, not a decisive exit. Should be immediate or routine.');
   }
 
   // ── forbidden combinations ─────────────────────────────────────────────────
   const allTags = new Set([rec.primary_driver, ...secondary]);
   for (const [a, b] of SELL_FORBIDDEN_COMBOS) {
     if (allTags.has(a) && allTags.has(b)) {
-      errors.push(`forbidden combination: "${a}" and "${b}" cannot both apply — choose the causally upstream one`);
+      errors.push(`Contradictory reasoning: this rec cites both "${a.replace(/_/g, ' ')}" and "${b.replace(/_/g, ' ')}", which can't both be true at the same time.`);
     }
   }
 
@@ -224,14 +224,14 @@ function validateSellTags(rec, ctx) {
     if (!needed.some(t => secondary.includes(t))) {
       const driverLabel = rec.primary_driver.replace(/_/g, ' ');
       const neededLabels = needed.map(t => t.replace(/_/g, ' ')).join(' or ');
-      errors.push(`"${driverLabel}" requires supporting evidence (${neededLabels}) — add one of these as a secondary factor`);
+      errors.push(`Tagged as "${driverLabel}", but no evidence for it was given (expected ${neededLabels}) — treat this rec with extra scrutiny.`);
     }
   }
 
   // ── better_opportunity with valid alternativeTicker ────────────────────────
   if (rec.primary_driver === 'better_opportunity') {
     if (!/^[A-Z0-9]{2,5}(\.AX)?$/.test(rec.alternativeTicker)) {
-      errors.push(`alternativeTicker "${rec.alternativeTicker}" is not a valid ASX ticker (2-5 uppercase alphanumeric, optional .AX)`);
+      errors.push(`This rec says capital should rotate into "${rec.alternativeTicker}", but that doesn't look like a valid ASX ticker.`);
     }
   }
 

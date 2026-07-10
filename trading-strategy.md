@@ -54,8 +54,6 @@ The regime gate is the first and most consequential filter in the pipeline. It r
 | ASX200 ATR% | > 1.5% | highVol +1 |
 | Iron ore 5d change | < −3% (when riskOff 5d already) | riskOff +1 |
 | AUD/USD 5d change | < −1% (when riskOff 5d already) | riskOff +1 |
-| SPI200 futures vs spot | < −1.5% | riskOff +2 |
-| SPI200 futures vs spot | > +1.0% | riskOn +1 |
 
 Panic requires the hard override (VIX > 30 + breadth collapse). All other regimes are determined by the plurality of weighted votes.
 
@@ -287,9 +285,6 @@ A setup passes when **all** of the following are true:
 | VWAP discount | Price ≤ VWAP × (1 − 0.003), i.e. ≥ 0.3% below VWAP |
 | Intraday RSI | RSI(14) on 5m bars ≤ 40 |
 | Setup score | ≥ 50 |
-| SPI200 defensive overlay | SPI200 futures vs spot > −1.5% (before 11:00 AEST) |
-
-If SPI200 futures are ≤ −1.5% before 11:00 AEST (expected weak gap-down open), all `passes` are forced to False. **Known limitation:** the overlay comment references a "Mode A (VWAP recapture)" fallback that has not yet been implemented — on gap-down days, the scanner generates zero setups.
 
 ### 5.3 Scoring (`_score_setup()`)
 

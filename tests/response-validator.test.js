@@ -499,6 +499,6 @@ describe('validateSellTags — ground-truth numeric checks', () => {
     }));
     expect(valid).toBe(false);
     expect(fixed).toBeNull();
-    expect(errors.some(e => e.includes('target_reached') && e.includes('dividend_at_risk'))).toBe(true);
+    expect(errors.some(e => e.includes('target reached') && e.includes('dividend at risk'))).toBe(true);
   });
 });

@@ -213,7 +213,7 @@ _STOOQ_MAP: dict[str, str] = {
     "GC=F":     "gc.f",
     "CL=F":     "cl.f",
     "HG=F":     "hg.f",
-    # TIO=F (iron ore) and YAP=F (SPI200 futures) are not available on Stooq.
+    # TIO=F (iron ore) is not available on Stooq.
     # ASX sector indices — ^AX* yfinance symbols map to ^ax* on Stooq.
     "^AXMJ":    "^axmj",   # Materials
     "^AXFJ":    "^axfj",   # Financials

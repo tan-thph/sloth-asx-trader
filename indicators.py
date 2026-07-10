@@ -301,7 +301,19 @@ def compute_stochastic(high, low, close, k_period=14, d_period=3):
 
 
 def compute_adx(high, low, close, period=14):
-    """Average Directional Index."""
+    """Average Directional Index (Wilder's original smoothing).
+
+    Audit fix (2026-07-09): the TR/+DM/-DM/DX smoothing previously used
+    `ewm(span=period, adjust=False)` (alpha=2/(period+1)) instead of Wilder's
+    RMA (alpha=1/period, i.e. `ewm(com=period-1)`) — the convention this same
+    file already uses for compute_rsi() and compute_atr(). Span-EMA is more
+    reactive and runs materially hotter: on a real BHP sample the app read
+    ADX=27.7 ("strong trend", >25) against the correct Wilder value of 16.8
+    ("weak"). Since `adx > 25` gates trend_strength, the scanner's "trending"
+    label, the Signals page badge, backtest.py's entry filter, and
+    routes/learning.py's driver classification, this silently over-fired
+    "strong trend" across the whole app. Now matches Wilder/TradingView.
+    """
     tr = pd.concat([
         high - low,
         (high - close.shift()).abs(),
@@ -315,11 +327,11 @@ def compute_adx(high, low, close, period=14):
     plus_dm[(plus_dm < minus_dm)] = 0
     minus_dm[(minus_dm < plus_dm)] = 0
 
-    atr = tr.ewm(span=period, adjust=False).mean()
-    plus_di = 100 * plus_dm.ewm(span=period, adjust=False).mean() / atr
-    minus_di = 100 * minus_dm.ewm(span=period, adjust=False).mean() / atr
+    atr = tr.ewm(com=period - 1, min_periods=period).mean()
+    plus_di = 100 * plus_dm.ewm(com=period - 1, min_periods=period).mean() / atr
+    minus_di = 100 * minus_dm.ewm(com=period - 1, min_periods=period).mean() / atr
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    adx = dx.ewm(span=period, adjust=False).mean()
+    adx = dx.ewm(com=period - 1, min_periods=period).mean()
     return adx, plus_di, minus_di
 
 
@@ -328,8 +340,26 @@ def compute_obv(close, volume):
     return (direction * volume).cumsum()
 
 
-def compute_vwap(high, low, close, volume):
+def compute_vwap(high, low, close, volume, period=None):
+    """Volume-weighted average price.
+
+    period=None (default): cumulative VWAP from the start of the passed series
+    — correct for an intraday VWAP where the caller already slices to just
+    today's bars (see routes/intraday.py's own _compute_vwap, which has that
+    contract). period=N: a true rolling N-bar VWAP.
+
+    Audit fix (2026-07-09): analyse_ticker()'s "vwap_20d" field called this
+    with the full ~6-month `hist` series and no window, so despite the "20d"
+    name it was actually a VWAP since the start of the whole fetch period
+    (~125 trading days), not the last 20. On a real BHP sample this put the
+    reported VWAP 10%+ away from the true 20-day value and flipped
+    `price_vs_vwap` from "below" to "above" — both are injected verbatim into
+    the Claude prompt and shown on the Signals page. Callers that want a
+    genuine N-day VWAP must now pass period=N explicitly.
+    """
     typical = (high + low + close) / 3
+    if period:
+        return (typical * volume).rolling(period).sum() / volume.rolling(period).sum()
     return (typical * volume).cumsum() / volume.cumsum()
 
 
@@ -653,7 +683,7 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
     adv_20      = float((close * volume).rolling(20).mean().iloc[-1]) if len(close) >= 20 else 0.0
     obv         = compute_obv(close, volume)
     obv_signal  = "rising" if obv.iloc[-1] > obv.rolling(10).mean().iloc[-1] else "falling"
-    vwap_20     = compute_vwap(high, low, close, volume)
+    vwap_20     = compute_vwap(high, low, close, volume, period=20)
 
     # ── Trend direction score ─────────────────────────────────────────────────
     cp = close.iloc[-1]

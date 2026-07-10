@@ -2202,7 +2202,6 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
     aud_usd_chg:           _md.aud_usd?.change_pct ?? null,
     gold_chg:              _md.gold?.change_pct ?? null,
     iron_ore_chg:          _md.iron_ore?.change_pct ?? null,
-    spi200_futures_chg:    _md.spi200_futures_chg ?? null,
     asx_vol_20d:           _md.asx_vol_20d ?? null,
     advance_decline_ratio: _md.advance_decline_ratio ?? null,
     // US market (overnight lead), commodities, and risk gauges — captured per-rec

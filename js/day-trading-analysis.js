@@ -569,6 +569,12 @@ function executeDayTrade(recId) {
     rec.status    = 'executed';
     rec.mode      = mode;        // remember mode for the close path
     rec._execQty  = qty;         // remember actual qty for close dialog and display
+    // A rec that missed a scan or two while still pending carries _stale/_staleScans
+    // (see the "not in latest scan" bookkeeping in runDayTradingScan/_runUniverseScan) —
+    // once executed it's an open position, not a scan candidate, so these fields are
+    // stale bookkeeping in the literal sense and must not linger to mislabel the card.
+    delete rec._stale;
+    delete rec._staleScans;
     scheduleSave();
     if (isRealTrade(mode)) pushCashToDb(state.cash);   // only real cash lives in the cash table
     const qtyNote = (qty !== rec.qty) ? ` (AI suggested ${rec.qty})` : '';

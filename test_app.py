@@ -2043,7 +2043,7 @@ class TestSprint5(unittest.TestCase):
         appear in aggregates — a 2-trade 'pattern' is noise, not signal."""
         from routes.learning import _compute_digest_aggregates
         rows = [
-            {"outcome_status": "win", "market_context": json.dumps({"spi200_futures_chg": 0.5}),
+            {"outcome_status": "win", "market_context": json.dumps({"asx_vol_20d": 12}),
              "thesis_verdict": None, "skill_score": None, "ai_confidence": None,
              "exit_quality_tag": None, "primary_entry_driver": None}
             for _ in range(2)
@@ -2056,14 +2056,14 @@ class TestSprint5(unittest.TestCase):
         from routes.learning import _compute_digest_aggregates
         rows = [
             {"outcome_status": "win" if i % 2 == 0 else "loss",
-             "market_context": json.dumps({"spi200_futures_chg": 0.5}),
+             "market_context": json.dumps({"asx_vol_20d": 12}),
              "thesis_verdict": None, "skill_score": None, "ai_confidence": None,
              "exit_quality_tag": None, "primary_entry_driver": None}
             for i in range(8)
         ]
         agg = _compute_digest_aggregates(rows)
         self.assertEqual(len(agg["macro_bucket_stats"]), 1)
-        self.assertEqual(agg["macro_bucket_stats"][0]["bucket"], "spi_pos")
+        self.assertEqual(agg["macro_bucket_stats"][0]["bucket"], "vol_low")
         self.assertEqual(agg["macro_bucket_stats"][0]["n"], 8)
 
     def test_digest_aggregates_thesis_verdict_luck_vs_skill(self):
@@ -2113,14 +2113,14 @@ class TestSprint5(unittest.TestCase):
             "outcome_status": "loss", "realized_pnl_pct": -3.5, "holding_period_days": 12,
             "entry_signals_json": json.dumps({"rsi_14": 65, "bb_pct_b": 0.8}),
             "exit_signals_json": json.dumps({"rsi_14": 40, "bb_pct_b": 0.2}),
-            "market_context": json.dumps({"spi200_futures_chg": -0.8, "asx_vol_20d": 22, "advance_decline_ratio": 0.3}),
+            "market_context": json.dumps({"asx_vol_20d": 22, "advance_decline_ratio": 0.3}),
             "error_type": "thesis_broken", "success_tags": None,
             "thesis_verdict": "invalidated", "exit_quality_tag": None,
             "bull_case": "rate cuts coming", "bear_case": "valuation stretched",
         }
         line = _format_digest_exemplar(row)
         self.assertIn("CBA.AX", line)
-        self.assertIn("SPI", line)
+        self.assertIn("vol22", line)
         self.assertIn("-3.5%", line)
         self.assertIn("valuation stretched", line)  # bear_case used since outcome is a loss
 
@@ -9840,18 +9840,18 @@ class TestSprintQuant(unittest.TestCase):
         self.client = asx_server.app.test_client()
         asx_server.app.config["TESTING"] = True
 
-    def test_intraday_scan_accepts_spi_chg_param(self):
-        """POST /api/intraday/scan accepts spi_chg without error (empty tickers = 200)."""
+    def test_intraday_scan_empty_tickers_returns_200(self):
+        """POST /api/intraday/scan with empty tickers returns 200 + {}."""
         r = self.client.post('/api/intraday/scan',
-                             json={'tickers': [], 'spi_chg': -2.0},
+                             json={'tickers': []},
                              content_type='application/json')
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json(), {})
 
-    def test_intraday_scan_no_spi_chg_still_works(self):
-        """POST /api/intraday/scan without spi_chg still returns 200."""
+    def test_intraday_scan_ignores_unknown_body_fields(self):
+        """POST /api/intraday/scan tolerates extra/legacy JSON keys without error."""
         r = self.client.post('/api/intraday/scan',
-                             json={'tickers': []},
+                             json={'tickers': [], 'spi_chg': -2.0},
                              content_type='application/json')
         self.assertEqual(r.status_code, 200)
 
@@ -9894,20 +9894,6 @@ class TestSprintQuant(unittest.TestCase):
         self.assertIn('_dtMaxHoldDays', src)
         self.assertIn('_dtTimeStopBadge', src)
         self.assertIn('TIME_STOP_DAYS', src)
-
-    def test_intraday_strategy_js_sends_spi_chg(self):
-        """intraday-strategy.js sends spi_chg in the scan request body."""
-        with open(os.path.join(ROOT, 'js', 'intraday-strategy.js'), encoding='utf-8') as f:
-            src = f.read()
-        self.assertIn('spi_chg', src)
-
-    def test_intraday_py_handles_spi_chg(self):
-        """routes/intraday.py reads spi_chg from request body."""
-        with open(os.path.join(ROOT, 'routes', 'intraday.py'), encoding='utf-8') as f:
-            src = f.read()
-        self.assertIn('spi_chg', src)
-        self.assertIn('spi_defensive', src)
-        self.assertIn('spi_blocked', src)
 
 
 class TestSellTrimSizingAndMacroRace(unittest.TestCase):

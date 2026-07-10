@@ -381,17 +381,6 @@ Intraday stop/target alerts are checked via `checkIntradayStopTarget()` on every
 - `state.intraday.todayPnl` accumulates net P&L from all same-day closes.
 - **Resets automatically on the next page load after midnight** — `pnlDate` is compared to `todayStr()` on DB restore; stale values are zeroed.
 
-### 8.8 SPI200 Futures Defensive Overlay
-
-Large negative SPI200 futures moves create opening-session selling pressure that makes VWAP Discount entries (Mode B) lower quality.
-
-**Rule:** When `spi200_futures_chg ≤ −1.5%` AND time is before 11:00 AEST:
-- Mode B (VWAP Discount) setups are disabled (`passes = false`)
-- Mode A (VWAP Recapture) would remain enabled when implemented
-- An amber warning banner appears in the Intraday tab
-
-The threshold of −1.5% was chosen based on the enhancement review. Threshold sensitivities (−1.0%, −2.0%) can be evaluated via the backtest tab.
-
 ---
 
 ## 9. Market Regime Awareness
@@ -424,8 +413,6 @@ The portfolio heat budget (total $ at risk across open positions as % of net wor
 | panic | 0% (all BUY/TOP_UP blocked) |
 
 The **effective limit** = min(user setting, regime ceiling). During riskOff, new positions are rare. During panic, no new longs are permitted regardless of user setting.
-
-**SPI200 futures lead indicator:** The SPI200 futures price (`spi200_futures_chg` on the Macro page) reflects what institutional participants expect the ASX200 to open at — it votes in the regime classifier as a same-session lead indicator. A futures drop of −1.5%+ adds a `riskOff` vote even before the ASX opens.
 
 ---
 

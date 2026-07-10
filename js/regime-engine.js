@@ -19,8 +19,6 @@ const REGIME_THRESHOLDS = {
   atrPctHighVol:       1.5, // ASX200 ATR% > this → intraday volatility elevated
   riskOffReturn5d:    -2.0, // ASX200 5d return < this → risk-off
   riskOnReturn5d:      1.0, // ASX200 5d return > this (+ good A/D) → risk-on
-  spiFuturesRiskOff:  -1.5, // SPI200 futures vs spot < this % → expected weak open
-  spiFuturesRiskOn:    1.0, // SPI200 futures vs spot > this % → expected strong open
 };
 
 // classifyRegime — reads extended macro fields added by the updated /api/macro endpoint.
@@ -37,7 +35,6 @@ function classifyRegime(macroData) {
   const audChg5d  = macroData.aud_usd_change_5d;
   const ironChg5d = macroData.iron_ore_change_5d;
   const asxVol20d = macroData.asx_vol_20d;
-  const spiChg    = macroData.spi200_futures_chg;
 
   const signals = [];
   const votes = { riskOn: 0, riskOff: 0, panic: 0, highVol: 0, trend: 0, sideways: 0 };
@@ -121,15 +118,6 @@ function classifyRegime(macroData) {
     }
     if (audChg5d != null && audChg5d < -1) {
       vote('riskOff', 1, `AUD/USD ${audChg5d.toFixed(2)}% 5d → risk currency weakness`);
-    }
-  }
-
-  // ── SPI200 futures (lead indicator — moves overnight before ASX opens) ──────
-  if (spiChg != null) {
-    if (spiChg < REGIME_THRESHOLDS.spiFuturesRiskOff) {
-      vote('riskOff', 2, `SPI200 futures ${spiChg.toFixed(1)}% vs spot → expected weak open`);
-    } else if (spiChg > REGIME_THRESHOLDS.spiFuturesRiskOn) {
-      vote('riskOn', 1, `SPI200 futures ${spiChg.toFixed(1)}% vs spot → expected strong open`);
     }
   }
 

@@ -480,7 +480,6 @@ async function runMacroAnalysis(force=false) {
           + (d.asx200_5d_return != null ? ` (5d: ${fmtp(d.asx200_5d_return)}` : '')
           + (d.asx200_20d_return != null ? `, 20d: ${fmtp(d.asx200_20d_return)})` : (d.asx200_5d_return != null ? ')' : '')));
         if(d.asx_vol_20d != null) lines.push(`ASX 20d Realised Vol: ${d.asx_vol_20d.toFixed(1)}%`);
-        if(d.spi200_futures_chg != null) lines.push(`SPI200 Futures vs ASX200 spot: ${fmtp(d.spi200_futures_chg)}`);
         if(d.advance_decline_ratio != null) lines.push(`ASX Breadth (% above 20d SMA): ${d.advance_decline_ratio.toFixed(1)}%`);
         if(d.sectors) {
           const sLines = Object.values(d.sectors).filter(Boolean)

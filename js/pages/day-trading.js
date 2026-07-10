@@ -608,7 +608,7 @@ function _renderDtRec(r, compact = false) {
 
   const borderColor = isClosed ? '#059669' : isExecuted ? '#6366f1' : isPending ? '#f59e0b' : '#6b7280';
   return `
-    <div class="card" style="border-left:3px solid ${borderColor};padding:12px 14px${(isStale || r._stale) ? ';opacity:.75' : ''}">
+    <div class="card" style="border-left:3px solid ${borderColor};padding:12px 14px${(isStale || (isPending && r._stale)) ? ';opacity:.75' : ''}">
       <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">
 
         <!-- Left: ticker + signals -->
@@ -619,7 +619,7 @@ function _renderDtRec(r, compact = false) {
             ${isExecuted ? `<span style="background:#6366f1;color:#fff;font-size:10px;padding:2px 7px;border-radius:4px">EXECUTED</span>` : ''}
             ${isClosed   ? `<span style="background:#059669;color:#fff;font-size:10px;padding:2px 7px;border-radius:4px">CLOSED</span>` : ''}
             ${isStale    ? `<span style="background:#ef444422;color:#ef4444;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Setup is ${recAgeDays}d old — signals may no longer be valid">⚠ STALE ${recAgeDays}d</span>` : ''}
-            ${r._stale   ? `<span style="background:#f59e0b22;color:#f59e0b;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Did not reappear in the latest universe scan (missed ${r._staleScans || 1}/${3} scan(s)) — kept until it reappears or expires">⚠ NOT IN LATEST SCAN</span>` : ''}
+            ${(isPending && r._stale) ? `<span style="background:#f59e0b22;color:#f59e0b;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px" title="Did not reappear in the latest universe scan (missed ${r._staleScans || 1}/${3} scan(s)) — kept until it reappears or expires">⚠ NOT IN LATEST SCAN</span>` : ''}
             ${r.holdDays ? `<span style="font-size:11px;color:var(--text-muted)">${r.holdDays}d hold est.</span>` : ''}
             ${isPending && typeof dtWinProbLabel === 'function' ? dtWinProbLabel(r) : ''}
             ${isExecuted ? _dtTimeStopBadge(r) : ''}
@@ -956,17 +956,6 @@ function _renderIntradaySetupsContent() {
   const pending = recs.filter(r => r.status === 'pending');
   const scanInfo = id.lastScan;
 
-  // SPI defensive mode: check if any scan result flagged spi_defensive
-  const _spiDefensive = (id.recommendations || []).some(function(r) { return r.spi_defensive; });
-  const _spiChg = (id.lastScan && id.recommendations && id.recommendations[0] && id.recommendations[0].spi_chg != null)
-    ? id.recommendations[0].spi_chg : null;
-  const spiWarningBanner = (_spiDefensive && _spiChg != null)
-    ? `<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#92400e">
-        ⚠ <strong>SPI200 Defensive Mode</strong> — Futures ${_spiChg.toFixed(1)}% ≤ −1.5% before 11:00 AEST.
-        VWAP Discount entries (Mode B) are disabled. Only VWAP Recapture setups would qualify.
-       </div>`
-    : '';
-
   // ── Action bar ────────────────────────────────────────────────────────────
   const universeLabel = scanInfo && scanInfo.universeLabel
     ? scanInfo.universeLabel
@@ -1138,7 +1127,6 @@ function _renderIntradaySetupsContent() {
       }).join('');
 
   return `
-    ${spiWarningBanner}
     ${actionBar}
     ${positionsCard}
     <div style="margin-bottom:6px;font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">

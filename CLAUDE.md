@@ -29,7 +29,7 @@ Signals (indicators.py) → Regime gate (regime-engine.js) → Claude → Quant 
 
 | Layer | Job |
 |---|---|
-| **Regime engine** | Classifies macro (riskOn/riskOff/panic/highVol/trend/sideways); gates strategies; `sizeMult=0` on panic → `_regimeBlocked`, recs dropped. `stopAtrMult` 2.5–4.0×; `_blendedSizeMult` transitions over 30 min on flip. SPI200 futures vote in classifier. |
+| **Regime engine** | Classifies macro (riskOn/riskOff/panic/highVol/trend/sideways); gates strategies; `sizeMult=0` on panic → `_regimeBlocked`, recs dropped. `stopAtrMult` 2.5–4.0×; `_blendedSizeMult` transitions over 30 min on flip. |
 | **Claude** | Qualitative conviction only — never does arithmetic. Always receives TAX_LOSS_HARVEST_ACTIVE, date, time, regime, calibration block. |
 | **Quant engine** | Deterministic sizing: Kelly + vol scalar + multi-constraint. Rejects `kellyFrac ≤ 0`. Stop = `stopAtrMult × earningsAdj × ATR`; `earningsAdj=1.3` when `pre_earnings_risk`. |
 | **Validator** | Schema + business rules; auto-repair ≤2 retries; HOLD uses `requiredUnless`. |
@@ -93,7 +93,7 @@ config.js → utils.js → notifications.js → regime-engine.js → learning-lo
 | `js/utils.js` | `escapeHTML`, `fmt`, `fmtp`, portfolio math, `mergedPortfolio()`, `_detectExitReason()` (canonical — do NOT redefine in page files), `isRealTrade()`, `askTradeMode()`, `adjustCashForMode()`, `_applyTheme()`, `reasoningText()`, `entrySignature()` |
 | `js/api.js` | Backend fetch wrappers, `saveStateToDb()` / `loadStateFromDb()` |
 | `js/claude-client.js` | `callClaude(agentType, msg, opts)` — direct + proxy mode. Portfolio uses forced tool use. `_callLocalAnalysis()` fast-path when `useLocalLLM`. Agent types: `portfolio`, `analyst`, `pm`, `dayTrade`, `universe`, `macro`, `assistant`. |
-| `js/regime-engine.js` | `classifyRegime()`, `applyRegimeModifiers()`, `getRegimeModifiers()` (returns `stopAtrMult`). Panic → `_regimeBlocked`. `_blendedSizeMult` 30-min linear transition on flip. SPI200 votes in classifier. |
+| `js/regime-engine.js` | `classifyRegime()`, `applyRegimeModifiers()`, `getRegimeModifiers()` (returns `stopAtrMult`). Panic → `_regimeBlocked`. `_blendedSizeMult` 30-min linear transition on flip. |
 | `js/quant-engine.js` | `computeTradeParams()` — Kelly + constraints. Rejects `kellyFrac ≤ 0` before `minQty` floor. Stop = `regimeMod.stopAtrMult × earningsAdj × ATR`. |
 | `js/response-validator.js` | `validateRec()`, `getValidatedAnalysisWithRepair()`. Ticker: `[A-Z0-9]{2,5}`. `requiredUnless:'HOLD'`. |
 | `js/learning-loop.js` | `fetchCalibrationBlock()`, `computeThesisDrift()` (exit verdict: validated/partially_validated/invalidated/reversed/irrelevant), `fetchEntryContexts()`. |
@@ -175,7 +175,7 @@ routes/learning.py _calib_compute() → decay-weighted WRs injected into next pr
 - `GET /api/portfolio/splits-check?tickers=...` — yfinance splits last 90d
 
 ### Market data
-- `GET /api/macro` — ASX200, AUD/USD, gold, iron ore, SPI200 futures, A-VIX proxy. 5-min cache.
+- `GET /api/macro` — ASX200, AUD/USD, gold, iron ore, A-VIX proxy. 5-min cache.
 - `GET /api/quote/<ticker>` — price + sector + `fetched_at`. 45s cache. Falls back to Stooq (`_source:'stooq'`).
 - `GET /api/analyse/<ticker>` / `POST /api/analyse/batch` — full indicator pack. 5-min cache.
 - `GET /api/risk?tickers=...&rf=4.35` — beta, Sharpe, VaR, CVaR, correlation matrix

@@ -223,7 +223,6 @@ def _macro_payload() -> dict:
         "us10y":    ("^TNX",     "1mo"),  # 5d returns only 1 row; need >=2 for change_pct
         "iron_ore": ("TIO=F",    "1mo"),
         "copper":   ("HG=F",     "5d"),
-        "spi200":   ("YAP=F",    "5d"),    # ASX SPI200 futures — lead indicator vs ^AXJO spot
         # ASX sector indices — use ^AX* prefix (Yahoo Finance canonical format).
         # XMJ.AX / XFJ.AX etc. are delisted/renamed on yfinance; ^AXMJ is the
         # correct symbol for the ASX Materials Sector Index and so on.
@@ -367,24 +366,6 @@ def _macro_payload() -> dict:
     except Exception:
         macro_data["advance_decline_ratio"] = None
 
-    # ── SPI200 futures vs ASX200 spot (overnight lead indicator) ─────────────
-    # YAP=F is the ASX SPI200 futures contract. When US markets are open
-    # overnight, this moves before ASX opens, giving a ~12h lead on direction.
-    # spi200_futures_chg = (futures / asx200_spot - 1) × 100
-    spi_hist = _histories.get("spi200")
-    if spi_hist is not None and len(spi_hist) >= 1 and asx_hist is not None:
-        try:
-            spi_price = safe_float(spi_hist["Close"].iloc[-1])
-            asx_spot  = safe_float(asx_hist["Close"].iloc[-1])
-            if spi_price and asx_spot:
-                macro_data["spi200_futures_chg"] = round((spi_price / asx_spot - 1) * 100, 2)
-            else:
-                macro_data["spi200_futures_chg"] = None
-        except Exception:
-            macro_data["spi200_futures_chg"] = None
-    else:
-        macro_data["spi200_futures_chg"] = None
-
     # Lazy daily snapshot for AI Lesson Generator macro history.
     # INSERT OR IGNORE: only the first cache-miss per day writes a row.
     try:
@@ -395,13 +376,12 @@ def _macro_payload() -> dict:
             _conn.execute(
                 "INSERT OR IGNORE INTO macro_snapshots "
                 "(snapshot_date, asx200_chg, aud_usd_chg, gold_chg, oil_chg, "
-                "iron_ore_chg, spi200_futures_chg, asx_vol_20d, advance_decline_ratio, "
+                "iron_ore_chg, asx_vol_20d, advance_decline_ratio, "
                 "vix_level, sp500_chg, copper_chg, us10y_level) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (_today_str,
                  _chg("asx200"), _chg("aud_usd"), _chg("gold"), _chg("oil"),
                  _chg("iron_ore"),
-                 macro_data.get("spi200_futures_chg"),
                  macro_data.get("asx_vol_20d"),
                  macro_data.get("advance_decline_ratio"),
                  _lvl("vix"), _chg("sp500"), _chg("copper"), _lvl("us10y"))

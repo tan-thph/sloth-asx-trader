@@ -534,7 +534,6 @@ def _flatten_market_context(market_context_json: str) -> str:
 
     _KEY_MAP = [
         ("asx200_chg",            "asx200",     lambda v: f"{v:+.1f}%"),
-        ("spi200_futures_chg",    "spi200_fut", lambda v: f"{v:+.1f}%"),
         ("advance_decline_ratio", "breadth",    lambda v: f"{v:.0%}"),
         ("asx_vol_20d",           "asx_vol20d", lambda v: f"{v:.1f}%"),
         ("sp500_chg",             "sp500",      lambda v: f"{v:+.1f}%"),

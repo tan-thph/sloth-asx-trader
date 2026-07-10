@@ -2358,11 +2358,8 @@ def _compute_digest_aggregates(rows: list[dict]) -> dict:
             mc = json.loads(r["market_context"]) if r["market_context"] else {}
         except Exception:
             mc = {}
-        spi = mc.get("spi200_futures_chg")
         vol = mc.get("asx_vol_20d")
         adl = mc.get("advance_decline_ratio")
-        if isinstance(spi, (int, float)):
-            buckets.setdefault(f"spi_{'pos' if spi >= 0 else 'neg'}", []).append(r)
         if isinstance(vol, (int, float)):
             buckets.setdefault(f"vol_{'high' if vol >= 18 else 'low'}", []).append(r)
         if isinstance(adl, (int, float)):
@@ -2465,8 +2462,7 @@ def _format_digest_exemplar(row: dict) -> str:
 
     tech = (f"RSI {_n(entry.get('rsi_14'))}→{_n(exitd.get('rsi_14'))}, "
             f"BB%b {_n(entry.get('bb_pct_b'))}→{_n(exitd.get('bb_pct_b'))}")
-    macro = (f"SPI{_n(mc.get('spi200_futures_chg'), '%')} "
-             f"vol{_n(mc.get('asx_vol_20d'))} "
+    macro = (f"vol{_n(mc.get('asx_vol_20d'))} "
              f"breadth{_n(mc.get('advance_decline_ratio'))}")
     tags = ",".join(t for t in [row.get("error_type"), row.get("success_tags"),
                                  row.get("thesis_verdict"), row.get("exit_quality_tag")] if t)
@@ -4684,10 +4680,11 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         except Exception:
             pass  # never let thesis-matrix errors break calibration
 
-        # HOLD outcome tracking: nudge when HOLD recs frequently miss a large
-        # move (n>=10, >50% miss rate) — the model is too passive. Continuous-
-        # metric n-gate (like _compute_thesis_drift), not a Wilson CI, since
-        # this is a single proportion rather than a win/loss comparison.
+        # HOLD outcome tracking: nudge when HOLD recs frequently sat through a
+        # sustained adverse move — the model is too passive. Gated in
+        # _compute_hold_outcome_nudge() on a raw-count floor (n>=_MIN_NUDGE_N)
+        # AND a Wilson 95% CI whose lower bound clears 50%, same as every other
+        # behaviour-changing nudge in this module (gotcha #42/#92).
         try:
             _hold_nudge = _compute_hold_outcome_nudge(conn)
             if _hold_nudge:

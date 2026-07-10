@@ -285,13 +285,6 @@ def intraday_scan():
     body    = request.get_json(silent=True) or {}
     tickers = [t.upper() for t in body.get("tickers", []) if t]
 
-    # SPI200 defensive overlay: when futures are ≤ −1.5% before 11:00 AEST,
-    # disable VWAP-Discount setups (Mode B). Only Mode A (VWAP Recapture) remains
-    # enabled in future — for now, all passes are blocked since only Mode B is implemented.
-    spi_chg = float(body.get('spi_chg', 0) or 0)
-    _now_sydney = datetime.now(_SYDNEY_TZ)
-    _spi_defensive = spi_chg <= -1.5 and _now_sydney.hour < 11
-
     if not tickers:
         return jsonify({}), 200
 
@@ -325,19 +318,5 @@ def intraday_scan():
             except Exception as exc:
                 log.warning("intraday: error for %s: %s", t, exc)
                 results[t] = {"error": str(exc), "ticker": t}
-
-    # Apply SPI defensive overlay — mark blocked results
-    if _spi_defensive:
-        for t, res in results.items():
-            if isinstance(res, dict) and res.get('passes'):
-                res['passes'] = False
-                res['spi_blocked'] = True
-                res['spi_note'] = f'Mode B disabled: SPI200 futures {spi_chg:.1f}% ≤ −1.5% before 11:00 AEST'
-
-    # Attach SPI context to every result for frontend display
-    for t, res in results.items():
-        if isinstance(res, dict):
-            res['spi_chg'] = spi_chg
-            res['spi_defensive'] = _spi_defensive
 
     return jsonify(results)
