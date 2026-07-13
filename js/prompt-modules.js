@@ -72,7 +72,7 @@ PRIMARY DRIVERS (must be evaluated; cite at least 2 that are directly relevant):
     Australian banks are high-yield income stocks; dividend cut risk is the #1 retail concern.
     Gross yield (after franking) should be cited alongside cash yield.
 
-TECHNICAL SIGNALS ARE CONFIRMING ONLY (Rule 20 applies):
+TECHNICAL SIGNALS ARE CONFIRMING ONLY (Rule 19 applies):
   Do NOT recommend SELL/TRIM on a major bank solely due to RSI, death cross, or BB breakdown.
   Require at least one fundamental deterioration (NIM compression, rising bad debts, capital breach,
   dividend at risk) alongside any technical signal. Moving-average crossovers on banks reflect

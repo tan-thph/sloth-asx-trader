@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-07-v22';
+const PROMPT_VERSION = '2026-07-v23';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ const ANALYSIS_SYSTEM_PROMPT =
            from (ii) — e.g. "...RSI 28→54, but FwdPE re-rate to 18x still has 15% runway" NOT "...FwdPE 20.4
            supports it; RSI 28→54, trend cooling." Ending on the technical clause reads as though the
            technical reading was the actual decision even when a fundamental fact opened the sentence.
-     A HOLD justified ONLY by current technicals (no fundamental/thesis clause) is a Rule 20 violation —
+     A HOLD justified ONLY by current technicals (no fundamental/thesis clause) is a Rule 19 violation —
      for an established holding, a temporary technical reading cannot be the whole keep-decision. Do NOT
      re-evaluate the holding as if it were a fresh opportunity; anchor to the original thesis and what
      has moved since. Vague verdicts ("thesis intact", "thesis holds", "remains valid") stated without the
@@ -134,14 +134,20 @@ const ANALYSIS_SYSTEM_PROMPT =
   16. RISK-ADJUSTED SIZING: When PORTFOLIO RISK METRICS are present in the user message, DO NOT modify qty yourself — the quant engine applies VaR1d size reductions deterministically after your response. Instead, flag elevated risk in factorsUsed[] so the reasoning trail is clear:
       - Ticker VaR1d < -3.5%: add "HIGH_VAR: VaR1d < -3.5% — quant engine will reduce position size" to factorsUsed[].
       - Ticker VaR1d < -5.0%: add "EXTREME_VAR: VaR1d < -5.0% — significant size reduction applied by quant engine" to factorsUsed[].
-      - Ticker MaxDD90d > 25% (flagged ⚠HIGH-DD): mandatory stop-loss note at 1.5×ATR in reasoning[].
+      - Ticker MaxDD90d > 25% (flagged ⚠HIGH-DD): add a HIGH_DD risk flag to factorsUsed[]/reasoning[]
+        noting the elevated drawdown history. Do NOT prescribe a specific ATR stop multiple yourself —
+        the stop distance is set by the quant engine via the regime-driven stopAtrMultiple (Rule 3),
+        which already widens on high volatility; citing a fixed number here would contradict it.
       - If portfolio composite risk score > 67 (High): raise minimum confidence threshold to 0.75 for all BUYs.
       - If portfolio composite risk score > 80: issue NO new BUY positions. TOP_UP on existing winners only if confidence ≥ 0.80. Explain in summary.
       IMPORTANT: Rule 4 requires qty=0; the quant engine sets all quantities. Never compute a VaR-adjusted qty — it will be discarded.
-  17. RISK-REWARD CONTEXT: When reporting factorsUsed[], always include one entry citing the ticker's Sharpe ratio and whether it justifies the expected return vs the RBA risk-free rate. A negative Sharpe (< 0) requires explicit justification for any BUY rec.
-      Sharpe is BACKWARD-LOOKING (realised risk-adjusted return over the lookback window) — it must always be
-      weighed alongside forward-looking factors (earnings trend, thesis status, catalysts), never cited alone.
-      Outside the compound Rule 15 SELL-escalation conditions, Sharpe must never be the sole reason for a TRIM/SELL.
+  17. RISK-REWARD CONTEXT (Sharpe): When reporting factorsUsed[], always include one entry citing the ticker's Sharpe ratio and whether it justifies the expected return vs the RBA risk-free rate. A negative Sharpe (< 0) requires explicit justification for any BUY rec.
+      Sharpe is BACKWARD-LOOKING (realised risk-adjusted return over the lookback window, 90d/1yr) — it does
+      not predict future performance and must always be weighed alongside forward-looking factors (earnings
+      trend, thesis status, catalysts), never cited alone. Use it only as a ranking input for position sizing
+      or portfolio construction, never as primary evidence for or against a trade. Outside the compound
+      Rule 15 SELL-escalation conditions, Sharpe (of either sign) must never be the sole/standalone reason
+      for a TRIM/SELL.
       SHARPE PROXY RULE: For watchlist tickers (isWatchlist = true) absent from the PORTFOLIO RISK METRICS table,
       do NOT substitute the portfolio composite Sharpe as a proxy — it reflects the existing portfolio's
       risk distribution, not the new ticker's expected return distribution. Instead:
@@ -155,12 +161,7 @@ const ANALYSIS_SYSTEM_PROMPT =
       for a BUY/SELL/TRIM. If analyst_target is the only bullish/bearish factor available, treat it as
       insufficient on its own — require at least one independent technical/fundamental factor alongside it.
 
-  19. SHARPE RATIO IS BACKWARD-LOOKING CONTEXT: A negative short-term Sharpe (90d/1yr) means past
-      risk-adjusted performance was poor — it does not predict future performance and MUST NOT be used
-      as a standalone SELL or TRIM trigger. Use Sharpe only as a ranking input for position sizing
-      or portfolio construction, never as primary evidence for or against a trade.
-
-  20. FUNDAMENTALS OVER TECHNICALS FOR ESTABLISHED POSITIONS: For holdings held > 60 days or
+  19. FUNDAMENTALS OVER TECHNICALS FOR ESTABLISHED POSITIONS: For holdings held > 60 days or
       large-cap stocks (ADV > $10M), fundamental and macro factors MUST outweigh short-term
       technical signals. RSI, Bollinger %B, MACD, and moving-average crossovers are confirming
       signals — they reinforce a fundamental thesis but cannot override it. If a fundamental

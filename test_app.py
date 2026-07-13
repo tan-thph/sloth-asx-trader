@@ -1345,8 +1345,8 @@ class TestStage3PromptInstructions(unittest.TestCase):
         """PROMPT_VERSION must be bumped when Rule 5's HOLDING_CONTEXT wording changes."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-07-v22'", src,
-                      "PROMPT_VERSION must be current (v22)")
+        self.assertIn("PROMPT_VERSION = '2026-07-v23'", src,
+                      "PROMPT_VERSION must be current (v23)")
 
     def test_entry_driver_in_prompt(self):
         """Sprint 67: ANALYSIS_SYSTEM_PROMPT must require primary_entry_driver on BUYs."""
@@ -3479,6 +3479,57 @@ class TestPromptVersionDelta(unittest.TestCase):
                       "learning.js must highlight the current prompt version")
         self.assertIn("PROMPT_VERSION", src,
                       "learning.js must reference PROMPT_VERSION for current-version badge")
+
+
+class TestImprovementI5PromptConsolidation(unittest.TestCase):
+    """Audit I-5 — consolidate redundant/contradictory prompt rules (v22→v23)."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "js", "prompts.js"), encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_sharpe_rules_merged_no_longer_duplicated(self):
+        """The old standalone Rule 19 ('SHARPE RATIO IS BACKWARD-LOOKING CONTEXT')
+        restated Rule 17's Sharpe guidance near-verbatim. It must be gone as a
+        separate numbered rule; its one genuinely new phrase ('ranking input for
+        position sizing') must survive, merged into Rule 17."""
+        self.assertNotIn("SHARPE RATIO IS BACKWARD-LOOKING CONTEXT", self.src)
+        self.assertIn("ranking input for position sizing", self.src)
+        # Rule 17 (Sharpe) and the old Rule 19's content must appear in the SAME
+        # rule block now, not as two separately-numbered rules.
+        idx17 = self.src.index("17. RISK-REWARD CONTEXT")
+        idx18 = self.src.index("18. ANALYST TARGETS ARE WEAK EVIDENCE")
+        self.assertIn("ranking input for position sizing", self.src[idx17:idx18])
+
+    def test_rules_renumbered_sequentially_after_merge(self):
+        """Rule 19 (old 20, fundamentals-over-technicals) must exist at its new
+        number with no gap left by the deleted old-19."""
+        self.assertIn("19. FUNDAMENTALS OVER TECHNICALS", self.src)
+        self.assertNotIn("20. FUNDAMENTALS OVER TECHNICALS", self.src)
+        # Cross-references elsewhere in the prompt must point at the new number.
+        self.assertIn("Rule 19 violation", self.src)
+        self.assertNotIn("Rule 20 violation", self.src)
+        with open(os.path.join(ROOT, "js", "prompt-modules.js"), encoding="utf-8") as f:
+            pm_src = f.read()
+        self.assertIn("Rule 19 applies", pm_src)
+        self.assertNotIn("Rule 20 applies", pm_src)
+
+    def test_high_dd_no_longer_prescribes_a_fixed_atr_multiple(self):
+        """Rule 16's HIGH-DD bullet used to say 'mandatory stop-loss note at
+        1.5xATR' — a fixed multiple that contradicts the regime-driven
+        stopAtrMultiple (2.5-4.0x, Rule 3 + ACTIVE RULE OVERRIDES). The model must
+        no longer be told to cite a specific ATR number for this case; stops stay
+        engine-owned."""
+        self.assertNotIn("1.5×ATR", self.src)
+        self.assertNotIn("1.5xATR", self.src)
+        idx16 = self.src.index("16. RISK-ADJUSTED SIZING")
+        idx17 = self.src.index("17. RISK-REWARD CONTEXT")
+        self.assertIn("HIGH_DD", self.src[idx16:idx17])
+        self.assertIn("Do NOT prescribe a specific ATR stop multiple", self.src[idx16:idx17])
+
+    def test_prompt_version_bumped_for_i5(self):
+        self.assertIn("PROMPT_VERSION = '2026-07-v23'", self.src)
 
 
 class TestSprint10FormingBarAndStooq(unittest.TestCase):
@@ -12180,18 +12231,20 @@ class TestCriticsAddressing(unittest.TestCase):
     # ── Problem 4: fundamentals > technicals rule ───────────────────────────
 
     def test_fundamentals_rule_in_prompt(self):
-        """prompts.js must include Rule 20 (fundamentals over technicals)."""
+        """prompts.js must include Rule 19 (fundamentals over technicals; renumbered
+        from 20 by Audit I-5's consolidation, which merged the old Rule 19 Sharpe
+        restatement into Rule 17)."""
         src = self._read("js/prompts.js")
         self.assertIn("FUNDAMENTALS OVER TECHNICALS", src,
-                      "ANALYSIS_SYSTEM_PROMPT must include Rule 20 — fundamentals over technicals for established positions")
+                      "ANALYSIS_SYSTEM_PROMPT must include Rule 19 — fundamentals over technicals for established positions")
         self.assertIn("confirming", src,
-                      "Rule 20 must explicitly label RSI/BB/MA as confirming signals, not primary drivers")
+                      "Rule 19 must explicitly label RSI/BB/MA as confirming signals, not primary drivers")
 
     def test_prompt_version_v16(self):
-        """PROMPT_VERSION must be current (v22 after the HOLDING_CONTEXT delta-summary change)."""
+        """PROMPT_VERSION must be current (v23 after Audit I-5's rule consolidation)."""
         src = self._read("js/prompts.js")
-        self.assertIn("PROMPT_VERSION = '2026-07-v22'", src,
-                      "PROMPT_VERSION must be bumped to current (v22)")
+        self.assertIn("PROMPT_VERSION = '2026-07-v23'", src,
+                      "PROMPT_VERSION must be bumped to current (v23)")
 
     # ── Problem 5/6: Financials sector module ──────────────────────────────
 
