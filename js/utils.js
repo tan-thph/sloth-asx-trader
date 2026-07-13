@@ -76,6 +76,17 @@ function askTradeMode(summary) {
   });
 }
 
+// CGT 50% discount eligibility — the ONE canonical boundary (Audit C2).
+// ATO rule: the CGT asset must be held for MORE than 12 months (acquisition day
+// excluded, disposal day included) ⇒ strictly > 365 days. A parcel held exactly
+// 365 days is NOT eligible. Defined once here (utils.js loads before everything) so
+// the open-lots table, the pre-trade sell estimate, and the SELL validator can never
+// disagree with the disposal engine (matchSaleAgainstParcels in portfolio-helpers.js),
+// which used `> 365` while the UI/validator used `>= 365`.
+function cgtDiscountEligible(heldDays) {
+  return typeof heldDays === 'number' && heldDays > 365;
+}
+
 // Escape untrusted text before inserting into innerHTML — guards against
 // malformed RSS headlines, AI output, or external API strings breaking layout.
 function escapeHTML(s) {

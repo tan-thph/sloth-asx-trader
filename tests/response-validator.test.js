@@ -502,3 +502,42 @@ describe('validateSellTags — ground-truth numeric checks', () => {
     expect(errors.some(e => e.includes('target reached') && e.includes('dividend at risk'))).toBe(true);
   });
 });
+
+// ── Audit C2: CGT 50%-discount boundary is > 365, consistent everywhere ─────────
+describe('cgtDiscountEligible — canonical CGT 12-month boundary', () => {
+  it('a parcel held exactly 365 days is NOT discount-eligible (> 365, ATO)', () => {
+    expect(cgtDiscountEligible(365)).toBe(false);
+  });
+
+  it('366 days IS eligible', () => {
+    expect(cgtDiscountEligible(366)).toBe(true);
+  });
+
+  it('matches the disposal engine boundary (held > 365), not >= 365', () => {
+    // matchSaleAgainstParcels uses held > 365; the UI/validator previously used >= 365.
+    for (const d of [0, 100, 364, 365]) expect(cgtDiscountEligible(d)).toBe(false);
+    for (const d of [366, 400, 730]) expect(cgtDiscountEligible(d)).toBe(true);
+  });
+
+  it('is null-safe', () => {
+    expect(cgtDiscountEligible(null)).toBe(false);
+    expect(cgtDiscountEligible(undefined)).toBe(false);
+  });
+
+  it('SELL validator held_over_12m ground-truth uses the same > 365 boundary', () => {
+    // daysHeld exactly 365 must NOT ground a "held_over_12m" (CGT discount) SELL tag.
+    const ctx = { holding: { weightPct: 1, sectorWeightPct: 1, unrealisedPnl: 10, daysHeld: 365 } };
+    const { fixed } = validateRec(makeRec({
+      action:            'TRIM',
+      target:            40.00,
+      stopLoss:          48.00,
+      rrRatio:           2.0,
+      primary_driver:    'target_reached',
+      secondary_factors: ['held_over_12m'],
+      urgency:           'routine',
+      reasoning:         'target_reached — price above fair value; also flagged 12m CGT discount.',
+    }), ctx);
+    // The ungrounded held_over_12m tag must be stripped at exactly 365 days.
+    expect(fixed == null || !(fixed.secondary_factors || []).includes('held_over_12m')).toBe(true);
+  });
+});

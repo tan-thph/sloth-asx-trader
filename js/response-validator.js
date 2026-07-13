@@ -96,8 +96,8 @@ const SELL_GROUND_TRUTH_CHECKS = {
   unrealised_loss_large: (h) => h.unrealisedPnl != null && h.unrealisedPnl <= -200,
   position_oversized:     (h) => h.weightPct != null && h.weightPct > 10,
   sector_concentration:   (h) => h.sectorWeightPct != null && h.sectorWeightPct > 15,
-  held_over_12m:          (h) => h.daysHeld != null && h.daysHeld >= 365,
-  held_11_to_12m:         (h) => h.daysHeld != null && h.daysHeld >= 335 && h.daysHeld < 365,
+  held_over_12m:          (h) => cgtDiscountEligible(h.daysHeld),   // > 365 (Audit C2)
+  held_11_to_12m:         (h) => h.daysHeld != null && h.daysHeld >= 335 && h.daysHeld <= 365,
 };
 
 /**

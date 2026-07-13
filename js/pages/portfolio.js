@@ -225,7 +225,7 @@ function renderPortfolio() {
                           const mktVal   = p.remainingQty * h.currentPrice;
                           const lotPl    = mktVal - costBase;
                           const held     = daysBetween(p.date, todayStr());
-                          const disc     = held >= 365;
+                          const disc     = cgtDiscountEligible(held);   // > 365 (Audit C2)
                           const pAcct    = p.account || 'personal';
                           const splittable = p.remainingQty >= p.qty && p.qty > 1;
                           return `<tr>
@@ -815,8 +815,8 @@ function _computeSellPreview(ticker, shares, price, date, brokerage, importAccou
     const heldDays = typeof daysBetween === 'function'
       ? daysBetween(p.date, date)
       : Math.floor((new Date(date.split('-').reverse().join('-')) - new Date(p.date.split('-').reverse().join('-'))) / 86400000);
-    if (heldDays >= 365) cgtDiscount = true;
-    if (heldDays >= 320 && heldDays < 365) cgtWarning = true;
+    if (cgtDiscountEligible(heldDays)) cgtDiscount = true;   // > 365 (Audit C2)
+    if (heldDays >= 320 && heldDays <= 365) cgtWarning = true;
     remaining -= consumed;
   }
 

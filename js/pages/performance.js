@@ -240,7 +240,12 @@ function renderPerformance() {
   const losses=closedTrades.filter(t=>t.pnl<0).length;
   const total=wins+losses;
   const winRate=total?wins/total*100:0;
-  const execRecIds=new Set(_journalInView.filter(t=>t.recId != null).map(t=>t.recId));
+  // recId on a journal row isn't always an AI-analyst rec — day-trading (swing/intraday)
+  // stamps its own DT-*/IDT-* position ids into the same column, which never appear in
+  // state.recHistory. Intersect against the recs actually in view so a mismatched space
+  // can't inflate the numerator past the denominator (e.g. "57 of 53").
+  const _recIdSet=new Set(_recsInView.map(r=>r.id));
+  const execRecIds=new Set(_journalInView.filter(t=>t.recId != null && _recIdSet.has(t.recId)).map(t=>t.recId));
   const execRate=_recsInView.length?execRecIds.size/_recsInView.length*100:0;
   const totalFees=_journalInView.reduce((s,t)=>s+(Number(t.fees)||0),0);
   const realised=closedTrades.reduce((s,t)=>s+(Number(t.pnl)||0),0);

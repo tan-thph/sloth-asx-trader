@@ -137,18 +137,14 @@ function classifyRegime(macroData) {
   return { regime, confidence, signals };
 }
 
-// Strategy gate — which regimes allow which strategies
-const _STRATEGY_GATES = {
-  meanReversionSwing: ['riskOn', 'sideways', 'highVol'],
-  momentumBreakout:   ['riskOn', 'trend'],
-  portfolioAnalysis:  ['riskOn', 'riskOff', 'sideways', 'trend', 'highVol'],
-};
-
-function isStrategyAllowed(strategy, regime) {
-  if (regime === 'panic') return false;
-  const allowed = _STRATEGY_GATES[strategy] || [];
-  return allowed.includes(regime);
-}
+// Audit B3 (2026-07-13): the per-strategy regime allow-list (_STRATEGY_GATES /
+// isStrategyAllowed) was DELETED as dead code. It had no production call site — the
+// day-trade system gates on DT_FILTER params (strategy.js), not on these three
+// abstract strategy names, and panic/size gating is already enforced by
+// applyRegimeModifiers (qty=0 → _regimeBlocked). Per-strategy gating was never wired
+// and there is no mapping from these names to the live strategies, so keeping the
+// scaffold only invited a false sense of enforcement. If per-strategy gating is
+// wanted later, wire a real gate into _dtBuildRecs rather than reviving this.
 
 // getRegimeModifiers — scaling factors and warnings per regime
 function getRegimeModifiers(regime) {
@@ -177,7 +173,18 @@ function applyRegimeModifiers(rec, regime) {
     // Use blended sizeMult during a post-flip transition window, full mult otherwise
     const sizeMult = state.currentRegime?._blendedSizeMult ?? mod.sizeMult;
     if (sizeMult !== 1.0 && out.qty) {
+      const prevQty = out.qty;
       out.qty = Math.max(1, Math.floor(out.qty * sizeMult));
+      // Rescale the risk/reward $ fields by the ACTUAL applied ratio (Math.floor and
+      // the min-1 floor make it ≠ sizeMult). riskAUD/rewardAUD are linear in qty
+      // (per-share × qty from the quant engine), so this is exact. Without it, a
+      // scaled-up (trend/blended >1) qty silently exceeds the Kelly/1%-risk caps while
+      // riskAUD stays small (heat budget under-counts), and a scaled-down qty leaves
+      // riskAUD inflated so the heat gate blocks unrelated recs. netProfit/expectedProfit
+      // are refreshed separately at the final qty by _recomputeBuyEv in analysis.js.
+      const ratio = out.qty / prevQty;
+      if (out.riskAUD != null)   out.riskAUD   = Math.round(out.riskAUD * ratio);
+      if (out.rewardAUD != null) out.rewardAUD = Math.round(out.rewardAUD * ratio);
       out._regimeAdjusted = true;
       if (state.currentRegime?._blendedSizeMult != null) out._regimeBlending = true;
     }

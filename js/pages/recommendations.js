@@ -400,10 +400,20 @@ function _renderSummaryBlock(summary, opts = {}) {
       const confBadge = r.confidence != null
         ? `<span style="font-size:10px;color:var(--text-tertiary);margin-left:6px;flex-shrink:0">${Math.round(r.confidence * 100)}%</span>`
         : '';
+      // HOLD recs never get their own rec-card (no execute/skip action exists for
+      // them), so this summary row is the only place to offer a local-LLM second
+      // opinion on the AI's passivity call. Non-HOLD rows already have a
+      // 🔍 Scrutinize button on their full card below — don't duplicate it here.
+      const isHold = (r.action || '').toUpperCase() === 'HOLD';
+      const scrutinyBtn = isHold
+        ? (r._localScrutiny
+            ? _scrutinyBadge(r)
+            : `<button class="btn btn-sm" style="font-size:10px;padding:2px 8px;margin-left:6px" onclick="scrutinizeHoldSummaryRec(${i})" title="Local LLM second opinion on this HOLD">🔍 Scrutinize</button>`)
+        : '';
       return `<div style="display:flex;gap:8px;align-items:baseline;padding:6px 0${isLast ? '' : ';border-bottom:1px solid var(--border)'}">
         <span class="badge ${_badgeCls(r.action)}" style="flex-shrink:0;font-size:10px;min-width:42px;text-align:center">${escapeHTML(r.action || '')}</span>
         <div style="min-width:0;line-height:1.55;font-size:13px">
-          <strong style="color:var(--text-primary)">${escapeHTML(r.ticker || '')}</strong>${r._parcelLabel ? `<span style="font-size:10px;padding:1px 5px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:2px;color:#1d4ed8;margin-left:4px">${escapeHTML(r._parcelLabel)}</span>` : ''}${confBadge}
+          <strong style="color:var(--text-primary)">${escapeHTML(r.ticker || '')}</strong>${r._parcelLabel ? `<span style="font-size:10px;padding:1px 5px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:2px;color:#1d4ed8;margin-left:4px">${escapeHTML(r._parcelLabel)}</span>` : ''}${confBadge}${scrutinyBtn}
           ${r.reasoning ? `<span style="color:var(--text-secondary)"> — ${escapeHTML(r.reasoning)}</span>` : ''}
         </div>
       </div>`;
@@ -1694,6 +1704,56 @@ async function scrutinizeRec(recId) {
   scheduleSave();
   renderPage();
   toast(`Local critic ${result.verdict}s with ${rec.ticker} ${rec.action}${result.concerns ? ': ' + result.concerns : ''}`,
+        result.verdict === 'disagree' ? 'error' : 'success');
+}
+
+/**
+ * Same idea as scrutinizeRec() but for a HOLD row inside the Analyst Summary
+ * block (state.analysisLastSummary.recs[idx]). HOLD recs never enter
+ * state.recommendations (gotcha #85 — filteredRecs strips them before the
+ * Pending tab is built) and their _learningId isn't known synchronously when
+ * the summary is assembled (logRecsToLearningLoop() is fire-and-forget and
+ * runs after analysisLastSummary is already set). So instead of a stored id,
+ * resolve the most recently logged event for this ticker via the
+ * action-agnostic /api/learning/recent-rec lookup, confirm it really is a
+ * HOLD (guards against a stale click hitting a newer non-HOLD rec logged for
+ * the same ticker since), then scrutinize it the normal way.
+ */
+async function scrutinizeHoldSummaryRec(idx) {
+  const row = state.analysisLastSummary?.recs?.[idx];
+  if (!row || (row.action || '').toUpperCase() !== 'HOLD') return;
+
+  const status = await debateStatus();
+  if (!status.available) { toast('Local LLM (Ollama) is not available', 'error'); return; }
+
+  toast(`Scrutinizing ${row.ticker} HOLD via local LLM…`, 'info');
+
+  let learningId = row._learningId;
+  if (!learningId) {
+    try {
+      const resp = await fetch(`${API}/api/learning/recent-rec?ticker=${encodeURIComponent(row.ticker)}`).then(r => r.json());
+      if (resp?.ok && resp.rec && (resp.rec.recommendation || '').toUpperCase() === 'HOLD') {
+        learningId = resp.rec.id;
+      }
+    } catch (_) {}
+  }
+  if (!learningId) { toast('This HOLD has not finished logging yet — try again shortly', 'error'); return; }
+  row._learningId = learningId;
+
+  const result = await triggerScrutiny(learningId);
+  if (!result || !result.ok) {
+    toast(`Scrutiny failed${result?.error ? ': ' + result.error : ''}`, 'error');
+    return;
+  }
+
+  row._localScrutiny = {
+    verdict: result.verdict, concerns: result.concerns,
+    confidence_adj: result.confidence_adj, model: result.model,
+  };
+
+  scheduleSave();
+  renderPage();
+  toast(`Local critic ${result.verdict}s with ${row.ticker} HOLD${result.concerns ? ': ' + result.concerns : ''}`,
         result.verdict === 'disagree' ? 'error' : 'success');
 }
 

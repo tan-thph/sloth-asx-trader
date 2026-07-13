@@ -438,19 +438,22 @@ def eofy_tax_pack():
         except Exception:
             return False
 
-    # Filter disposals by FY sale date AND real-only
-    fy_disposals = [
-        d for d in disposals
-        if isinstance(d, dict) and _is_real(d)
-        and fy_start <= (d.get("saleDate") or "") <= fy_end
-    ]
-
-    # Filter trades by FY date (DD-MM-YYYY → compare as YYYY-MM-DD)
+    # DD-MM-YYYY → YYYY-MM-DD so the lexical FY range compare is meaningful.
+    # saleDate is stored DD-MM-YYYY (todayStr() in utils.js); comparing it raw against
+    # ISO fy_start/fy_end fails on the first character and silently drops/misfiles
+    # real disposals from the ATO-facing pack.
     def _dd_mm_to_iso(d):
         parts = (d or "").split("-")
         if len(parts) == 3 and len(parts[2]) == 4:
             return f"{parts[2]}-{parts[1]}-{parts[0]}"
         return d or ""
+
+    # Filter disposals by FY sale date AND real-only
+    fy_disposals = [
+        d for d in disposals
+        if isinstance(d, dict) and _is_real(d)
+        and fy_start <= _dd_mm_to_iso(d.get("saleDate")) <= fy_end
+    ]
 
     fy_trades = [
         r for r in fee_rows

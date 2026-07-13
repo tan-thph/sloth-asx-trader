@@ -1656,6 +1656,29 @@ class TestCalibrationEfficacy(unittest.TestCase):
         col_names = [col for col, _ in _db._LE_MIGRATIONS]
         self.assertIn("calibrated_confidence", col_names)
 
+    def test_calibration_cache_key_includes_flip_params(self):
+        """Audit E2: flipped_at/flipped_to must be part of the TTL cache key so a
+        flip-aware request never serves its discounted/⚠REGIME_FLIP block to a
+        non-flip caller within the 5-min window (or vice versa)."""
+        import routes.learning as L
+        import unittest.mock as _mock
+        with L._calib_lock:
+            L._calib_cache.clear()
+
+        def fake_compute(regime, sectors, tickers, days, flipped_at, flipped_to, deep):
+            return {"block": f"flip={flipped_at}"}
+
+        with _mock.patch.object(L, "_calib_compute", side_effect=fake_compute):
+            r1 = self.client.get(
+                "/api/learning/calibration?regime=riskOn"
+                "&flipped_at=2026-07-13T10:00:00Z&flipped_to=riskOff")
+            r2 = self.client.get("/api/learning/calibration?regime=riskOn")
+
+        self.assertEqual(r1.get_json()["block"], "flip=2026-07-13T10:00:00Z")
+        # Before the fix r2 (no flip params) would collide on the cache key and
+        # return r1's flip-tagged block. It must instead be its own computation.
+        self.assertEqual(r2.get_json()["block"], "flip=")
+
     def test_log_accepts_calibrated_confidence(self):
         resp = self.client.post(
             "/api/learning/log",
@@ -2173,6 +2196,42 @@ class TestSprint5(unittest.TestCase):
         self.assertIn("CBA", cgt_csv)
         self.assertIn("290.0", cgt_csv)
         self.assertNotIn("PPRZ", cgt_csv)  # paper disposal must NOT reach the tax pack
+
+    def test_eofy_pack_ddmmyyyy_saledate_lands_in_correct_fy(self):
+        """Audit C1: saleDate is stored DD-MM-YYYY; the FY filter must convert it
+        before the lexical range compare, else real disposals are dropped/misfiled.
+        """
+        sample = json.dumps([
+            {  # DD-MM-YYYY, FY2025-26 — must appear in year=2025
+                "saleDate": "15-08-2025", "ticker": "INFY", "mode": "real",
+                "salePrice": 30.0, "saleQty": 10, "proceeds": 300.0,
+                "parcelDate": "10-01-2024", "parcelCostPerShare": 20.0,
+                "costBase": 200.0, "saleFee": 10.0,
+                "grossGain": 90.0, "discount": 45.0, "netGain": 45.0,
+                "heldDays": 582, "eligible50": True,
+            },
+            {  # DD-MM-YYYY, FY2024-25 — must NOT appear in year=2025
+                "saleDate": "15-08-2024", "ticker": "OUTFY", "mode": "real",
+                "salePrice": 30.0, "saleQty": 10, "proceeds": 300.0,
+                "parcelDate": "10-01-2023", "parcelCostPerShare": 20.0,
+                "costBase": 200.0, "saleFee": 10.0,
+                "grossGain": 90.0, "discount": 45.0, "netGain": 45.0,
+                "heldDays": 582, "eligible50": True,
+            },
+        ])
+        _get_shared_conn().execute(
+            "INSERT OR REPLACE INTO blob_store (key, value, updated_at) VALUES ('cgtDisposals', ?, datetime('now'))",
+            (sample,)
+        )
+        _get_shared_conn().commit()
+
+        resp = self.client.get("/api/tax/eofy-pack?year=2025")
+        self.assertEqual(resp.status_code, 200)
+        import zipfile, io
+        with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+            cgt_csv = zf.read([n for n in zf.namelist() if "cgt" in n][0]).decode()
+        self.assertIn("INFY", cgt_csv)      # in-FY DD-MM-YYYY disposal survives
+        self.assertNotIn("OUTFY", cgt_csv)  # out-of-FY disposal excluded
 
     def test_db_save_persists_watchlist(self):
         """POST /api/db/save stores watchlist in blob_store."""
@@ -3403,6 +3462,132 @@ class TestSprint10FormingBarAndStooq(unittest.TestCase):
         import pandas as pd
         self.assertIsInstance(result, pd.DataFrame)
         self.assertTrue(result.empty)
+
+
+class TestAudit20260713Indicators(unittest.TestCase):
+    """Audit 2026-07-13 — A1 (pct_return off-by-one) + A2 (RSI overbought)."""
+
+    def _fake_hist(self, closes):
+        import pandas as pd
+        import numpy as np
+        n = len(closes)
+        idx = pd.date_range("2025-01-01", periods=n, freq="D")
+        c = pd.Series(closes, index=idx, dtype=float)
+        return pd.DataFrame({
+            "Open":   c.values,
+            "High":   c.values * 1.001,
+            "Low":    c.values * 0.999,
+            "Close":  c.values,
+            "Volume": np.full(n, 1_000_000, dtype=float),
+        }, index=idx)
+
+    def test_return_1d_is_the_last_day_move_not_zero(self):
+        """A1: return_1d must reflect close[-1] vs close[-2], not be identically 0."""
+        import indicators as ind
+        import unittest.mock as _mock
+
+        closes = [100.0 * (1.001 ** i) for i in range(120)]
+        closes.append(closes[-1] * 1.05)   # final day +5%
+        hist = self._fake_hist(closes)
+
+        class FakeTicker:
+            def __init__(self, *a, **k):
+                pass
+            def history(self, *a, **k):
+                return hist
+            @property
+            def info(self):
+                return {}
+            @property
+            def calendar(self):
+                return {}
+
+        with _mock.patch.object(ind, "yf") as ymock, \
+             _mock.patch.object(ind, "_drop_forming_bar", lambda df: df), \
+             _mock.patch.object(ind, "_sanity_check", lambda df, ticker="": df):
+            ymock.Ticker.return_value = FakeTicker()
+            res = ind.analyse_ticker("TEST")
+
+        self.assertNotIn("error", res)
+        # Was identically 0.0 before the fix; now ≈ +5%.
+        self.assertAlmostEqual(res["return_1d"], 5.0, delta=0.15)
+
+    def test_rsi_all_gains_window_is_100(self):
+        """A2: an all-up window is extreme overbought (100), not neutral 50."""
+        import indicators as ind
+        import pandas as pd
+        s = pd.Series([100.0 + i for i in range(30)])   # strictly increasing
+        rsi = ind.compute_rsi(s, period=14)
+        self.assertAlmostEqual(rsi.iloc[-1], 100.0, delta=0.01)
+
+    def test_rsi_flat_window_is_50(self):
+        """A2: a flat window (no gains, no losses) stays genuinely neutral (50)."""
+        import indicators as ind
+        import pandas as pd
+        s = pd.Series([100.0] * 30)
+        rsi = ind.compute_rsi(s, period=14)
+        self.assertAlmostEqual(rsi.iloc[-1], 50.0, delta=0.01)
+
+    def _analyse_with_earnings(self, earnings_dt):
+        """Run analyse_ticker with a mocked calendar carrying one earnings date."""
+        import indicators as ind
+        import unittest.mock as _mock
+        closes = [100.0 + i * 0.1 for i in range(120)]
+        hist = self._fake_hist(closes)
+
+        class FakeTicker:
+            def __init__(self, *a, **k):
+                pass
+            def history(self, *a, **k):
+                return hist
+            @property
+            def info(self):
+                return {}
+            @property
+            def calendar(self):
+                return {"Earnings Date": [earnings_dt]}
+
+        with _mock.patch.object(ind, "yf") as ymock, \
+             _mock.patch.object(ind, "_drop_forming_bar", lambda df: df), \
+             _mock.patch.object(ind, "_sanity_check", lambda df, ticker="": df):
+            ymock.Ticker.return_value = FakeTicker()
+            return ind.analyse_ticker("TEST")
+
+    def test_pre_earnings_risk_true_on_earnings_day(self):
+        """D1: earnings today ⇒ days_to_earnings == 0 and pre_earnings_risk True."""
+        import pandas as pd
+        today_syd = pd.Timestamp.now(tz="Australia/Sydney").normalize().tz_localize(None)
+        res = self._analyse_with_earnings(today_syd.to_pydatetime())
+        self.assertEqual(res.get("days_to_earnings"), 0)
+        self.assertTrue(res.get("pre_earnings_risk"))
+
+    def test_pre_earnings_risk_false_after_earnings(self):
+        """D1: earnings yesterday ⇒ negative days_to_earnings, pre_earnings_risk False."""
+        import pandas as pd
+        yday = (pd.Timestamp.now(tz="Australia/Sydney").normalize().tz_localize(None)
+                - pd.Timedelta(days=1))
+        res = self._analyse_with_earnings(yday.to_pydatetime())
+        self.assertEqual(res.get("days_to_earnings"), -1)
+        self.assertFalse(res.get("pre_earnings_risk"))
+
+    def test_factor_weights_guard_uses_app_logger(self):
+        """D2: the FACTOR_WEIGHTS sum-to-100 guard must log via core.log (captured in
+        server.log), not warnings.warn (stderr, filtered under waitress/gunicorn)."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        blk = src[src.index("_fw_total = sum("):src.index("def _simple_rsi")]
+        self.assertIn(".warning(", blk)
+        self.assertNotIn("_warn.warn(", blk)
+        self.assertNotIn("warnings.warn(", blk)
+
+    def test_sector_rs_etf_gets_forming_bar_guard(self):
+        """A3: the sector-ETF history must pass _drop_forming_bar before the 5d RS
+        compare, so both legs end on the same settled bar during market hours."""
+        with open(os.path.join(ROOT, "indicators.py"), encoding="utf-8") as f:
+            src = f.read()
+        # Isolate the sector-RS block and assert the guard is applied to etf_hist.
+        blk = src[src.index("Sector ETF relative strength"):src.index("_score_ticker(close.values")]
+        self.assertIn("_drop_forming_bar(etf_hist)", blk)
 
 
 class TestSprint10StopProximityAlerts(unittest.TestCase):
@@ -5021,22 +5206,42 @@ class TestSprint31LearningLoopHardening(unittest.TestCase):
         self.assertFalse(result9["active"])
 
     def test_compute_phase8_meta_active_when_wins_score_higher(self):
-        """_compute_phase8_meta must return active=True when wins have higher mean skill."""
+        """_compute_phase8_meta activates when the OUTCOME-INDEPENDENT process score
+        (Audit E1) predicts outcomes: wins came from validated reads, losses from
+        invalidated ones. The gate no longer keys on the outcome-blended skill_score."""
         import routes.learning as rl
         rows = (
-            [{"skill_score": 8.0, "outcome_status": "win"}]     * 6 +
-            [{"skill_score": 4.0, "outcome_status": "loss"}]    * 6
+            [{"skill_score": 8.0, "outcome_status": "win",
+              "thesis_verdict": "validated",   "rr_ratio": 2.5}] * 6 +
+            [{"skill_score": 4.0, "outcome_status": "loss",
+              "thesis_verdict": "invalidated", "rr_ratio": 1.5}] * 6
         )
         result = rl._compute_phase8_meta(rows)
         self.assertTrue(result["active"])
         self.assertGreater(result["mean_skill_wins"], result["mean_skill_losses"])
 
-    def test_compute_phase8_meta_inactive_when_scores_inverted(self):
-        """_compute_phase8_meta must return active=False when losses score higher than wins."""
+    def test_compute_phase8_meta_inactive_when_process_identical(self):
+        """Audit E1: wins and losses with IDENTICAL process/verdict must NOT activate
+        the gate — the whole point of decoupling from outcome. (Under the old
+        skill_score gate this set activated tautologically.)"""
         import routes.learning as rl
         rows = (
-            [{"skill_score": 3.0, "outcome_status": "win"}]     * 6 +
-            [{"skill_score": 7.0, "outcome_status": "loss"}]    * 6
+            [{"skill_score": 8.0, "outcome_status": "win",
+              "thesis_verdict": "validated", "rr_ratio": 2.5}] * 6 +
+            [{"skill_score": 4.0, "outcome_status": "loss",
+              "thesis_verdict": "validated", "rr_ratio": 2.5}] * 6
+        )
+        result = rl._compute_phase8_meta(rows)
+        self.assertFalse(result["active"])
+
+    def test_compute_phase8_meta_inactive_when_scores_inverted(self):
+        """active=False when the process score is HIGHER for losses than wins."""
+        import routes.learning as rl
+        rows = (
+            [{"skill_score": 3.0, "outcome_status": "win",
+              "thesis_verdict": "invalidated", "rr_ratio": 1.5}] * 6 +
+            [{"skill_score": 7.0, "outcome_status": "loss",
+              "thesis_verdict": "validated",   "rr_ratio": 2.5}] * 6
         )
         result = rl._compute_phase8_meta(rows)
         self.assertFalse(result["active"])
@@ -5047,8 +5252,9 @@ class TestSprint31LearningLoopHardening(unittest.TestCase):
             src = f.read()
         self.assertIn("_phase8_active", src,
                       "learning.py must define _phase8_active gate variable")
-        self.assertIn("sk is not None and _phase8_active", src,
-                      "learning.py _weight() must gate skill factor on _phase8_active")
+        # Audit E1: the skill factor now gates on the outcome-independent process score.
+        self.assertIn("ps is not None and _phase8_active", src,
+                      "learning.py _weight() must gate the process-score factor on _phase8_active")
 
     def test_stats_returns_phase8_key(self):
         """GET /api/learning/stats must return a 'phase8' key."""
@@ -5838,33 +6044,55 @@ class TestFix16Phase8GoodLossExclusion(unittest.TestCase):
         """_compute_phase8_meta must activate when wins > analytical losses even if good-loss
         scores are high (i.e. protective_stop trades with 9/10 must not inflate mean_loss)."""
         import routes.learning as rl
-        # 3 wins scoring 8.0 avg; 1 protective-stop scoring 9.0 (should be excluded);
-        # 1 analytical loss scoring 3.0 — wins (8.0) > analytical_losses (3.0) → active
-        rows = [
-            {"outcome_status": "win", "skill_score": "8.0", "exit_reason": None, "error_type": None},
-            {"outcome_status": "win", "skill_score": "8.0", "exit_reason": None, "error_type": None},
-            {"outcome_status": "win", "skill_score": "8.0", "exit_reason": None, "error_type": None},
-            {"outcome_status": "win", "skill_score": "7.0", "exit_reason": None, "error_type": None},
-            {"outcome_status": "win", "skill_score": "7.0", "exit_reason": None, "error_type": None},
-            {"outcome_status": "loss", "skill_score": "9.0", "exit_reason": "protective_stop", "error_type": None},
-            {"outcome_status": "loss", "skill_score": "9.0", "exit_reason": "protective_stop", "error_type": None},
-            {"outcome_status": "loss", "skill_score": "3.0", "exit_reason": "stop_hit", "error_type": "overconfident"},
-            {"outcome_status": "loss", "skill_score": "3.0", "exit_reason": "stop_hit", "error_type": "poor_entry"},
-            {"outcome_status": "loss", "skill_score": "3.0", "exit_reason": "manual", "error_type": None},
+        # Audit E1: the gate keys on the outcome-independent process score
+        # (validated verdict → high, invalidated → low), NOT skill_score. Wins came
+        # from validated reads; protective-stop good losses are excluded from the
+        # comparison; analytical losses were invalidated reads → wins > losses → active.
+        def _w(**kw):  # validated win
+            return {"outcome_status": "win", "thesis_verdict": "validated",
+                    "rr_ratio": 2.5, "exit_reason": None, "error_type": None, **kw}
+        rows = [_w(), _w(), _w(), _w(), _w()] + [
+            {"outcome_status": "loss", "thesis_verdict": "validated", "rr_ratio": 2.5,
+             "exit_reason": "protective_stop", "error_type": None},
+            {"outcome_status": "loss", "thesis_verdict": "validated", "rr_ratio": 2.5,
+             "exit_reason": "protective_stop", "error_type": None},
+            {"outcome_status": "loss", "thesis_verdict": "invalidated", "rr_ratio": 1.5,
+             "exit_reason": "stop_hit", "error_type": "overconfident"},
+            {"outcome_status": "loss", "thesis_verdict": "invalidated", "rr_ratio": 1.5,
+             "exit_reason": "stop_hit", "error_type": "poor_entry"},
+            {"outcome_status": "loss", "thesis_verdict": "invalidated", "rr_ratio": 1.5,
+             "exit_reason": "manual", "error_type": None},
         ]
         result = rl._compute_phase8_meta(rows)
         self.assertTrue(result["active"],
-                        "Phase 8 must be active — wins (7.8 avg) > analytical losses (3.0), "
-                        "protective_stop losses (9.0) must be excluded")
+                        "Phase 8 must be active — validated wins > invalidated analytical "
+                        "losses; protective_stop good losses must be excluded")
         self.assertEqual(result["n_good_losses_excluded"], 2)
+
+    def test_process_score_is_outcome_independent(self):
+        """Audit E1: the process score must NOT depend on the realized win/loss —
+        two rows with the same verdict+rr score identically regardless of outcome."""
+        import routes.learning as rl
+        win_row  = {"thesis_verdict": "validated", "rr_ratio": 2.5,
+                    "outcome_status": "win",  "realized_pnl_pct": 12.0}
+        loss_row = {"thesis_verdict": "validated", "rr_ratio": 2.5,
+                    "outcome_status": "loss", "realized_pnl_pct": -6.0}
+        self.assertEqual(rl.compute_process_score_deterministic(win_row),
+                         rl.compute_process_score_deterministic(loss_row))
+        # verdict ordering holds, and a missing verdict yields None (unscorable)
+        self.assertGreater(rl.compute_process_score_deterministic({"thesis_verdict": "validated"}),
+                           rl.compute_process_score_deterministic({"thesis_verdict": "invalidated"}))
+        self.assertIsNone(rl.compute_process_score_deterministic({"outcome_status": "win"}))
 
     def test_compute_phase8_meta_returns_n_good_losses_excluded(self):
         """_compute_phase8_meta return dict must include n_good_losses_excluded field."""
         import routes.learning as rl
         rows = [
-            {"outcome_status": "win", "skill_score": "7.0", "exit_reason": None, "error_type": None},
+            {"outcome_status": "win", "thesis_verdict": "validated", "rr_ratio": 2.5,
+             "exit_reason": None, "error_type": None},
         ] * 8 + [
-            {"outcome_status": "loss", "skill_score": "4.0", "exit_reason": "stop_hit", "error_type": None},
+            {"outcome_status": "loss", "thesis_verdict": "invalidated", "rr_ratio": 1.5,
+             "exit_reason": "stop_hit", "error_type": None},
         ] * 2
         result = rl._compute_phase8_meta(rows)
         self.assertIn("n_good_losses_excluded", result)
@@ -6097,6 +6325,42 @@ class TestHoldOutcomeTracking(unittest.TestCase):
         self.assertIn("def _hold_move_threshold(", src)
         self.assertIn("atr_pct", src[src.find("def _hold_move_threshold("):
                                       src.find("def _hold_move_threshold(") + 900])
+
+    def test_resolve_hold_outcomes_requires_full_horizon(self):
+        """Audit E5: a HOLD with fewer than the full forward horizon of bars must
+        stay virtual_open, not be graded on a truncated endpoint against a
+        √_HOLD_HORIZON_DAYS threshold."""
+        import routes.learning as rl
+        import unittest.mock as _mock
+        import pandas as pd
+        from datetime import datetime, timedelta
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                old_ts = (datetime.now() - timedelta(days=40)).isoformat()
+                conn.execute("""
+                    INSERT INTO ai_learning_events
+                      (event_type, ticker, recommendation, virtual_outcome,
+                       timestamp, entry_signals_json)
+                    VALUES ('recommendation','ZZZ.AX','HOLD',NULL,?,?)
+                """, (old_ts, '{"atr_pct":2.0}'))
+                # 15 forward bars (< _HOLD_HORIZON_DAYS+1 == 21) on a FALLING series:
+                # pre-fix (_HOLD_MIN_BARS=10) this graded to virtual_hold_miss; now it
+                # must stay unresolved until the full horizon is available.
+                idx = pd.date_range("2026-01-01", periods=15, freq="D")
+                hist = pd.DataFrame({"Close": [100.0 - i for i in range(15)]}, index=idx)
+                fake = _mock.MagicMock()
+                fake.history.return_value = hist
+                with _mock.patch("yfinance.Ticker", return_value=fake):
+                    rl._resolve_hold_outcomes(conn, cap=5)
+                row = conn.execute(
+                    "SELECT virtual_outcome FROM ai_learning_events WHERE ticker='ZZZ.AX'"
+                ).fetchone()
+                self.assertEqual(row["virtual_outcome"], "virtual_open")
+        finally:
+            asx_server.get_db = _orig_get_db
 
     def test_compute_hold_outcome_nudge_below_n_gate_returns_empty(self):
         from routes.learning import _compute_hold_outcome_nudge
@@ -6912,6 +7176,34 @@ class TestSprint70DeterministicTagging(unittest.TestCase):
         """5-of-40 (12.5% WR) clearly excludes a 65% threshold."""
         from routes.learning import _ci_excludes
         self.assertTrue(_ci_excludes(5, 40, 0.65))
+
+    def test_e3_rr_accuracy_nudge_is_ci_gated(self):
+        """Audit E3: the R:R-accuracy nudge must route through _ci_excludes and the
+        _MIN_NUDGE_N floor, not fire on a bare n≥5, hi_wr<0.50 point estimate."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        blk = src[src.index("# 5. R:R accuracy"):src.index("# 6. Dominant learnable error")]
+        self.assertIn("len(hi_rr) >= _MIN_NUDGE_N", blk)
+        self.assertIn("_ci_excludes(hi_wins, len(hi_rr), 0.50)", blk)
+        self.assertNotIn("len(hi_rr) >= 5", blk)   # old ungated floor removed
+
+    def test_e3_top_error_nudge_is_ci_gated(self):
+        """Audit E3: the top-error nudge must significance-gate the dominant-tag
+        proportion (Wilson CI excludes 0.33), not fire on any ≥33% share."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        blk = src[src.index("# 6. Dominant learnable error"):src.index("# 6b.")]
+        self.assertIn("_ci_excludes(top_cnt, len(learnable_losses), 0.33)", blk)
+
+    def test_e3_strategy_decay_nudge_is_ci_gated(self):
+        """Audit E3: the strategy-decay nudge must gate on the recent window's Wilson
+        CI excluding the all-time rate, not a raw global_delta < −0.15 point estimate."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        idx = src.index("recent_rows = [r for r in rows_all if r[\"timestamp\"] >= cutoff_30]")
+        blk = src[idx:idx + 900]
+        self.assertIn("len(recent_rows) >= _MIN_NUDGE_N", blk)
+        self.assertIn("_ci_excludes(recent_wins, len(recent_rows), all_wr)", blk)
 
     # ── _resolve_deterministic_tags (DB integration) ─────────────────────────
     def test_resolver_fills_and_marks_source(self):

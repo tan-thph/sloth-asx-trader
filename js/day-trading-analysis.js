@@ -409,6 +409,15 @@ function _dtBuildRecs(candidates, ap, portCtx, regime, quantStats) {
     if (typeof applyRegimeModifiers === 'function' && regime) {
       rec = applyRegimeModifiers(rec, regime);
     }
+    // Gotcha #3: regime-blocked recs (panic → qty=0) must NEVER be surfaced as
+    // executable. The portfolio path drops them (analysis.js); the day-trade path
+    // used to push them anyway, so _renderDtRec showed an ordinary BUY card the user
+    // could click Execute on during a panic. Drop them here too (shadow-log below
+    // via the breadth path already captures suppressed setups for ML).
+    if (rec._regimeBlocked) {
+      if (quantStats) quantStats.regimeBlocked = (quantStats.regimeBlocked || 0) + 1;
+      continue;
+    }
 
     recs.push({
       ...rec,
@@ -463,6 +472,11 @@ function _dtBuildRecs(candidates, ap, portCtx, regime, quantStats) {
 function executeDayTrade(recId) {
   const rec = state.dayTrading.recommendations.find(r => r.id === recId);
   if (!rec) return;
+  // Gotcha #3 belt-and-braces: never open a position the regime engine zeroed.
+  if (rec._regimeBlocked) {
+    toast(`⛔ ${rec.ticker} is regime-blocked (${rec._regimeBlocked}) — no new positions`, 'error');
+    return;
+  }
 
   const defaultPrice = rec.priceRange
     ? ((rec.priceRange[0] + rec.priceRange[1]) / 2)

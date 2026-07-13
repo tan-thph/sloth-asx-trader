@@ -9,7 +9,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { extractFunction } from './setup.js';
+
+const _ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const _read = (p) => readFileSync(join(_ROOT, p), 'utf8');
 
 // eslint-disable-next-line no-eval
 const _dtImpliedWinProb = eval('(' + extractFunction('js/day-trading-analysis.js', '_dtImpliedWinProb') + ')');
@@ -73,5 +79,36 @@ describe('_intradayReversionRR', () => {
 
   it('returns null when both reversion and target rewards are non-positive', () => {
     expect(_intradayReversionRR(99, 98, 98.5, 98)).toBeNull();   // vwap<entry, target<entry
+  });
+});
+
+// ── Audit B1: panic/regime-blocked day-trade recs must never be executable ─────
+// Gotcha #3 — a rec that comes back qty=0/_regimeBlocked from applyRegimeModifiers
+// must be dropped at build time AND hard-refused at execute time (belt-and-braces).
+describe('regime-blocked day-trade recs (Audit B1)', () => {
+  it('_dtBuildRecs drops _regimeBlocked recs before pushing them', () => {
+    const src = _read('js/day-trading-analysis.js');
+    // The guard sits right after applyRegimeModifiers and continues the loop.
+    const afterMod = src.slice(src.indexOf('applyRegimeModifiers(rec, regime)'));
+    expect(afterMod).toMatch(/if\s*\(\s*rec\._regimeBlocked\s*\)/);
+    expect(afterMod.slice(0, 800)).toContain('continue');
+  });
+
+  it('executeDayTrade (swing) hard-refuses a _regimeBlocked rec', () => {
+    const body = extractFunction('js/day-trading-analysis.js', 'executeDayTrade');
+    expect(body).toMatch(/rec\._regimeBlocked/);
+    expect(body).toMatch(/return/);
+  });
+
+  it('executeIntradayTrade hard-refuses a _regimeBlocked rec', () => {
+    const body = extractFunction('js/pages/day-trading.js', 'executeIntradayTrade');
+    expect(body).toMatch(/rec\._regimeBlocked/);
+  });
+
+  it('_renderDtRec renders a disabled regime-blocked state instead of Execute', () => {
+    const body = extractFunction('js/pages/day-trading.js', '_renderDtRec');
+    // The Execute button must be gated behind !r._regimeBlocked.
+    expect(body).toMatch(/isPending\s*&&\s*!r\._regimeBlocked/);
+    expect(body).toMatch(/isPending\s*&&\s*r\._regimeBlocked/);
   });
 });

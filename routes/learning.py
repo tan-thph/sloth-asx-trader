@@ -445,6 +445,52 @@ def compute_skill_score_deterministic(row):
     return round(max(0.0, min(10.0, base)), 1)
 
 
+def compute_process_score_deterministic(row):
+    """Outcome-INDEPENDENT process-quality score 0–10, or None (Audit E1).
+
+    The Phase-8 predictiveness gate (Mann-Whitney of skill vs outcome) and the
+    _weight() skill amplifier must NOT be driven by a score that is itself defined
+    by the realized win/loss. compute_skill_score_deterministic's base quadrant gives
+    a win 1–2 points more than a loss for the *same* thesis_verdict, so testing
+    "do scores predict outcomes" with it is near-tautological — it trips z>1.28 on
+    structure alone, and _weight() then up-weights wins / down-weights losses so a
+    mediocre ~45% raw win rate can present as >50% and nudge toward more risk on noise.
+
+    This score reads only signals independent of the P&L sign:
+      • thesis_verdict — did the entry read still hold at exit (signal persistence,
+        not P&L: a thesis can be validated on a losing trade stopped by noise, or
+        invalidated on a lucky win)
+      • planned R:R    — was the trade structured ≥2:1 reward:risk at entry
+    No win/loss branch, no confidence-vs-outcome term, no MAE/MFE-of-win term.
+
+    Returns None when thesis_verdict is absent (nothing outcome-independent to score).
+    """
+    def _g(key):
+        try:
+            return row[key]
+        except (KeyError, IndexError, TypeError):
+            return row.get(key) if hasattr(row, "get") else None
+
+    base = {
+        "validated":            7.5,
+        "partially_validated":  6.0,
+        "irrelevant":           5.0,
+        "invalidated":          3.0,
+        "reversed":             2.0,
+    }.get(_g("thesis_verdict") or "")
+    if base is None:
+        return None
+
+    rr = _g("rr_ratio")
+    try:
+        if rr is not None and float(rr) >= 2.0:
+            base += 0.5   # planned discipline, fixed at entry — outcome-independent
+    except (TypeError, ValueError):
+        pass
+
+    return round(max(0.0, min(10.0, base)), 1)
+
+
 def compute_skill_score_fallback(row):
     """LOWER-TRUST skill score 0–10 for legacy rows that lack a thesis_verdict.
 
@@ -813,23 +859,33 @@ def _compute_phase8_meta(skill_rows: list) -> dict:
     Threshold: z > 1.28 (one-sided p < 0.10). Returns z and threshold in the response
     so the Learning page can display the statistical evidence.
     """
-    n = len(skill_rows)
+    # Audit E1: gate on the OUTCOME-INDEPENDENT process score, not skill_score.
+    # skill_score's quadrant is partly defined by win/loss, so a Mann-Whitney of
+    # skill_score(win) vs skill_score(loss) is near-tautological. The process score
+    # (thesis_verdict + planned R:R) is not a function of the P&L sign, so a positive
+    # result here genuinely means "good reads led to wins", which is what licenses
+    # skill amplification. Rows without a thesis_verdict yield None → excluded.
+    def _ps(r):
+        return compute_process_score_deterministic(r)
+
+    scored = [r for r in skill_rows if _ps(r) is not None]
+    n = len(scored)
     if n < 10:
         return {"active": False, "n_scored": n,
-                "reason": f"insufficient scored events (need 10, have {n})"}
-    win_skills = [float(r["skill_score"]) for r in skill_rows if r["outcome_status"] == "win"]
+                "reason": f"insufficient process-scored events (need 10, have {n})"}
+    win_skills = [_ps(r) for r in scored if r["outcome_status"] == "win"]
     # Exclude protective_stop + external_shock losses — disciplined capital protection
     # and black-swan events reflect execution quality, not analytical error. Including
     # their high scores in loss_skills would suppress Phase 8 despite correct analysis.
-    good_loss_rows       = [r for r in skill_rows
+    good_loss_rows       = [r for r in scored
                             if r["outcome_status"] in ("loss", "breakeven") and _is_good_loss(r)]
-    analytical_loss_rows = [r for r in skill_rows
+    analytical_loss_rows = [r for r in scored
                             if r["outcome_status"] in ("loss", "breakeven") and not _is_good_loss(r)]
-    loss_skills = [float(r["skill_score"]) for r in analytical_loss_rows]
+    loss_skills = [_ps(r) for r in analytical_loss_rows]
     n_good_excl = len(good_loss_rows)
     if not win_skills or not loss_skills:
         return {"active": False, "n_scored": n, "n_good_losses_excluded": n_good_excl,
-                "reason": "no wins or no analytical losses among scored events"}
+                "reason": "no wins or no analytical losses among process-scored events"}
 
     mean_win  = round(sum(win_skills)  / len(win_skills),  2)
     mean_loss = round(sum(loss_skills) / len(loss_skills), 2)
@@ -847,7 +903,7 @@ def _compute_phase8_meta(skill_rows: list) -> dict:
         "mann_whitney_z":          z,
         "mann_whitney_threshold":  threshold,
         "reason": (
-            f"MW Z={z:.2f}>{threshold} — scores predict outcomes (wins={mean_win}, losses={mean_loss}{excl_note})"
+            f"MW Z={z:.2f}>{threshold} — process scores predict outcomes (wins={mean_win}, losses={mean_loss}{excl_note})"
             if active else
             f"MW Z={z:.2f}≤{threshold} — scores do NOT reliably predict wins — sf=1.0 applied"
         ),
@@ -1194,7 +1250,7 @@ def recent_rec():
     try:
         with get_db() as conn:
             row = conn.execute("""
-                SELECT recommendation, entry_signals_json, timestamp
+                SELECT id, recommendation, entry_signals_json, timestamp
                   FROM ai_learning_events
                  WHERE ticker = ?
                  ORDER BY id DESC
@@ -1209,6 +1265,7 @@ def recent_rec():
         except (ValueError, TypeError):
             sig = {}
         return jsonify({"ok": True, "rec": {
+            "id":             row["id"],
             "recommendation": row["recommendation"],
             "entry_signals":  sig,
             "timestamp":      row["timestamp"],
@@ -2069,7 +2126,8 @@ def learning_stats():
             # Gap 2: Phase 8 skill-weighting validation
             # Fix #16: include exit_reason and error_type so _is_good_loss() can filter them
             skill_rows_raw = conn.execute("""
-                SELECT skill_score, outcome_status, exit_reason, error_type
+                SELECT skill_score, outcome_status, exit_reason, error_type,
+                       thesis_verdict, rr_ratio
                 FROM ai_learning_events
                 WHERE skill_score IS NOT NULL
                   AND outcome_status IN ('win','loss','breakeven')
@@ -3169,7 +3227,13 @@ _HOLD_HORIZON_DAYS = 20    # forward trading-day window a HOLD thesis must hold 
 _HOLD_VOL_K        = 1.0   # threshold = K × horizon-σ of the stock's own ATR
 _HOLD_THR_FLOOR    = 0.05  # never call a <5% drawdown a miss (noise floor)
 _HOLD_THR_CAP      = 0.20  # never demand >20% before flagging (very high-vol names)
-_HOLD_MIN_BARS     = 10    # too few forward bars to judge → leave unresolved
+# Audit E5: require the FULL horizon (entry bar + _HOLD_HORIZON_DAYS forward bars)
+# before resolving. The endpoint is read at bar _HOLD_HORIZON_DAYS and the miss
+# threshold is sized for √_HOLD_HORIZON_DAYS, so resolving with only 10 bars judged a
+# ~bar-11 endpoint against a 20-day-drift threshold — a non-uniform effective horizon
+# that biased the miss rate feeding the CI-gated ⚠HOLD_TOO_PASSIVE nudge. Too few
+# forward bars → leave unresolved (virtual_open) until the window fills.
+_HOLD_MIN_BARS     = _HOLD_HORIZON_DAYS + 1
 # Raw-count floor for the behaviour-changing HOLD nudge. Mirrors the local
 # _MIN_NUDGE_N in _calib_compute() (Sprint 70) — same value, module-level so the
 # standalone _compute_hold_outcome_nudge() can share the gate.
@@ -4012,10 +4076,13 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         """
         half_life = hl if half_life is None else half_life
         td = _decay(r["timestamp"], half_life)
-        sk = r["skill_score"]
-        # Phase 8 gate: only apply skill amplification when scores predict outcomes.
+        # Audit E1: amplify by the OUTCOME-INDEPENDENT process score, not skill_score
+        # (skill_score is partly defined by win/loss, so weighting by it directly
+        # inflates the weighted win rate — the up-weight-wins/down-weight-losses loop).
+        ps = compute_process_score_deterministic(r)
+        # Phase 8 gate: only apply skill amplification when process scores predict outcomes.
         # _phase8_active is resolved at call time (closure over outer scope variable).
-        sf = max(0.2, min(1.8, float(sk) / 5.0)) if (sk is not None and _phase8_active) else 1.0
+        sf = max(0.2, min(1.8, float(ps) / 5.0)) if (ps is not None and _phase8_active) else 1.0
         base = td * sf
         # Paper-trading discount: paper fills are idealized (no real slippage or
         # behavioural drag) so they're less trustworthy than real outcomes. A
@@ -4101,7 +4168,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 SELECT ai_confidence, outcome_status, regime, sector, ticker,
                        realized_pnl_pct, rr_ratio, timestamp,
                        error_type, error_type_source, exit_reason, skill_score, success_tags,
-                       trade_mode, recommendation, market_context
+                       trade_mode, recommendation, market_context, thesis_verdict
                 FROM ai_learning_events
                 WHERE timestamp >= ? AND outcome_status IN ('win','loss','breakeven')
                 ORDER BY timestamp DESC LIMIT 300
@@ -4126,7 +4193,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                        regime, sector, ticker,
                        NULL AS realized_pnl_pct, rr_ratio, timestamp,
                        error_type, exit_reason, skill_score, success_tags,
-                       trade_mode,
+                       trade_mode, thesis_verdict,
                        1 AS is_virtual,
                        COALESCE(virtual_speed_weight, 1.0) AS virtual_speed_weight
                 FROM ai_learning_events
@@ -4220,11 +4287,13 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         # Python closures read names at call time, so assigning _phase8_active here
         # (in the same function scope as the earlier `_phase8_active = False`)
         # makes _weight() see the updated value when first called below.
-        _scored_rows = [r for r in rows if r["skill_score"] is not None]
+        # Audit E1: gate on the outcome-independent process score (see _weight/_ps).
+        _scored_rows = [(r, _p) for r in rows
+                        if (_p := compute_process_score_deterministic(r)) is not None]
         if len(_scored_rows) >= 10:
-            _win_sk  = [float(r["skill_score"]) for r in _scored_rows if r["outcome_status"] == "win"]
+            _win_sk  = [p for r, p in _scored_rows if r["outcome_status"] == "win"]
             # Fix #16: exclude good losses (protective_stop + external_shock) from gate comparison
-            _loss_sk = [float(r["skill_score"]) for r in _scored_rows
+            _loss_sk = [p for r, p in _scored_rows
                         if r["outcome_status"] in ("loss", "breakeven") and not _is_good_loss(r)]
             if _win_sk and _loss_sk:
                 _phase8_active = _mann_whitney_z(_win_sk, _loss_sk) > 1.28  # same gate as _compute_phase8_meta()
@@ -4360,11 +4429,15 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         # If current regime is stable (|reg_delta|<8pp), the decay is likely regime-exposure
         # (under-performance in other regimes) rather than a universal strategy breakdown.
         recent_rows = [r for r in rows_all if r["timestamp"] >= cutoff_30]
-        if len(recent_rows) >= 5 and n >= 10:
+        if len(recent_rows) >= _MIN_NUDGE_N and n >= 10:
             all_wr       = _wwr(rows_all)
             rec_wr       = _wwr(recent_rows)
             global_delta = rec_wr - all_wr
-            if global_delta < -0.15:
+            recent_wins  = sum(1 for r in recent_rows if r["outcome_status"] == "win")
+            # Audit E3: was a raw point-estimate gate (global_delta < −0.15, no CI), so
+            # a noisy recent window triggered "reduce posn 30%". Require the recent
+            # window's Wilson CI to exclude the all-time rate before flagging decay.
+            if global_delta < -0.15 and _ci_excludes(recent_wins, len(recent_rows), all_wr):
                 interpretation_appended = False
                 if regime:
                     reg_recent = [r for r in recent_rows if (r.get("regime") or "") == regime]
@@ -4392,11 +4465,15 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                         f"(Δ{global_delta*100:+.0f}pp)→reduce posn 30%"
                     )
 
-        # 5. R:R accuracy — n≥5 high-R:R with clear underperformance
+        # 5. R:R accuracy — Audit E3: was `n≥5 and hi_wr<0.50` with NO CI/ESS, so a
+        # 2W/3L fluke (40% vs 50%) triggered "widen stops". Now routed through the same
+        # Wilson-CI + raw-count floor the band/correlation nudges use: fire only when
+        # the high-R:R bucket's 95% CI lies entirely below 50% at n≥_MIN_NUDGE_N.
         hi_rr = [r for r in rows_all if (r["rr_ratio"] or 0) >= 2.0]
-        if len(hi_rr) >= 5:
-            hi_wr = _wwr(hi_rr)
-            if hi_wr < 0.50:
+        if len(hi_rr) >= _MIN_NUDGE_N:
+            hi_wins = sum(1 for r in hi_rr if r["outcome_status"] == "win")
+            hi_wr   = _wwr(hi_rr)
+            if hi_wr < 0.50 and _ci_excludes(hi_wins, len(hi_rr), 0.50):
                 parts.append(f"RR≥2.0:{hi_wr*100:.0f}%WR(n={len(hi_rr)})⚠stops/targets off→widen stops")
 
         # 6. Dominant learnable error in non-shock losses — L2: threshold lowered to 33%, n≥3
@@ -4418,7 +4495,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             if type_counts:
                 top_et, top_cnt = max(type_counts.items(), key=lambda x: x[1])
                 top_pct = top_cnt / len(learnable_losses)
-                if top_pct >= 0.33:
+                # Audit E3: gate the proportion on significance too — previously any
+                # tag firing at ≥33% share fired the nudge, so 4-of-12 noise passed.
+                # Require the Wilson CI of the dominant-tag share to exclude 0.33.
+                if top_pct >= 0.33 and _ci_excludes(top_cnt, len(learnable_losses), 0.33):
                     short = {"overconfident": "OC", "missed_catalyst": "MC",
                              "regime_mismatch": "RM", "poor_entry": "PE",
                              "stop_too_tight": "ST", "poor_rr": "PR",
@@ -4819,10 +4899,16 @@ def learning_calibration():
     deep        = request.args.get("deep", "") in ("1", "true", "True")
 
     # L4: serve from cache if fresh (Fix #8: lock protects dict access only)
-    # flipped_at/flipped_to are not part of the cache key — they are short-lived
-    # and the TTL (5 min) is shorter than the minimum meaningful penalty window.
-    # `deep` IS part of the key — deep and light produce materially different blocks.
-    cache_key = (regime, sectors_str, tickers_str, days, deep)
+    # Audit E2: flipped_at/flipped_to MUST be in the key. _calib_compute halves the
+    # decay half-life and appends ⚠REGIME_FLIP when they are set, so a flip-aware
+    # request and a non-flip request produce materially different blocks. Keying
+    # without them served whichever call populated the cache first to every caller
+    # for the 5-min window (flip penalty leaking onto non-flip requests, or vice
+    # versa). flipped_at is a stable per-flip ISO timestamp; bucket it to the minute
+    # so it keys deterministically without churning the cache. `deep` is also part of
+    # the key — deep and light produce materially different blocks.
+    flip_at_bucket = flipped_at[:16]   # 'YYYY-MM-DDTHH:MM' — minute resolution
+    cache_key = (regime, sectors_str, tickers_str, days, deep, flip_at_bucket, flipped_to)
     with _calib_lock:
         cached = _calib_cache.get(cache_key)
         if cached and (time.time() - cached[1]) < _CALIB_TTL:

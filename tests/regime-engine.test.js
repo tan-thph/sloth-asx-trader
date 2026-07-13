@@ -1,8 +1,8 @@
 /**
  * tests/regime-engine.test.js
  *
- * Tests for classifyRegime(), isStrategyAllowed(), getRegimeModifiers(),
- * and applyRegimeModifiers() — the deterministic market regime classifier.
+ * Tests for classifyRegime(), getRegimeModifiers(), and applyRegimeModifiers()
+ * — the deterministic market regime classifier.
  */
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -143,32 +143,9 @@ describe('classifyRegime — confidence is a value in (0, 1]', () => {
   });
 });
 
-// ── isStrategyAllowed ─────────────────────────────────────────────────────────
-
-describe('isStrategyAllowed', () => {
-  it('blocks everything in panic regime', () => {
-    expect(isStrategyAllowed('momentumBreakout', 'panic')).toBe(false);
-    expect(isStrategyAllowed('meanReversionSwing', 'panic')).toBe(false);
-    expect(isStrategyAllowed('portfolioAnalysis', 'panic')).toBe(false);
-  });
-
-  it('allows portfolioAnalysis in all non-panic regimes', () => {
-    for (const r of ['riskOn', 'riskOff', 'sideways', 'trend', 'highVol']) {
-      expect(isStrategyAllowed('portfolioAnalysis', r)).toBe(true);
-    }
-  });
-
-  it('allows momentumBreakout only in riskOn and trend', () => {
-    expect(isStrategyAllowed('momentumBreakout', 'riskOn')).toBe(true);
-    expect(isStrategyAllowed('momentumBreakout', 'trend')).toBe(true);
-    expect(isStrategyAllowed('momentumBreakout', 'riskOff')).toBe(false);
-    expect(isStrategyAllowed('momentumBreakout', 'highVol')).toBe(false);
-  });
-
-  it('returns false for unknown strategy names', () => {
-    expect(isStrategyAllowed('nonexistent', 'riskOn')).toBe(false);
-  });
-});
+// isStrategyAllowed / _STRATEGY_GATES were deleted as dead code (Audit B3, 2026-07-13)
+// — no production call site; day-trade gating is via DT_FILTER, panic gating via
+// applyRegimeModifiers. Tests removed alongside the implementation.
 
 // ── getRegimeModifiers ────────────────────────────────────────────────────────
 
@@ -281,5 +258,39 @@ describe('applyRegimeModifiers', () => {
     expect(typeof out.reasoning).toBe('string');
     expect(out.reasoning).toContain('legacy array reasoning');
     expect(out.reasoning).toContain('[REGIME:highVol]');
+  });
+
+  // ── Audit B2: risk/reward $ fields must scale with qty ──────────────────────
+  it('scales riskAUD AND rewardAUD down with qty in riskOff (0.5×)', () => {
+    const rec = { ticker: 'BHP', action: 'BUY', qty: 100, riskAUD: 200, rewardAUD: 400, reasoning: '' };
+    const out = applyRegimeModifiers(rec, 'riskOff');   // sizeMult 0.5
+    expect(out.qty).toBe(50);
+    expect(out.riskAUD).toBe(100);      // was left stale at 200 before the fix
+    expect(out.rewardAUD).toBe(200);
+  });
+
+  it('scales riskAUD up with qty in trend (1.1×) so the heat budget sees true risk', () => {
+    const rec = { ticker: 'BHP', action: 'BUY', qty: 100, riskAUD: 200, rewardAUD: 400, reasoning: '' };
+    const out = applyRegimeModifiers(rec, 'trend');     // sizeMult 1.1
+    expect(out.qty).toBe(110);
+    // riskAUD scaled by the ACTUAL floored ratio (110/100), not left at 200
+    expect(out.riskAUD).toBe(Math.round(200 * (out.qty / 100)));
+    expect(out.riskAUD).toBeGreaterThan(200);
+  });
+
+  it('scales risk fields by the exact floored ratio, not the raw sizeMult', () => {
+    // qty 7 × 0.6 (highVol) = 4.2 → floor 4; ratio 4/7, not 0.6
+    const rec = { ticker: 'XYZ', action: 'BUY', qty: 7, riskAUD: 70, rewardAUD: 140, reasoning: '' };
+    const out = applyRegimeModifiers(rec, 'highVol');
+    expect(out.qty).toBe(4);
+    expect(out.riskAUD).toBe(Math.round(70 * (4 / 7)));   // 40, not 42
+  });
+
+  it('leaves risk fields untouched when they are absent', () => {
+    const rec = { ticker: 'BHP', action: 'BUY', qty: 100, reasoning: '' };
+    const out = applyRegimeModifiers(rec, 'riskOff');
+    expect(out.qty).toBe(50);
+    expect(out.riskAUD).toBeUndefined();
+    expect(out.rewardAUD).toBeUndefined();
   });
 });

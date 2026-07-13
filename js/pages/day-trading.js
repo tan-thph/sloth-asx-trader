@@ -656,7 +656,14 @@ function _renderDtRec(r, compact = false) {
             <span>Risk: <span style="color:#ef4444">-$${r.riskAUD != null ? Number(r.riskAUD).toFixed(0) : '?'}</span></span>
             <span>Reward: <span style="color:#10b981">+$${r.rewardAUD != null ? Number(r.rewardAUD).toFixed(0) : '?'}</span></span>
           </div>
-          ${isPending ? `
+          ${isPending && r._regimeBlocked ? `
+            <div style="padding:8px;text-align:center;background:#ef444422;color:#ef4444;border-radius:6px;font-size:12px;font-weight:600">
+              ⛔ Regime-blocked (${r._regimeBlocked}) — no new positions
+            </div>
+            <div class="flex-row" style="gap:7px;margin-top:6px">
+              <button class="btn btn-sm btn-danger" onclick="dismissDayTradeRec('${r.id}')" style="flex:1">Dismiss</button>
+            </div>` : ''}
+          ${isPending && !r._regimeBlocked ? `
             <div class="flex-row" style="gap:7px">
               <button class="btn btn-primary btn-sm" onclick="executeDayTrade('${r.id}')" style="flex:1">✓ Execute</button>
               <button class="btn btn-sm btn-danger" onclick="dismissDayTradeRec('${r.id}')">Dismiss</button>
@@ -1291,6 +1298,11 @@ function executeIntradayTrade(recId) {
   if (!state.intraday) return;
   const rec = (state.intraday.recommendations || []).find(r => r.id === recId);
   if (!rec || rec.status !== 'pending') return;
+  // Gotcha #3 belt-and-braces: never open a position the regime engine zeroed.
+  if (rec._regimeBlocked) {
+    toast(`⛔ ${rec.ticker} is regime-blocked (${rec._regimeBlocked}) — no new positions`, 'error');
+    return;
+  }
 
   const ip = { maxPositions: 2, ...(state.intraday.params || {}) };
   if ((state.intraday.openPositions || []).length >= ip.maxPositions) {

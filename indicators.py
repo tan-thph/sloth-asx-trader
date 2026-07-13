@@ -263,7 +263,15 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    # avg_loss == 0 makes rs NaN → RSI NaN. Standard convention: an all-gains window
+    # is extreme overbought (RSI 100), not neutral 50. A flat window (no gains, no
+    # losses) is genuinely neutral (50). Set both explicitly rather than letting a
+    # downstream safe_float(..., 50) silently coerce a real overbought signal to 50.
+    zero_loss = avg_loss == 0
+    rsi = rsi.mask(zero_loss & (avg_gain > 0), 100.0)
+    rsi = rsi.mask(zero_loss & (avg_gain == 0), 50.0)
+    return rsi
 
 
 def compute_macd(series: pd.Series, fast=12, slow=26, signal=9):
@@ -459,11 +467,14 @@ FACTOR_WEIGHTS = {
 }
 _fw_total = sum(FACTOR_WEIGHTS.values())
 if _fw_total != 100:
-    import warnings as _warn
-    _warn.warn(
+    # Audit D2: route through the app logger (server.log), not warnings.warn.
+    # warnings.warn is once-per-location, goes to stderr, and is filtered under
+    # waitress/gunicorn — a future edit breaking the sum would silently corrupt
+    # every scanner score with no server.log trace. core.log.warning is captured.
+    from core import log as _core_log
+    _core_log.warning(
         f"FACTOR_WEIGHTS sum to {_fw_total}, not 100 — scanner scores will be wrong. "
-        "Fix the values in indicators.py.",
-        stacklevel=2,
+        "Fix the values in indicators.py."
     )
 
 def _simple_rsi(closes: np.ndarray, period: int = 14) -> float:
@@ -716,8 +727,10 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         pass
 
     def pct_return(days):
-        if len(close) > days:
-            return safe_float((close.iloc[-1] / close.iloc[-days] - 1) * 100)
+        # An N-day return spans N gaps, i.e. close[-1] vs close[-N-1] (N bars back).
+        # Using close[-N] made return_1d identically 0.0 and every window off-by-one.
+        if len(close) > days + 1:
+            return safe_float((close.iloc[-1] / close.iloc[-days - 1] - 1) * 100)
         return None
 
     # ── Composite buy/sell signal list ────────────────────────────────────────
@@ -828,6 +841,17 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         fundamentals["pct_from_52w_low"] = round((cp / fundamentals["52w_low"] - 1) * 100, 2)
 
     # ── Earnings proximity ────────────────────────────────────────────────────
+    def _days_to(first):
+        # Audit D1: compare DATES, not datetimes. `first` is a midnight-normalized
+        # earnings date; pd.Timestamp.now() carries time-of-day, so on the earnings
+        # day itself the delta went slightly negative → .days floored to -1 → the
+        # 0..14 gate failed on the single highest-risk day. Normalize both to naive
+        # midnight (Sydney date, per gotcha #87, to avoid a UTC/AEST day-boundary
+        # off-by-one) so the earnings date reads as 0.
+        first_d = pd.Timestamp(first).replace(tzinfo=None).normalize()
+        today_d = pd.Timestamp.now(tz="Australia/Sydney").normalize().tz_localize(None)
+        return (first_d - today_d).days
+
     days_to_earnings = None
     try:
         cal = stk.calendar
@@ -836,14 +860,11 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
                 earn_dates = cal.get("Earnings Date", [])
                 if earn_dates:
                     first = earn_dates[0] if isinstance(earn_dates, (list, tuple)) else earn_dates
-                    # Fix #30: strip tz before subtraction — yfinance returns tz-aware
-                    # timestamps; pd.Timestamp.now() is tz-naive → TypeError on compare.
-                    # .replace(tzinfo=None) works on both tz-aware and tz-naive Timestamps.
-                    days_to_earnings = (pd.Timestamp(first).replace(tzinfo=None) - pd.Timestamp.now()).days
+                    days_to_earnings = _days_to(first)
             elif hasattr(cal, "columns") and "Earnings Date" in cal.columns:
                 earn_ts = cal["Earnings Date"].dropna()
                 if not earn_ts.empty:
-                    days_to_earnings = (pd.Timestamp(earn_ts.iloc[0]).replace(tzinfo=None) - pd.Timestamp.now()).days
+                    days_to_earnings = _days_to(earn_ts.iloc[0])
     except Exception:
         pass
     pre_earnings_risk = bool(days_to_earnings is not None and 0 <= days_to_earnings <= 14)
@@ -887,6 +908,14 @@ def analyse_ticker(ticker: str, period: str = "6mo") -> dict:
         if etf_sym and len(close) >= 5:
             etf_stk = yf.Ticker(etf_sym)
             etf_hist = etf_stk.history(period='1mo', auto_adjust=True)
+            # Audit A3: the ticker `close` series has already passed _drop_forming_bar
+            # (+ _sanity_check), so before the ASX settlement cutoff its last bar is
+            # yesterday's settled close. etf_hist is fetched raw, so intraday it still
+            # carries today's partial bar → the two 5-day returns would end on
+            # different trading dates (one-day lookback misalignment injecting intraday
+            # noise). Apply the same guards so both legs end on the same settled bar.
+            if etf_hist is not None and not etf_hist.empty:
+                etf_hist = _sanity_check(_drop_forming_bar(etf_hist), etf_sym)
             if etf_hist is not None and len(etf_hist) >= 5:
                 etf_ret5 = float(etf_hist['Close'].iloc[-1] / etf_hist['Close'].iloc[-5] - 1) * 100
                 ticker_ret5 = float(close.iloc[-1] / close.iloc[-5] - 1) * 100
