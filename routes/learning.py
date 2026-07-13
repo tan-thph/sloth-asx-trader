@@ -4725,9 +4725,16 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 if abs(delta) > 0.15:
                     direction = "✓strong" if delta > 0 else "⚠weak"
                     if delta < 0:
-                        # Penalty-only, matching the prompt's documented per-ticker rule
                         # ("apply an extra −0.10 to that ticker's confidence").
                         adjustments["tickers"][tk] = -0.10
+                    else:
+                        # Audit F5: symmetric positive side — a ticker whose decay-
+                        # weighted WR clears the overall book by >15pp at ESS≥6 earns a
+                        # small +0.05 confidence bump (same ESS/delta gate as the
+                        # penalty). Capped BELOW the 0.10 penalty on purpose: intentional
+                        # asymmetry so a losing ticker down-weights conviction more than a
+                        # winning one up-weights it (don't chase a hot streak).
+                        adjustments["tickers"][tk] = 0.05
                     ticker_parts.append(
                         f"{tk}:{tk_wr*100:.0f}%(Δ{delta*100:+.0f}pp,ESS={_ess(tk_rows):.1f}){direction}"
                     )

@@ -1823,6 +1823,29 @@ class TestThesisSnapshotsF4(unittest.TestCase):
         self.assertIn("thesis_snapshots", _db._SCHEMA)
 
 
+class TestAuditF6RetryBudget(unittest.TestCase):
+    """Audit F6 — the portfolio agent gets a longer 529 retry budget with jitter."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "js", "claude-client.js"), encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_portfolio_agent_gets_longer_schedule(self):
+        # The portfolio path must use the extended 0/1/4/15s schedule; other agents
+        # keep the short 0/1/2/4s. Both arrays must be present, gated on agentType.
+        self.assertIn("agentType === 'portfolio'", self.src)
+        self.assertIn("[0, 1000, 4000, 15000]", self.src)
+        self.assertIn("[0, 1000, 2000, 4000]", self.src)
+
+    def test_backoff_has_jitter(self):
+        # Jitter must be applied so concurrent retries don't thunder-herd.
+        self.assertIn("Math.random()", self.src)
+        # Jitter is only added to the delay inside the retry sleep, not fabricated
+        # into the base schedule.
+        self.assertRegex(self.src, r"RETRY_DELAYS\[attempt\]\s*\+\s*jitter")
+
+
 class TestPaperTradingFirewall(unittest.TestCase):
     """Paper/real trade firewall — data model, backfill, learning trade_mode."""
 
@@ -7796,6 +7819,83 @@ class TestSprint71Phase2(unittest.TestCase):
         self.assertIn('"rs_5d_alpha":', src)
         # And that they're sourced from the _score_data dict (the score pattern).
         self.assertIn("_score_data.get(\"rs_score\")", src)
+
+
+class TestF5SymmetricPerTickerNudge(unittest.TestCase):
+    """Audit F5 — the per-ticker calibration nudge is now two-sided: a strong
+    ticker (WR >15pp above the book at ESS≥6) earns a capped +0.05 bump, mirroring
+    the existing −0.10 penalty for a weak one."""
+
+    @staticmethod
+    def _clean(conn):
+        conn.execute("DELETE FROM ai_learning_events")
+        conn.commit()
+
+    @staticmethod
+    def _insert(conn, ticker, outcome, ts):
+        conn.execute("""
+            INSERT INTO ai_learning_events
+              (event_type, ticker, recommendation, outcome_status,
+               ai_confidence, trade_mode, was_executed, timestamp)
+            VALUES ('recommendation',?,'BUY',?,0.6,'real',1,?)
+        """, (ticker, outcome, ts))
+
+    def _run(self, tk):
+        from routes.learning import _calib_compute
+        import unittest.mock as _mock
+        import yfinance as yf
+
+        class _FakeTicker:
+            def history(self, **kw):
+                import pandas as pd
+                return pd.DataFrame()
+        with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+            return _calib_compute("riskOn", "", tk, 90)
+
+    def test_strong_ticker_earns_capped_positive_nudge(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+                # TGT: 10 fresh events, 9 wins (90% WR, ESS≈10).
+                for i in range(10):
+                    self._insert(conn, "TGT.AX", "win" if i < 9 else "loss",
+                                 f"2026-07-{(i%12)+1:02d} 10:00:00")
+                # Book drag: 22 other-ticker events at ~32% WR (>=30 total rows to
+                # clear the base-rate-prior gate) so overall WR is well below TGT.
+                for i in range(22):
+                    self._insert(conn, f"D{i}.AX", "win" if i < 7 else "loss",
+                                 f"2026-07-{(i%12)+1:02d} 10:00:00")
+                conn.commit()
+            result = self._run("TGT.AX")
+            adj = result.get("adjustments", {}).get("tickers", {})
+            self.assertEqual(adj.get("TGT.AX"), 0.05)
+            self.assertIn("✓strong", result.get("block", ""))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_weak_ticker_still_penalised(self):
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean(conn)
+                # TGT weak: 10 fresh events, 1 win (10% WR).
+                for i in range(10):
+                    self._insert(conn, "TGT.AX", "win" if i < 1 else "loss",
+                                 f"2026-07-{(i%12)+1:02d} 10:00:00")
+                # Book: 22 other-ticker events at ~68% WR (>=30 total rows) so overall
+                # is well above TGT.
+                for i in range(22):
+                    self._insert(conn, f"U{i}.AX", "win" if i < 15 else "loss",
+                                 f"2026-07-{(i%12)+1:02d} 10:00:00")
+                conn.commit()
+            result = self._run("TGT.AX")
+            adj = result.get("adjustments", {}).get("tickers", {})
+            self.assertEqual(adj.get("TGT.AX"), -0.10)
+        finally:
+            asx_server.get_db = _orig_get_db
 
 
 class TestCorrelationDragNudge(unittest.TestCase):

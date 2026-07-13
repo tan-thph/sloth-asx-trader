@@ -286,12 +286,22 @@ async function callClaude(agentType, userMessage, options = {}) {
     `${useProxy ? 'proxy' : 'direct'} | ${new Date().toLocaleTimeString('en-AU')}`
   );
 
-  // ── Exponential backoff: 4 attempts (0s, 1s, 2s, 4s) ──────────────────────
-  const RETRY_DELAYS = [0, 1000, 2000, 4000];
+  // ── Exponential backoff ───────────────────────────────────────────────────
+  // Audit F6: the portfolio agent is the once-per-run, user-initiated call — a
+  // failed analysis is far more costly than an extra ~15s wait, and Anthropic 529
+  // overload bursts routinely outlast the default ~7s budget. Give it a longer
+  // schedule (0/1/4/15s ≈ 20s total); high-frequency agents keep the short 0/1/2/4s.
+  // Jitter (±0–500ms) is added per sleep so concurrent retries don't thunder-herd.
+  const RETRY_DELAYS = (agentType === 'portfolio')
+    ? [0, 1000, 4000, 15000]
+    : [0, 1000, 2000, 4000];
   let lastErr;
 
   for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
-    if (attempt > 0) await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
+    if (attempt > 0) {
+      const jitter = RETRY_DELAYS[attempt] > 0 ? Math.floor(Math.random() * 500) : 0;
+      await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt] + jitter));
+    }
 
     let resp;
     try {
