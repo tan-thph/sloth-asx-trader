@@ -1742,6 +1742,87 @@ class TestCalibrationEfficacy(unittest.TestCase):
         self.assertEqual(d["n"], 0)
 
 
+class TestThesisSnapshotsF4(unittest.TestCase):
+    """Audit F4 — thesis-evolution snapshots (critics.md #4). Data accrual only."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def _post(self, **kw):
+        return self.client.post("/api/learning/thesis-snapshot",
+                                data=json.dumps(kw), content_type="application/json")
+
+    def test_snapshot_persists_and_reads_back(self):
+        r = self._post(learning_id=4001, ticker="BHP.AX", milestone_day=30,
+                       days_held=31, verdict="validated", reason="RSI 42→55",
+                       deltas={"rsi_14": {"entry": 42, "now": 55}})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertTrue(r.get_json()["inserted"])
+        g = self.client.get("/api/learning/thesis-snapshots?learning_id=4001")
+        snaps = g.get_json()["snapshots"]
+        self.assertEqual(len(snaps), 1)
+        self.assertEqual(snaps[0]["milestone_day"], 30)
+        self.assertEqual(snaps[0]["verdict"], "validated")
+        self.assertEqual(snaps[0]["deltas"]["rsi_14"]["now"], 55)
+
+    def test_duplicate_milestone_is_deduped(self):
+        self._post(learning_id=4002, ticker="CBA.AX", milestone_day=60,
+                   days_held=61, verdict="invalidated", reason="x")
+        r2 = self._post(learning_id=4002, ticker="CBA.AX", milestone_day=60,
+                        days_held=65, verdict="reversed", reason="y")
+        self.assertEqual(r2.status_code, 200)
+        self.assertFalse(r2.get_json()["inserted"])
+        self.assertTrue(r2.get_json()["deduped"])
+        snaps = self.client.get(
+            "/api/learning/thesis-snapshots?learning_id=4002").get_json()["snapshots"]
+        # First write wins; the second (different verdict) is ignored.
+        self.assertEqual(len(snaps), 1)
+        self.assertEqual(snaps[0]["verdict"], "invalidated")
+
+    def test_invalid_milestone_rejected(self):
+        r = self._post(learning_id=4003, ticker="X.AX", milestone_day=45)
+        self.assertEqual(r.status_code, 400)
+
+    def test_missing_learning_id_rejected(self):
+        r = self._post(ticker="X.AX", milestone_day=30)
+        self.assertEqual(r.status_code, 400)
+
+    def test_entry_context_returns_learning_id(self):
+        """F4 wiring: entry-context must expose learning_id so the client capture
+        can key snapshots to the entry event."""
+        with _test_get_db() as conn:
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, primary_entry_driver,
+                   entry_signals_json, was_executed, timestamp)
+                VALUES ('recommendation','WOW.AX','BUY','mean_reversion',
+                        '{"rsi_14": 30}', 1, datetime('now'))
+            """)
+        d = self.client.get("/api/learning/entry-context?tickers=WOW.AX").get_json()
+        self.assertIn("WOW.AX", d["contexts"])
+        self.assertIsInstance(d["contexts"]["WOW.AX"]["learning_id"], int)
+
+    def test_client_capture_wired(self):
+        """F4 client: learning-loop.js defines the capture; scheduler runs it daily."""
+        with open(os.path.join(ROOT, "js", "learning-loop.js"), encoding="utf-8") as f:
+            ll = f.read()
+        self.assertIn("async function captureThesisSnapshots(", ll)
+        self.assertIn("/api/learning/thesis-snapshot", ll)
+        self.assertIn("computeThesisDrift(", ll)
+        with open(os.path.join(ROOT, "js", "scheduler.js"), encoding="utf-8") as f:
+            sch = f.read()
+        self.assertIn("checkThesisSnapshotSchedule", sch)
+        self.assertIn("thesisSnapshotDay", sch)   # once-per-day guard
+
+    def test_thesis_snapshots_table_in_schema(self):
+        import db as _db
+        self.assertIn("thesis_snapshots", _db._SCHEMA)
+
+
 class TestPaperTradingFirewall(unittest.TestCase):
     """Paper/real trade firewall — data model, backfill, learning trade_mode."""
 

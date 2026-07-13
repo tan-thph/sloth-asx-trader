@@ -1207,7 +1207,7 @@ def entry_context():
         with get_db() as conn:
             for tk in tickers:
                 row = conn.execute("""
-                    SELECT timestamp, primary_entry_driver, entry_signals_json, trade_thesis
+                    SELECT id, timestamp, primary_entry_driver, entry_signals_json, trade_thesis
                       FROM ai_learning_events
                      WHERE ticker = ? AND recommendation IN ('BUY','TOP_UP')
                      ORDER BY was_executed DESC, id DESC
@@ -1222,12 +1222,104 @@ def entry_context():
                 except (ValueError, TypeError):
                     sig = {}
                 contexts[tk] = {
+                    "learning_id": row["id"],
                     "entry_date": row["timestamp"],
                     "primary_entry_driver": row["primary_entry_driver"],
                     "entry_signals": sig,
                     "trade_thesis": row["trade_thesis"],
                 }
         return jsonify({"ok": True, "contexts": contexts})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/thesis-snapshot", methods=["POST"])
+def thesis_snapshot():
+    """Persist a thesis-evolution snapshot for an open holding (Audit F4).
+
+    POST body: {learning_id, ticker, milestone_day (30|60|90), days_held,
+                verdict, reason, deltas}
+    computeThesisDrift() runs client-side and posts its {verdict, reason, deltas}
+    here at the ~30/60/90-day marks. One row per (learning_id, milestone_day) —
+    a duplicate milestone is a no-op (INSERT OR IGNORE), so the daily scheduler
+    pass can call blindly without re-capturing an existing mark. Pure accrual: no
+    stats or nudges consume this yet.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        learning_id   = int(data.get("learning_id"))
+        milestone_day = int(data.get("milestone_day"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "learning_id and milestone_day required"}), 400
+    if milestone_day not in (30, 60, 90):
+        return jsonify({"ok": False, "error": "milestone_day must be 30, 60 or 90"}), 400
+    ticker = (data.get("ticker") or "").strip().upper()
+    deltas = data.get("deltas")
+    try:
+        deltas_json = json.dumps(deltas) if deltas is not None else None
+    except (TypeError, ValueError):
+        deltas_json = None
+    days_held = data.get("days_held")
+    try:
+        days_held = int(days_held) if days_held is not None else None
+    except (TypeError, ValueError):
+        days_held = None
+    try:
+        with get_db() as conn:
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO thesis_snapshots
+                  (learning_id, ticker, milestone_day, days_held, verdict, reason, deltas_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (learning_id, ticker, milestone_day, days_held,
+                  data.get("verdict"), data.get("reason"), deltas_json))
+            inserted = cur.rowcount > 0
+        return jsonify({"ok": True, "inserted": inserted, "deduped": not inserted})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/thesis-snapshots", methods=["GET"])
+def thesis_snapshots():
+    """Return thesis-evolution snapshots (Audit F4).
+
+    GET /api/learning/thesis-snapshots[?learning_id=N][?ticker=X][?limit=N]
+    Ordered by learning_id then milestone_day so a holding's 30/60/90 sequence
+    reads in order. Default limit 300.
+    """
+    lid   = request.args.get("learning_id")
+    tk    = (request.args.get("ticker") or "").strip().upper()
+    try:
+        limit = min(int(request.args.get("limit", 300)), 1000)
+    except (TypeError, ValueError):
+        limit = 300
+    where, params = [], []
+    if lid:
+        try:
+            params.append(int(lid)); where.append("learning_id = ?")
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "learning_id must be an integer"}), 400
+    if tk:
+        params.append(tk); where.append("ticker = ?")
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(f"""
+                SELECT id, learning_id, ticker, milestone_day, days_held,
+                       verdict, reason, deltas_json, captured_at
+                  FROM thesis_snapshots
+                  {clause}
+                 ORDER BY learning_id, milestone_day
+                 LIMIT ?
+            """, (*params, limit)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["deltas"] = json.loads(d.pop("deltas_json") or "null")
+            except (ValueError, TypeError):
+                d["deltas"] = None
+            out.append(d)
+        return jsonify({"ok": True, "snapshots": out})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

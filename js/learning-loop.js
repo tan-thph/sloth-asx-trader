@@ -547,3 +547,58 @@ async function fetchEntryContexts(tickers) {
     return (data.ok && data.contexts) ? data.contexts : {};
   } catch (_) { return {}; }
 }
+
+// Audit F4 (critics.md #4): capture thesis-evolution snapshots for open holdings.
+// For each open portfolio ticker, compares its entry signals against the current
+// live snapshot via computeThesisDrift() and persists the {verdict, reason, deltas}
+// at the ~30/60/90-day marks. The server dedupes on (learning_id, milestone_day),
+// so this can run blindly every day — the first daily pass after a mark is crossed
+// records it, later passes are no-ops. Pure data accrual (no nudges consume it yet);
+// the point is that mid-hold thesis drift CANNOT be reconstructed after the fact.
+async function captureThesisSnapshots() {
+  try {
+    if (typeof state === 'undefined' || !state.serverOk) return 0;
+    const holdings = (state.portfolio || []);
+    const tickers = [...new Set(holdings.map(h => h && h.ticker).filter(Boolean))];
+    if (!tickers.length) return 0;
+    const contexts = await fetchEntryContexts(tickers);
+    const now = Date.now();
+    let posted = 0;
+    for (const tk of tickers) {
+      const ctx = contexts[tk];
+      if (!ctx || !ctx.learning_id || !ctx.primary_entry_driver ||
+          !ctx.entry_signals || !ctx.entry_date) continue;
+      const entryMs = new Date(String(ctx.entry_date).replace(' ', 'T')).getTime();
+      if (!isFinite(entryMs)) continue;
+      const daysHeld = Math.floor((now - entryMs) / 86400000);
+      if (daysHeld < 30) continue;   // no mark crossed yet
+      const live = (state.liveSignals || {})[tk];
+      if (!live) continue;
+      const drift = computeThesisDrift(ctx.primary_entry_driver, ctx.entry_signals, live);
+      if (!drift) continue;
+      for (const M of [30, 60, 90]) {
+        if (daysHeld < M) continue;
+        try {
+          await fetch(`${API}/api/learning/thesis-snapshot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              learning_id:   ctx.learning_id,
+              ticker:        tk,
+              milestone_day: M,
+              days_held:     daysHeld,
+              verdict:       drift.verdict,
+              reason:        drift.reason,
+              deltas:        drift.deltas,
+            }),
+          });
+          posted++;
+        } catch (_) { /* best-effort; retried next pass */ }
+      }
+    }
+    return posted;
+  } catch (e) {
+    if (typeof console !== 'undefined') console.warn('captureThesisSnapshots failed', e);
+    return 0;
+  }
+}

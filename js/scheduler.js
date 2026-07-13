@@ -257,6 +257,20 @@ async function autoRefreshPrices(reason) {
   console.log(`Auto-refreshing prices (${reason})...`);
   await refreshPrices({silent: true});
   checkMacroBriefSchedule();
+  checkThesisSnapshotSchedule();
+}
+
+// Audit F4: capture thesis-evolution snapshots at most once per calendar day.
+// Piggybacks the price-refresh cycle (liveSignals are freshest then). The server
+// dedupes per (learning_id, milestone_day), so this is a cheap no-op most days —
+// the daily guard just avoids re-POSTing every 10 minutes.
+function checkThesisSnapshotSchedule() {
+  if (typeof state === 'undefined' || !state.serverOk) return;
+  if (typeof captureThesisSnapshots !== 'function') return;
+  const today = todayStr();
+  if (localStorage.getItem('thesisSnapshotDay') === today) return;
+  localStorage.setItem('thesisSnapshotDay', today);
+  Promise.resolve(captureThesisSnapshots()).catch(() => {});
 }
 
 // ── AI morning macro — auto-run once per trading day ─────────────────────────

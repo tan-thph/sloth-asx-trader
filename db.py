@@ -252,6 +252,26 @@ _SCHEMA = """
         us10y_level           REAL,
         created_at            TEXT DEFAULT (datetime('now','localtime'))
     );
+
+    -- Audit F4 (critics.md #4): thesis-evolution snapshots. For each open
+    -- BUY/TOP_UP holding, a lightweight periodic capture (~30/60/90-day marks) of
+    -- computeThesisDrift()'s {verdict, reason, deltas} vs entry. Pure data accrual —
+    -- no stats/nudges yet — so exit-timing analysis (when does thesis deterioration
+    -- begin?) becomes possible once the corpus grows. Cannot be backfilled, hence
+    -- built now. One row per (learning_id, milestone_day).
+    CREATE TABLE IF NOT EXISTS thesis_snapshots (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        learning_id   INTEGER NOT NULL,
+        ticker        TEXT NOT NULL,
+        milestone_day INTEGER NOT NULL,     -- 30 | 60 | 90 (nominal age bucket)
+        days_held     INTEGER,              -- actual holding age at capture
+        verdict       TEXT,                 -- validated | partially_validated | invalidated | reversed | irrelevant
+        reason        TEXT,                 -- compact "RSI 42→68" style delta string
+        deltas_json   TEXT,                 -- full {field: [entry, now]} payload
+        captured_at   TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(learning_id, milestone_day)
+    );
+    CREATE INDEX IF NOT EXISTS idx_thesis_snap_lid ON thesis_snapshots(learning_id);
 """
 
 
