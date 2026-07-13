@@ -7288,7 +7288,7 @@ class TestSprint70DeterministicTagging(unittest.TestCase):
             src = f.read()
         blk = src[src.index("# 5. R:R accuracy"):src.index("# 6. Dominant learnable error")]
         self.assertIn("len(hi_rr) >= _MIN_NUDGE_N", blk)
-        self.assertIn("_ci_excludes(hi_wins, len(hi_rr), 0.50)", blk)
+        self.assertIn("_ci_excludes(hi_wins, len(hi_rr), 0.50", blk)   # E4 appends z=_FWER_Z
         self.assertNotIn("len(hi_rr) >= 5", blk)   # old ungated floor removed
 
     def test_e3_top_error_nudge_is_ci_gated(self):
@@ -7297,7 +7297,7 @@ class TestSprint70DeterministicTagging(unittest.TestCase):
         with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
             src = f.read()
         blk = src[src.index("# 6. Dominant learnable error"):src.index("# 6b.")]
-        self.assertIn("_ci_excludes(top_cnt, len(learnable_losses), 0.33)", blk)
+        self.assertIn("_ci_excludes(top_cnt, len(learnable_losses), 0.33", blk)  # E4 appends z=_FWER_Z
 
     def test_e3_strategy_decay_nudge_is_ci_gated(self):
         """Audit E3: the strategy-decay nudge must gate on the recent window's Wilson
@@ -7307,7 +7307,7 @@ class TestSprint70DeterministicTagging(unittest.TestCase):
         idx = src.index("recent_rows = [r for r in rows_all if r[\"timestamp\"] >= cutoff_30]")
         blk = src[idx:idx + 900]
         self.assertIn("len(recent_rows) >= _MIN_NUDGE_N", blk)
-        self.assertIn("_ci_excludes(recent_wins, len(recent_rows), all_wr)", blk)
+        self.assertIn("_ci_excludes(recent_wins, len(recent_rows), all_wr", blk)  # E4 appends z=_FWER_Z
 
     # ── _resolve_deterministic_tags (DB integration) ─────────────────────────
     def test_resolver_fills_and_marks_source(self):
@@ -7821,6 +7821,100 @@ class TestSprint71Phase2(unittest.TestCase):
         self.assertIn("_score_data.get(\"rs_score\")", src)
 
 
+class TestE4MultipleComparisonsCorrection(unittest.TestCase):
+    """Audit E4 — Bonferroni-lite tightening (99% Wilson CI, z=2.576) applied
+    across the family of simultaneous calibration-nudge tests, to control the
+    family-wise false-positive rate (≈46% uncorrected at ~12 simultaneous 95%
+    tests) down to ≈14%."""
+
+    def test_ci_excludes_z_param_tightens_the_bar(self):
+        """A 2-of-12 (16.7%) win rate vs a 50% threshold clears the default 95%
+        Wilson CI but NOT the tightened 99% one — the exact fluke shape E4 exists
+        to suppress."""
+        from routes.learning import _ci_excludes
+        self.assertTrue(_ci_excludes(2, 12, 0.50))                # default z=1.96
+        self.assertFalse(_ci_excludes(2, 12, 0.50, z=2.576))       # tightened
+
+    def test_ci_excludes_decisive_signal_still_fires_at_99(self):
+        """A decisive 1-of-12 (8.3%) vs 50% must still clear the tightened 99% CI —
+        the correction reduces false positives without killing real signal."""
+        from routes.learning import _ci_excludes
+        self.assertTrue(_ci_excludes(1, 12, 0.50, z=2.576))
+
+    def test_fwer_z_applied_at_every_family_site(self):
+        """Every enumerated family test (bands, sector, decay, RR, top-error,
+        success-tag, corr-drag, per-ticker, sector×regime) must pass z=_FWER_Z —
+        a future edit that drops the param on any site silently reverts to the
+        uncorrected 95% bar for that one test in the family."""
+        with open(os.path.join(ROOT, "routes", "learning.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_FWER_Z = 2.576", src)
+        self.assertEqual(src.count("z=_FWER_Z"), 9,
+                         "expected exactly 9 family call sites gated at the tightened bar")
+
+    def test_moderate_rr_fluke_suppressed_end_to_end(self):
+        """A 2/12 high-R:R bucket (would have fired the old 95%-gated RR-accuracy
+        nudge, per the E3 fixture) must now stay silent under the E4 tightening."""
+        from routes.learning import _calib_compute
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                conn.execute("DELETE FROM ai_learning_events")
+                for i in range(12):
+                    outcome = "win" if i < 2 else "loss"   # 2/12 = 16.7% WR
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           ai_confidence, rr_ratio, trade_mode, was_executed, timestamp)
+                        VALUES ('recommendation',?,'BUY',?,0.6,2.5,'real',1,?)
+                    """, (f"R{i}.AX", outcome, f"2026-07-{(i%12)+1:02d} 10:00:00"))
+                for i in range(20):   # pad past the n>=30 base-rate-prior gate
+                    outcome = "win" if i < 10 else "loss"
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           ai_confidence, rr_ratio, trade_mode, was_executed, timestamp)
+                        VALUES ('recommendation',?,'BUY',?,0.6,1.0,'real',1,?)
+                    """, (f"P{i}.AX", outcome, f"2026-07-{(i%12)+1:02d} 10:00:00"))
+                conn.commit()
+            result = _calib_compute("riskOn", "", "", 90)
+            self.assertNotIn("RR≥2.0", result.get("block", ""))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_decisive_rr_signal_still_fires_end_to_end(self):
+        """A decisive 1/12 high-R:R bucket must still surface the RR-accuracy
+        nudge — the tightened bar suppresses flukes, not real signal."""
+        from routes.learning import _calib_compute
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                conn.execute("DELETE FROM ai_learning_events")
+                for i in range(12):
+                    outcome = "win" if i < 1 else "loss"   # 1/12 = 8.3% WR
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           ai_confidence, rr_ratio, trade_mode, was_executed, timestamp)
+                        VALUES ('recommendation',?,'BUY',?,0.6,2.5,'real',1,?)
+                    """, (f"R{i}.AX", outcome, f"2026-07-{(i%12)+1:02d} 10:00:00"))
+                for i in range(20):
+                    outcome = "win" if i < 10 else "loss"
+                    conn.execute("""
+                        INSERT INTO ai_learning_events
+                          (event_type, ticker, recommendation, outcome_status,
+                           ai_confidence, rr_ratio, trade_mode, was_executed, timestamp)
+                        VALUES ('recommendation',?,'BUY',?,0.6,1.0,'real',1,?)
+                    """, (f"P{i}.AX", outcome, f"2026-07-{(i%12)+1:02d} 10:00:00"))
+                conn.commit()
+            result = _calib_compute("riskOn", "", "", 90)
+            self.assertIn("RR≥2.0", result.get("block", ""))
+        finally:
+            asx_server.get_db = _orig_get_db
+
+
 class TestF5SymmetricPerTickerNudge(unittest.TestCase):
     """Audit F5 — the per-ticker calibration nudge is now two-sided: a strong
     ticker (WR >15pp above the book at ESS≥6) earns a capped +0.05 bump, mirroring
@@ -7858,9 +7952,10 @@ class TestF5SymmetricPerTickerNudge(unittest.TestCase):
         try:
             with _test_get_db() as conn:
                 self._clean(conn)
-                # TGT: 10 fresh events, 9 wins (90% WR, ESS≈10).
+                # TGT: 10 fresh events, all wins (100% WR — decisive, clears the E4
+                # tightened 99% CI against the overall book rate computed below).
                 for i in range(10):
-                    self._insert(conn, "TGT.AX", "win" if i < 9 else "loss",
+                    self._insert(conn, "TGT.AX", "win",
                                  f"2026-07-{(i%12)+1:02d} 10:00:00")
                 # Book drag: 22 other-ticker events at ~32% WR (>=30 total rows to
                 # clear the base-rate-prior gate) so overall WR is well below TGT.
@@ -7881,14 +7976,15 @@ class TestF5SymmetricPerTickerNudge(unittest.TestCase):
         try:
             with _test_get_db() as conn:
                 self._clean(conn)
-                # TGT weak: 10 fresh events, 1 win (10% WR).
+                # TGT weak: 10 fresh events, 0 wins (0% WR — decisive, clears the E4
+                # tightened 99% CI against the overall book rate computed below).
                 for i in range(10):
-                    self._insert(conn, "TGT.AX", "win" if i < 1 else "loss",
+                    self._insert(conn, "TGT.AX", "loss",
                                  f"2026-07-{(i%12)+1:02d} 10:00:00")
-                # Book: 22 other-ticker events at ~68% WR (>=30 total rows) so overall
-                # is well above TGT.
+                # Book: 22 other-ticker events at ~82% WR (>=30 total rows) so overall
+                # (TGT+book combined, ~56%) is well above TGT's tightened CI upper bound.
                 for i in range(22):
-                    self._insert(conn, f"U{i}.AX", "win" if i < 15 else "loss",
+                    self._insert(conn, f"U{i}.AX", "win" if i < 18 else "loss",
                                  f"2026-07-{(i%12)+1:02d} 10:00:00")
                 conn.commit()
             result = self._run("TGT.AX")

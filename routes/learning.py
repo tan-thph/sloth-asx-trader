@@ -988,17 +988,21 @@ def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float] |
     return round(lo, 1), round(hi, 1)
 
 
-def _ci_excludes(successes: int, n: int, threshold: float) -> bool:
-    """True iff the Wilson 95% CI for successes/n lies entirely on one side of
-    `threshold` (a fraction 0–1). Used to gate behaviour-changing nudges: only
-    emit when the observed win-rate is *significantly* off the reference, so a
-    3-of-5 fluke (whose CI spans the threshold) is correctly withheld.
+def _ci_excludes(successes: int, n: int, threshold: float, z: float = 1.96) -> bool:
+    """True iff the Wilson CI (default 95%, z=1.96) for successes/n lies entirely
+    on one side of `threshold` (a fraction 0–1). Used to gate behaviour-changing
+    nudges: only emit when the observed win-rate is *significantly* off the
+    reference, so a 3-of-5 fluke (whose CI spans the threshold) is correctly
+    withheld.
 
     Operates on RAW integer counts (significance) even though the magnitude of the
     nudge is taken from the decay-weighted rate — counts carry the statistical
     power, weighting only re-centres the point estimate.
+
+    `z` lets callers tighten the bar (Audit E4 passes `_FWER_Z=2.576`, a 99% CI,
+    for the family of simultaneous calibration-nudge tests in _calib_compute).
     """
-    ci = _wilson_ci(successes, n)
+    ci = _wilson_ci(successes, n, z=z)
     if not ci:
         return False
     lo, hi = ci
@@ -4405,6 +4409,36 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         _STOP_TAG_MIN_N    = 5    # min resolved counterfactuals before trusting precision
         _STOP_TAG_PREC_MIN = 0.5  # <50% wider-stop-saved ⇒ tag unreliable, suppress nudge
 
+        # Audit E4 — multiple-comparisons correction. A single _calib_compute() call
+        # runs ~10-17 individually-significant Wilson-CI tests against the same
+        # overlapping ≤300-row sample: up to 3 confidence bands, up to N sectors,
+        # strategy-decay, RR-accuracy, top-error, success-tag, corr-drag, up to 5
+        # tickers, and up to 2 sector×regime cells. At the un-corrected 95% per-test
+        # bar (z=1.96), family-wise false-positive rate for even 12 simultaneous
+        # tests is ≈1-0.95^12≈46% — more likely than not that ANY given call surfaces
+        # at least one fluke nudge. Rather than plumb per-test p-values through nine
+        # structurally different test shapes (a true Holm-Bonferroni/BH-FDR pass),
+        # apply a Bonferroni-lite fix: tighten the shared bar to a 99% Wilson CI
+        # (z=2.576, per-test alpha≈0.01) for every test in the enumerated family.
+        # For a worst-case family of 15 that caps the family-wise rate at
+        # ≈1-0.99^15≈14% — a ~3x reduction — at some cost to sensitivity, which is
+        # the correct trade for a nudge feeding LLM confidence adjustments rather
+        # than a one-shot decision. Applied at: bands (§1), sector (§3),
+        # strategy-decay (§4), RR-accuracy (§5), top-error (§6), success-tag (§6b —
+        # previously had NO significance test at all; added here for the correction
+        # to be coherent), corr-drag (§6d), per-ticker (§7 — likewise newly
+        # CI-gated), sector×regime (§8).
+        # Deliberately NOT tightened: the regime line (§2, a descriptive WR report
+        # with fixed ⚠AVOID/⚠CAUTION thresholds, no vs-reference significance test to
+        # begin with), CLUSTER_LOSS (§6c, a literal count of realized losses in a
+        # window — a structural pattern, not a sampled proportion with a null to
+        # correct for), AUTO_TAGS_UNRELIABLE/STOP_TAG_UNRELIABLE (data-quality
+        # reports, not hypothesis tests), the Phase-8 skill gate (a separate
+        # Mann-Whitney test at its own documented threshold, Audit E1), and the
+        # deep-only exemplar/playbook/cross-tab blocks (already gated per-cell at
+        # n≥3, out of the audit's named family).
+        _FWER_Z = 2.576  # 99% two-sided Wilson CI, vs the uncorrected 1.96 (95%)
+
         # 1. Confidence bands — ESS≥6 AND |delta|>5pp AND Wilson CI excludes the
         #    band midpoint (Sprint 70: the CI gate withholds small-n flukes).
         for label, lo, hi, mid in [("60-70", 0.60, 0.70, 0.65), ("70-80", 0.70, 0.80, 0.75),
@@ -4420,7 +4454,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             wr    = _wwr(subset)
             delta = wr - mid
             raw_wins = sum(1 for r in subset if r["outcome_status"] == "win")
-            if abs(delta) > 0.05 and _ci_excludes(raw_wins, len(subset), mid):
+            if abs(delta) > 0.05 and _ci_excludes(raw_wins, len(subset), mid, z=_FWER_Z):
                 adj_val = round(max(-0.15, min(0.10, delta * 0.8)), 2)
                 adjustments["bands"][label] = adj_val
                 parts.append(f"conf {label}%:{wr*100:.0f}%WR(Δ{delta*100:+.0f}pp,adj{adj_val:+.2f},ESS={ess:.1f})")
@@ -4493,7 +4527,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             delta = wr - _mkt_wr
             s_wins  = sum(1 for r in s_rows if r["outcome_status"] == "win")
             s_total = len(s_rows)
-            significant = _ci_excludes(s_wins, s_total, _mkt_wr)
+            significant = _ci_excludes(s_wins, s_total, _mkt_wr, z=_FWER_Z)
             flag = ""
             if significant:
                 if delta <= -0.05:
@@ -4529,7 +4563,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             # Audit E3: was a raw point-estimate gate (global_delta < −0.15, no CI), so
             # a noisy recent window triggered "reduce posn 30%". Require the recent
             # window's Wilson CI to exclude the all-time rate before flagging decay.
-            if global_delta < -0.15 and _ci_excludes(recent_wins, len(recent_rows), all_wr):
+            if global_delta < -0.15 and _ci_excludes(recent_wins, len(recent_rows), all_wr, z=_FWER_Z):
                 interpretation_appended = False
                 if regime:
                     reg_recent = [r for r in recent_rows if (r.get("regime") or "") == regime]
@@ -4565,7 +4599,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         if len(hi_rr) >= _MIN_NUDGE_N:
             hi_wins = sum(1 for r in hi_rr if r["outcome_status"] == "win")
             hi_wr   = _wwr(hi_rr)
-            if hi_wr < 0.50 and _ci_excludes(hi_wins, len(hi_rr), 0.50):
+            if hi_wr < 0.50 and _ci_excludes(hi_wins, len(hi_rr), 0.50, z=_FWER_Z):
                 parts.append(f"RR≥2.0:{hi_wr*100:.0f}%WR(n={len(hi_rr)})⚠stops/targets off→widen stops")
 
         # 6. Dominant learnable error in non-shock losses — L2: threshold lowered to 33%, n≥3
@@ -4590,7 +4624,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 # Audit E3: gate the proportion on significance too — previously any
                 # tag firing at ≥33% share fired the nudge, so 4-of-12 noise passed.
                 # Require the Wilson CI of the dominant-tag share to exclude 0.33.
-                if top_pct >= 0.33 and _ci_excludes(top_cnt, len(learnable_losses), 0.33):
+                if top_pct >= 0.33 and _ci_excludes(top_cnt, len(learnable_losses), 0.33, z=_FWER_Z):
                     short = {"overconfident": "OC", "missed_catalyst": "MC",
                              "regime_mismatch": "RM", "poor_entry": "PE",
                              "stop_too_tight": "ST", "poor_rr": "PR",
@@ -4649,7 +4683,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 if stag_counts:
                     top_st, top_sc = max(stag_counts.items(), key=lambda x: x[1])
                     top_spct = top_sc / len(wins_tagged)
-                    if top_spct >= 0.33:
+                    # Audit E4: this nudge had NO significance test at all (mirror of
+                    # the bug E3 fixed for top-error) — any tag at ≥33% share fired
+                    # regardless of n. Gate it the same way, at the tightened FWER bar.
+                    if top_spct >= 0.33 and _ci_excludes(top_sc, len(wins_tagged), 0.33, z=_FWER_Z):
                         parts.append(
                             f"✓{top_st}({top_sc}/{len(wins_tagged)}wins,ESS={win_ess:.1f})"
                             "→lean into this"
@@ -4705,7 +4742,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             _hi_wins = sum(1 for r in _hi_corr if r["outcome_status"] == "win")
             _lo_wins = sum(1 for r in _lo_corr if r["outcome_status"] == "win")
             _lo_wr   = _lo_wins / len(_lo_corr)
-            if _ci_excludes(_hi_wins, len(_hi_corr), _lo_wr):
+            if _ci_excludes(_hi_wins, len(_hi_corr), _lo_wr, z=_FWER_Z):
                 _hi_wr = _hi_wins / len(_hi_corr) * 100
                 parts.append(
                     f"⚠CORR_DRAG(corr>0.7 entries {_hi_wr:.0f}%WR n={len(_hi_corr)} vs "
@@ -4713,6 +4750,10 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 )
 
         # 7. Per-ticker memory — ESS≥_ESS_MIN (6.0) AND |delta from overall WR| > 15pp
+        # AND (Audit E4) the ticker's raw-count Wilson CI excludes the overall WR at
+        # the tightened FWER bar — this nudge previously had NO significance test at
+        # all (delta + ESS only), the weakest-gated of the family despite testing up
+        # to 5 tickers per call.
         if tickers_req and len(calib_rows) >= 5:
             overall_wr = _wwr(calib_rows)
             ticker_parts = []
@@ -4722,7 +4763,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                     continue
                 tk_wr = _wwr(tk_rows)
                 delta = tk_wr - overall_wr
-                if abs(delta) > 0.15:
+                tk_wins = sum(1 for r in tk_rows if r["outcome_status"] == "win")
+                if abs(delta) > 0.15 and _ci_excludes(tk_wins, len(tk_rows), overall_wr, z=_FWER_Z):
                     direction = "✓strong" if delta > 0 else "⚠weak"
                     if delta < 0:
                         # ("apply an extra −0.10 to that ticker's confidence").
@@ -4765,7 +4807,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 if abs(delta) >= 0.12:
                     sx_wins  = sum(1 for r in s_rows if r["outcome_status"] == "win")
                     sx_total = len(s_rows)
-                    sig = _ci_excludes(sx_wins, sx_total, overall_wr)
+                    sig = _ci_excludes(sx_wins, sx_total, overall_wr, z=_FWER_Z)
                     direction = ("✓" if delta > 0 else "⚠") if sig else ""
                     sx_parts.append((
                         abs(delta),
