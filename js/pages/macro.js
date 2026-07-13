@@ -538,6 +538,15 @@ async function runMacroAnalysis(force=false) {
     + '  Return only JSON.';
 
   try {
+    // I-2: callClaude('macro', ...) is now forced-tool (_MACRO_TOOL in
+    // claude-client.js, same §8.5 pattern as 'portfolio') — the response
+    // arrives as a tool_use block that callClaude() already serialises back
+    // into `text` via JSON.stringify(toolBlock.input), so parseClaudeJSON()
+    // below needs no changes and always sees syntactically valid JSON. The
+    // recovery path underneath stays as a defensive fallback (mirrors
+    // analysis.js's brace-depth recovery for the portfolio agent) in case a
+    // future options.noTool diagnostic call, or a partial tool_use block from
+    // a hard max_tokens cutoff mid-argument, still needs it.
     const { text } = await callClaude('macro', userMsg, { noCache: true });
     const { ok: macroOk, data: ai } = parseClaudeJSON(text);
     let macroAI = ai;

@@ -127,6 +127,82 @@ const _PORTFOLIO_TOOL = {
   },
 };
 
+// ── I-2: structured tool output for the macro agent ───────────────────────────
+// Same rationale as _PORTFOLIO_TOOL above: forced tool use eliminates the
+// malformed/truncated-JSON parse-failure class for the macro brief. This was
+// the second known occurrence of that failure class (_AGENT_MAX_TOKENS.macro
+// comment above: 1800→3000 after a mid-string truncation in keyDrivers).
+// macro runs with noCache=true (once daily) so there is no prompt-cache
+// stability concern here — unlike _PORTFOLIO_TOOL, this schema does not need
+// to stay byte-static across calls, though it does anyway since it's a const.
+// Field shape mirrors MACRO_SYSTEM_PROMPT's "Output schema" block exactly —
+// only HOW the JSON is obtained changed, not WHAT it contains. Only the
+// fields the app's own logic keys off (Rule 12 macro-override threshold,
+// sentiment badge, regime display) are `required`; the rest stay optional so
+// a thin response degrades gracefully in macro.js's existing render (all
+// consumers already use `m.field?.` optional chaining) rather than risking
+// an API-level rejection.
+const _MACRO_TOOL = {
+  name: 'emit_macro_brief',
+  description: 'Emit the final ASX morning macro brief. Call exactly once with the '
+    + 'complete sentiment, drivers, sector impact, and analysis.',
+  input_schema: {
+    type: 'object',
+    required: ['sentiment', 'sentimentConf', 'bullish', 'macro_regime'],
+    properties: {
+      sentiment:     { type: 'string', enum: ['risk-on', 'risk-off'] },
+      sentimentConf: { type: 'number', minimum: 0, maximum: 1 },
+      bullish:       { type: 'number', minimum: 0, maximum: 100 },
+      macro_regime:  { type: 'string', enum: ['risk_on', 'mild_risk_on', 'sideways', 'mild_risk_off', 'risk_off', 'panic'] },
+      what_changed: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            factor:   { type: 'string' },
+            observed: { type: 'string' },
+            signal:   { type: 'string' },
+          },
+        },
+      },
+      drivers: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            factor:     { type: 'string' },
+            direction:  { type: 'string', enum: ['bullish_asx', 'bearish_asx', 'neutral'] },
+            importance: { type: 'number', minimum: 1, maximum: 10 },
+            confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+            observed:   { type: 'string' },
+          },
+        },
+      },
+      sector_impact: {
+        type: 'object',
+        properties: {
+          materials:  { type: 'number', minimum: -10, maximum: 10 },
+          energy:     { type: 'number', minimum: -10, maximum: 10 },
+          financials: { type: 'number', minimum: -10, maximum: 10 },
+          healthcare: { type: 'number', minimum: -10, maximum: 10 },
+          reits:      { type: 'number', minimum: -10, maximum: 10 },
+          technology: { type: 'number', minimum: -10, maximum: 10 },
+        },
+      },
+      analysis:   { type: 'string' },
+      keyDrivers: { type: 'string' },
+    },
+  },
+};
+
+// Agent types that get grammar-level JSON enforcement via forced tool use.
+// Keyed by agentType so callClaude() can look up both the tool definition and
+// its tool_choice name in one place.
+const _AGENT_TOOLS = {
+  portfolio: _PORTFOLIO_TOOL,
+  macro:     _MACRO_TOOL,
+};
+
 // Returns the system prompt string for a given agent type.
 // Prompt functions (getDayTradeSystemPrompt etc.) are called lazily
 // so they can reference state at call time.
@@ -244,13 +320,15 @@ async function callClaude(agentType, userMessage, options = {}) {
   const body = { model, max_tokens: maxTokens, messages };
   if (system) body.system = system;
 
-  // §8.5: portfolio agent gets grammar-level JSON enforcement via forced tool use.
-  // options.noTool opts out (escape hatch for diagnostics). The proxy endpoint
-  // forwards the body verbatim, so tools work identically in both modes.
-  const useTool = agentType === 'portfolio' && !options.noTool;
+  // §8.5 / I-2: portfolio and macro agents get grammar-level JSON enforcement
+  // via forced tool use. options.noTool opts out (escape hatch for
+  // diagnostics). The proxy endpoint forwards the body verbatim, so tools
+  // work identically in both direct and proxy modes.
+  const _forcedTool = _AGENT_TOOLS[agentType];
+  const useTool = !!_forcedTool && !options.noTool;
   if (useTool) {
-    body.tools = [_PORTFOLIO_TOOL];
-    body.tool_choice = { type: 'tool', name: 'emit_recommendations' };
+    body.tools = [_forcedTool];
+    body.tool_choice = { type: 'tool', name: _forcedTool.name };
   }
 
   // ── Headers ─────────────────────────────────────────────────────────────────

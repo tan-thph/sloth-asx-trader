@@ -10792,7 +10792,13 @@ class TestSprint62RemainingFilters(unittest.TestCase):
         self.assertIn("_PORTFOLIO_TOOL", self.client)
         self.assertIn("emit_recommendations", self.client)
         self.assertIn("tool_choice", self.client)
-        self.assertIn("agentType === 'portfolio' && !options.noTool", self.client)
+        # Sprint I-2 generalised the portfolio-only condition into a lookup
+        # table keyed by agentType (_AGENT_TOOLS) so macro could reuse the
+        # same forced-tool-use plumbing — assert the generalised wiring
+        # instead of the old portfolio-only literal condition.
+        self.assertIn("const _forcedTool = _AGENT_TOOLS[agentType];", self.client)
+        self.assertIn("const useTool = !!_forcedTool && !options.noTool;", self.client)
+        self.assertIn("body.tool_choice = { type: 'tool', name: _forcedTool.name };", self.client)
 
     def test_tool_use_block_serialised_for_parser(self):
         """tool_use input must be stringified so parseClaudeJSON works unchanged."""
@@ -10812,6 +10818,69 @@ class TestSprint62RemainingFilters(unittest.TestCase):
         tool_src = self.client.split("const _PORTFOLIO_TOOL")[1].split("};")[0]
         self.assertNotIn("${", tool_src)
         self.assertNotIn("state.", tool_src)
+
+    # ── I-2: forced tool use for the macro agent ──────────────────────────
+    def test_macro_tool_schema_forced(self):
+        """Macro agent must also use forced tool_choice, via the same
+        _AGENT_TOOLS lookup table the portfolio agent uses (§8.5)."""
+        self.assertIn("_MACRO_TOOL", self.client)
+        self.assertIn("emit_macro_brief", self.client)
+        self.assertIn("_AGENT_TOOLS = {", self.client)
+        agent_tools_src = self.client.split("_AGENT_TOOLS = {")[1].split("};")[0]
+        self.assertIn("portfolio: _PORTFOLIO_TOOL", agent_tools_src)
+        self.assertIn("macro:     _MACRO_TOOL", agent_tools_src)
+
+    def test_macro_tool_schema_field_names_and_types(self):
+        """Tool schema must mirror every field MACRO_SYSTEM_PROMPT's own JSON
+        shape requests (js/prompts.js) — same field names, same enums — since
+        I-2 changes HOW the JSON is obtained, never WHAT it contains."""
+        tool_src = self.client.split("const _MACRO_TOOL")[1].split("input_schema: {")[1].split("\n};")[0]
+        # top-level fields from MACRO_SYSTEM_PROMPT's schema
+        for field in ("sentiment", "sentimentConf", "bullish", "macro_regime",
+                      "what_changed", "drivers", "sector_impact",
+                      "analysis", "keyDrivers"):
+            self.assertIn(f"{field}:", tool_src, f"macro tool schema missing field {field}")
+        # enums must match the vocabulary in MACRO_SYSTEM_PROMPT exactly
+        self.assertIn("enum: ['risk-on', 'risk-off']", tool_src)
+        self.assertIn(
+            "enum: ['risk_on', 'mild_risk_on', 'sideways', 'mild_risk_off', 'risk_off', 'panic']",
+            tool_src,
+        )
+        self.assertIn("enum: ['bullish_asx', 'bearish_asx', 'neutral']", tool_src)
+        self.assertIn("enum: ['high', 'medium', 'low']", tool_src)
+        # types
+        self.assertIn("bullish:       { type: 'number', minimum: 0, maximum: 100 }", tool_src)
+        self.assertIn("sentimentConf: { type: 'number', minimum: 0, maximum: 1 }", tool_src)
+
+    def test_macro_tool_required_fields_match_rule12_dependencies(self):
+        """Only the fields Rule 12 (macro-override BUY-blocker) and the macro
+        page's own render logic key off are `required` — everything else stays
+        optional so a thin response degrades gracefully instead of risking an
+        API-level rejection (same minimal-required philosophy as the portfolio
+        tool, documented on _PORTFOLIO_TOOL above it)."""
+        tool_src = self.client.split("const _MACRO_TOOL")[1].split("};")[0]
+        self.assertIn(
+            "required: ['sentiment', 'sentimentConf', 'bullish', 'macro_regime']",
+            tool_src,
+        )
+
+    def test_macro_tool_schema_is_static(self):
+        """Same no-state-interpolation invariant as the portfolio tool — macro
+        runs noCache=true so this isn't a cache-stability requirement, but the
+        schema should still be a plain static const."""
+        tool_src = self.client.split("const _MACRO_TOOL")[1].split("};")[0]
+        self.assertNotIn("${", tool_src)
+        self.assertNotIn("state.", tool_src)
+
+    def test_macro_prompt_semantics_unchanged(self):
+        """I-2 must change HOW the macro JSON is obtained, never WHAT it
+        contains — MACRO_SYSTEM_PROMPT's field vocabulary must be untouched
+        (verified against js/prompts.js directly, not just the tool schema)."""
+        prompts_js = os.path.join(ROOT, "js", "prompts.js")
+        with open(prompts_js, encoding="utf-8") as f:
+            prompts_src = f.read()
+        self.assertIn('"sentiment": "risk-on" | "risk-off"', prompts_src)
+        self.assertIn('"macro_regime": "risk_on" | "mild_risk_on" | "sideways" | "mild_risk_off" | "risk_off" | "panic"', prompts_src)
 
 
 class TestSprint63ExecutionAlphaAndRetrainNudge(unittest.TestCase):
