@@ -253,6 +253,53 @@ class TestLearningLoopRoutes(unittest.TestCase):
             self.assertLessEqual(wr, 100.0, "win_rate should be 0-100 scale")
             self.assertGreaterEqual(wr, 0.0)
 
+    def _pad_learning_events(self, prefix, n):
+        """Insert n throwaway ai_learning_events rows, each with a unique ticker
+        so different test methods (which run in alphabetical, not source, order
+        against the shared in-memory DB) never collide on row count."""
+        with _test_get_db() as conn:
+            for i in range(n):
+                conn.execute(
+                    "INSERT INTO ai_learning_events (ticker, recommendation, ai_confidence) "
+                    "VALUES (?, 'BUY', 0.7)", (f"{prefix}{i:03d}",)
+                )
+
+    def test_stats_events_limit_defaults_to_30(self):
+        """recent_events must be capped at 30 rows when events_limit is omitted."""
+        self._pad_learning_events("ZDEF", 40)
+        resp = self.client.get("/api/learning/stats")
+        body = json.loads(resp.data)
+        self.assertEqual(len(body["recent_events"]), 30)
+
+    def test_stats_events_limit_honours_query_param(self):
+        """events_limit=60 must return up to 60 rows, more than the default 30."""
+        self._pad_learning_events("ZHON", 70)
+        resp30 = self.client.get("/api/learning/stats?events_limit=30")
+        resp60 = self.client.get("/api/learning/stats?events_limit=60")
+        n30 = len(json.loads(resp30.data)["recent_events"])
+        n60 = len(json.loads(resp60.data)["recent_events"])
+        self.assertEqual(n30, 30)
+        self.assertEqual(n60, 60)
+        self.assertGreater(n60, n30)
+
+    def test_stats_events_limit_all_returns_everything(self):
+        """events_limit=0 (the 'All' filter) must return every logged event, not just 30."""
+        self._pad_learning_events("ZALL", 40)
+        with _test_get_db() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM ai_learning_events").fetchone()[0]
+        resp = self.client.get("/api/learning/stats?events_limit=0")
+        body = json.loads(resp.data)
+        self.assertEqual(len(body["recent_events"]), min(total, 2000))
+        self.assertGreater(len(body["recent_events"]), 30)
+
+    def test_stats_events_limit_rejects_garbage(self):
+        """A non-numeric events_limit must fall back to the default 30, not 500."""
+        self._pad_learning_events("ZGARB", 40)
+        resp = self.client.get("/api/learning/stats?events_limit=notanumber")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertEqual(len(body["recent_events"]), 30)
+
     # ── /api/learning/event/<id> DELETE ─────────────────────────────────────
 
     def test_delete_event(self):

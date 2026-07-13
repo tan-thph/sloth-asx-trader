@@ -1960,6 +1960,14 @@ def learning_go_live_readiness():
 def learning_stats():
     """Return learning loop stats: win rates by confidence band, regime, prompt version."""
     try:
+        # events_limit: how many rows the Recent Events card gets. 0/negative = all.
+        # Capped at 2000 so a stale "All" filter can't pull an unbounded table.
+        try:
+            events_limit = int(request.args.get("events_limit", 30))
+        except (TypeError, ValueError):
+            events_limit = 30
+        events_limit = 2000 if events_limit <= 0 else min(events_limit, 2000)
+
         with get_db() as conn:
             total  = conn.execute("SELECT COUNT(*) FROM ai_learning_events").fetchone()[0]
             closed = conn.execute(
@@ -2086,8 +2094,8 @@ def learning_stats():
                        sell_primary_driver, sell_secondary_factors, sell_urgency,
                        primary_entry_driver,
                        virtual_outcome, virtual_speed_weight, virtual_slippage_applied
-                FROM ai_learning_events ORDER BY timestamp DESC LIMIT 30
-            """).fetchall()
+                FROM ai_learning_events ORDER BY timestamp DESC LIMIT ?
+            """, (events_limit,)).fetchall()
 
             # Virtual outcome count — for calibration stats card display
             n_virtual_resolved = conn.execute("""

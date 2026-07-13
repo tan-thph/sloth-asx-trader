@@ -181,6 +181,28 @@ function setLlWindow(days) {
   state._llWindowDays = days;
   renderPage();   // full re-render so every dated card refetches with the new window
 }
+
+// ── Recent Events row-count filter ───────────────────────────────────────────
+// Recent Events is server-capped (LIMIT on the SQL query, not a client slice) so
+// pending-tag rows past the cap don't silently vanish. `events_limit` is sent as
+// a query param on /api/learning/stats; changing it requires a refetch, same
+// pattern as setLlWindow() above.
+const _LL_EVENTS_LIMIT_PRESETS = [[30, '30'], [60, '60'], [90, '90'], [0, 'All']];
+function _llEventsLimit() {
+  const v = state._llEventsLimit;
+  return (v === 0 || v > 0) ? v : 30;   // default 30 when unset
+}
+function setLlEventsLimit(n) {
+  state._llEventsLimit = n;
+  renderPage();   // full re-render so /api/learning/stats refetches with the new limit
+}
+function _llEventsLimitBar() {
+  const cur = _llEventsLimit();
+  return `<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+    <span class="text-xs text-muted">Show:</span>
+    ${_LL_EVENTS_LIMIT_PRESETS.map(([n, lab]) => `<button class="btn btn-sm" style="${n === cur ? 'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)' : ''}" onclick="setLlEventsLimit(${n})" title="Show ${lab === 'All' ? 'all logged events' : lab + ' most recent events'}">${lab}</button>`).join('')}
+  </div>`;
+}
 function _llWindowBar() {
   const cur = _llWindowDays();
   return `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:12px;padding:8px 10px;border:0.5px solid var(--border-light);border-radius:var(--radius-md,6px);background:var(--bg-inset)">
@@ -205,7 +227,7 @@ async function renderLearningPage(gen) {
   let brierData = null;
   try {
     const [resp, brierResp] = await Promise.all([
-      fetch(`${API}/api/learning/stats`),
+      fetch(`${API}/api/learning/stats?events_limit=${_llEventsLimit()}`),
       fetch(`${API}/api/learning/calibration-stats`).catch(() => null),
     ]);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -969,12 +991,13 @@ function _renderLearningContent(d, brier) {
             style="white-space:nowrap">🤖 Classify All Untagged</button>
         </div>
       </div>
+      <div style="margin-bottom:8px">${_llEventsLimitBar()}</div>
       <div id="classify-all-progress" style="display:none;margin-bottom:8px;padding:8px 10px;background:var(--bg-secondary);border-radius:5px;font-size:12px"></div>
       ${events.length ? `
-        <div style="overflow-x:auto">
+        <div style="overflow:auto;max-height:640px">
           <table class="tbl-stack" style="width:100%;border-collapse:collapse;font-size:12px;min-width:620px">
             <thead>
-              <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+              <tr style="color:var(--text-muted);border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-primary);z-index:1">
                 <th style="text-align:left;padding:4px 6px">Date</th>
                 <th style="text-align:left;padding:4px 6px">Ticker</th>
                 <th style="text-align:left;padding:4px 6px">Action</th>
