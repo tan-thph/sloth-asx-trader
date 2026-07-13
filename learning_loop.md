@@ -420,3 +420,4 @@ Brings a larger cloud model (auto-detect Gemini→Groq→Claude) to score each l
 ## Open Items
 
 None outstanding — all planned phases (1–8), sprint improvements, and the current session's HOLD-tracking redesign are live. New work should append here rather than growing a historical changelog; use `git log` for what shipped when.
+
