@@ -10994,6 +10994,258 @@ class TestSprint65MacroBriefPersistence(unittest.TestCase):
         self.assertIn("Today · ${state.macroDate}", self.macro_js)
 
 
+class TestF3MacroCalibration(unittest.TestCase):
+    """AUDIT_2026-07-13 F3: grade the morning macro brief's sentiment/bullish
+    call against the next trading day's realized ASX200 return.
+
+    Covers both halves: the capture endpoint (POST /api/macro/sentiment,
+    routes/market.py) that upserts the AI call's sentiment/bullish into
+    macro_snapshots, and the grading side (_resolve_macro_calibration +
+    GET /api/learning/macro-calibration, routes/learning.py)."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    @classmethod
+    def tearDownClass(cls):
+        asx_server.get_db = _orig_get_db
+
+    @staticmethod
+    def _clean():
+        with _test_get_db() as conn:
+            conn.execute("DELETE FROM macro_snapshots")
+
+    # ── Capture endpoint ──────────────────────────────────────────────────
+
+    def test_macro_sentiment_creates_row(self):
+        self._clean()
+        resp = self.client.post(
+            "/api/macro/sentiment",
+            data=json.dumps({
+                "date": "2026-06-01",
+                "sentiment": "risk-on",
+                "sentimentConf": 0.8,
+                "bullish": 72,
+                "promptVersion": "2026-07-v22",
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.data).get("ok"))
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT sentiment, sentiment_conf, bullish_score, prompt_version "
+                "FROM macro_snapshots WHERE snapshot_date='2026-06-01'"
+            ).fetchone()
+        self.assertEqual(row["sentiment"], "risk-on")
+        self.assertAlmostEqual(row["sentiment_conf"], 0.8)
+        self.assertAlmostEqual(row["bullish_score"], 72.0)
+        self.assertEqual(row["prompt_version"], "2026-07-v22")
+
+    def test_macro_sentiment_upserts_without_clobbering_market_columns(self):
+        """The market-data GET /api/macro write and the AI-call POST here share
+        one row keyed by snapshot_date — whichever lands first must not be wiped
+        out by the other."""
+        self._clean()
+        with _test_get_db() as conn:
+            conn.execute(
+                "INSERT INTO macro_snapshots (snapshot_date, asx200_chg) VALUES (?,?)",
+                ("2026-06-02", 1.23),
+            )
+        resp = self.client.post(
+            "/api/macro/sentiment",
+            data=json.dumps({"date": "2026-06-02", "sentiment": "risk-off", "bullish": 20}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT asx200_chg, sentiment, bullish_score FROM macro_snapshots "
+                "WHERE snapshot_date='2026-06-02'"
+            ).fetchone()
+        self.assertAlmostEqual(row["asx200_chg"], 1.23)   # untouched
+        self.assertEqual(row["sentiment"], "risk-off")
+        self.assertAlmostEqual(row["bullish_score"], 20.0)
+
+    def test_macro_sentiment_rejects_bad_date(self):
+        resp = self.client.post(
+            "/api/macro/sentiment",
+            data=json.dumps({"date": "not-a-date", "bullish": 50}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_macro_sentiment_clamps_out_of_range_values(self):
+        self._clean()
+        self.client.post(
+            "/api/macro/sentiment",
+            data=json.dumps({
+                "date": "2026-06-03", "sentiment": "bogus-value",
+                "sentimentConf": 5.0, "bullish": -40,
+            }),
+            content_type="application/json",
+        )
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT sentiment, sentiment_conf, bullish_score FROM macro_snapshots "
+                "WHERE snapshot_date='2026-06-03'"
+            ).fetchone()
+        self.assertIsNone(row["sentiment"])          # invalid enum value dropped
+        self.assertAlmostEqual(row["sentiment_conf"], 1.0)  # clamped to [0,1]
+        self.assertAlmostEqual(row["bullish_score"], 0.0)   # clamped to [0,100]
+
+    # ── Resolver ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _hist_from_closes(closes, start="2026-05-01"):
+        import pandas as pd
+        idx = pd.date_range(start, periods=len(closes), freq="D")
+        return pd.DataFrame({"Close": closes}, index=idx)
+
+    def _resolve_one(self, snap_date, bullish, closes):
+        import unittest.mock as _mock
+        import yfinance as yf
+        from routes.learning import _resolve_macro_calibration
+        self._clean()
+        with _test_get_db() as conn:
+            conn.execute(
+                "INSERT INTO macro_snapshots (snapshot_date, bullish_score) VALUES (?,?)",
+                (snap_date, bullish),
+            )
+            conn.commit()
+            hist = self._hist_from_closes(closes, start=snap_date)
+
+            class _FakeTicker:
+                def history(self, **kw):
+                    return hist
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                n = _resolve_macro_calibration(conn)
+            row = conn.execute(
+                "SELECT realized_next_day_chg, direction_correct FROM macro_snapshots "
+                "WHERE snapshot_date=?", (snap_date,)
+            ).fetchone()
+            return n, row
+
+    def test_resolver_marks_bullish_call_correct_on_up_day(self):
+        # Snapshot is well over 4 days old; ASX200 close rose from day0 to day1.
+        n, row = self._resolve_one("2026-01-01", 70.0, [7000.0, 7100.0])
+        self.assertEqual(n, 1)
+        self.assertEqual(row["direction_correct"], 1)
+        self.assertGreater(row["realized_next_day_chg"], 0)
+
+    def test_resolver_marks_bullish_call_wrong_on_down_day(self):
+        n, row = self._resolve_one("2026-01-01", 70.0, [7000.0, 6900.0])
+        self.assertEqual(n, 1)
+        self.assertEqual(row["direction_correct"], 0)
+        self.assertLess(row["realized_next_day_chg"], 0)
+
+    def test_resolver_marks_bearish_call_correct_on_down_day(self):
+        n, row = self._resolve_one("2026-01-01", 20.0, [7000.0, 6900.0])
+        self.assertEqual(n, 1)
+        self.assertEqual(row["direction_correct"], 1)
+
+    def test_resolver_skips_rows_too_recent_to_resolve(self):
+        """A snapshot from today can't have a resolved next-trading-day yet —
+        the resolver must leave it ungraded rather than fetch garbage."""
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y-%m-%d")
+        n, row = self._resolve_one(today, 70.0, [7000.0, 7100.0])
+        self.assertEqual(n, 0)
+        self.assertIsNone(row["direction_correct"])
+
+    def test_resolver_idempotent_skips_already_graded_rows(self):
+        import unittest.mock as _mock
+        import yfinance as yf
+        from routes.learning import _resolve_macro_calibration
+        n1, row1 = self._resolve_one("2026-01-01", 70.0, [7000.0, 7100.0])
+        self.assertEqual(n1, 1)
+        with _test_get_db() as conn:
+            hist = self._hist_from_closes([7000.0, 6000.0], start="2026-01-01")
+
+            class _FakeTicker:
+                def history(self, **kw):
+                    return hist
+            with _mock.patch.object(yf, "Ticker", return_value=_FakeTicker()):
+                n2 = _resolve_macro_calibration(conn)
+        self.assertEqual(n2, 0, "already-graded row must not be re-fetched/overwritten")
+
+    # ── Summary endpoint ──────────────────────────────────────────────────
+
+    def test_macro_calibration_endpoint_insufficient_data_below_min_n(self):
+        self._clean()
+        with _test_get_db() as conn:
+            for i in range(5):  # below _MIN_NUDGE_N=12
+                conn.execute(
+                    "INSERT INTO macro_snapshots "
+                    "(snapshot_date, bullish_score, realized_next_day_chg, direction_correct) "
+                    "VALUES (?,?,?,?)",
+                    (f"2026-02-{10+i:02d}", 20.0, -1.0, 1),
+                )
+            conn.commit()
+        body = json.loads(self.client.get("/api/learning/macro-calibration").data)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["rule12_bullish_lt_35"]["n"], 5)
+        self.assertEqual(body["rule12_bullish_lt_35"]["verdict"], "insufficient_data")
+
+    def test_macro_calibration_endpoint_supported_verdict(self):
+        """>= _MIN_NUDGE_N low-bullish reads, all followed by a down day ⇒ the
+        Wilson CI clears 50% ⇒ verdict 'supported'."""
+        self._clean()
+        with _test_get_db() as conn:
+            for i in range(14):
+                conn.execute(
+                    "INSERT INTO macro_snapshots "
+                    "(snapshot_date, bullish_score, realized_next_day_chg, direction_correct) "
+                    "VALUES (?,?,?,?)",
+                    (f"2026-03-{1+i:02d}", 25.0, -1.5, 1),
+                )
+            conn.commit()
+        body = json.loads(self.client.get("/api/learning/macro-calibration").data)
+        self.assertEqual(body["rule12_bullish_lt_35"]["n"], 14)
+        self.assertEqual(body["rule12_bullish_lt_35"]["down_day_rate_pct"], 100.0)
+        self.assertEqual(body["rule12_bullish_lt_35"]["verdict"], "supported")
+
+    def test_macro_calibration_endpoint_not_supported_verdict(self):
+        """>= _MIN_NUDGE_N low-bullish reads, none followed by a down day ⇒
+        verdict 'not_supported' (threshold isn't tracking a real bearish tell)."""
+        self._clean()
+        with _test_get_db() as conn:
+            for i in range(14):
+                conn.execute(
+                    "INSERT INTO macro_snapshots "
+                    "(snapshot_date, bullish_score, realized_next_day_chg, direction_correct) "
+                    "VALUES (?,?,?,?)",
+                    (f"2026-04-{1+i:02d}", 25.0, 1.5, 0),
+                )
+            conn.commit()
+        body = json.loads(self.client.get("/api/learning/macro-calibration").data)
+        self.assertEqual(body["rule12_bullish_lt_35"]["n"], 14)
+        self.assertEqual(body["rule12_bullish_lt_35"]["down_day_rate_pct"], 0.0)
+        self.assertEqual(body["rule12_bullish_lt_35"]["verdict"], "not_supported")
+
+    def test_macro_calibration_endpoint_reports_overall_accuracy(self):
+        self._clean()
+        with _test_get_db() as conn:
+            conn.execute(
+                "INSERT INTO macro_snapshots "
+                "(snapshot_date, bullish_score, realized_next_day_chg, direction_correct) "
+                "VALUES ('2026-05-01', 80.0, 1.0, 1)"
+            )
+            conn.execute(
+                "INSERT INTO macro_snapshots "
+                "(snapshot_date, bullish_score, realized_next_day_chg, direction_correct) "
+                "VALUES ('2026-05-02', 80.0, -1.0, 0)"
+            )
+            conn.commit()
+        body = json.loads(self.client.get("/api/learning/macro-calibration").data)
+        self.assertEqual(body["n_graded"], 2)
+        self.assertEqual(body["direction_accuracy_pct"], 50.0)
+
+
 class TestSprint66RegimeStopWideningAndSlippage(unittest.TestCase):
     """§9.1 dynamic regime stop widening + §9.2 virtual-fill slippage."""
 

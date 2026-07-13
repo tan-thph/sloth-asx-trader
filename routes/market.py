@@ -7,6 +7,7 @@ Endpoints:
   /api/analyse/batch               POST    — parallel batch
   /api/quote/<ticker>              GET     — fast price + sector (45 s cache)
   /api/macro                       GET     — ASX200 + global indices (5 min cache)
+  /api/macro/sentiment             POST    — capture AI macro-brief sentiment/bullish for later grading (F3)
   /api/rba-rate                    GET     — live scrape → 6h in-memory cache → DB cache (7d) → user fallback → 4.35
   /api/rba-meetings                GET     — scrape rba.gov.au/schedules-events/board-meeting-schedules.html → 24h cache
   /api/polymarket                  GET     — Manifold market probabilities (30 min cache)
@@ -396,6 +397,66 @@ def _macro_payload() -> dict:
 def macro():
     """Real market data for macro dashboard (yfinance). Cached 5 min upstream."""
     return jsonify(_macro_payload())
+
+
+@bp.route("/api/macro/sentiment", methods=["POST"])
+def macro_sentiment():
+    """Capture the morning macro brief's own AI call (sentiment/sentimentConf/
+    bullish — js/prompts.js MACRO_SYSTEM_PROMPT schema) so it can be graded
+    later against what the ASX actually did the next trading day (AUDIT
+    2026-07-13 F3). Called from js/pages/macro.js right after a successful
+    parse of the Claude macro response; best-effort/non-blocking on the client.
+
+    Upserts into the SAME macro_snapshots row the market-data GET /api/macro
+    lazily writes (keyed by snapshot_date) — whichever call lands first creates
+    the row, the other fills in its half of the columns. Never touches the
+    grading columns (realized_next_day_chg/direction_correct/graded_at) —
+    those are owned exclusively by _resolve_macro_calibration()
+    (routes/learning.py).
+    """
+    data = request.get_json(silent=True) or {}
+    date = data.get("date") or datetime.now().date().isoformat()
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "date must be YYYY-MM-DD"}), 400
+
+    sentiment = data.get("sentiment")
+    if sentiment not in ("risk-on", "risk-off"):
+        sentiment = None
+
+    def _clamp(v, lo, hi):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        if v != v:  # NaN
+            return None
+        return max(lo, min(hi, v))
+
+    sentiment_conf = _clamp(data.get("sentimentConf"), 0.0, 1.0)
+    bullish_score  = _clamp(data.get("bullish"), 0.0, 100.0)
+    prompt_version = data.get("promptVersion")
+    if not isinstance(prompt_version, str):
+        prompt_version = None
+
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO macro_snapshots "
+                "(snapshot_date, sentiment, sentiment_conf, bullish_score, prompt_version) "
+                "VALUES (?,?,?,?,?) "
+                "ON CONFLICT(snapshot_date) DO UPDATE SET "
+                "sentiment=excluded.sentiment, "
+                "sentiment_conf=excluded.sentiment_conf, "
+                "bullish_score=excluded.bullish_score, "
+                "prompt_version=excluded.prompt_version",
+                (date, sentiment, sentiment_conf, bullish_score, prompt_version),
+            )
+        return jsonify({"ok": True})
+    except Exception as e:
+        log.warning(f"[macro_sentiment] upsert failed: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ── RBA cash rate ────────────────────────────────────────────────────────────

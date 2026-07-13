@@ -556,6 +556,23 @@ async function runMacroAnalysis(force=false) {
     state.macroData={...state.macroData, ...macroAI, _source:'ai'};
     state.macroDate = today;
     scheduleSave();
+    // F3 (AUDIT_2026-07-13): capture this call's sentiment/bullish read so
+    // routes/learning.py's _resolve_macro_calibration() can grade it against
+    // the next trading day's realized ASX200 return. Best-effort, non-blocking
+    // — a failure here must never interrupt the brief the user is looking at.
+    if (state.serverOk && (macroAI?.sentiment || macroAI?.bullish != null)) {
+      fetch(`${API}/api/macro/sentiment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          date: today,
+          sentiment: macroAI.sentiment,
+          sentimentConf: macroAI.sentimentConf,
+          bullish: macroAI.bullish,
+          promptVersion: typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : null,
+        }),
+      }).catch(()=>{});
+    }
     toast(
       recovered
         ? 'AI macro brief recovered from a truncated response — some detail may be missing'

@@ -8,6 +8,7 @@ Endpoints:
   /api/learning/stats                GET    — win rates by band/regime/version
   /api/learning/debate-stats         GET    — per-pairing debate agreement breakdown
   /api/learning/calibration          GET    — compact context-aware prompt block
+  /api/learning/macro-calibration    GET    — grade the AI macro brief's sentiment/bullish call (F3)
 """
 
 import json
@@ -3072,6 +3073,157 @@ def learning_calibration_trend():
             """).fetchall()
         snapshots = [dict(r) for r in rows][::-1]  # chronological order for charting
         return jsonify({"ok": True, "snapshots": snapshots})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _resolve_macro_calibration(conn, cap: int = 10) -> int:
+    """Lazily grade the morning macro brief's sentiment/bullish call against
+    what the ASX actually did the next trading day (AUDIT 2026-07-13 F3).
+
+    js/pages/macro.js POSTs {sentiment, sentimentConf, bullish} to
+    /api/macro/sentiment right after a successful Claude parse, upserted into
+    macro_snapshots keyed by snapshot_date (routes/market.py). This resolver
+    is the read side: for every ungraded row that carries a bullish_score,
+    fetch ^AXJO daily closes starting on snapshot_date and take the return
+    from that day's close (bar 0 — the day the brief was written) to the very
+    next trading day's close (bar 1). `bullish_score >= 50` is treated as a
+    predicted-up call (mirrors js/prompts.js Rule 12's own bullish<35
+    threshold, which sits well below the midpoint — the model has to be
+    genuinely bearish before it changes behaviour, so 50 is the natural
+    up/down split for grading the raw score itself).
+
+    Mirrors the lazy/batched/best-effort/non-fatal pattern of the other
+    resolvers in this module (_resolve_hold_outcomes, _resolve_virtual_outcomes):
+    capped per call, oldest-ungraded-first, a transient yfinance failure just
+    leaves the row for the next call (no fetch_failed_at bookkeeping needed
+    here — the row is a single lightweight snapshot, not something we'd
+    otherwise mass-refetch).
+
+    Returns the number of rows graded this call.
+    """
+    try:
+        rows = conn.execute("""
+            SELECT snapshot_date, bullish_score
+            FROM macro_snapshots
+            WHERE bullish_score IS NOT NULL
+              AND direction_correct IS NULL
+            ORDER BY snapshot_date ASC LIMIT ?
+        """, (cap,)).fetchall()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+
+    resolved = 0
+    for row in rows:
+        snap_date = row["snapshot_date"]
+        bullish = row["bullish_score"]
+        try:
+            start_dt = datetime.strptime(snap_date, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            continue
+        # Too recent to have a resolved "next trading day" yet — skip without
+        # consuming a fetch; it will be picked up again once enough time has
+        # passed (weekends/public holidays mean a flat 2 calendar days isn't
+        # always enough, hence the 4-day floor).
+        if (datetime.now() - start_dt).days < 4:
+            continue
+        end = (start_dt + timedelta(days=10)).strftime("%Y-%m-%d")
+        try:
+            hist = yf.Ticker("^AXJO").history(start=snap_date, end=end, interval="1d")
+        except Exception:
+            continue  # transient — retried on a later call
+        if hist is None or hist.empty or len(hist) < 2:
+            continue
+
+        closes = hist["Close"]
+        day0 = float(closes.iloc[0])
+        day1 = float(closes.iloc[1])
+        if day0 <= 0:
+            continue
+        chg = (day1 / day0 - 1.0) * 100.0
+        predicted_up = bullish >= 50.0
+        actual_up = chg > 0.0
+        correct = 1 if predicted_up == actual_up else 0
+        conn.execute("""
+            UPDATE macro_snapshots
+            SET realized_next_day_chg = ?, direction_correct = ?,
+                graded_at = datetime('now','localtime')
+            WHERE snapshot_date = ?
+        """, (round(chg, 3), correct, snap_date))
+        resolved += 1
+
+    return resolved
+
+
+@bp.route("/api/learning/macro-calibration", methods=["GET"])
+def macro_calibration():
+    """Grade the macro agent (AUDIT 2026-07-13 F3) — is the morning brief's
+    sentiment/bullish call actually predictive of what the ASX does next, and
+    specifically is js/prompts.js Rule 12's `bullish < 35` BUY-blocker
+    threshold calibrated?
+
+    Runs the lazy resolver first (idempotent, capped), then reports:
+      - direction_accuracy_pct: of all graded briefs, how often
+        (bullish>=50 ⇒ next day up) matched reality.
+      - rule12_bullish_lt_35: of the subset that would have triggered the
+        Rule-12 threshold (bullish<35), how often the next trading day was
+        actually down. `verdict` is Wilson-CI/`_MIN_NUDGE_N`-gated like every
+        other behaviour-changing signal in this module (gotcha #42):
+          supported     — CI entirely above 50% down-day rate (threshold
+                           tracks a real bearish tendency, keep it)
+          not_supported — CI entirely below 50% (bullish<35 reads aren't
+                           reliably followed by a down day; threshold may be
+                           over-cautious)
+          insufficient_data — n below _MIN_NUDGE_N or CI spans 50%
+    """
+    try:
+        with get_db() as conn:
+            _resolve_macro_calibration(conn)
+            rows = conn.execute("""
+                SELECT snapshot_date, sentiment, sentiment_conf, bullish_score,
+                       realized_next_day_chg, direction_correct
+                FROM macro_snapshots
+                WHERE direction_correct IS NOT NULL
+                ORDER BY snapshot_date DESC
+            """).fetchall()
+
+        graded = [dict(r) for r in rows]
+        n = len(graded)
+        n_correct = sum(r["direction_correct"] for r in graded)
+        accuracy = round(100.0 * n_correct / n, 1) if n else None
+
+        low_bullish = [r for r in graded if r["bullish_score"] is not None and r["bullish_score"] < 35]
+        n_low = len(low_bullish)
+        n_low_down = sum(
+            1 for r in low_bullish
+            if r["realized_next_day_chg"] is not None and r["realized_next_day_chg"] < 0
+        )
+        low_down_rate = round(100.0 * n_low_down / n_low, 1) if n_low else None
+
+        verdict = "insufficient_data"
+        if n_low >= _MIN_NUDGE_N and _ci_excludes(n_low_down, n_low, 0.5):
+            verdict = "supported" if (low_down_rate or 0) > 50.0 else "not_supported"
+
+        return jsonify({
+            "ok": True,
+            "n_graded": n,
+            "direction_accuracy_pct": accuracy,
+            "rule12_bullish_lt_35": {
+                "n": n_low,
+                "n_followed_by_down_day": n_low_down,
+                "down_day_rate_pct": low_down_rate,
+                "min_n": _MIN_NUDGE_N,
+                "verdict": verdict,
+            },
+            "recent": graded[:30],
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

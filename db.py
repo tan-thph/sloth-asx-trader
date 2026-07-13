@@ -591,6 +591,29 @@ def init_db():
         if "breadth_scope" not in tl_cols:
             conn.execute("ALTER TABLE trading_lessons ADD COLUMN breadth_scope TEXT")
 
+        # macro_snapshots: F3 (AUDIT_2026-07-13) — grade the morning macro brief.
+        # The table previously only carried objective market data written by
+        # /api/macro's lazy INSERT OR IGNORE; the AI brief's own sentiment/bullish
+        # call (js/pages/macro.js, POST /api/macro/sentiment) was never persisted
+        # anywhere queryable, so nothing could grade it against what actually
+        # happened next. These columns are nullable and filled in two passes:
+        # sentiment/sentiment_conf/bullish_score/prompt_version at brief-generation
+        # time (client POST, upserted by snapshot_date); realized_next_day_chg/
+        # direction_correct/graded_at lazily by _resolve_macro_calibration()
+        # (routes/learning.py) once the next trading day's ASX200 close exists.
+        for col, defn in (
+            ("sentiment",              "TEXT"),
+            ("sentiment_conf",         "REAL"),
+            ("bullish_score",          "REAL"),
+            ("prompt_version",         "TEXT"),
+            ("realized_next_day_chg",  "REAL"),
+            ("direction_correct",      "INTEGER"),
+            ("graded_at",              "TEXT"),
+        ):
+            ms_cols = {r[1] for r in conn.execute("PRAGMA table_info(macro_snapshots)").fetchall()}
+            if col not in ms_cols:
+                conn.execute(f"ALTER TABLE macro_snapshots ADD COLUMN {col} {defn}")
+
         # Passive maintenance on every startup:
         # - optimize: updates index statistics so the query planner stays accurate
         #   as rows accumulate in ai_learning_events / ai_call_log (large JSON blobs).
