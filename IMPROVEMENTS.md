@@ -86,7 +86,7 @@ The starvation gaps above were only findable by SQL. Add a small coverage strip 
 
 ### 8. Test coverage for the firewall's persistence boundary
 **Files:** `test_app.py`, `tests/paper-real-firewall.test.js`
-**Status:** Open — companion to FIXES.md #1/#2
+**Status:** Resolved — already satisfied by existing coverage, confirmed 2026-07-13: (a) `test_db_save_load_portfolio_round_trips_mode_dual_book` (Python round-trip, dual-mode ticker survives with modes intact); (b) `paper-real-firewall.test.js` "`_validHolding` preserves mode" tests; (c) `test_eofy_pack_with_disposals` + the new `test_eofy_pack_ddmmyyyy_saledate_lands_in_correct_fy` (`AUDIT_2026-07-13.md` C1) — EOFY pack contains real disposals after a mixed-mode save.
 
 The existing firewall vitest suite covers in-memory invariants (`isRealTrade`, cash routing, parcel scoping) but nothing crosses the client↔server persistence boundary, which is exactly where the real/paper distinction was lost. Add: (a) Python round-trip test — save a dual-mode ticker, load, assert both rows and their modes survive; (b) vitest — `_validHolding` preserves `mode`; (c) Python test — EOFY pack contains real disposals after a mixed-mode save.
 
@@ -121,21 +121,31 @@ Companion to the same-dated section in `FIXES.md` (defects live there). Overall 
 
 ### I-1. Delete or wire the dead 3-phase pipeline (`ANALYST_SYSTEM_PROMPT`, `PM_SYSTEM_PROMPT`)
 
+**Status:** Resolved (2026-07-13) — deleted (not wired): `ANALYST_SYSTEM_PROMPT`/`PM_SYSTEM_PROMPT` removed from `js/prompts.js`, `analyst`/`pm` entries removed from `_AGENT_MAX_TOKENS`/`_resolveSystemPrompt` (`js/claude-client.js`) and the Recent-AI-Calls filter dropdown (`js/pages/settings.js`). Zero live call sites confirmed by repo-wide grep before deletion; no test exercised the dead code. Chose delete over wire since the PM prompt's schema had already drifted from the live one (array `scenarios` vs the live `{bull,base,bear}` object) and a fresh design against the current tool-schema/quant-engine architecture is better than resurrecting a stale draft.
+
 `callClaude('analyst', …)` and `callClaude('pm', …)` have zero call sites — the "Phase 1/3" prompts in `js/prompts.js` (~:746-828) and their `_AGENT_MAX_TOKENS`/`_resolveSystemPrompt` entries are dead code. The PM prompt has also drifted: its `scenarios` shape is `[{"label","prob","outcome"}]` (array) vs the main schema's `{bull,base,bear}` object, and it tells the model to emit computed `qty`/`evNet` (contradicting the Rule-4 architecture). Either wire the pipeline or delete the prompts; if kept for future use, align the shapes now so the drift doesn't calcify.
 
 ### I-2. Forced tool use for the macro agent
+
+**Status:** Resolved (2026-07-13) — new `_MACRO_TOOL` (`emit_macro_brief`) in `js/claude-client.js`, mirroring every field `MACRO_SYSTEM_PROMPT` requests (sentiment/sentimentConf/bullish/macro_regime required; what_changed/drivers/sector_impact/analysis/keyDrivers optional so a thin response degrades gracefully). Tool-forcing generalized from a portfolio-only branch to an `_AGENT_TOOLS` map (`{portfolio, macro}`) so both agents share one code path. Confirmed `routes/claude.py`'s proxy forwards the request body verbatim — no backend change needed. `PROMPT_VERSION` not bumped (no prompt text changed — same precedent as the portfolio tool, which also kept its JSON-format instructions as belt-and-suspenders).
 
 Macro's `maxTokens` was raised 1800→3000 after a truncation-mid-string JSON failure. A `tool_choice`-forced `emit_macro_brief` tool (same pattern as §8.5) removes the parse-failure class entirely; macro already runs `noCache` once daily so there is no cache-stability concern. Low effort, kills a known recurring failure mode.
 
 ### I-3. Log `scenarios` probabilities to the learning loop
 
+**Status:** Resolved (2026-07-13, via `AUDIT_2026-07-13.md` F2) — `scenarios` now rides the existing `market_context` JSON column at log time.
+
 `logRecsToLearningLoop()` drops the `scenarios` object (bull/base/bear p+ret) at log time. Persisting it (one JSON column or riding `market_context`) would let calibration score the model's *probability distribution* (e.g. did bear cases hit at ~bear-p frequency?) instead of only the scalar confidence — a materially richer Brier/calibration signal for near-zero cost.
 
 ### I-4. Grade the macro agent
 
+**Status:** Resolved (2026-07-13, via `AUDIT_2026-07-13.md` F3) — `macro_snapshots` extended with capture + grading columns, `_resolve_macro_calibration()` grades next-day ASX200 direction, `GET /api/learning/macro-calibration` reports whether the `bullish<35` threshold is empirically supported.
+
 The morning macro brief emits `sentiment`, `sentimentConf`, `bullish` daily, but nothing ever scores it. A tiny resolver (compare against next-day ASX200 return, log to `calibration_snapshots`-style table) would close the loop on the second-most-important AI call in the app and reveal whether the `bullish < 35` Rule-12 BUY-blocker threshold is calibrated.
 
 ### I-5. Consolidate redundant/overlapping prompt rules
+
+**Status:** Resolved (2026-07-13) — merged the old Rule 19 (near-verbatim Sharpe restatement) into Rule 17, renumbered the fundamentals-over-technicals rule 20→19 (updated its two cross-references), and replaced Rule 16's contradictory fixed "1.5×ATR" HIGH-DD note with a flag-only instruction (stops stay engine-owned via the regime-driven `stopAtrMultiple`). The `qty=0` restatements (Rule 4) were deliberately left as-is — all consistent, not contradictory, and each is contextually anchored at its point of use. `PROMPT_VERSION` → v23.
 
 `ANALYSIS_SYSTEM_PROMPT` restates the same constraints in multiple places: Rules 17 and 19 both say Sharpe is backward-looking/never standalone; Rule 4's "qty=0" is re-explained inside Rules 15, 16, the field spec, and the ACTION DEFINITIONS. Caching makes tokens cheap, but duplicated rules with slightly different wording create ambiguity about which variant is authoritative (Rule 3 says "Stop-loss at stopAtrMultiple×ATR" while Rule 16 references "1.5×ATR" in the HIGH-DD note). One consolidation pass + `PROMPT_VERSION` bump; the calibration-trend chart will show whether compliance improves.
 
@@ -153,8 +163,12 @@ The morning macro brief emits `sentiment`, `sentimentConf`, `bullish` daily, but
 
 ### I-8. Consider a symmetric per-ticker nudge
 
+**Status:** Resolved (2026-07-13, via `AUDIT_2026-07-13.md` F5) — capped +0.05 positive nudge at ✓strong, same ESS/delta/CI gates as the −0.10 penalty; magnitude kept intentionally asymmetric (documented next to the code).
+
 `_calib_compute` §7 applies per-ticker adjustments penalty-only (−0.10 on ⚠weak). That matches the documented rule, but a capped positive nudge (+0.05 at ✓strong, same ESS/delta gates) would make the per-ticker memory two-sided like the band nudges (which allow up to +0.10). Optional — the asymmetry may be a deliberate conservatism choice; if so, document it next to the band logic.
 
 ### I-9. Retry budget for 529s is small
+
+**Status:** Resolved (2026-07-13, via `AUDIT_2026-07-13.md` F6) — portfolio agent now gets a 0/1/4/15s + jitter schedule; other agents keep the short 0/1/2/4s.
 
 `callClaude()`'s total backoff is ~7s across 4 attempts. Anthropic 529 (overloaded) bursts often outlast that. Consider a longer final delay (e.g. 0/1/4/15s) + jitter for the portfolio agent specifically — it is a user-initiated, once-per-run call where an extra 15s beats a failed analysis.
