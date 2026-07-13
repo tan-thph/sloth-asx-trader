@@ -2322,7 +2322,17 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
             const c = rowC[h];
             if (typeof c === 'number' && (maxC == null || Math.abs(c) > Math.abs(maxC))) maxC = c;
           }
-          return { ..._mktCtx, max_corr_to_holdings: maxC != null ? +maxC.toFixed(2) : null };
+          // F2: ride the same JSON bucket to persist the rec's bull/base/bear
+          // {p, ret} scenario object (dropped previously) so calibration can
+          // later score the probability *distribution*, not just scalar
+          // confidence — e.g. did bear cases hit at ~bear-p frequency? Passed
+          // through as-is (no new fields invented); null when Claude omitted
+          // scenarios (HOLD recs, or a repair-loop failure).
+          return {
+            ..._mktCtx,
+            max_corr_to_holdings: maxC != null ? +maxC.toFixed(2) : null,
+            scenarios: r.scenarios && typeof r.scenarios === 'object' ? r.scenarios : null,
+          };
         })(),
         debate_summary:           _debateSummary,
         entry_signals_json,

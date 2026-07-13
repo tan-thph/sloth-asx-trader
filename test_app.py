@@ -321,6 +321,62 @@ class TestLearningLoopRoutes(unittest.TestCase):
         self.assertEqual(row["bull_case"], "iron ore demand recovering on China stimulus")
         self.assertEqual(row["bear_case"], "China property slump could deepen further")
 
+    # ── Audit F2: scenarios probabilities ride market_context ───────────────
+
+    def test_log_stores_scenarios_inside_market_context(self):
+        """POST /api/learning/log must round-trip the bull/base/bear {p,ret}
+        `scenarios` object when it rides inside `market_context` (F2 — no new
+        column; same pattern as §9.3's max_corr_to_holdings, gotcha #94b).
+        This is the richer distribution the calibration layer can later score
+        (did bear cases hit at ~bear-p frequency?) instead of just scalar
+        confidence."""
+        scenarios = {
+            "bull": {"p": 0.25, "ret": 18.0},
+            "base": {"p": 0.55, "ret": 6.0},
+            "bear": {"p": 0.20, "ret": -9.0},
+        }
+        payload = {
+            "ticker": "FMG", "recommendation": "BUY",
+            "prompt_version": "2026-07-v22", "ai_confidence": 0.71,
+            "market_context": {"asx_vol_20d": 14.2, "scenarios": scenarios},
+        }
+        r = self.client.post("/api/learning/log",
+                             data=json.dumps(payload),
+                             content_type="application/json")
+        ev_id = json.loads(r.data)["id"]
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT market_context FROM ai_learning_events WHERE id=?",
+                (ev_id,)
+            ).fetchone()
+        mc = json.loads(row["market_context"])
+        self.assertEqual(mc["scenarios"], scenarios,
+                          "scenarios object must round-trip intact inside market_context")
+        self.assertEqual(mc["asx_vol_20d"], 14.2,
+                          "existing market_context fields must survive alongside scenarios")
+
+    def test_log_market_context_scenarios_absent_is_fine(self):
+        """A rec logged without scenarios (e.g. HOLD, or pre-F2 client) must not
+        error and market_context must still round-trip whatever it does carry."""
+        payload = {
+            "ticker": "BHP", "recommendation": "HOLD",
+            "prompt_version": "2026-07-v22", "ai_confidence": 0.60,
+            "market_context": {"asx_vol_20d": 11.0},
+        }
+        r = self.client.post("/api/learning/log",
+                             data=json.dumps(payload),
+                             content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        ev_id = json.loads(r.data)["id"]
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT market_context FROM ai_learning_events WHERE id=?",
+                (ev_id,)
+            ).fetchone()
+        mc = json.loads(row["market_context"])
+        self.assertNotIn("scenarios", mc)
+        self.assertEqual(mc["asx_vol_20d"], 11.0)
+
     def test_classify_entry_driver_taxonomy(self):
         """classify_entry_driver maps signal snapshots to the right driver."""
         from routes.learning import classify_entry_driver, ENTRY_DRIVERS
@@ -11063,6 +11119,20 @@ class TestSprint67CorrContextTraceabilityAndBatch(unittest.TestCase):
     def test_max_corr_logged_to_learning_events(self):
         self.assertIn("max_corr_to_holdings", self.analysis_js)
         self.assertIn("window._lastCorrMatrix", self.analysis_js)
+
+    # ── Audit F2: scenarios probabilities logged to learning loop ──────────
+    def test_scenarios_logged_inside_market_context(self):
+        """logRecsToLearningLoop()'s market_context payload must carry the rec's
+        bull/base/bear scenarios object through to /api/learning/log — it was
+        previously dropped at log time (IMPROVEMENTS.md I-3 / AUDIT F2)."""
+        # Must live inside the same market_context IIFE as max_corr_to_holdings,
+        # not a bare top-level field (no new DB column for this).
+        mc_start = self.analysis_js.index("market_context:")
+        mc_end = self.analysis_js.index("debate_summary:", mc_start)
+        mc_block = self.analysis_js[mc_start:mc_end]
+        self.assertIn("scenarios", mc_block,
+                       "scenarios must be assembled inside the market_context block")
+        self.assertIn("r.scenarios", mc_block)
 
     # ── §9.4 traceability modal ───────────────────────────────────────────
     def test_traceability_modal_wired(self):
