@@ -279,8 +279,6 @@ python3 asx_server.py</pre>
           <select id="ai-log-filter" onchange="loadAICallLog()" style="font-size:11px;padding:2px 6px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary)">
             <option value="">All agents</option>
             <option value="portfolio">portfolio</option>
-            <option value="analyst">analyst</option>
-            <option value="pm">pm</option>
             <option value="dayTrade">dayTrade</option>
             <option value="universe">universe</option>
             <option value="macro">macro</option>

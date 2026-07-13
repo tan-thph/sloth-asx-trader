@@ -92,7 +92,7 @@ config.js → utils.js → notifications.js → regime-engine.js → learning-lo
 | `js/config.js` | Global `state` object, `API` base URL, defaults |
 | `js/utils.js` | `escapeHTML`, `fmt`, `fmtp`, portfolio math, `mergedPortfolio()`, `_detectExitReason()` (canonical — do NOT redefine in page files), `isRealTrade()`, `askTradeMode()`, `adjustCashForMode()`, `_applyTheme()`, `reasoningText()`, `entrySignature()` |
 | `js/api.js` | Backend fetch wrappers, `saveStateToDb()` / `loadStateFromDb()` |
-| `js/claude-client.js` | `callClaude(agentType, msg, opts)` — direct + proxy mode. Portfolio uses forced tool use. `_callLocalAnalysis()` fast-path when `useLocalLLM`. Agent types: `portfolio`, `analyst`, `pm`, `dayTrade`, `universe`, `macro`, `assistant`. |
+| `js/claude-client.js` | `callClaude(agentType, msg, opts)` — direct + proxy mode. Portfolio uses forced tool use. `_callLocalAnalysis()` fast-path when `useLocalLLM`. Agent types: `portfolio`, `dayTrade`, `universe`, `macro`, `assistant`. |
 | `js/regime-engine.js` | `classifyRegime()`, `applyRegimeModifiers()`, `getRegimeModifiers()` (returns `stopAtrMult`). Panic → `_regimeBlocked`. `_blendedSizeMult` 30-min linear transition on flip. |
 | `js/quant-engine.js` | `computeTradeParams()` — Kelly + constraints. Rejects `kellyFrac ≤ 0` before `minQty` floor. Stop = `regimeMod.stopAtrMult × earningsAdj × ATR`. |
 | `js/response-validator.js` | `validateRec()`, `getValidatedAnalysisWithRepair()`. Ticker: `[A-Z0-9]{2,5}`. `requiredUnless:'HOLD'`. |

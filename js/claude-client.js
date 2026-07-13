@@ -2,7 +2,7 @@
 // claude-client.js — Centralised Claude API wrapper (2.1 + 2.4)
 //
 // callClaude(agentType, userMessage, options)
-//   agentType  — 'portfolio' | 'macro' | 'dayTrade' | 'universe' | 'analyst' | 'pm' | 'assistant'
+//   agentType  — 'portfolio' | 'macro' | 'dayTrade' | 'universe' | 'assistant'
 //   userMessage — string (ignored if options.messages provided)
 //   options.messages    — full messages array for multi-turn (assistant page)
 //   options.maxTokens   — override default token budget
@@ -19,8 +19,6 @@ const _AGENT_MAX_TOKENS = {
   // against max_tokens; a larger portfolio would truncate the tool input and fail
   // the whole parse. 12000 leaves headroom for HOLD entries (Audit #8) too.
   portfolio: 12000,
-  analyst:   5000,
-  pm:        3000,
   dayTrade:  4000,
   universe:  4000,
   // 1800 → 3000 (2026-06-24): the 08:57 run hit output_tokens=1800 exactly —
@@ -135,8 +133,6 @@ const _PORTFOLIO_TOOL = {
 function _resolveSystemPrompt(agentType) {
   switch (agentType) {
     case 'portfolio': return typeof ANALYSIS_SYSTEM_PROMPT  !== 'undefined' ? ANALYSIS_SYSTEM_PROMPT  : '';
-    case 'analyst':   return typeof ANALYST_SYSTEM_PROMPT   !== 'undefined' ? ANALYST_SYSTEM_PROMPT   : '';
-    case 'pm':        return typeof PM_SYSTEM_PROMPT        !== 'undefined' ? PM_SYSTEM_PROMPT        : '';
     case 'macro':     return typeof MACRO_SYSTEM_PROMPT     !== 'undefined' ? MACRO_SYSTEM_PROMPT     : '';
     case 'dayTrade':  return typeof getDayTradeSystemPrompt  === 'function'  ? getDayTradeSystemPrompt()  : '';
     case 'universe':  return typeof getDayTradeUniverseScanPrompt === 'function' ? getDayTradeUniverseScanPrompt() : '';
