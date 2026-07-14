@@ -8,7 +8,12 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
+import { readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { loadScript } from './setup.js';
+
+const _ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 beforeAll(() => {
   // Minimal stubs analysis.js needs at parse time
@@ -29,6 +34,63 @@ beforeAll(() => {
 function buyRec(overrides) {
   return Object.assign({ action: 'BUY', ticker: 'NEW', qty: 100, riskAUD: 500 }, overrides);
 }
+
+// ── _unheldHasActiveSetup (two-tier gate for NOT-HELD tickers) ────────────────
+// Ownership-keyed tiering: holdings are always Tier 1 (asserted via _isCandidate's
+// short-circuit, not this fn); a not-held watchlist ticker gets a full Tier-1 block
+// ONLY when it shows an active setup, else a compressed Tier-2 one-liner.
+describe('_unheldHasActiveSetup', () => {
+  const quiet = { rsi_14: 50, bb_pct_b: 0.5, score: 45, volume_z_score: 0.5 };
+
+  it('a quiet not-held ticker is Tier 2 (no full block)', () => {
+    expect(_unheldHasActiveSetup(quiet)).toBe(false);
+  });
+
+  it('promotes on an oversold/overbought RSI extreme', () => {
+    expect(_unheldHasActiveSetup({ ...quiet, rsi_14: 34 })).toBe(true);
+    expect(_unheldHasActiveSetup({ ...quiet, rsi_14: 72 })).toBe(true);
+  });
+
+  it('promotes on a Bollinger band edge', () => {
+    expect(_unheldHasActiveSetup({ ...quiet, bb_pct_b: 0.05 })).toBe(true);
+    expect(_unheldHasActiveSetup({ ...quiet, bb_pct_b: 0.95 })).toBe(true);
+  });
+
+  it('promotes on a strong composite score (bull or bear)', () => {
+    expect(_unheldHasActiveSetup({ ...quiet, score: 70 })).toBe(true);
+    expect(_unheldHasActiveSetup({ ...quiet, score: 25 })).toBe(true);
+  });
+
+  it('promotes on pre-earnings risk or a volume spike', () => {
+    expect(_unheldHasActiveSetup({ ...quiet, pre_earnings_risk: true })).toBe(true);
+    expect(_unheldHasActiveSetup({ ...quiet, volume_z_score: 3.1 })).toBe(true);
+  });
+
+  it('a mid-range partial signal stays Tier 2, and null never crashes', () => {
+    expect(_unheldHasActiveSetup({ score: 50 })).toBe(false); // rsi/bb default neutral
+    expect(_unheldHasActiveSetup(null)).toBe(false);
+  });
+});
+
+// ── _isCandidate ownership-keyed source guard ────────────────────────────────
+// The tier axis must stay "do I own it?", not "is the signal loud?". Holdings must
+// short-circuit to Tier 1; watchlist must NOT be auto-promoted (that was the old bug).
+describe('_isCandidate tier axis (source guard)', () => {
+  const src = readFileSync(join(_ROOT, 'js/analysis.js'), 'utf8');
+  const body = src.slice(src.indexOf('const _isCandidate ='), src.indexOf('const _isCandidate =') + 400);
+
+  it('holdings short-circuit to Tier 1', () => {
+    expect(body).toMatch(/portfolioTickers\.includes\(t\)\)\s*return true/);
+  });
+
+  it('does not auto-promote watchlist (no isExtra in the gate)', () => {
+    expect(body).not.toMatch(/\bisExtra\b/);
+  });
+
+  it('delegates the not-held case to the pure setup helper', () => {
+    expect(body).toContain('_unheldHasActiveSetup(s)');
+  });
+});
 
 // ── _applyCorrSizing ─────────────────────────────────────────────────────────
 

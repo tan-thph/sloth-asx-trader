@@ -112,6 +112,23 @@ function _recomputeBuyEv(r, rbaRate, fees) {
 // ============================================================
 // ANALYSIS ENGINE
 // ============================================================
+// Tier-1 gate for a NOT-HELD ticker: true when it shows an active setup worth a full
+// indicator block, else Tier 2 (compressed one-liner). Holdings never reach this —
+// they are unconditionally Tier 1 in _isCandidate. Pure + module-level so it's unit-
+// testable; the tier axis is ownership (see _isCandidate), this is just the setup test.
+function _unheldHasActiveSetup(s) {
+  if (!s) return false;
+  const rsi        = s.rsi_14 ?? 50;
+  const bbPctB     = s.bb_pct_b ?? 0.5;
+  const score      = s.score ?? 0;
+  const preEarnings = s.pre_earnings_risk === true;
+  const volSpike   = (s.volume_z_score ?? 0) > 2.5;
+  return rsi < 38 || rsi > 68
+    || bbPctB < 0.12 || bbPctB > 0.88
+    || score >= 65 || score <= 30
+    || preEarnings || volSpike;
+}
+
 async function runAnalysis(opts = {}) {
   // opts.watchlistFocus — array of tickers for an on-demand "analyse the deferred
   // watchlist now" pass. When set, those tickers bypass budget rationing (they were
@@ -365,41 +382,25 @@ async function runAnalysis(opts = {}) {
     'Energy': 'xej', 'Real Estate': 'xrj', 'RealEstate': 'xrj',
   };
 
-  // _isCandidate — Tier 1 (full block) when ticker has an active setup; Tier 2 (compact) otherwise
+  // ── Tiered ticker detail — keyed on OWNERSHIP, not signal strength ───────────
+  // Tier 1 (full indicator/fundamentals block):
+  //   • every HOLDING, always — so each is genuinely analysed and returns a verdict
+  //     (Rule 5), holdings-first by construction; PLUS
+  //   • any not-held WATCHLIST ticker with an ACTIVE SETUP — a real BUY candidate
+  //     worth the full data.
+  // Tier 2 (compressed one-liner): a not-held watchlist ticker that is QUIET (no
+  //   setup) — monitored, not actionable today, so a full block would only spend
+  //   tokens and dilute Claude's attention on the holdings that matter.
+  // The axis is deliberately "do I own it?", NOT "is the signal loud?": the old
+  //   signal-only gate compressed quiet holdings while expanding loud watchlist
+  //   names — exactly backwards from the holdings-first priority. A held ticker
+  //   short-circuits to Tier 1 before any signal check runs; the P&L-extreme trigger
+  //   was dropped because it only ever fired for holdings (0 for non-held), which are
+  //   now unconditionally Tier 1.
   const _isCandidate = (s, t) => {
     if (!s) return false;
-    const rsi = s.rsi_14 ?? 50;
-    const bbPctB = s.bb_pct_b ?? 0.5;
-    const score = s.score ?? 0;
-    const unrealisedPnlPct = (() => {
-      const h = mergedPortfolio().find(h => h.ticker === t);
-      if (!h || !h.avgPrice) return 0;
-      const livePrice = state.liveSignals?.[t]?.current_price ?? h.currentPrice;
-      return ((livePrice / h.avgPrice) - 1) * 100;
-    })();
-    const preEarnings = s.pre_earnings_risk === true;
-    const volSpike = (s.volume_z_score ?? 0) > 2.5;
-    const isExtra = extraTickers.includes(t);
-    // Requirement (2026-07): every ticker we actually HOLD must be analysed in full,
-    // not compressed to a Tier-2 one-liner (which Rule 5 lets Claude skip → synthetic
-    // no-confidence HOLDs). Held tickers always get the Tier-1 block; the Tier-2
-    // compression now only ever applies to nothing (watchlist is already Tier-1 via
-    // isExtra), so holdings are never silently skipped again. Token cost lands on the
-    // INPUT/prompt side (not max_tokens output), and the budget tiers ration watchlist
-    // — holdings-first, exactly the intended priority.
-    const inPortfolio = portfolioTickers.includes(t);
-    return inPortfolio
-      || isExtra
-      || rsi < 38
-      || rsi > 68
-      || bbPctB < 0.12
-      || bbPctB > 0.88
-      || score >= 65
-      || score <= 30
-      || preEarnings
-      || volSpike
-      || unrealisedPnlPct < -8
-      || unrealisedPnlPct > 25;
+    if (portfolioTickers.includes(t)) return true;   // holdings are ALWAYS Tier 1
+    return _unheldHasActiveSetup(s);                  // not held → Tier 1 only with a setup
   };
 
   // Build indicator context (full detail per ticker)
@@ -415,7 +416,10 @@ async function runAnalysis(opts = {}) {
     // ASX200 5d return for relative-strength baseline (from macro data)
     const _asx200_5d = state.macroData?.asx200_5d_return ?? null;
 
-    indicatorCtx = sectorAllocCtx + '\n\nLIVE TECHNICAL DATA (yfinance, real-time):\n' + loaded.map(t=>{
+    indicatorCtx = sectorAllocCtx + '\n\nLIVE TECHNICAL DATA (yfinance, real-time):'
+      + '\n(Full multi-line block = a holding or an active-setup candidate — full data, safe to act on. '
+      + 'One-line "★WATCHLIST★ … no active setup" = monitored only, data intentionally compressed — do NOT '
+      + 'issue a BUY/TOP_UP on a one-liner; it lacks the factors to justify one.)\n' + loaded.map(t=>{
       const s  = state.liveSignals[t];
       const f  = s.fundamentals || {};
       const sr = s.support_resistance || {};
