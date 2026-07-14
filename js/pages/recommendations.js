@@ -165,18 +165,18 @@ function renderRunAnalysisPanel() {
       <div class="card">
         <div class="card-title">Analysis Token Budget</div>
         <p class="text-xs text-muted" style="margin-bottom:10px">Caps how much Claude can write per run. Holdings are always analysed in full first; watchlist tickers are covered only if the budget allows (extras beyond the budget are deferred, never half-analysed).</p>
-        <div class="flex-row" style="gap:8px;flex-wrap:wrap">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;align-items:stretch">
           ${Object.entries((typeof ANALYSIS_BUDGET_TIERS!=='undefined'?ANALYSIS_BUDGET_TIERS:{})).map(([key,tier])=>{
             const active = (state.settings.analysisTokenBudget||'standard') === key;
             const blurb = key==='lean' ? 'Holdings only — watchlist skipped' : key==='deep' ? 'Holdings + full watchlist' : 'Holdings + watchlist to fit';
-            return `<button class="btn btn-sm${active?' btn-primary':''}" style="flex:1;min-width:140px;text-align:left;padding:8px 12px;white-space:normal" onclick="setAnalysisBudget('${key}')">
+            return `<button class="btn btn-sm${active?' btn-primary':''}" style="display:flex;flex-direction:column;justify-content:center;gap:4px;height:100%;min-height:58px;text-align:left;padding:8px 12px;white-space:normal" onclick="setAnalysisBudget('${key}')">
               <div style="font-weight:600;white-space:normal">${tier.label}</div>
               <div class="text-xs" style="opacity:0.75;white-space:normal;line-height:1.4">~${(tier.maxTokens/1000)}k tok · ${blurb}</div>
             </button>`;
           }).join('')}
           ${(()=>{
             const active = state.settings.analysisTokenBudget === 'custom';
-            return `<button class="btn btn-sm${active?' btn-primary':''}" style="flex:1;min-width:140px;text-align:left;padding:8px 12px;white-space:normal" onclick="setAnalysisBudget('custom')">
+            return `<button class="btn btn-sm${active?' btn-primary':''}" style="display:flex;flex-direction:column;justify-content:center;gap:4px;height:100%;min-height:58px;text-align:left;padding:8px 12px;white-space:normal" onclick="setAnalysisBudget('custom')">
               <div style="font-weight:600;white-space:normal">Custom</div>
               <div class="text-xs" style="opacity:0.75;white-space:normal;line-height:1.4">~${((state.settings.customTokenBudget||12000)/1000).toFixed(1)}k tok · Set your own ceiling</div>
             </button>`;
