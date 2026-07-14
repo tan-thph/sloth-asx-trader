@@ -230,7 +230,18 @@ async function runAnalysis() {
 
   // Fetch signals for all tickers — force-refresh so the AI gets the freshest
   // technical data (bypasses the 15-min fetchSignals cache).
-  if(state.serverOk && allTickers.length) { try { await fetchSignals(allTickers, true); } catch {} }
+  //
+  // Widen the FETCH beyond portfolioTickers (which is view-mode-scoped via
+  // mergedPortfolio()) to every holding in state.portfolio, unfiltered. state.
+  // liveSignals is a shared, non-persisted cache read by other pages (e.g. the
+  // Dashboard's Holdings Overview) — scoping the fetch to the current
+  // portfolioViewMode toggle ('real'/'paper'/'all') would silently starve
+  // holdings outside that toggle (e.g. paper trades while viewing "Live only")
+  // of any signal data for the rest of the session, even after switching back
+  // to "All". portfolioTickers itself stays view-scoped for the analysis logic
+  // below (correlation sizing, calibration ticker scoping, etc.).
+  const _signalFetchTickers = [...new Set([...state.portfolio.map(h=>h.ticker), ...allTickers])];
+  if(state.serverOk && _signalFetchTickers.length) { try { await fetchSignals(_signalFetchTickers, true); } catch {} }
 
   // Macro brief must be resolved BEFORE any prompt context is built. It was
   // previously awaited only at regime-classification time — after macroCtx and
