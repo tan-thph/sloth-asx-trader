@@ -148,6 +148,46 @@ function renderRunAnalysisPanel() {
         </div>
       </div>
 
+      <!-- Token budget -->
+      <div class="card">
+        <div class="card-title">Analysis Token Budget</div>
+        <p class="text-xs text-muted" style="margin-bottom:10px">Caps how much Claude can write per run. Holdings are always analysed in full first; watchlist tickers are covered only if the budget allows (extras beyond the budget are deferred, never half-analysed).</p>
+        <div class="flex-row" style="gap:8px;flex-wrap:wrap">
+          ${Object.entries((typeof ANALYSIS_BUDGET_TIERS!=='undefined'?ANALYSIS_BUDGET_TIERS:{})).map(([key,tier])=>{
+            const active = (state.settings.analysisTokenBudget||'standard') === key;
+            const blurb = key==='lean' ? 'Holdings only — watchlist skipped' : key==='deep' ? 'Holdings + full watchlist' : 'Holdings + watchlist to fit';
+            return `<button class="btn btn-sm${active?' btn-primary':''}" style="flex:1;min-width:140px;text-align:left;padding:8px 12px" onclick="setAnalysisBudget('${key}')">
+              <div style="font-weight:600">${tier.label}</div>
+              <div class="text-xs" style="opacity:0.75">~${(tier.maxTokens/1000)}k tok · ${blurb}</div>
+            </button>`;
+          }).join('')}
+          ${(()=>{
+            const active = state.settings.analysisTokenBudget === 'custom';
+            return `<button class="btn btn-sm${active?' btn-primary':''}" style="flex:1;min-width:140px;text-align:left;padding:8px 12px" onclick="setAnalysisBudget('custom')">
+              <div style="font-weight:600">Custom</div>
+              <div class="text-xs" style="opacity:0.75">~${((state.settings.customTokenBudget||12000)/1000).toFixed(1)}k tok · Set your own ceiling</div>
+            </button>`;
+          })()}
+        </div>
+        ${state.settings.analysisTokenBudget === 'custom' ? (()=>{
+          const range = typeof CUSTOM_TOKEN_BUDGET_RANGE!=='undefined' ? CUSTOM_TOKEN_BUDGET_RANGE : {min:2000,max:32000};
+          const val = state.settings.customTokenBudget || 12000;
+          return `<div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <label class="form-label" style="margin:0" for="custom-token-budget-input">Max output tokens</label>
+            <input type="number" id="custom-token-budget-input" value="${val}" min="${range.min}" max="${range.max}" step="500"
+              style="width:110px" onchange="setCustomTokenBudget(this.value)">
+            <input type="range" id="custom-token-budget-slider" value="${val}" min="${range.min}" max="${range.max}" step="500"
+              style="flex:1;min-width:160px" oninput="document.getElementById('custom-token-budget-input').value=this.value" onchange="setCustomTokenBudget(this.value)">
+            <span class="text-xs text-muted">Range ${(range.min/1000).toFixed(0)}k–${(range.max/1000).toFixed(0)}k. Watchlist tickers still ration/defer the same way as the preset tiers.</span>
+          </div>`;
+        })() : ''}
+        ${(state.deferredWatchlist && state.deferredWatchlist.length) ? `
+        <div style="margin-top:12px;padding:10px 12px;background:var(--bg-secondary);border-radius:var(--radius-md);border:0.5px solid var(--border-light);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--text-secondary);flex:1;min-width:180px">⏸ <strong>${state.deferredWatchlist.length}</strong> watchlist ticker(s) deferred last run to protect the holdings budget: <span style="color:var(--text-primary);font-weight:600">${state.deferredWatchlist.join(', ')}</span></span>
+          <button class="btn btn-sm btn-primary" onclick="runDeferredWatchlist()" ${state.analysisRunning?'disabled':''} style="${state.analysisRunning?'opacity:0.6':''}">▶ Analyse them now</button>
+        </div>` : ''}
+      </div>
+
       <!-- Market view / instructions -->
       <div class="card">
         <div class="card-title">Market View & Instructions</div>
@@ -297,6 +337,30 @@ function clearExtraTickers() {
   if(tab) tab.classList.add('active');
 }
 
+function setAnalysisBudget(tier) {
+  if (tier !== 'custom' && (typeof ANALYSIS_BUDGET_TIERS === 'undefined' || !ANALYSIS_BUDGET_TIERS[tier])) return;
+  state.settings.analysisTokenBudget = tier;
+  scheduleSave();
+  const el = document.getElementById('rec-content');
+  if(el) el.innerHTML = renderRunAnalysisPanel();
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  const tab = document.getElementById('tab-run');
+  if(tab) tab.classList.add('active');
+}
+
+// Custom token budget (analysisTokenBudget === 'custom') — clamped to
+// CUSTOM_TOKEN_BUDGET_RANGE (config.js), same bound analysis.js re-applies at
+// run time so a stale/tampered value can never exceed the deferred-pass cap.
+function setCustomTokenBudget(value) {
+  const range = typeof CUSTOM_TOKEN_BUDGET_RANGE !== 'undefined' ? CUSTOM_TOKEN_BUDGET_RANGE : { min: 2000, max: 32000 };
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return;
+  state.settings.customTokenBudget = Math.min(range.max, Math.max(range.min, n));
+  scheduleSave();
+  const el = document.getElementById('rec-content');
+  if(el) el.innerHTML = renderRunAnalysisPanel();
+}
+
 function saveCurrentView() {
   const ta = document.getElementById('market-view-input');
   const text = ta ? ta.value.trim() : state.analysisConfig.marketView;
@@ -354,6 +418,17 @@ async function runAnalysisFromPanel() {
   scheduleSave();
   await runAnalysis();
 }
+
+// On-demand second pass for watchlist tickers the token budget deferred. Runs the
+// full analysis with those tickers forced in (holdings still ride along as shared
+// context), so the deferred names get covered without ever having pressured the
+// holdings analysis on the primary run.
+async function runDeferredWatchlist() {
+  const list = (state.deferredWatchlist || []).slice();
+  if (!list.length) { toast('No deferred watchlist tickers to analyse', 'info'); return; }
+  await runAnalysis({ watchlistFocus: list });
+}
+
 function _sectorConcentrationWarning(rec) {
   if (!rec.sector || rec.action === 'SELL' || rec.action === 'TRIM') return '';
   const isSameTicker = state.portfolio.some(h => h.ticker === rec.ticker);

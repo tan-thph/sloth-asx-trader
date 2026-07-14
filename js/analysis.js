@@ -112,7 +112,15 @@ function _recomputeBuyEv(r, rbaRate, fees) {
 // ============================================================
 // ANALYSIS ENGINE
 // ============================================================
-async function runAnalysis() {
+async function runAnalysis(opts = {}) {
+  // opts.watchlistFocus — array of tickers for an on-demand "analyse the deferred
+  // watchlist now" pass. When set, those tickers bypass budget rationing (they were
+  // explicitly requested) and the budget is bumped to fit holdings + focus so nothing
+  // is dropped again. Holdings still ride along as shared context (correlation /
+  // concentration / sizing depend on the existing book) — that's the whole reason
+  // this stays one call rather than a book-blind watchlist-only prompt.
+  const _watchlistFocus = Array.isArray(opts.watchlistFocus) && opts.watchlistFocus.length
+    ? opts.watchlistFocus : null;
   if(state.analysisRunning){toast('Analysis already running','info');return;}
   const key=getApiKey();
   // Proxy mode has no browser-side key — callClaude() routes via the backend.
@@ -225,7 +233,56 @@ async function runAnalysis() {
 
   // All tickers = portfolio + any extras from analysisConfig
   const portfolioTickers = mergedPortfolio().map(h=>h.ticker);
-  const extraTickers = (state.analysisConfig.extraTickers||[]).filter(t=>!portfolioTickers.includes(t));
+  // ── Token-budget rationing (holdings-first) ────────────────────────────────
+  // Holdings are ALWAYS analysed in full. Watchlist ("extra") tickers are
+  // SECONDARY: we deterministically drop whole watchlist tickers (lowest-priority
+  // last, in the user's own add order) until the estimated output fits the tier's
+  // token budget, rather than letting the API truncate a holding mid-analysis.
+  // The Claude API can't self-estimate response length, so this pre-flight fit is
+  // the guarantee; the prompt budget note + max_tokens ceiling are backstops.
+  // 'custom' isn't a static ANALYSIS_BUDGET_TIERS entry (config.js) — its maxTokens
+  // is user-set (settings.customTokenBudget); rationing shape (perTicker/reserve/
+  // dropWatchlist) reuses the 'standard' tier so a custom budget rations watchlist
+  // tickers the same way standard/deep do, just against a different ceiling.
+  let _budgetTier;
+  if (state.settings?.analysisTokenBudget === 'custom' && typeof ANALYSIS_BUDGET_TIERS !== 'undefined') {
+    const _range = typeof CUSTOM_TOKEN_BUDGET_RANGE !== 'undefined' ? CUSTOM_TOKEN_BUDGET_RANGE : { min: 2000, max: 32000 };
+    const _custom = Math.min(_range.max, Math.max(_range.min, Number(state.settings.customTokenBudget) || 12000));
+    _budgetTier = { ...ANALYSIS_BUDGET_TIERS.standard, label: 'Custom', maxTokens: _custom, dropWatchlist: false };
+  } else {
+    _budgetTier = (typeof ANALYSIS_BUDGET_TIERS !== 'undefined'
+      ? ANALYSIS_BUDGET_TIERS[state.settings?.analysisTokenBudget]
+      : null) || { label: 'Standard', maxTokens: 12000, perTicker: 550, reserve: 1800, dropWatchlist: false };
+  }
+  let extraTickers = (state.analysisConfig.extraTickers||[]).filter(t=>!portfolioTickers.includes(t));
+  let _deferredWatchlist = [];
+  if (_watchlistFocus) {
+    // On-demand deferred pass: analyse EXACTLY the requested tickers, no rationing.
+    // Bump the budget (this run only) so holdings + focus all fit — never defer again.
+    extraTickers = _watchlistFocus.filter(t => !portfolioTickers.includes(t));
+    const _need = (portfolioTickers.length + extraTickers.length) * _budgetTier.perTicker + _budgetTier.reserve;
+    if (_need > _budgetTier.maxTokens) {
+      _budgetTier = { ..._budgetTier, maxTokens: Math.min(32000, _need) };
+    }
+    toast(`Analysing ${extraTickers.length} deferred watchlist ticker(s) alongside your holdings…`, 'info');
+  } else if (_budgetTier.dropWatchlist) {
+    _deferredWatchlist = extraTickers;
+    extraTickers = [];
+  } else if (extraTickers.length) {
+    const _outAllowance = Math.max(0, _budgetTier.maxTokens - _budgetTier.reserve);
+    const _holdingsCost = portfolioTickers.length * _budgetTier.perTicker;
+    const _maxWatchlist = Math.max(0, Math.floor((_outAllowance - _holdingsCost) / _budgetTier.perTicker));
+    if (extraTickers.length > _maxWatchlist) {
+      _deferredWatchlist = extraTickers.slice(_maxWatchlist);
+      extraTickers = extraTickers.slice(0, _maxWatchlist);
+    }
+  }
+  if (_deferredWatchlist.length) {
+    toast(`Token budget (${_budgetTier.label}): ${_deferredWatchlist.length} watchlist ticker(s) deferred — holdings fully covered first.`, 'info');
+  }
+  // Surface the deferral to the UI so the "Analyse deferred watchlist" button can
+  // appear. A focus pass clears it (those tickers have now been covered).
+  state.deferredWatchlist = _watchlistFocus ? [] : _deferredWatchlist.slice();
   const allTickers = [...portfolioTickers, ...extraTickers];
 
   // Fetch signals for all tickers — force-refresh so the AI gets the freshest
@@ -742,7 +799,9 @@ ${riskRows}`;
     ? '\n\nENTRY THESIS CONTEXT (original buy rationale per holding):\n' + _holdingCtxLines.join('\n')
     : '';
 
-  const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()} | TAX_LOSS_HARVEST_ACTIVE: ${inHarvestWindow}${_acctLabel}
+  const _budgetNote = `\nANALYSIS_BUDGET: ${_budgetTier.label} (~${_budgetTier.maxTokens} output tokens). Analyse EVERY holding fully FIRST — holdings are the priority and must never be truncated or skipped. Watchlist tickers are SECONDARY. ${_deferredWatchlist.length ? `${_deferredWatchlist.length} watchlist ticker(s) were deferred this run due to the budget (${_deferredWatchlist.join(', ')}) — state this in dataGaps[].` : `Cover watchlist only if budget remains; if you must trim, drop whole watchlist tickers (note them in dataGaps[]) rather than shorten any holding's analysis.`}`;
+
+  const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()} | TAX_LOSS_HARVEST_ACTIVE: ${inHarvestWindow}${_acctLabel}${_budgetNote}
 Account settings: brokerage $${state.settings.brokerage}/trade (round-trip $${state.settings.brokerage * 2}) | max ${state.settings.maxTradesPerDay} trades/day | min trade $${state.settings.minTradeSize}
 ACTIVE_REGIME: __REGIME_PLACEHOLDER__ (confidence: __CONF_PLACEHOLDER__)
 
@@ -755,7 +814,7 @@ ${recCtx}__CHANGES_PLACEHOLDER__${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__
 TASK:
 1. Read the CALIBRATION block above as context for your reasoning. Do NOT pre-adjust confidence scores — numeric band/per-ticker adjustments are applied by the engine after your response.
 2. Assess macro regime — Rule 12: if sentiment = "bearish" AND bullish < 35, block all BUY/TOP_UP.
-3. For every holding and watchlist ticker, run the Section 3 multi-factor framework. Exclude any ticker with < 3 independent non-technical factors from recs[].
+3. Run the Section 3 multi-factor framework on EVERY holding FIRST (holdings are the priority — never skip or truncate one), then on any watchlist ticker the ANALYSIS_BUDGET allows. Exclude any ticker with < 3 independent non-technical factors from recs[].
 4. For each candidate rec: compute priceRange, target (next S/R), stopLoss (stopAtrMultiple×ATR from ACTIVE RULE OVERRIDES), set qty=0 (quant engine sizes), optionally scenarios (if included, p must sum to 1.0), invalidationCondition (must include a measurable value), bearCase (if conf ≥ 0.70), factorsUsed (≥ 3 specific data points).
 5. Apply Section 7 pre-flight checks. Fix all failures before writing JSON.
 6. Return JSON only — no preamble, no markdown.
@@ -980,6 +1039,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     const { text, usage: _usage } = await callClaude('portfolio', fullUserMessage, {
       systemArray: _systemArray,
       model: state.settings?.analysisModel || undefined,
+      maxTokens: _budgetTier.maxTokens,
     });
 
     console.log(`[Token audit] recHistory sent: ${recentRecs.length} entries (last5=${last5.length} withPnl=${withPnl.length} withFeedback=${withFeedback.length})`);

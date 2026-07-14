@@ -3,6 +3,26 @@
 // ============================================================
 const API = (location.protocol === 'file:') ? 'http://localhost:5000' : location.origin;
 
+// ── Portfolio-analysis token budget tiers ────────────────────────────────────
+// The Claude API cannot pre-estimate its own response length (max_tokens is a
+// hard truncation ceiling, not a target), so we ration DETERMINISTICALLY here:
+// portfolio-analysis output is structured tool JSON and its size is ~linear in
+// the number of recs. `perTicker` is a conservative per-rec output-token cost;
+// `reserve` covers the summary/dataGaps/book-snapshot overhead. analysis.js keeps
+// ALL holdings, then fills watchlist tickers only up to what the budget allows —
+// dropping whole watchlist tickers (never truncating a holding). `maxTokens`
+// becomes the callClaude('portfolio') ceiling. See settings.analysisTokenBudget.
+const ANALYSIS_BUDGET_TIERS = {
+  lean:     { label: 'Lean',     maxTokens: 8000,  perTicker: 550, reserve: 1500, dropWatchlist: true  },
+  standard: { label: 'Standard', maxTokens: 12000, perTicker: 550, reserve: 1800, dropWatchlist: false },
+  deep:     { label: 'Deep',     maxTokens: 20000, perTicker: 550, reserve: 2500, dropWatchlist: false },
+};
+// 'custom' isn't a static tier (its maxTokens is user-set via settings.customTokenBudget)
+// — analysis.js builds it at run time from the 'standard' tier's perTicker/reserve/
+// dropWatchlist plus this clamped maxTokens. Upper bound matches the existing deferred-
+// watchlist-pass cap (analysis.js: Math.min(32000, _need)).
+const CUSTOM_TOKEN_BUDGET_RANGE = { min: 2000, max: 32000 };
+
 // ============================================================
 // STATE
 // ============================================================
@@ -66,7 +86,10 @@ const state = {
     autoMacroBrief: true, // auto-run the AI morning macro once per trading day (scheduler.js); when off, it still runs on the first manual Run Analysis
     autoMacroBriefTime: '', // 'HH:MM' AEST — don't auto-run before this time; empty = no restriction (fire ASAP, current behaviour)
     paperStartCash: 100000, // seed for state.paperCash the first time paper mode is used (separate from real cash)
+    analysisTokenBudget: 'standard', // 'lean' | 'standard' | 'deep' | 'custom' — see ANALYSIS_BUDGET_TIERS. Caps callClaude('portfolio') max_tokens and deterministically rations watchlist tickers so holdings are always fully analysed first.
+    customTokenBudget: 12000, // maxTokens used when analysisTokenBudget === 'custom' (clamped to CUSTOM_TOKEN_BUDGET_RANGE in analysis.js); perTicker/reserve/dropWatchlist reuse the 'standard' tier's rationing behaviour.
   },
+  deferredWatchlist: [],       // watchlist tickers the token budget skipped on the last run (drives the "Analyse deferred watchlist" button). Session artifact — reset on each analysis run.
   analysisRunning: false,
   analysisLastSummary: null,   // {text, date, recCount} – AI's reasoning when recs=0 or overall summary
   currentRegime: null,         // { regime, confidence, signals[], fetchedAt } — set by regime-engine.js
