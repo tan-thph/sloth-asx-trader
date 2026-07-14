@@ -1394,8 +1394,8 @@ class TestStage3PromptInstructions(unittest.TestCase):
         """PROMPT_VERSION must be bumped when Rule 5's HOLDING_CONTEXT wording changes."""
         with open(os.path.join(ROOT, "js/prompts.js"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("PROMPT_VERSION = '2026-07-v23'", src,
-                      "PROMPT_VERSION must be current (v23)")
+        self.assertIn("PROMPT_VERSION = '2026-07-v24'", src,
+                      "PROMPT_VERSION must be current (v24)")
 
     def test_entry_driver_in_prompt(self):
         """Sprint 67: ANALYSIS_SYSTEM_PROMPT must require primary_entry_driver on BUYs."""
@@ -3578,7 +3578,7 @@ class TestImprovementI5PromptConsolidation(unittest.TestCase):
         self.assertIn("Do NOT prescribe a specific ATR stop multiple", self.src[idx16:idx17])
 
     def test_prompt_version_bumped_for_i5(self):
-        self.assertIn("PROMPT_VERSION = '2026-07-v23'", self.src)
+        self.assertIn("PROMPT_VERSION = '2026-07-v24'", self.src)
 
 
 class TestSprint10FormingBarAndStooq(unittest.TestCase):
@@ -10053,6 +10053,65 @@ class TestDayTradeTraining(unittest.TestCase):
         # has_more should be True since we have multiple records
         self.assertIsInstance(data["has_more"], bool)
 
+    def _dt_items(self, ticker_prefix, sort=None):
+        """Fetch a large-enough page of history and filter to this test's own
+        tickers — the shared in-memory DB accumulates rows across every test
+        method in this class, so results must be scoped by a unique prefix."""
+        url = "/api/daytrading/history?limit=100"
+        if sort:
+            url += "&sort=" + sort
+        items = self.client.get(url).get_json()["items"]
+        return [it for it in items if (it.get("ticker") or "").startswith(ticker_prefix)]
+
+    def test_history_sort_by_exit_date_orders_closed_trades_by_exit(self):
+        """?sort=exit_date must order by exit_date DESC, not entry_date."""
+        # Deliberately scrambled: earliest entry closes LAST (latest exit_date),
+        # so entry-sort and exit-sort produce different orders — proves the
+        # param actually changes behaviour rather than coincidentally matching.
+        s1 = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "ZSORTA.AX", "entry_date": "2026-01-01", "entry_price": 10.0, "qty": 10,
+        }).get_json()
+        self.client.patch(f"/api/daytrading/snapshot/{s1['id']}/close", json={
+            "exit_price": 11.0, "entry_price": 10.0, "exit_date": "2026-03-01", "exit_reason": "target",
+        })
+        s2 = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "ZSORTB.AX", "entry_date": "2026-02-01", "entry_price": 20.0, "qty": 10,
+        }).get_json()
+        self.client.patch(f"/api/daytrading/snapshot/{s2['id']}/close", json={
+            "exit_price": 21.0, "entry_price": 20.0, "exit_date": "2026-01-15", "exit_reason": "target",
+        })
+
+        by_exit = self._dt_items("ZSORT", sort="exit_date")
+        self.assertEqual([it["ticker"] for it in by_exit], ["ZSORTA.AX", "ZSORTB.AX"])  # exit 03-01 before 01-15
+
+        by_entry = self._dt_items("ZSORT", sort="entry_date")
+        self.assertEqual([it["ticker"] for it in by_entry], ["ZSORTB.AX", "ZSORTA.AX"])  # entry 02-01 before 01-01
+
+    def test_history_sort_by_exit_date_puts_open_trades_last(self):
+        """An open trade (exit_date IS NULL) must sort to the bottom under
+        sort=exit_date, even though its entry_date is the most recent."""
+        closed = self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "ZSORTC.AX", "entry_date": "2026-01-01", "entry_price": 10.0, "qty": 10,
+        }).get_json()
+        self.client.patch(f"/api/daytrading/snapshot/{closed['id']}/close", json={
+            "exit_price": 11.0, "entry_price": 10.0, "exit_date": "2026-01-10", "exit_reason": "target",
+        })
+        self.client.post("/api/daytrading/snapshot", json={
+            "ticker": "ZSORTD.AX", "entry_date": "2026-06-01", "entry_price": 20.0, "qty": 10,
+        })  # left open — no /close call
+
+        items = self._dt_items("ZSORT", sort="exit_date")
+        tickers = [it["ticker"] for it in items]
+        self.assertIn("ZSORTC.AX", tickers)
+        self.assertIn("ZSORTD.AX", tickers)
+        self.assertLess(tickers.index("ZSORTC.AX"), tickers.index("ZSORTD.AX"))
+
+    def test_history_sort_default_is_entry_date_backward_compat(self):
+        """Omitting ?sort must behave exactly as before (entry_date DESC)."""
+        r = self.client.get("/api/daytrading/history?limit=5")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+
     # ── GET /api/daytrading/stats ────────────────────────────────────────────
 
     def test_stats_shape(self):
@@ -12359,10 +12418,10 @@ class TestCriticsAddressing(unittest.TestCase):
                       "Rule 19 must explicitly label RSI/BB/MA as confirming signals, not primary drivers")
 
     def test_prompt_version_v16(self):
-        """PROMPT_VERSION must be current (v23 after Audit I-5's rule consolidation)."""
+        """PROMPT_VERSION must be current (v24 — every holding must appear in recs[])."""
         src = self._read("js/prompts.js")
-        self.assertIn("PROMPT_VERSION = '2026-07-v23'", src,
-                      "PROMPT_VERSION must be bumped to current (v23)")
+        self.assertIn("PROMPT_VERSION = '2026-07-v24'", src,
+                      "PROMPT_VERSION must be bumped to current (v24)")
 
     # ── Problem 5/6: Financials sector module ──────────────────────────────
 

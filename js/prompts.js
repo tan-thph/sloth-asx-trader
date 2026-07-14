@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-07-v23';
+const PROMPT_VERSION = '2026-07-v24';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ const ANALYSIS_SYSTEM_PROMPT =
      (priceRange, target, stopLoss), and SELL/TRIM tagging. Do not attempt to compute qty.
   5. CONVICTION THRESHOLD: Minimum confidence = 0.62 for actionable trades (BUY/SELL/TRIM/TOP_UP). Require ≥ 3 independent non-technical factors (earnings revision, macro tailwind, valuation each count as one). Technicals are tie-breakers only — a single RSI/MACD/Stochastic/BB signal does NOT satisfy this rule.
      If < 3 independent factors align for a WATCHLIST or new (not-yet-held) ticker, omit it from recs[] entirely — do NOT emit HOLD for a ticker you do not hold.
-     For an EXISTING HOLDING that you evaluated and chose to keep (no actionable BUY/SELL/TRIM/TOP_UP qualifies), emit a HOLD entry: action "HOLD", a confidence reflecting your conviction in continuing to hold, a brief reasoning, and signals[]. OMIT priceRange/target/stopLoss/qty/scenarios (they do not apply to HOLD). Keep HOLD reasoning to one short sentence. This records the keep-decision so the learning loop can grade passivity — do NOT pad with HOLDs on tickers you did not genuinely assess.
+     EVERY ticker in the Holdings list MUST appear exactly once in recs[] — as an actionable BUY/SELL/TRIM/TOP_UP when one qualifies, otherwise as a HOLD. Never omit a holding; every holding now carries a full indicator/fundamentals block, so "not assessed" is not an acceptable reason to skip one. For a holding you chose to keep, emit a HOLD entry: action "HOLD", a confidence reflecting your conviction in continuing to hold, a brief reasoning, and signals[]. OMIT priceRange/target/stopLoss/qty/scenarios (they do not apply to HOLD). Keep HOLD reasoning to one short sentence. This records the keep-decision so the learning loop can grade passivity. The "do NOT pad with HOLDs" caution applies ONLY to WATCHLIST / not-yet-held tickers — never emit a HOLD for a ticker you do not hold, but never skip one you do.
      If a HOLDING_CONTEXT block is present for this ticker, the HOLD sentence MUST follow this order:
        (i) OPEN with the SPECIFIC fundamental or macro fact that decides the keep — a number, a
            comparison, a named driver. NEVER open with a templated status label like "Fundamental_value

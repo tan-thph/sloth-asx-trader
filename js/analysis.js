@@ -380,7 +380,16 @@ async function runAnalysis(opts = {}) {
     const preEarnings = s.pre_earnings_risk === true;
     const volSpike = (s.volume_z_score ?? 0) > 2.5;
     const isExtra = extraTickers.includes(t);
-    return isExtra
+    // Requirement (2026-07): every ticker we actually HOLD must be analysed in full,
+    // not compressed to a Tier-2 one-liner (which Rule 5 lets Claude skip → synthetic
+    // no-confidence HOLDs). Held tickers always get the Tier-1 block; the Tier-2
+    // compression now only ever applies to nothing (watchlist is already Tier-1 via
+    // isExtra), so holdings are never silently skipped again. Token cost lands on the
+    // INPUT/prompt side (not max_tokens output), and the budget tiers ration watchlist
+    // — holdings-first, exactly the intended priority.
+    const inPortfolio = portfolioTickers.includes(t);
+    return inPortfolio
+      || isExtra
       || rsi < 38
       || rsi > 68
       || bbPctB < 0.12
