@@ -9,12 +9,19 @@ const _DT_SIG_KEYS = ['bb', 'rsi', 'vol', 'fib', 'obv'];
 
 // ── Time-based exit helpers ───────────────────────────────────────────────
 
-// Approximate trading days elapsed from entryDateStr (YYYY-MM-DD) to today.
+// Approximate trading days elapsed from entryDateStr to today.
 // Formula: calendarDays × (5/7) — sufficient precision for a 8–15 day window.
+// entryDateStr is DD-MM-YYYY (todayStr() / en-AU locale) — MUST parse via
+// parseDate(), not `new Date()`. Raw `new Date('05-07-2026')` reads it as
+// MM-DD-YYYY (→ 7 May, not 5 Jul), inflating elapsed days and firing spurious
+// Time Stop alerts; days > 12 parse to Invalid Date → NaN → the badge is
+// silently suppressed instead. parseDate() is DD-MM-aware (portfolio-helpers.js).
 function _dtTradingDaysElapsed(entryDateStr) {
   if (!entryDateStr) return 0;
-  var entry = new Date(entryDateStr);
-  var calendarMs = Date.now() - entry.getTime();
+  var entry = (typeof parseDate === 'function') ? parseDate(entryDateStr) : new Date(entryDateStr);
+  var entryMs = entry instanceof Date ? entry.getTime() : NaN;
+  if (Number.isNaN(entryMs)) return 0;
+  var calendarMs = Date.now() - entryMs;
   if (calendarMs < 0) return 0;
   return Math.floor((calendarMs / 86400000) * 5 / 7);
 }

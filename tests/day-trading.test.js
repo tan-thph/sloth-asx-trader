@@ -8,7 +8,7 @@
  * whole live-signals / model / quant-engine stack).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -21,6 +21,12 @@ const _read = (p) => readFileSync(join(_ROOT, p), 'utf8');
 const _dtImpliedWinProb = eval('(' + extractFunction('js/day-trading-analysis.js', '_dtImpliedWinProb') + ')');
 // eslint-disable-next-line no-eval
 const _intradayReversionRR = eval('(' + extractFunction('js/intraday-strategy.js', '_intradayReversionRR') + ')');
+// parseDate must be in module scope BEFORE _dtTradingDaysElapsed is eval'd, so the
+// extracted function (which references `parseDate` by name) resolves it via closure.
+// eslint-disable-next-line no-eval
+const parseDate = eval('(' + extractFunction('js/portfolio-helpers.js', 'parseDate') + ')');
+// eslint-disable-next-line no-eval
+const _dtTradingDaysElapsed = eval('(' + extractFunction('js/pages/day-trading.js', '_dtTradingDaysElapsed') + ')');
 
 describe('_dtImpliedWinProb', () => {
   it('inverts E[R] = p*(b+1) - 1 exactly for a mid-range case', () => {
@@ -79,6 +85,48 @@ describe('_intradayReversionRR', () => {
 
   it('returns null when both reversion and target rewards are non-positive', () => {
     expect(_intradayReversionRR(99, 98, 98.5, 98)).toBeNull();   // vwap<entry, target<entry
+  });
+});
+
+// ── Swing Time Stop date-parse regression ──────────────────────────────────────
+// r.date is DD-MM-YYYY (todayStr()/en-AU). _dtTradingDaysElapsed MUST parse it via
+// parseDate(), not `new Date()` — the latter reads "05-07-2026" as MM-DD-YYYY
+// (7 May, not 5 Jul), inflating elapsed days and firing spurious Time Stop alerts
+// (the FMG/WDS symptom). Fixed "now" via fake timers makes these exact.
+describe('_dtTradingDaysElapsed (swing Time Stop date parse)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('parses DD-MM-YYYY correctly — 9 calendar days → 6 trading days, NOT the month-swapped 48', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 14)); // 14 Jul 2026, local midnight
+    // "05-07-2026" = 5 Jul 2026 → 9 calendar days → floor(9*5/7)=6.
+    // A raw new Date('05-07-2026') would read 7 May → 68 days → 48 (spurious Time Stop).
+    expect(_dtTradingDaysElapsed('05-07-2026')).toBe(6);
+  });
+
+  it('a same-day entry is 0 days elapsed (no premature alert)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 14));
+    expect(_dtTradingDaysElapsed('14-07-2026')).toBe(0);
+  });
+
+  it('a day-of-month > 12 no longer parses to Invalid Date (badge suppression bug)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 28)); // 28 Jul 2026
+    // "14-07-2026" would be Invalid Date under new Date() → NaN → 0 (real time-stop hidden).
+    // Correct: 14 Jul → 14 calendar days → floor(14*5/7)=10.
+    expect(_dtTradingDaysElapsed('14-07-2026')).toBe(10);
+  });
+
+  it('a future-dated entry clamps to 0', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 14));
+    expect(_dtTradingDaysElapsed('20-07-2026')).toBe(0);
+  });
+
+  it('empty/missing date is 0', () => {
+    expect(_dtTradingDaysElapsed('')).toBe(0);
+    expect(_dtTradingDaysElapsed(null)).toBe(0);
   });
 });
 
