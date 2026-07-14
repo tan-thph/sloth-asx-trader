@@ -354,6 +354,7 @@ def dt_history():
     offset  = int(request.args.get("offset", 0))
     outcome = request.args.get("outcome")        # 'win' | 'loss' | 'open' | '' = all
     record_type = request.args.get("record_type")
+    sort    = request.args.get("sort", "entry_date")  # 'entry_date' | 'exit_date'
 
     where = []
     params = []
@@ -366,11 +367,21 @@ def dt_history():
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
+    # Sorting by exit_date puts still-open trades (exit_date IS NULL) last
+    # regardless of direction — there's no exit date to sort them by, and
+    # burying them at the bottom of a "most recently closed first" list
+    # reads correctly (they haven't closed yet).
+    order_sql = (
+        "ORDER BY exit_date IS NULL, exit_date DESC, created_at DESC"
+        if sort == "exit_date"
+        else "ORDER BY entry_date DESC, created_at DESC"
+    )
+
     with get_dt_db() as conn:
         rows = conn.execute(
             f"""SELECT * FROM trade_snapshots
                 {where_sql}
-                ORDER BY entry_date DESC, created_at DESC
+                {order_sql}
                 LIMIT ? OFFSET ?""",
             params + [limit + 1, offset]
         ).fetchall()

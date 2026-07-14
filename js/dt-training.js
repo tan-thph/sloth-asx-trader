@@ -23,7 +23,7 @@ var _dtHistLoading = false; // true = fetch already in flight — prevents dupli
 var _dtHistOffset = 0;
 var _dtHistMore   = false;
 var _dtStats      = null;  // summary stats
-var _dtHistFilter = { ticker: '', outcome: 'all', recordType: 'executed' }; // client-side history filter state
+var _dtHistFilter = { ticker: '', outcome: 'all', recordType: 'executed', sortBy: 'exit_date' }; // client-side history filter state
 var _dtExpandedIds = {}; // { [snapshotId]: true } — which History rows have the entry/exit technicals drawer open
 // recordType: 'executed' (default — real trades only) | 'all' (executed + shadow ML training rows)
 // Shadow rows (record_type='shadow') are written by the ML bias-correction pipeline for
@@ -274,7 +274,8 @@ function dtLoadHistory(reset) {
   if (reset) { _dtHistItems = null; _dtHistOffset = 0; _dtHistMore = false; }
   var limit = 20;
   var recordType = (_dtHistFilter && _dtHistFilter.recordType) || 'executed';
-  return fetch(`${API}/api/daytrading/history?limit=` + limit + '&offset=' + _dtHistOffset + '&record_type=' + recordType)
+  var sortBy = (_dtHistFilter && _dtHistFilter.sortBy) || 'exit_date';
+  return fetch(`${API}/api/daytrading/history?limit=` + limit + '&offset=' + _dtHistOffset + '&record_type=' + recordType + '&sort=' + sortBy)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
@@ -423,6 +424,15 @@ function renderDtHistoryTab() {
           </select>
         </div>
         <div>
+          <div class="form-label" style="margin-bottom:3px">Sort by</div>
+          <select onchange="setDtHistFilterKey('sortBy', this.value)"
+            style="padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-primary);color:var(--text-primary);font-size:12px"
+            title="Open trades (no exit yet) always sort to the bottom when sorting by Exit date.">
+            <option value="exit_date"  ${hf.sortBy==='exit_date'  ?'selected':''}>Exit date (newest first)</option>
+            <option value="entry_date" ${hf.sortBy==='entry_date' ?'selected':''}>Entry date (newest first)</option>
+          </select>
+        </div>
+        <div>
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;padding-bottom:5px"
             title="Shadow records are ML training data written for below-threshold setups — never executed, never manually closed. They resolve via r_multiple after ~8 days instead of an exit price/date.">
             <input type="checkbox" ${hf.recordType === 'all' ? 'checked' : ''}
@@ -486,10 +496,10 @@ function renderDtHistoryTab() {
 function setDtHistFilterKey(key, value) {
   _dtHistFilter[key] = value;
   var el = document.getElementById('dt-tab-content');
-  if (key === 'recordType') {
-    // recordType is a server-side query param (not a client-side post-filter like
-    // ticker/outcome) — must re-fetch from offset 0 so pagination/has_more reflect
-    // the new scope.
+  if (key === 'recordType' || key === 'sortBy') {
+    // recordType and sortBy are server-side query params (not a client-side
+    // post-filter like ticker/outcome) — must re-fetch from offset 0 so
+    // pagination/has_more/ordering reflect the new scope.
     if (el) el.innerHTML = _dtHistLoadingHTML();
     dtLoadHistory(true).then(function() {
       if (el) el.innerHTML = renderDtHistoryTab();
@@ -500,10 +510,10 @@ function setDtHistFilterKey(key, value) {
 }
 
 function resetDtHistFilter() {
-  var recordTypeChanged = _dtHistFilter.recordType !== 'executed';
-  _dtHistFilter = { ticker: '', outcome: 'all', recordType: 'executed' };
+  var needsRefetch = _dtHistFilter.recordType !== 'executed' || _dtHistFilter.sortBy !== 'exit_date';
+  _dtHistFilter = { ticker: '', outcome: 'all', recordType: 'executed', sortBy: 'exit_date' };
   var el = document.getElementById('dt-tab-content');
-  if (recordTypeChanged) {
+  if (needsRefetch) {
     if (el) el.innerHTML = _dtHistLoadingHTML();
     dtLoadHistory(true).then(function() {
       if (el) el.innerHTML = renderDtHistoryTab();
