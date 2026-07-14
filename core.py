@@ -289,6 +289,59 @@ def stooq_quote(yf_symbol: str) -> dict | None:
             time.sleep(1.0)
 
 
+# ── Shared impact-score band table (SCORING_FIXES.md X1) ─────────────────────
+# One canonical event-type -> impact-band table, referenced by both
+# news_engine.py (S2) and announcement_engine.py (S1) so the same event type
+# lands in the same 0-10 band regardless of which surface classified it —
+# without this, "impact 0-10" meant two different, non-comparable scales.
+#
+# Small local LLMs do band SELECTION far more reliably than multi-step
+# arithmetic. This replaces what used to be either an un-rubric'd anchor
+# (announcements seeded a bare "impact":6/8 example with no scale definition)
+# or a 4-step additive sum (news: base score + specificity nudge + magnitude
+# nudge, summed) that weak quantised models frequently didn't actually follow.
+IMPACT_BAND_TABLE: list[tuple[str, tuple[int, int]]] = [
+    ("Trading Halt / Suspension",                                    (8, 9)),
+    ("Acquisition / Takeover / Merger / Scheme of Arrangement",       (8, 9)),
+    ("Capital Raise",                                                (6, 8)),
+    ("Earnings / Guidance Update",                                   (6, 8)),
+    ("Geopolitical Conflict / Sanctions / Major Trade-Policy Shift",  (5, 8)),
+    ("Dividend Change",                                              (5, 7)),
+    ("CEO / Board Change",                                           (4, 6)),
+    ("RBA / APRA / Macro Policy",                                    (3, 5)),
+    ("Asset Sale / Operational Update",                              (3, 5)),
+    ("AGM / Admin / Broad Commentary / Other",                       (1, 3)),
+]
+
+
+def impact_band_rubric_text() -> str:
+    """Render IMPACT_BAND_TABLE as prompt-ready text, one line per band. Both
+    news_engine.py and announcement_engine.py embed this exact text so the two
+    prompts can never silently drift onto different scales."""
+    return "\n".join(f"{label} → {lo}-{hi}" for label, (lo, hi) in IMPACT_BAND_TABLE)
+
+
+def impact_floor_for_keywords(text: str) -> float | None:
+    """Deterministic, provider-agnostic backstop (SCORING_FIXES.md S2): if
+    `text` matches keywords for one of the two highest-severity, most
+    reliably keyword-detectable bands (halt/suspension, acquisition/
+    takeover), return that band's floor so a weak model's under-scored
+    output can't produce an absurdly low impact for a clearly high-severity
+    event. Returns None when nothing matches (no opinion on the score)."""
+    t = text.lower()
+    if any(kw in t for kw in (
+        "trading halt", "halt in trading", "suspended from quotation",
+        "suspension from trading", "trading suspension",
+    )):
+        return float(IMPACT_BAND_TABLE[0][1][0])  # Trading Halt / Suspension floor
+    if any(kw in t for kw in (
+        "takeover", "scheme of arrangement", "to acquire", "acquisition of",
+        "merger with", "bid for", "proposed merger",
+    )):
+        return float(IMPACT_BAND_TABLE[1][1][0])  # Acquisition / Takeover floor
+    return None
+
+
 # ── Sector map (used by market scanner) ──────────────────────────────────────
 # Curated lookup for ASX200-ish tickers. Each ticker appears exactly once.
 # Falls back to "Other" if a scanned ticker isn't here.

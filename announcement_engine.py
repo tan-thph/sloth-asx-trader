@@ -33,7 +33,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 import requests
 
-from core import classify_llm_http_error
+from core import classify_llm_http_error, impact_band_rubric_text
 
 # ---------------------------------------------------------------------------
 # Optional dependency guards
@@ -212,11 +212,16 @@ _LLM_PROMPT_TEMPLATE = (
     "Ticker: {ticker}\n"
     "Headline: {headline}\n"
     "Content: {content}\n\n"
+    "IMPACT SCALE (1-10) — pick the band matching this announcement's type, "
+    "then choose a value within that band (bottom of the band if this reads "
+    "as routine/minor for its type, top if it's an unusually significant "
+    "instance):\n"
+    "{impact_rubric}\n\n"
     "Reply with ONLY this JSON (no other text):\n"
     '{{"type":"Earnings|Dividend|Capital Raise|CEO Change|Acquisition|AGM|'
     'Trading Halt|Asset Sale|Guidance Update|Other",'
     '"sentiment":"positive|neutral|negative",'
-    '"impact":6,'
+    '"impact":<integer 1-10, per the band table above>,'
     '"summary":"One sentence max 120 chars.",'
     '"tags":["tag1","tag2"]}}'
 )
@@ -236,6 +241,13 @@ _LLM_PROMPT_TEMPLATE_PS = (
     "Ticker: {ticker}\n"
     "Headline: {headline}\n"
     "Content: {content}\n\n"
+    "IMPACT SCALE (1-10) — pick the band matching this announcement's type, "
+    "then choose a value within that band (bottom of the band if this reads "
+    "as routine/minor for its type, top if it's an unusually significant "
+    "instance). This announcement is price-sensitive per ASX, so treat it as "
+    "at least meaningful within its band — do not default to the bottom "
+    "purely because the wording is calm:\n"
+    "{impact_rubric}\n\n"
     "Reply with ONLY this JSON. Extract keyFigures — only values EXPLICITLY stated in the content "
     "(e.g. EPS, NPAT, revenue, dividend amount, franking %, ex-date, pay-date, "
     "raise amount/price/discount, acquisition value/premium). "
@@ -243,7 +255,7 @@ _LLM_PROMPT_TEMPLATE_PS = (
     '{{"type":"Earnings|Dividend|Capital Raise|CEO Change|Acquisition|AGM|'
     'Trading Halt|Asset Sale|Guidance Update|Other",'
     '"sentiment":"positive|neutral|negative",'
-    '"impact":8,'
+    '"impact":<integer 1-10, per the band table above>,'
     '"summary":"Max 200 chars. Open with the single most important figure or outcome.",'
     '"tags":["tag1","tag2"],'
     '"keyFigures":{{"key":"value"}}}}'
@@ -1369,7 +1381,10 @@ def _build_prompt(ticker: str, headline: str, pdf_text: str,
     max_chars = 2000 if price_sensitive else 1800
     content = (pdf_text or headline)[:max_chars].replace("\n", " ").strip()
     template = _LLM_PROMPT_TEMPLATE_PS if price_sensitive else _LLM_PROMPT_TEMPLATE
-    return template.format(ticker=ticker, headline=headline, content=content)
+    return template.format(
+        ticker=ticker, headline=headline, content=content,
+        impact_rubric=impact_band_rubric_text(),
+    )
 
 
 def _robust_json_parse(raw: str) -> Optional[Dict]:
@@ -1937,6 +1952,20 @@ def classify_announcement(
         if not result:
             result = _classify_keyword(ticker, headline, pdf_text)
             result.setdefault("details", "")
+
+    # S1: ASX's isPriceSensitive flag is authoritative — express it as a
+    # FLOOR, not an anchor. The old PS prompt seeded an impact value of eight
+    # as its JSON example, which the model just echoed back regardless of the
+    # actual announcement's severity (the same event scored differently purely
+    # by which template fired). Applying the floor here, after classification,
+    # means the model still picks its own value from the shared band table —
+    # this only guarantees a PS announcement can never end up looking
+    # low-impact regardless of which path (LLM or keyword fallback) produced it.
+    if price_sensitive and isinstance(result, dict):
+        try:
+            result["impact"] = max(float(result.get("impact", 5.0)), 5.0)
+        except (TypeError, ValueError):
+            result["impact"] = 5.0
 
     return result
 

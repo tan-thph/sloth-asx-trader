@@ -27,7 +27,7 @@ from pathlib import Path
 
 import requests
 
-from core import classify_llm_http_error
+from core import classify_llm_http_error, impact_band_rubric_text, impact_floor_for_keywords
 
 log = logging.getLogger("news_engine")
 
@@ -926,10 +926,9 @@ Required JSON (fill ALL fields):
 "sentiment_score":<float -1.0 to 1.0>,\
 "impact_score":<float 0.0-10.0; score the REAL PORTFOLIO IMPACT using this rubric — \
 STEP 1 — article type: if this is commentary/opinion/question with NO new company data (e.g. 'should I buy X?', 'top stocks for 2025', listicles), set score to 0.5-2.0 and stop; \
-STEP 2 — base score by event class: trading-halt/M&A-bid/regulatory-decision=7-9, earnings-result/dividend-change/capital-raise/guidance-update=6-8, geopolitical-conflict/war/sanctions/major-election-or-trade-policy-shift=5-8, CEO-exec-change/analyst-PT-revision=4-6, RBA-APRA-macro-policy=3-5, operational-company-update=2-4, broad-sector-commentary=1-3; \
-STEP 3 — specificity: for company-specific articles, add +1.5 if a portfolio ticker is the PRIMARY subject; subtract 2 if only mentioned in passing or as part of an index list — SKIP this step for macro/geopolitics articles (broad market relevance is the point, not a penalty); \
-STEP 4 — magnitude: add +1 if specific large figures are cited (earnings change >5%, deal >$500M, dividend cut >20%, market-wide index move >2%); \
-final = min(10.0, sum of applicable steps)>,\
+STEP 2 — pick the ONE row below that best matches the event (a lookup, not arithmetic):
+{impact_rubric}
+Then choose a value WITHIN that row's range: the TOP of the range if a portfolio ticker is the PRIMARY subject AND a specific large figure is cited (earnings change >5%, deal >$500M, dividend cut >20%, market-wide index move >2%); the BOTTOM if the ticker is only mentioned in passing or as part of an index list; otherwise the MIDDLE of the range. For macro/geopolitics rows, skip the primary-subject test (broad market relevance is the point, not a penalty) — use the magnitude test alone to pick top vs middle. Do not add, subtract, or sum anything — one row, one value from within it>,\
 "primary_tickers":<ASX codes that are the MAIN SUBJECT — e.g. ["CBA"] for a CBA earnings article; [] for broad-market articles>,\
 "mentioned_tickers":<ALL other ASX codes referenced in passing>,\
 "tags":<list of 2-5 keyword tags>,\
@@ -1035,6 +1034,7 @@ final = min(10.0, sum of applicable steps)>,\
             content=clean_content,
             tickers=ticker_str,
             context=context_block,
+            impact_rubric=impact_band_rubric_text(),
         )
         # For thinking models (qwen3/qwq/deepseek-r1 etc.), prepend /no_think to
         # disable chain-of-thought. Without it, the reasoning pass consumes most of
@@ -1276,6 +1276,7 @@ class GoogleLLM:
             content=_strip_urls((content or ""))[:700],
             tickers=ticker_str,
             context=context_block,
+            impact_rubric=impact_band_rubric_text(),
         )
         try:
             resp = requests.post(
@@ -1367,6 +1368,7 @@ class GroqLLM:
             content=_strip_urls((content or ""))[:700],
             tickers=ticker_str,
             context=context_block,
+            impact_rubric=impact_band_rubric_text(),
         )
         try:
             resp = requests.post(
@@ -1741,6 +1743,16 @@ class NewsPipeline:
                                 # tickers col = union of both (primary first) for backward compat
                                 ann_tickers = list(dict.fromkeys(primary + [t for t in mentioned if t not in primary]))
 
+                                # S2: deterministic, provider-agnostic backstop — a weak
+                                # local model can under-score a clearly high-severity
+                                # event (e.g. impact=2 on a trading-halt headline) even
+                                # with the band-selection rubric above. Floor, never
+                                # lower, so a model that scored HIGHER than the keyword
+                                # floor (correctly) is never pulled down.
+                                _raw_impact = _safe_float(result.get("impact_score"), max_val=10.0, min_val=0.0)
+                                _kw_floor = impact_floor_for_keywords(f"{row['title'] or ''} {row['content'] or ''}")
+                                _final_impact = max(_raw_impact, _kw_floor) if _kw_floor is not None else _raw_impact
+
                                 conn.execute("""
                                     UPDATE news_items SET
                                         summary         = :summary,
@@ -1760,7 +1772,7 @@ class NewsPipeline:
                                     "category":        str(result.get("category") or "other").lower()[:30],
                                     "sentiment":       _norm_sentiment(result.get("sentiment")),
                                     "score":           _safe_float(result.get("sentiment_score"), max_val=1.0, min_val=-1.0),
-                                    "impact":          _safe_float(result.get("impact_score"), max_val=10.0, min_val=0.0),
+                                    "impact":          _final_impact,
                                     "tickers":         json.dumps(ann_tickers),
                                     "primary_tickers": json.dumps(primary),
                                     "tags":            json.dumps(

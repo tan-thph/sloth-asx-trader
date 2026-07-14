@@ -15,6 +15,7 @@ Run:  python test_app.py
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -13069,6 +13070,152 @@ class TestNewsLlmFixes(unittest.TestCase):
     def _src(self, rel):
         with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
             return f.read()
+
+
+# ── SCORING_FIXES.md — X1/S1/S2: shared impact-band scale ────────────────────
+import core as _core
+import announcement_engine as _ann_engine
+
+
+class TestScoringFixes(unittest.TestCase):
+    def _src(self, rel):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            return f.read()
+
+    # ── X1: shared band table ────────────────────────────────────────────────
+
+    def test_impact_band_table_well_formed(self):
+        self.assertGreater(len(_core.IMPACT_BAND_TABLE), 0)
+        for label, (lo, hi) in _core.IMPACT_BAND_TABLE:
+            self.assertIsInstance(label, str)
+            self.assertGreaterEqual(lo, 1)
+            self.assertLessEqual(hi, 10)
+            self.assertLessEqual(lo, hi)
+
+    def test_impact_band_table_highest_severity_bands_first(self):
+        # Trading Halt and Acquisition/Takeover must be the two floor-backstop
+        # bands (impact_floor_for_keywords indexes IMPACT_BAND_TABLE[0] and [1]).
+        self.assertIn("Trading Halt", _core.IMPACT_BAND_TABLE[0][0])
+        self.assertIn("Acquisition", _core.IMPACT_BAND_TABLE[1][0])
+
+    def test_impact_band_rubric_text_one_line_per_band(self):
+        text = _core.impact_band_rubric_text()
+        lines = text.strip().split("\n")
+        self.assertEqual(len(lines), len(_core.IMPACT_BAND_TABLE))
+        for label, (lo, hi) in _core.IMPACT_BAND_TABLE:
+            self.assertIn(f"{label} → {lo}-{hi}", text)
+
+    def test_both_surfaces_embed_the_identical_shared_rubric_text(self):
+        # The whole point of X1 — an "Earnings result" must map to the same
+        # band text whether it's rendered by news_engine.py or
+        # announcement_engine.py. Render both real prompts and assert the
+        # exact band-table substring is byte-identical in each.
+        rubric = _core.impact_band_rubric_text()
+        ann_prompt = _ann_engine._build_prompt("BHP", "headline", "content", price_sensitive=False)
+        self.assertIn(rubric, ann_prompt)
+        import news_engine as _ne
+        news_prompt = _ne.OllamaLLM.CLASSIFY_PROMPT.format(
+            title="t", content="c", tickers="BHP", context="", impact_rubric=rubric,
+        )
+        self.assertIn(rubric, news_prompt)
+
+    def test_impact_floor_for_keywords_halt_and_takeover(self):
+        self.assertEqual(_core.impact_floor_for_keywords("BHP enters trading halt"), 8.0)
+        self.assertEqual(_core.impact_floor_for_keywords("Rival launches takeover of BHP"), 8.0)
+        self.assertIsNone(_core.impact_floor_for_keywords("BHP annual general meeting notice"))
+
+    def test_impact_floor_never_lowers_a_correctly_high_score(self):
+        raw, floor = 9.0, _core.impact_floor_for_keywords("trading halt announced")
+        final = max(raw, floor) if floor is not None else raw
+        self.assertEqual(final, 9.0)
+
+    def test_impact_floor_raises_an_under_scored_halt(self):
+        raw, floor = 2.0, _core.impact_floor_for_keywords("trading halt announced")
+        final = max(raw, floor) if floor is not None else raw
+        self.assertEqual(final, 8.0)
+
+    # ── S1: announcement rubric un-anchored + PS floor ──────────────────────
+
+    def test_announcement_templates_no_longer_seed_a_bare_impact_number(self):
+        # Regression guard (doc's own suggestion): neither template may embed
+        # a bare "impact":<digit> anchor value ever again.
+        src = self._src("announcement_engine.py")
+        m = re.search(r'"impact":(\d)', src)
+        self.assertIsNone(m, f'found a seeded bare impact value: {m.group(0) if m else None}')
+
+    def test_announcement_templates_reference_shared_rubric(self):
+        self.assertIn('impact_rubric=impact_band_rubric_text()', self._src("announcement_engine.py"))
+        self.assertIn("{impact_rubric}", _ann_engine._LLM_PROMPT_TEMPLATE)
+        self.assertIn("{impact_rubric}", _ann_engine._LLM_PROMPT_TEMPLATE_PS)
+
+    def test_build_prompt_renders_without_error_both_variants(self):
+        p1 = _ann_engine._build_prompt("BHP", "headline", "content", price_sensitive=False)
+        p2 = _ann_engine._build_prompt("BHP", "headline", "content", price_sensitive=True)
+        self.assertIn("Trading Halt / Suspension", p1)
+        self.assertIn("Trading Halt / Suspension", p2)
+        self.assertIn("keyFigures", p2)  # PS-only field
+
+    def test_ps_floor_raises_low_impact_result(self):
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "AGM", "sentiment": "neutral", "impact": 2.0, "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "BHP", "BHP AGM notice", "AGM notice",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=True,
+            )
+        self.assertEqual(r["impact"], 5.0)
+
+    def test_non_ps_impact_is_not_floored(self):
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "AGM", "sentiment": "neutral", "impact": 2.0, "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "BHP", "BHP AGM notice", "AGM notice",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
+            )
+        self.assertEqual(r["impact"], 2.0)
+
+    def test_ps_floor_does_not_lower_an_already_high_score(self):
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Acquisition", "sentiment": "positive", "impact": 9.0, "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "BHP", "BHP takeover bid", "Takeover bid details",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=True,
+            )
+        self.assertEqual(r["impact"], 9.0)
+
+    # ── S2: news rubric rewritten as band selection + backstop wired in ─────
+
+    def test_news_prompt_has_no_summing_arithmetic_instruction(self):
+        src = self._src("news_engine.py")
+        self.assertNotIn("sum of applicable steps", src)
+        self.assertNotIn("add +1.5", src)
+        self.assertNotIn("subtract 2", src)
+
+    def test_news_prompt_step1_commentary_rule_preserved(self):
+        # STEP 1 (opinion/commentary -> 0.5-2.0, stop) is explicitly kept as-is.
+        src = self._src("news_engine.py")
+        self.assertIn("STEP 1", src)
+        self.assertIn("0.5-2.0 and stop", src)
+
+    def test_news_prompt_macro_geopolitics_exemption_preserved(self):
+        src = self._src("news_engine.py")
+        self.assertIn("skip the primary-subject test", src)
+        self.assertIn("broad market relevance is the point, not a penalty", src)
+
+    def test_news_prompt_references_shared_rubric(self):
+        src = self._src("news_engine.py")
+        self.assertEqual(src.count("impact_rubric=impact_band_rubric_text()"), 3)  # Ollama/Google/Groq
+
+    def test_news_backstop_wired_into_scan_loop(self):
+        src = self._src("news_engine.py")
+        self.assertIn("_kw_floor = impact_floor_for_keywords(", src)
+        self.assertIn('"impact":          _final_impact,', src)
+        self.assertIn("max(_raw_impact, _kw_floor) if _kw_floor is not None else _raw_impact", src)
 
 
 if __name__ == "__main__":
