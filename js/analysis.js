@@ -1803,6 +1803,32 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
 
     state.recommendations = [...cappedDedupedRecs, ...survivingPending];
 
+    // ── Tier-2 coverage fallback ────────────────────────────────────────────
+    // Rule 5 (prompts.js) deliberately lets Claude say nothing about a quiet
+    // Tier-2 holding ("do NOT pad with HOLDs on tickers you did not genuinely
+    // assess") — the right token-budget tradeoff, but it means a currently-held
+    // ticker can go completely uncovered (no rec, no dataGaps note) run after
+    // run, vanishing from the Analyst Summary, HOLD Decisions, and Recent
+    // Events. Backfill a minimal, explicitly-synthetic HOLD for any held
+    // ticker recs never mentioned, so its passivity still gets graded (did
+    // skipping it turn out fine?) without claiming Claude assessed it —
+    // logRecsToLearningLoop's 7-day HOLD dedupe (routes/learning.py) keeps
+    // this from spamming the log on repeated runs.
+    {
+      const _coveredTickers = new Set(recs.map(r => r.ticker));
+      const _uncoveredHeld  = portfolioTickers.filter(t => !_coveredTickers.has(t));
+      if (_uncoveredHeld.length) {
+        recs = [...recs, ..._uncoveredHeld.map(t => ({
+          ticker: t,
+          action: 'HOLD',
+          confidence: null,
+          reasoning: '[Auto-generated — not assessed by AI this run: no active setup, Tier-2 compressed summary only]',
+          signals: [],
+          _synthetic: true,
+        }))];
+      }
+    }
+
     // Build structured summary from actual recs — never rely on AI free-text for this.
     // `summaryRecs` carries the full untruncated reasoning for rich card rendering.
     // `recLines` (truncated) is kept only for the plain-text `text` fallback field.
