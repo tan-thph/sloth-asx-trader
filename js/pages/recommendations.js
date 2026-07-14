@@ -39,17 +39,30 @@ async function _refreshRecPrices() {
 
 function renderRecommendations() {
   const pending=state.recommendations.filter(r=>r.status==='pending'&&(r.action||'').toUpperCase()!=='HOLD');
+  // Full page re-renders (renderPage(), fired constantly by scheduleSave/price
+  // refresh/alerts/etc.) used to always call this function fresh and hardcode
+  // "pending" as the active tab — so being on Run Analysis (or History/Rules)
+  // when any background re-render fired silently bounced you back to Pending.
+  // Persist the active tab in state so a full re-render reproduces whatever
+  // tab you were actually on, not always the first one.
+  const tab = state._recTab || 'pending';
+  const contentHtml =
+    tab === 'run'     ? renderRunAnalysisPanel() :
+    tab === 'history'  ? renderRecHistory() :
+    tab === 'rules'    ? renderRecRulesPanel() :
+    renderPendingRecs(pending);
   return `
     <div class="tabs">
-      <button class="tab active" id="tab-pending" onclick="switchRecTab('pending')">Pending (${pending.length})</button>
-      <button class="tab" id="tab-run" onclick="switchRecTab('run')">▶ Run Analysis</button>
-      <button class="tab" id="tab-history" onclick="switchRecTab('history')">History (${state.recHistory.filter(r=>(r.action||'').toUpperCase()!=='HOLD').length})</button>
-      <button class="tab" id="tab-rules" onclick="switchRecTab('rules')">⚙ Rules</button>
+      <button class="tab${tab==='pending'?' active':''}" id="tab-pending" onclick="switchRecTab('pending')">Pending (${pending.length})</button>
+      <button class="tab${tab==='run'?' active':''}" id="tab-run" onclick="switchRecTab('run')">▶ Run Analysis</button>
+      <button class="tab${tab==='history'?' active':''}" id="tab-history" onclick="switchRecTab('history')">History (${state.recHistory.filter(r=>(r.action||'').toUpperCase()!=='HOLD').length})</button>
+      <button class="tab${tab==='rules'?' active':''}" id="tab-rules" onclick="switchRecTab('rules')">⚙ Rules</button>
     </div>
-    <div id="rec-content">${renderPendingRecs(pending)}</div>
+    <div id="rec-content">${contentHtml}</div>
   `;
 }
 function switchRecTab(tab) {
+  state._recTab = tab;
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   const activeTab = document.getElementById('tab-'+tab);
   if(activeTab) activeTab.classList.add('active');
@@ -156,16 +169,16 @@ function renderRunAnalysisPanel() {
           ${Object.entries((typeof ANALYSIS_BUDGET_TIERS!=='undefined'?ANALYSIS_BUDGET_TIERS:{})).map(([key,tier])=>{
             const active = (state.settings.analysisTokenBudget||'standard') === key;
             const blurb = key==='lean' ? 'Holdings only — watchlist skipped' : key==='deep' ? 'Holdings + full watchlist' : 'Holdings + watchlist to fit';
-            return `<button class="btn btn-sm${active?' btn-primary':''}" style="flex:1;min-width:140px;text-align:left;padding:8px 12px" onclick="setAnalysisBudget('${key}')">
-              <div style="font-weight:600">${tier.label}</div>
-              <div class="text-xs" style="opacity:0.75">~${(tier.maxTokens/1000)}k tok · ${blurb}</div>
+            return `<button class="btn btn-sm${active?' btn-primary':''}" style="flex:1;min-width:140px;text-align:left;padding:8px 12px;white-space:normal" onclick="setAnalysisBudget('${key}')">
+              <div style="font-weight:600;white-space:normal">${tier.label}</div>
+              <div class="text-xs" style="opacity:0.75;white-space:normal;line-height:1.4">~${(tier.maxTokens/1000)}k tok · ${blurb}</div>
             </button>`;
           }).join('')}
           ${(()=>{
             const active = state.settings.analysisTokenBudget === 'custom';
-            return `<button class="btn btn-sm${active?' btn-primary':''}" style="flex:1;min-width:140px;text-align:left;padding:8px 12px" onclick="setAnalysisBudget('custom')">
-              <div style="font-weight:600">Custom</div>
-              <div class="text-xs" style="opacity:0.75">~${((state.settings.customTokenBudget||12000)/1000).toFixed(1)}k tok · Set your own ceiling</div>
+            return `<button class="btn btn-sm${active?' btn-primary':''}" style="flex:1;min-width:140px;text-align:left;padding:8px 12px;white-space:normal" onclick="setAnalysisBudget('custom')">
+              <div style="font-weight:600;white-space:normal">Custom</div>
+              <div class="text-xs" style="opacity:0.75;white-space:normal;line-height:1.4">~${((state.settings.customTokenBudget||12000)/1000).toFixed(1)}k tok · Set your own ceiling</div>
             </button>`;
           })()}
         </div>
