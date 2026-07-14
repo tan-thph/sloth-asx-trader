@@ -147,6 +147,10 @@ def _news_settings_from_db() -> dict:
         "max_age_days":        7,
         "cpu_mode":            not gpu.get("cuda", False),
         "sbc_mode":            False,
+        # NEWS_LLM_FIXES.md N3: retry a local-LLM None with a configured cloud
+        # provider (Google -> Groq) before giving up. Off by default so it never
+        # makes a surprise paid call — the user must opt in explicitly.
+        "news_cloud_fallback": False,
     }
     try:
         with get_db() as conn:

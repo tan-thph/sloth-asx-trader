@@ -12798,6 +12798,15 @@ import news_engine as _news_engine
 
 
 class TestNewsLlmFixes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # For the /api/news/settings round-trip tests only — the rest of this
+        # class uses its own isolated temp-file news DB (setUp below), unrelated
+        # to the shared in-memory asx_trader.db this patches.
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self._tmpdir.name) / "news_test.db"
@@ -12967,6 +12976,63 @@ class TestNewsLlmFixes(unittest.TestCase):
         self.assertIn("WHERE processed = -1 ORDER BY published_date DESC", src)
         self.assertIn("_NEWS_CLASSIFY_ATTEMPT_CAP", src)
         self.assertIn("processed=?, decay_weight=?, attempts=?", src)
+
+    # ── N3: cross-provider cloud fallback ───────────────────────────────────
+
+    def test_cloud_fallback_gated_and_ordered_google_then_groq(self):
+        src = self._src("news_engine.py")
+        # Gated behind the explicit setting, default off — must never fire on
+        # its own without the user opting in (a surprise paid call).
+        self.assertIn('cfg.get("news_cloud_fallback", False)', src)
+        # Google tried before Groq (doc's stated order), and each fallback
+        # provider is skipped when it's already the active/primary provider
+        # (retrying the provider that just failed isn't a fallback).
+        google_idx = src.index("GoogleLLM(api_key=cfg.get")
+        groq_idx   = src.index("GroqLLM(api_key=cfg.get")
+        self.assertLess(google_idx, groq_idx)
+        self.assertIn("not isinstance(llm, GoogleLLM)", src)
+        self.assertIn("not isinstance(llm, GroqLLM)", src)
+
+    def test_cloud_fallback_only_fires_on_none_result(self):
+        src = self._src("news_engine.py")
+        self.assertIn("if result is None and cloud_fallback_llms:", src)
+
+    def test_db_write_uses_result_model_not_always_primary(self):
+        # A fallback provider's classification must be attributed to itself
+        # in llm_model, not silently recorded as the primary provider.
+        src = self._src("news_engine.py")
+        self.assertIn("result_model = llm.model", src)
+        self.assertIn("result_model = fb_llm.model", src)
+        self.assertIn('"model":           result_model,', src)
+
+    def test_news_settings_default_cloud_fallback_off(self):
+        resp = self.client.get("/api/news/settings")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertIn("news_cloud_fallback", body)
+        self.assertFalse(body["news_cloud_fallback"])
+
+    def test_news_settings_cloud_fallback_round_trips(self):
+        resp = self.client.post(
+            "/api/news/settings",
+            data=json.dumps({"news_cloud_fallback": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.data)["settings"]["news_cloud_fallback"])
+        resp2 = self.client.get("/api/news/settings")
+        self.assertTrue(json.loads(resp2.data)["news_cloud_fallback"])
+        # Reset for other tests sharing the module-level in-memory DB.
+        self.client.post(
+            "/api/news/settings",
+            data=json.dumps({"news_cloud_fallback": False}),
+            content_type="application/json",
+        )
+
+    def test_news_page_has_cloud_fallback_toggle(self):
+        src = self._src("js/pages/news.js")
+        self.assertIn("newsToggleCloudFallback", src)
+        self.assertIn("news_cloud_fallback", src)
 
     def _src(self, rel):
         with open(os.path.join(ROOT, rel), encoding="utf-8") as f:

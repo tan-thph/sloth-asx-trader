@@ -1475,6 +1475,22 @@ class NewsPipeline:
         llm_ok = bool(llm.model) and llm.is_available()
         all_tickers = list({*portfolio_tickers, *(watchlist_tickers or [])})
 
+        # N3: "some news can't be analysed by LOCAL LLM" is literally accurate —
+        # when the active provider returns None on a hard article, nothing else
+        # attempts it, even if a cloud key is configured. Built once (not per
+        # article) from whatever OTHER providers have a configured key, tried
+        # Google -> Groq, skipping the provider that's already active (retrying
+        # the same provider that just failed isn't a fallback). Off by default
+        # (news_cloud_fallback) so this never makes a surprise paid call.
+        cloud_fallback_llms: list = []
+        if cfg.get("news_cloud_fallback", False):
+            if not isinstance(llm, GoogleLLM) and cfg.get("google_api_key"):
+                cloud_fallback_llms.append(
+                    GoogleLLM(api_key=cfg.get("google_api_key", ""), model=cfg.get("google_model", "")))
+            if not isinstance(llm, GroqLLM) and cfg.get("groq_api_key"):
+                cloud_fallback_llms.append(
+                    GroqLLM(api_key=cfg.get("groq_api_key", ""), model=cfg.get("groq_model", "")))
+
         t0 = time.time()
         fetched = new_count = processed = 0
         error_msg = None
@@ -1584,11 +1600,17 @@ class NewsPipeline:
                     # Skip the model entirely below the threshold and store the same
                     # deterministic fallback used for degenerate output (N6) — cheap,
                     # always succeeds, and never occupies a retry slot.
+                    # result_model tracks which model actually produced `result`
+                    # (defaults to the primary provider; N3 overwrites it below
+                    # if a cloud fallback is the one that succeeds) so the DB
+                    # write reflects the true source, not always the primary.
+                    result_model = llm.model
                     _clean_len = len(_strip_urls(row["content"] or "").strip())
                     if _clean_len < _HEADLINE_FALLBACK_MIN_CONTENT:
                         result = _headline_fallback_classification(
                             row["title"] or "", row["content"] or "", all_tickers
                         )
+                        result_model = "headline-fallback"
                     else:
                         result = llm.classify(
                             row["title"], row["content"] or "", all_tickers,
@@ -1604,6 +1626,29 @@ class NewsPipeline:
                         log.info("Scan stopped by user after classify returned (%d/%d)", idx + 1, total)
                         _scan_status["phase"] = "stopped"
                         break
+
+                    # N3: primary provider returned None — try each configured
+                    # cloud fallback once, in order, before giving up. A stop
+                    # request during a fallback call aborts the same as above.
+                    if result is None and cloud_fallback_llms:
+                        for fb_llm in cloud_fallback_llms:
+                            result = fb_llm.classify(
+                                row["title"], row["content"] or "", all_tickers,
+                                stop_event=stop_event,
+                            )
+                            if stop_event is not None and stop_event.is_set():
+                                log.info("Scan stopped by user during cloud fallback (%d/%d)", idx + 1, total)
+                                _scan_status["phase"] = "stopped"
+                                break
+                            if result is not None:
+                                result_model = fb_llm.model
+                                log.info(
+                                    "Cloud fallback (%s) classified article %s after local LLM returned None",
+                                    fb_llm.model, row["id"][:8],
+                                )
+                                break
+                        if stop_event is not None and stop_event.is_set():
+                            break
 
                     # Reject degenerate output (model repetition loop). Store a
                     # clean headline-based entry instead of looping garbage with
@@ -1682,7 +1727,7 @@ class NewsPipeline:
                                     "tags":            json.dumps(
                                         [str(t) for t in (result.get("tags") or []) if t][:8]
                                     ),
-                                    "model":           llm.model,
+                                    "model":           result_model,
                                     "decay":           dw,
                                     "id":              row["id"],
                                 })

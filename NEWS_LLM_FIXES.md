@@ -1,6 +1,6 @@
 # NEWS_LLM_FIXES.md — "Some news can't be analysed by local LLM"
 
-**Date:** 2026-07-14 · **Scope:** local-LLM (Ollama) news classification path · **Status:** N1/N2/N5/N6/N7 implemented + tested (18 new tests, `TestNewsLlmFixes` in `test_app.py`); N3/N4 still open.
+**Date:** 2026-07-14 · **Scope:** local-LLM (Ollama) news classification path · **Status:** N1/N2/N3/N5/N6/N7 implemented + tested (24 tests, `TestNewsLlmFixes` in `test_app.py`); N4 still open.
 
 ## Symptom & root confirmation
 
@@ -63,7 +63,10 @@ invisible AND re-consumes a scan slot every run).
 
 ## N3 — No cross-provider fallback when the local model can't classify (P1)
 
-- **Status:** Open
+- **Status:** Resolved. Gated behind `news_cloud_fallback` (default off, toggle in News page settings
+  when provider=ollama). On `result is None`, tries each configured cloud provider once, Google then
+  Groq (skipping whichever is already the active/primary provider). `llm_model` in the DB write now
+  reflects whichever provider actually produced the result (`result_model`), not always the primary.
 - **Where:** `news_engine.py:1487` (single `llm.classify(...)`); `GoogleLLM` (`:1077`), `GroqLLM` (`:1192`) already implement the same `classify()` interface
 - **Cause:** The scan loop only ever calls the one selected provider. "Some news can't be analysed by
   **local** LLM" is literally accurate — when Ollama returns `None` on a hard article, nothing else

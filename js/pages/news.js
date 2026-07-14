@@ -479,6 +479,16 @@ ollama pull llama3.2:3b     # lightweight</pre>
             Auto-scan enabled (${cfg.scan_interval_hours || 6}× per day)
           </label>
         </div>
+        ${provider === 'ollama' ? `
+        <div style="margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer" title="When the local model can't classify an article (empty/invalid JSON), retry it once with a configured cloud provider (Google, then Groq) before giving up. Off by default — this can make a paid API call.">
+            <input type="checkbox" ${cfg.news_cloud_fallback ? 'checked' : ''} onchange="newsToggleCloudFallback(this.checked)">
+            Cloud fallback on local-LLM failure
+          </label>
+          ${cfg.news_cloud_fallback && !cfg.google_api_key && !cfg.groq_api_key
+            ? `<span class="text-xs" style="color:#92400e">⚠ No Google/Groq key configured below — fallback has nothing to fall back to.</span>`
+            : ''}
+        </div>` : ''}
 
         <!-- Re-classify section -->
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-light)">
@@ -939,6 +949,16 @@ async function newsToggleCpuMode(enabled) {
   state.news.settings.cpu_mode = enabled;
   await _saveNewsSettings();
   toast(enabled ? 'CPU mode on — batch 20, ctx 1024 (SBC-friendly)' : 'GPU mode on — batch 100, ctx 2048', 'success');
+  renderPage();
+}
+
+// NEWS_LLM_FIXES.md N3 — off by default (typeof value === 'boolean' check per
+// gotcha #70, updateSetting() must not Number()-coerce booleans; this bypasses
+// that helper entirely since it writes into state.news.settings, not state.settings).
+async function newsToggleCloudFallback(enabled) {
+  state.news.settings.news_cloud_fallback = enabled;
+  await _saveNewsSettings();
+  toast(enabled ? 'Cloud fallback on — Google/Groq retried once when the local model returns nothing' : 'Cloud fallback off', 'success');
   renderPage();
 }
 
