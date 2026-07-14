@@ -170,15 +170,13 @@ function renderRunAnalysisPanel() {
           })()}
         </div>
         ${state.settings.analysisTokenBudget === 'custom' ? (()=>{
-          const range = typeof CUSTOM_TOKEN_BUDGET_RANGE!=='undefined' ? CUSTOM_TOKEN_BUDGET_RANGE : {min:2000,max:32000};
+          const min = typeof CUSTOM_TOKEN_BUDGET_MIN!=='undefined' ? CUSTOM_TOKEN_BUDGET_MIN : 1;
           const val = state.settings.customTokenBudget || 12000;
           return `<div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <label class="form-label" style="margin:0" for="custom-token-budget-input">Max output tokens</label>
-            <input type="number" id="custom-token-budget-input" value="${val}" min="${range.min}" max="${range.max}" step="500"
-              style="width:110px" onchange="setCustomTokenBudget(this.value)">
-            <input type="range" id="custom-token-budget-slider" value="${val}" min="${range.min}" max="${range.max}" step="500"
-              style="flex:1;min-width:160px" oninput="document.getElementById('custom-token-budget-input').value=this.value" onchange="setCustomTokenBudget(this.value)">
-            <span class="text-xs text-muted">Range ${(range.min/1000).toFixed(0)}k–${(range.max/1000).toFixed(0)}k. Watchlist tickers still ration/defer the same way as the preset tiers.</span>
+            <input type="number" id="custom-token-budget-input" value="${val}" min="${min}" step="1000"
+              style="width:130px" onchange="setCustomTokenBudget(this.value)">
+            <span class="text-xs text-muted">No cap — enter whatever ceiling you want. Watchlist tickers still ration/defer against it the same way as the preset tiers.</span>
           </div>`;
         })() : ''}
         ${(state.deferredWatchlist && state.deferredWatchlist.length) ? `
@@ -348,14 +346,15 @@ function setAnalysisBudget(tier) {
   if(tab) tab.classList.add('active');
 }
 
-// Custom token budget (analysisTokenBudget === 'custom') — clamped to
-// CUSTOM_TOKEN_BUDGET_RANGE (config.js), same bound analysis.js re-applies at
-// run time so a stale/tampered value can never exceed the deferred-pass cap.
+// Custom token budget (analysisTokenBudget === 'custom') — no upper cap, this is
+// the user's own call on spend. Only floored at CUSTOM_TOKEN_BUDGET_MIN (config.js)
+// so a zero/negative/garbage value can't break the API request; analysis.js
+// re-applies the same floor at run time in case the stored value is stale.
 function setCustomTokenBudget(value) {
-  const range = typeof CUSTOM_TOKEN_BUDGET_RANGE !== 'undefined' ? CUSTOM_TOKEN_BUDGET_RANGE : { min: 2000, max: 32000 };
+  const min = typeof CUSTOM_TOKEN_BUDGET_MIN !== 'undefined' ? CUSTOM_TOKEN_BUDGET_MIN : 1;
   const n = Math.round(Number(value));
   if (!Number.isFinite(n)) return;
-  state.settings.customTokenBudget = Math.min(range.max, Math.max(range.min, n));
+  state.settings.customTokenBudget = Math.max(min, n);
   scheduleSave();
   const el = document.getElementById('rec-content');
   if(el) el.innerHTML = renderRunAnalysisPanel();

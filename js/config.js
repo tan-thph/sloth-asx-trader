@@ -19,9 +19,10 @@ const ANALYSIS_BUDGET_TIERS = {
 };
 // 'custom' isn't a static tier (its maxTokens is user-set via settings.customTokenBudget)
 // — analysis.js builds it at run time from the 'standard' tier's perTicker/reserve/
-// dropWatchlist plus this clamped maxTokens. Upper bound matches the existing deferred-
-// watchlist-pass cap (analysis.js: Math.min(32000, _need)).
-const CUSTOM_TOKEN_BUDGET_RANGE = { min: 2000, max: 32000 };
+// dropWatchlist plus this maxTokens. No upper bound — the user's own call on what
+// they're willing to spend; only a floor of 1 so a zero/negative/garbage value can't
+// break the API request.
+const CUSTOM_TOKEN_BUDGET_MIN = 1;
 
 // ============================================================
 // STATE
@@ -87,7 +88,7 @@ const state = {
     autoMacroBriefTime: '', // 'HH:MM' AEST — don't auto-run before this time; empty = no restriction (fire ASAP, current behaviour)
     paperStartCash: 100000, // seed for state.paperCash the first time paper mode is used (separate from real cash)
     analysisTokenBudget: 'standard', // 'lean' | 'standard' | 'deep' | 'custom' — see ANALYSIS_BUDGET_TIERS. Caps callClaude('portfolio') max_tokens and deterministically rations watchlist tickers so holdings are always fully analysed first.
-    customTokenBudget: 12000, // maxTokens used when analysisTokenBudget === 'custom' (clamped to CUSTOM_TOKEN_BUDGET_RANGE in analysis.js); perTicker/reserve/dropWatchlist reuse the 'standard' tier's rationing behaviour.
+    customTokenBudget: 12000, // maxTokens used when analysisTokenBudget === 'custom' — no upper cap, only floored at CUSTOM_TOKEN_BUDGET_MIN; perTicker/reserve/dropWatchlist reuse the 'standard' tier's rationing behaviour.
   },
   deferredWatchlist: [],       // watchlist tickers the token budget skipped on the last run (drives the "Analyse deferred watchlist" button). Session artifact — reset on each analysis run.
   analysisRunning: false,

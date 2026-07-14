@@ -241,13 +241,13 @@ async function runAnalysis(opts = {}) {
   // The Claude API can't self-estimate response length, so this pre-flight fit is
   // the guarantee; the prompt budget note + max_tokens ceiling are backstops.
   // 'custom' isn't a static ANALYSIS_BUDGET_TIERS entry (config.js) — its maxTokens
-  // is user-set (settings.customTokenBudget); rationing shape (perTicker/reserve/
-  // dropWatchlist) reuses the 'standard' tier so a custom budget rations watchlist
-  // tickers the same way standard/deep do, just against a different ceiling.
+  // is user-set (settings.customTokenBudget), uncapped; rationing shape (perTicker/
+  // reserve/dropWatchlist) reuses the 'standard' tier so a custom budget rations
+  // watchlist tickers the same way standard/deep do, just against a different ceiling.
   let _budgetTier;
   if (state.settings?.analysisTokenBudget === 'custom' && typeof ANALYSIS_BUDGET_TIERS !== 'undefined') {
-    const _range = typeof CUSTOM_TOKEN_BUDGET_RANGE !== 'undefined' ? CUSTOM_TOKEN_BUDGET_RANGE : { min: 2000, max: 32000 };
-    const _custom = Math.min(_range.max, Math.max(_range.min, Number(state.settings.customTokenBudget) || 12000));
+    const _min = typeof CUSTOM_TOKEN_BUDGET_MIN !== 'undefined' ? CUSTOM_TOKEN_BUDGET_MIN : 1;
+    const _custom = Math.max(_min, Number(state.settings.customTokenBudget) || 12000);
     _budgetTier = { ...ANALYSIS_BUDGET_TIERS.standard, label: 'Custom', maxTokens: _custom, dropWatchlist: false };
   } else {
     _budgetTier = (typeof ANALYSIS_BUDGET_TIERS !== 'undefined'
@@ -262,7 +262,7 @@ async function runAnalysis(opts = {}) {
     extraTickers = _watchlistFocus.filter(t => !portfolioTickers.includes(t));
     const _need = (portfolioTickers.length + extraTickers.length) * _budgetTier.perTicker + _budgetTier.reserve;
     if (_need > _budgetTier.maxTokens) {
-      _budgetTier = { ..._budgetTier, maxTokens: Math.min(32000, _need) };
+      _budgetTier = { ..._budgetTier, maxTokens: _need };
     }
     toast(`Analysing ${extraTickers.length} deferred watchlist ticker(s) alongside your holdings…`, 'info');
   } else if (_budgetTier.dropWatchlist) {
