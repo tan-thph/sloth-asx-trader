@@ -719,6 +719,31 @@ _HEADLINE_FALLBACK_MIN_CONTENT = 40
 # articles and other, genuinely-retryable failures.
 _NEWS_CLASSIFY_ATTEMPT_CAP = 3
 
+# N4: hard ceiling on the earnings/dividend context_block (OllamaLLM.classify)
+# regardless of how num_ctx gets sized — a defensive backstop against a
+# pathologically long _fetch_ticker_context result (it's "compact by design",
+# not length-guaranteed).
+_CONTEXT_BLOCK_MAX_CHARS = 1500
+
+
+def _sized_num_ctx(prompt_len: int, num_predict: int, cpu_mode: bool, has_context: bool) -> int:
+    """N4: pick num_ctx large enough for the actual assembled prompt when
+    earnings/dividend context enrichment (context_block) is present, instead
+    of trusting the fixed CPU/GPU constant to always have been enough — that
+    fixed budget is what let Ollama silently truncate an enriched prompt,
+    frequently dropping the trailing JSON-schema/format instruction.
+
+    `prompt_len // 4` is a standard rough chars-per-token estimate (no
+    tokenizer dependency). Never returns less than the existing base value
+    (so a plain, unenriched prompt is unaffected); capped at 8192 to bound
+    memory/latency.
+    """
+    base = 1024 if cpu_mode else 2048
+    if not has_context:
+        return base
+    est_prompt_tokens = prompt_len // 4
+    return min(8192, max(base, est_prompt_tokens + num_predict + 128))
+
 
 def _headline_fallback_classification(title: str, content: str,
                                        portfolio_tickers: list[str]) -> dict:
@@ -990,6 +1015,13 @@ final = min(10.0, sum of applicable steps)>,\
                         '- Override article tone if the hard data contradicts it (e.g. article is cautious '
                         'but earnings clearly beat trend → still bullish)\n'
                     )
+        # N4: hard-limit context_block length as a defensive backstop — the
+        # dynamic num_ctx sizing below handles normal-sized enrichment, but
+        # _fetch_ticker_context is "compact by design" not length-guaranteed
+        # (e.g. an unusually long peer list), so this bounds the pathological
+        # case regardless of how num_ctx gets sized.
+        if len(context_block) > _CONTEXT_BLOCK_MAX_CHARS:
+            context_block = context_block[:_CONTEXT_BLOCK_MAX_CHARS] + "…"
         # Strip any stray curly braces from context to avoid breaking .format()
         context_block = context_block.replace('{', '(').replace('}', ')')
 
@@ -1017,7 +1049,14 @@ final = min(10.0, sum of applicable steps)>,\
         # that route format:"json" output to chunk["thinking"] — in that case
         # raw_parts will be empty and we fall back to thinking_parts post-stream.
         num_predict = 250 if cpu_mode else 400
-        num_ctx     = 1024 if cpu_mode else 2048
+        # N4: fixed num_ctx (1024 CPU / 2048 GPU) is sized for a bare classify
+        # prompt. An earnings/dividend article on a portfolio ticker adds
+        # per-ticker historical context (context_block above) which can push
+        # the assembled prompt well past that budget, and Ollama silently
+        # truncates — frequently dropping the trailing JSON-schema/format
+        # instruction, so the model emits non-JSON -> None. This selectively
+        # breaks exactly the highest-value articles (holdings' earnings).
+        num_ctx = _sized_num_ctx(len(prompt), num_predict, cpu_mode, bool(context_block))
 
         options: dict = {
             # Near-greedy decoding (temp 0.1) is the PRIMARY cause of the

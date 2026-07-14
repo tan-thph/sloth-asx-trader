@@ -1,6 +1,6 @@
 # NEWS_LLM_FIXES.md — "Some news can't be analysed by local LLM"
 
-**Date:** 2026-07-14 · **Scope:** local-LLM (Ollama) news classification path · **Status:** N1/N2/N3/N5/N6/N7 implemented + tested (24 tests, `TestNewsLlmFixes` in `test_app.py`); N4 still open.
+**Date:** 2026-07-14 · **Scope:** local-LLM (Ollama) news classification path · **Status:** all seven items (N1-N7) implemented + tested (29 tests, `TestNewsLlmFixes` in `test_app.py`).
 
 ## Symptom & root confirmation
 
@@ -82,7 +82,11 @@ invisible AND re-consumes a scan slot every run).
 
 ## N4 — Earnings-context enrichment can overflow `num_ctx` → silent truncation → None (P1)
 
-- **Status:** Open
+- **Status:** Resolved. Added `_sized_num_ctx()` — sizes `num_ctx` from the actual assembled prompt
+  length (chars/4 estimate) when `context_block` is present, instead of trusting the fixed CPU/GPU
+  constant; never below the existing base, capped at 8192. Also hard-caps `context_block` itself at
+  `_CONTEXT_BLOCK_MAX_CHARS` (1500) as a defensive backstop against a pathologically long
+  `_fetch_ticker_context` result.
 - **Where:** `news_engine.py:884-909` (multi-ticker `context_block` build), `:935` (`num_ctx = 1024` CPU / `2048` GPU)
 - **Cause:** For earnings/dividend articles on portfolio tickers, the prompt gets the article **plus**
   per-ticker historical context **plus** peer comparisons **plus** the calibration-rules block. That can
@@ -159,3 +163,11 @@ invisible AND re-consumes a scan slot every run).
 **Cross-cutting:** N1 needs a schema migration (`attempts` column + terminal `-2` state) — wire it into
 `test_app.py`'s in-memory DB setup. Every fix needs a regression test; the existing suites cover none of
 this path.
+
+## Resolution log — 2026-07-14
+
+All seven items implemented in the order above (Phase 1 -> 2 -> 3), each verified against the full
+Python (1026 tests) and JS (222 tests) suites before moving to the next. 29 new tests in
+`TestNewsLlmFixes` (`test_app.py`) — schema/migration, pure-function, and source-wiring checks for a
+path that previously had zero coverage. N3 additionally got a News-page settings checkbox
+(`newsToggleCloudFallback`) so the (default-off) cloud-fallback gate is actually reachable from the UI.

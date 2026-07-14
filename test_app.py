@@ -13034,6 +13034,38 @@ class TestNewsLlmFixes(unittest.TestCase):
         self.assertIn("newsToggleCloudFallback", src)
         self.assertIn("news_cloud_fallback", src)
 
+    # ── N4: num_ctx sized to the actual assembled prompt ────────────────────
+
+    def test_sized_num_ctx_unenriched_prompt_uses_base(self):
+        # No context_block — behaviour must be identical to before N4 (fixed
+        # 1024 CPU / 2048 GPU), regardless of prompt length.
+        self.assertEqual(_news_engine._sized_num_ctx(50_000, 400, cpu_mode=False, has_context=False), 2048)
+        self.assertEqual(_news_engine._sized_num_ctx(50_000, 250, cpu_mode=True,  has_context=False), 1024)
+
+    def test_sized_num_ctx_enriched_short_prompt_still_uses_base(self):
+        # Enrichment present but the prompt is still small — never go BELOW
+        # the existing base value.
+        self.assertEqual(_news_engine._sized_num_ctx(200, 400, cpu_mode=False, has_context=True), 2048)
+
+    def test_sized_num_ctx_enriched_long_prompt_scales_up(self):
+        # A long enriched prompt (e.g. 2 tickers' historical context + peer
+        # comparison + calibration rules) that would have silently truncated
+        # against the fixed 1024 CPU budget must get a larger num_ctx.
+        long_prompt_chars = 6000  # ~1500 estimated tokens
+        result = _news_engine._sized_num_ctx(long_prompt_chars, 250, cpu_mode=True, has_context=True)
+        self.assertGreater(result, 1024)
+        self.assertEqual(result, min(8192, 6000 // 4 + 250 + 128))
+
+    def test_sized_num_ctx_capped_at_8192(self):
+        result = _news_engine._sized_num_ctx(100_000, 400, cpu_mode=False, has_context=True)
+        self.assertEqual(result, 8192)
+
+    def test_context_block_hard_cap_constant_wired_into_classify(self):
+        src = self._src("news_engine.py")
+        self.assertIn("_CONTEXT_BLOCK_MAX_CHARS = 1500", src)
+        self.assertIn("context_block[:_CONTEXT_BLOCK_MAX_CHARS]", src)
+        self.assertIn("num_ctx = _sized_num_ctx(len(prompt), num_predict, cpu_mode, bool(context_block))", src)
+
     def _src(self, rel):
         with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
             return f.read()
