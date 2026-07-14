@@ -88,7 +88,7 @@ def detect_gpu() -> dict:
     _gpu_cache = result
     return _gpu_cache
 
-def _safe_float(v, default: float = 0.0, max_val: float | None = None) -> float:
+def _safe_float(v, default: float = 0.0, max_val: float | None = None, min_val: float | None = None) -> float:
     """Convert LLM output to float, tolerating strings/lists/None."""
     if v is None:
         return default
@@ -100,7 +100,11 @@ def _safe_float(v, default: float = 0.0, max_val: float | None = None) -> float:
             result = float(str(v).split()[0].rstrip(".,;:"))
         except (ValueError, TypeError):
             return default
-    return min(result, max_val) if max_val is not None else result
+    if max_val is not None:
+        result = min(result, max_val)
+    if min_val is not None:
+        result = max(result, min_val)
+    return result
 
 
 def _norm_sentiment(v) -> str:
@@ -311,7 +315,8 @@ def init_news_tables(conn: sqlite3.Connection):
             tags            TEXT DEFAULT '[]',
             llm_model       TEXT,
             processed       INTEGER DEFAULT 0,
-            decay_weight    REAL DEFAULT 1.0
+            decay_weight    REAL DEFAULT 1.0,
+            attempts        INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_news_pub   ON news_items(published_date DESC);
         CREATE INDEX IF NOT EXISTS idx_news_proc  ON news_items(processed);
@@ -333,6 +338,12 @@ def init_news_tables(conn: sqlite3.Connection):
     # Migrate existing DBs that predate the primary_tickers column
     try:
         conn.execute("ALTER TABLE news_items ADD COLUMN primary_tickers TEXT DEFAULT '[]'")
+    except Exception:
+        pass  # column already exists
+    # N1: migrate existing DBs that predate the attempts column (retry-cap /
+    # terminal-state tracking for articles the LLM can never classify).
+    try:
+        conn.execute("ALTER TABLE news_items ADD COLUMN attempts INTEGER DEFAULT 0")
     except Exception:
         pass  # column already exists
     conn.commit()
@@ -537,6 +548,46 @@ class NewsPreprocessor:
 
 # ── Robust JSON parser (handles truncated / trailing-comma LLM output) ────────
 
+def _extract_json_object(raw: str) -> str:
+    """Isolate the first top-level JSON object via a string-aware balanced-brace
+    walk. A non-greedy `\\{.*?\\}` regex (the previous approach) truncates early
+    whenever a string value (summary, tags) contains a literal `}` — e.g. an
+    article about code or math — yielding invalid/truncated JSON. This walks
+    brace depth while skipping over quoted-string content (respecting `\\"`
+    escapes) so an embedded `}` inside a string never closes the object early.
+    Falls back to returning `raw` unchanged if no `{` is found (the caller's
+    JSON parser then fails cleanly, same as before).
+    """
+    start = raw.find("{")
+    if start == -1:
+        return raw
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start:i + 1]
+    # Unbalanced (truncated mid-object, e.g. token-limit cutoff) — return from
+    # the first brace to the end; _robust_json_parse's Stage 3 repair (below)
+    # handles appending the missing closers.
+    return raw[start:]
+
+
 def _robust_json_parse(raw: str) -> dict | None:
     """Parse JSON from LLM output, repairing the most common failure modes.
 
@@ -652,6 +703,40 @@ def _extract_article_tickers(title: str, content: str,
     content_hits = [t for t in portfolio_tickers
                     if t.upper() in early_u and t not in title_hits]
     return (title_hits + content_hits)[:2]  # cap at 2 tickers to control prompt size
+
+
+# Below this, clean_content is too thin for any model to reliably fill every
+# schema field — asked to invent category/sentiment/tags from a bare title,
+# weaker quantised local models emit invalid/empty JSON (-> None -> processed=-1
+# -> invisible, N1). Used by both the pre-classify title-only skip (N2) and the
+# post-classify degenerate-repetition fallback (N6) below.
+_HEADLINE_FALLBACK_MIN_CONTENT = 40
+
+# N1: after this many classify() -> None attempts, an article moves from
+# processed=-1 (retryable) to the terminal processed=-2 (excluded from every
+# future batch select). Without a cap, an article that always fails re-occupies
+# a batch slot on every single scan forever, at the expense of both new
+# articles and other, genuinely-retryable failures.
+_NEWS_CLASSIFY_ATTEMPT_CAP = 3
+
+
+def _headline_fallback_classification(title: str, content: str,
+                                       portfolio_tickers: list[str]) -> dict:
+    """Deterministic, LLM-free classification for articles too thin or too
+    degenerate to reliably classify. Cheap regex ticker extraction keeps a
+    genuinely relevant article (a held ticker's title) visible to portfolio/
+    impact filters instead of vanishing behind zeroed fields."""
+    tickers = _extract_article_tickers(title or "", content or "", portfolio_tickers)
+    return {
+        "summary":           (title or "")[:200],
+        "category":          "other",
+        "sentiment":         "neutral",
+        "sentiment_score":   0.0,
+        "impact_score":      3.0 if tickers else 0.0,
+        "primary_tickers":   tickers,
+        "mentioned_tickers": tickers,
+        "tags":              [],
+    }
 
 
 def _fmt_large(v: float) -> str:
@@ -1054,14 +1139,10 @@ final = min(10.0, sum of applicable steps)>,\
         # 2. Strip markdown code fences (``` json ... ```)
         raw = re.sub(r"```(?:json)?\s*", "", raw)
         raw = re.sub(r"```", "", raw).strip()
-        # 3. Isolate the first JSON object.  Use a non-greedy match first so
-        #    that a short, well-formed object is preferred over one that greedily
-        #    swallows trailing free-text.
-        m = re.search(r"\{.*?\}", raw, re.DOTALL)
-        if not m:
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            raw = m.group(0)
+        # 3. Isolate the first top-level JSON object via a balanced-brace walk
+        #    (string-aware, so a `}` inside a summary/tags value doesn't
+        #    truncate the match the way the old non-greedy regex did).
+        raw = _extract_json_object(raw)
 
         if not raw:
             log.debug("LLM returned no JSON after stripping (thinking model?)")
@@ -1179,9 +1260,7 @@ class GoogleLLM:
             raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             raw = re.sub(r"```(?:json)?\s*", "", raw)
             raw = re.sub(r"```", "", raw).strip()
-            m = re.search(r"\{.*?\}", raw, re.DOTALL) or re.search(r"\{.*\}", raw, re.DOTALL)
-            if m:
-                raw = m.group(0)
+            raw = _extract_json_object(raw)
             return _robust_json_parse(raw)
         except Exception as exc:
             log.debug("GoogleLLM classify failed: %s", exc)
@@ -1276,9 +1355,7 @@ class GroqLLM:
             # Strip markdown fences and isolate first JSON object
             raw = re.sub(r"```(?:json)?\s*", "", raw)
             raw = re.sub(r"```", "", raw).strip()
-            m = re.search(r"\{.*?\}", raw, re.DOTALL) or re.search(r"\{.*\}", raw, re.DOTALL)
-            if m:
-                raw = m.group(0)
+            raw = _extract_json_object(raw)
             return _robust_json_parse(raw)
         except Exception as exc:
             log.warning("GroqLLM classify failed: %s", exc)
@@ -1442,11 +1519,26 @@ class NewsPipeline:
                 # CPU/SBC mode caps batch to 20 to keep scan time reasonable
                 batch_limit = 20 if cpu_mode else 100
                 with news_db(self.db_path) as conn:
-                    unprocessed = conn.execute(
-                        "SELECT id, title, content, published_date "
-                        "FROM news_items WHERE processed IN (0,-1) ORDER BY published_date DESC LIMIT ?",
+                    # N1: two-phase select — fresh (processed=0) articles always fill
+                    # the batch first; retries (processed=-1) only top up remaining
+                    # slots. Without this, a cluster of ~20 unclassifiable recent
+                    # articles (same ORDER BY published_date DESC) re-occupies every
+                    # slot every scan, starving both new AND older-retryable articles.
+                    # Terminal failures (processed=-2, attempts cap reached below)
+                    # are excluded by construction — never selected here.
+                    fresh = conn.execute(
+                        "SELECT id, title, content, published_date, attempts "
+                        "FROM news_items WHERE processed = 0 ORDER BY published_date DESC LIMIT ?",
                         (batch_limit,),
                     ).fetchall()
+                    unprocessed = list(fresh)
+                    if len(unprocessed) < batch_limit:
+                        retries = conn.execute(
+                            "SELECT id, title, content, published_date, attempts "
+                            "FROM news_items WHERE processed = -1 ORDER BY published_date DESC LIMIT ?",
+                            (batch_limit - len(unprocessed),),
+                        ).fetchall()
+                        unprocessed.extend(retries)
 
                 total = len(unprocessed)
                 _scan_status["articles_to_classify"] = total
@@ -1484,12 +1576,26 @@ class NewsPipeline:
 
                     art_t0 = time.monotonic()
 
-                    result = llm.classify(
-                        row["title"], row["content"] or "", all_tickers,
-                        status_ref=_scan_status,
-                        cpu_mode=cpu_mode,
-                        stop_event=stop_event,
-                    )
+                    # N2: title-only / near-empty-content articles (BBC World, the
+                    # ASX-announcements RSS, some Google News entries) ask the model
+                    # to invent every schema field from a bare headline — weaker
+                    # quantised local models often emit invalid/empty JSON on these,
+                    # landing at processed=-1 (invisible, then stuck per N1) forever.
+                    # Skip the model entirely below the threshold and store the same
+                    # deterministic fallback used for degenerate output (N6) — cheap,
+                    # always succeeds, and never occupies a retry slot.
+                    _clean_len = len(_strip_urls(row["content"] or "").strip())
+                    if _clean_len < _HEADLINE_FALLBACK_MIN_CONTENT:
+                        result = _headline_fallback_classification(
+                            row["title"] or "", row["content"] or "", all_tickers
+                        )
+                    else:
+                        result = llm.classify(
+                            row["title"], row["content"] or "", all_tickers,
+                            status_ref=_scan_status,
+                            cpu_mode=cpu_mode,
+                            stop_event=stop_event,
+                        )
                     art_elapsed = time.monotonic() - art_t0
                     art_times.append(art_elapsed)
 
@@ -1508,16 +1614,16 @@ class NewsPipeline:
                             "Degenerate LLM output for '%s' — headline fallback",
                             short_title,
                         )
-                        result = {
-                            "summary":           (row["title"] or "")[:200],
-                            "category":          "other",
-                            "sentiment":         "neutral",
-                            "sentiment_score":   0.0,
-                            "impact_score":      0.0,
-                            "primary_tickers":   [],
-                            "mentioned_tickers": [],
-                            "tags":              [],
-                        }
+                        # N6: don't zero out ticker/category signal just because the
+                        # model looped — a genuinely relevant article (e.g. a held
+                        # ticker's result the model collapsed on) would otherwise be
+                        # stored processed=1 (so it never retries) but invisible to
+                        # every portfolio/impact filter. Cheap regex extraction over
+                        # title+early-content recovers the ticker match; a modest
+                        # non-zero impact keeps it from being filtered out as noise.
+                        result = _headline_fallback_classification(
+                            row["title"] or "", row["content"] or "", all_tickers
+                        )
 
                     # Probe GPU after first article so model is fully loaded into VRAM
                     if idx == 0:
@@ -1569,8 +1675,8 @@ class NewsPipeline:
                                     "summary":         _sanitize_summary(str(result.get("summary") or "")),
                                     "category":        str(result.get("category") or "other").lower()[:30],
                                     "sentiment":       _norm_sentiment(result.get("sentiment")),
-                                    "score":           _safe_float(result.get("sentiment_score"), max_val=1.0),
-                                    "impact":          _safe_float(result.get("impact_score"), max_val=10.0),
+                                    "score":           _safe_float(result.get("sentiment_score"), max_val=1.0, min_val=-1.0),
+                                    "impact":          _safe_float(result.get("impact_score"), max_val=10.0, min_val=0.0),
                                     "tickers":         json.dumps(ann_tickers),
                                     "primary_tickers": json.dumps(primary),
                                     "tags":            json.dumps(
@@ -1584,11 +1690,26 @@ class NewsPipeline:
                             processed += 1
                         else:
                             _scan_status["articles_failed"] = _scan_status.get("articles_failed", 0) + 1
-                            log.debug("LLM returned None for article %s — marking processed=-1", row["id"][:8])
+                            # N1: track attempts; at the cap, move to the terminal
+                            # processed=-2 state (excluded from every future batch
+                            # select) instead of re-queuing this article forever.
+                            next_attempts = (row["attempts"] or 0) + 1
+                            if next_attempts >= _NEWS_CLASSIFY_ATTEMPT_CAP:
+                                terminal_state = -2
+                                log.warning(
+                                    "Article %s failed classify %d times — giving up (processed=-2)",
+                                    row["id"][:8], next_attempts,
+                                )
+                            else:
+                                terminal_state = -1
+                                log.debug(
+                                    "LLM returned None for article %s (attempt %d/%d) — marking processed=-1",
+                                    row["id"][:8], next_attempts, _NEWS_CLASSIFY_ATTEMPT_CAP,
+                                )
                             with news_db(self.db_path) as conn:
                                 conn.execute(
-                                    "UPDATE news_items SET processed=-1, decay_weight=? WHERE id=?",
-                                    (dw, row["id"]),
+                                    "UPDATE news_items SET processed=?, decay_weight=?, attempts=? WHERE id=?",
+                                    (terminal_state, dw, next_attempts, row["id"]),
                                 )
                     except Exception as ex:
                         log.warning("DB update failed for article %s: %s", row["id"][:8], ex)

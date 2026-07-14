@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 # ── Bootstrap: import the Flask app ──────────────────────────────────────────
@@ -12784,6 +12785,192 @@ class TestRuleWarningSourcePresence(unittest.TestCase):
     def test_db_has_rule_warnings_columns(self):
         src = self._src("db.py")
         self.assertIn('"rule_warnings_json"', src)
+
+
+# ── NEWS_LLM_FIXES.md — N1/N2/N5/N6/N7 ────────────────────────────────────────
+# news_engine.py's news_items DB is a standalone sqlite file (news_db() opens a
+# real Path, not the shared in-memory monkeypatch used elsewhere in this file),
+# so these tests use a per-test temp file. The scan loop itself needs a live
+# LLM object and isn't unit-tested here (per the doc's own admission that this
+# path previously had zero coverage) — these exercise the pure functions and
+# the schema/query logic those fixes actually changed.
+import news_engine as _news_engine
+
+
+class TestNewsLlmFixes(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "news_test.db"
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            _news_engine.init_news_tables(conn)
+        finally:
+            conn.close()  # `with conn:` only commits/rollbacks — it does NOT close
+                           # the connection, which holds a file lock that blocks
+                           # tempdir cleanup on Windows.
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _insert(self, id_, processed=0, attempts=0, published_date="2026-07-14T00:00:00"):
+        with _news_engine.news_db(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO news_items (id, url, title, published_date, processed, attempts) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (id_, f"https://example.com/{id_}", f"title {id_}", published_date, processed, attempts),
+            )
+
+    # ── N7: _safe_float lower-bound clamp ───────────────────────────────────
+
+    def test_safe_float_clamps_negative_sentiment(self):
+        self.assertEqual(_news_engine._safe_float(-5, max_val=1.0, min_val=-1.0), -1.0)
+
+    def test_safe_float_clamps_negative_impact(self):
+        self.assertEqual(_news_engine._safe_float(-3, max_val=10.0, min_val=0.0), 0.0)
+
+    def test_safe_float_within_range_unaffected(self):
+        self.assertEqual(_news_engine._safe_float(0.4, max_val=1.0, min_val=-1.0), 0.4)
+
+    def test_safe_float_none_and_missing_min_val_unchanged(self):
+        # No min_val supplied — old call sites must behave exactly as before.
+        self.assertEqual(_news_engine._safe_float(-5, max_val=1.0), -5.0)
+        self.assertEqual(_news_engine._safe_float(None, default=0.0), 0.0)
+
+    # ── N5: balanced-brace JSON isolation ───────────────────────────────────
+
+    def test_extract_json_object_handles_brace_inside_string(self):
+        raw = '{"summary": "the function returns {x: 1}", "category": "other"}'
+        extracted = _news_engine._extract_json_object(raw)
+        self.assertEqual(extracted, raw)
+        parsed = json.loads(extracted)
+        self.assertEqual(parsed["category"], "other")
+
+    def test_extract_json_object_strips_trailing_prose(self):
+        raw = '{"summary": "ok", "category": "markets"}\n\nHope that helps!'
+        extracted = _news_engine._extract_json_object(raw)
+        self.assertEqual(extracted, '{"summary": "ok", "category": "markets"}')
+
+    def test_extract_json_object_no_brace_returns_input(self):
+        self.assertEqual(_news_engine._extract_json_object("no json here"), "no json here")
+
+    def test_extract_json_object_truncated_returns_from_first_brace(self):
+        # Unbalanced (token-limit cutoff mid-object) — _robust_json_parse's own
+        # repair stage is what closes it; this function just shouldn't crash
+        # and should hand back everything from the first brace onward.
+        raw = '{"summary": "cut off mid'
+        self.assertEqual(_news_engine._extract_json_object(raw), raw)
+
+    def test_old_non_greedy_regex_would_have_truncated(self):
+        # Regression guard: prove the specific failure mode N5 fixes actually
+        # existed with the old approach, so this test would have caught it.
+        import re as _re
+        raw = '{"summary": "the function returns {x: 1}", "category": "other"}'
+        old_match = _re.search(r"\{.*?\}", raw, _re.DOTALL)
+        self.assertNotEqual(old_match.group(0), raw)  # old regex truncated early
+        self.assertEqual(_news_engine._extract_json_object(raw), raw)  # new one doesn't
+
+    # ── N2/N6: shared headline-fallback classification ──────────────────────
+
+    def test_headline_fallback_extracts_portfolio_ticker(self):
+        result = _news_engine._headline_fallback_classification(
+            "CBA posts record profit", "", ["CBA", "BHP"]
+        )
+        self.assertEqual(result["primary_tickers"], ["CBA"])
+        self.assertEqual(result["mentioned_tickers"], ["CBA"])
+        self.assertGreater(result["impact_score"], 0.0)
+        self.assertEqual(result["category"], "other")
+        self.assertEqual(result["sentiment"], "neutral")
+
+    def test_headline_fallback_no_ticker_match_zero_impact(self):
+        result = _news_engine._headline_fallback_classification(
+            "Global markets rally on rate-cut hopes", "", ["CBA", "BHP"]
+        )
+        self.assertEqual(result["primary_tickers"], [])
+        self.assertEqual(result["impact_score"], 0.0)
+
+    def test_headline_fallback_summary_is_title(self):
+        result = _news_engine._headline_fallback_classification("Some headline", "", [])
+        self.assertEqual(result["summary"], "Some headline")
+
+    # ── N1: attempts column + terminal state + two-phase batch select ───────
+
+    def test_attempts_column_exists_after_init(self):
+        with _news_engine.news_db(self.db_path) as conn:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(news_items)")]
+        self.assertIn("attempts", cols)
+
+    def test_init_news_tables_is_idempotent_on_existing_db(self):
+        # Migration path: calling init_news_tables again on a DB that already
+        # has the attempts column must not raise (ALTER TABLE wrapped in try/except).
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            _news_engine.init_news_tables(conn)  # second call, same DB
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(news_items)")]
+        finally:
+            conn.close()
+        self.assertIn("attempts", cols)
+        self.assertIn("primary_tickers", cols)
+
+    def test_batch_select_prioritises_fresh_over_retries(self):
+        # 5 retries (processed=-1, newer) + 2 fresh (processed=0, older) with a
+        # batch_limit of 3 — fresh must fill the batch first even though the
+        # retries are more recent by published_date (the old single ORDER BY
+        # published_date DESC query would have returned the 3 newest retries
+        # instead, starving the 2 fresh articles indefinitely).
+        for i in range(5):
+            self._insert(f"retry{i}", processed=-1, published_date=f"2026-07-14T10:0{i}:00")
+        for i in range(2):
+            self._insert(f"fresh{i}", processed=0, published_date=f"2026-07-10T10:0{i}:00")
+
+        batch_limit = 3
+        with _news_engine.news_db(self.db_path) as conn:
+            fresh = conn.execute(
+                "SELECT id, attempts FROM news_items WHERE processed = 0 "
+                "ORDER BY published_date DESC LIMIT ?", (batch_limit,),
+            ).fetchall()
+            batch = list(fresh)
+            if len(batch) < batch_limit:
+                retries = conn.execute(
+                    "SELECT id, attempts FROM news_items WHERE processed = -1 "
+                    "ORDER BY published_date DESC LIMIT ?", (batch_limit - len(batch),),
+                ).fetchall()
+                batch.extend(retries)
+
+        ids = [r["id"] for r in batch]
+        self.assertEqual(len(ids), 3)
+        self.assertIn("fresh0", ids)
+        self.assertIn("fresh1", ids)
+        # Only one retry slot remains once both fresh articles are included.
+        self.assertEqual(sum(1 for i in ids if i.startswith("retry")), 1)
+
+    def test_terminal_state_excluded_from_batch_select(self):
+        self._insert("stuck", processed=-2, attempts=3)
+        self._insert("fresh0", processed=0)
+        with _news_engine.news_db(self.db_path) as conn:
+            fresh = conn.execute(
+                "SELECT id FROM news_items WHERE processed = 0 ORDER BY published_date DESC LIMIT ?", (20,),
+            ).fetchall()
+            retries = conn.execute(
+                "SELECT id FROM news_items WHERE processed = -1 ORDER BY published_date DESC LIMIT ?", (20,),
+            ).fetchall()
+        ids = [r["id"] for r in fresh] + [r["id"] for r in retries]
+        self.assertIn("fresh0", ids)
+        self.assertNotIn("stuck", ids)
+
+    def test_attempt_cap_constant_is_three(self):
+        # Locks the documented retry cap (NEWS_LLM_FIXES.md N1: "suggest 3").
+        self.assertEqual(_news_engine._NEWS_CLASSIFY_ATTEMPT_CAP, 3)
+
+    def test_scan_loop_uses_two_phase_select_and_writes_attempts(self):
+        src = self._src("news_engine.py")
+        self.assertIn("WHERE processed = 0 ORDER BY published_date DESC", src)
+        self.assertIn("WHERE processed = -1 ORDER BY published_date DESC", src)
+        self.assertIn("_NEWS_CLASSIFY_ATTEMPT_CAP", src)
+        self.assertIn("processed=?, decay_weight=?, attempts=?", src)
+
+    def _src(self, rel):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            return f.read()
 
 
 if __name__ == "__main__":
