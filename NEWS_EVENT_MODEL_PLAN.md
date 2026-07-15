@@ -1,9 +1,23 @@
 # NEWS_EVENT_MODEL_PLAN.md — Event lifecycles (R3) + Historical playbooks (R7)
 
-**Date:** 2026-07-15 · **Scope:** plan + ideas only, nothing implemented · **Status:** DRAFT — deferred by design, see *Verdict* first.
+**Date:** 2026-07-15 · **Scope:** plan + ideas · **Status:** **R7-A shipped. R3, R7-B, R7-C remain UNIMPLEMENTED and deferred by design** — see *Verdict* first.
 
 Source: `critics.md` R3 (Add Event Lifecycles) and R7 (Historical Event Playbooks). Companion to
 `NEWS_CLASSIFICATION_FIXES.md` (C1-C6, shipped) which applied R5 and R4 from the same list.
+
+## Implementation status (audited 2026-07-15)
+
+| Item | Status | Evidence |
+|---|---|---|
+| **R7-A** taxonomy fix (`Other` → `Admin`) | **Shipped** | `announcement_engine.classify_announcement()`, `POST /api/announcements/backfill-admin-cap`, `js/pages/announcements.js`; 10 tests |
+| **R3** event lifecycles | **Not implemented** | no `story_id` / `news_stories` anywhere in the tree |
+| **R7-B** `event_outcomes` collection | **Not implemented** | no table, no resolver |
+| **R7-C** `/api/learning/event-playbook` | **Not implemented** | no endpoint (the `playbook` symbols in `routes/learning.py` are the unrelated pre-existing Sprint 71 per-driver playbook) |
+
+R7-A is a sub-item of R7, not R7 itself — it is the taxonomy cleanup that had to precede any playbook,
+and the one piece this plan said to do *now*. **R7 proper (B + C) is still blocked on data** (15 capital
+raises vs the critic's 82; 24 days of history vs a 48-day median recovery), and **R3 is still gated on
+the story-spam measurement** described below. Neither has started.
 
 ## Verdict up front
 
@@ -165,6 +179,29 @@ It also shares its entire data-collection layer with **critics R6** (learn actua
 
 ### R7-A — Fix the taxonomy first (cheap, do this regardless)
 
+- **Follow-up defect found in audit (2026-07-15) — FIXED.** Widening the deny-list from 10 to 24
+  patterns added `"estimated distribution"`, which matches **real, price-sensitive distribution
+  announcements on holdings**. Under R2's original cap-then-floor ordering those were capped to 3.0 then
+  floored back to only **5.0** — the floor lifts, it never restores. Measured on the live corpus, the cap
+  fired on **19 PS rows, of which ZERO were genuine registry boilerplate**, and six lost impact:
+
+  ```
+  PS SGP  [Dividend] 8.0 -> 5.0   Stockland - 2H26 Estimated Distribution and DRP Update
+  PS VAP  [Dividend] 8.0 -> 5.0   Estimated Distribution Announcement
+  PS VDHG [Dividend] 8.0 -> 5.0   Estimated Distribution Announcement
+  PS VGB  [Dividend] 8.0 -> 5.0   Estimated Distribution Announcement
+  PS VHY  [Dividend] 8.0 -> 5.0   Estimated Distribution Announcement
+  PS VVLU [Dividend] 8.0 -> 5.0   Estimated Distribution Announcement
+  ```
+
+  SGP/VAP/VDHG/VHY/VVLU are all held, and for an income ETF the distribution **is** the news. The code's
+  stated principle was already right — *"ASX's own PS flag is authoritative"* — but cap-then-floor
+  couldn't deliver it. **Fix:** the entire admin block is now skipped when `price_sensitive` (one-line
+  guard change), rather than capping and flooring. With 19/19 PS matches being false positives there is
+  no case the cap protected on that path. Re-measured after: **6 rows restored to 8.0, 0 PS rows still
+  altered, and the non-PS RIO cessation case still caps 9.0 → 3.0.** Tests:
+  `test_classify_announcement_{ps_skips_admin_cap_entirely,ps_admin_match_keeps_high_score,non_ps_admin_still_capped}`.
+  (`backfill-admin-cap` already scoped itself `WHERE price_sensitive = 0`, so it needed no change.)
 - **Status:** Resolved (2026-07-15). The "largely" claim above was optimistic — measured against the
   live corpus, the original 10 `_ADMIN_ANN_PATTERNS` only matched **84/163 (51%)** of `Other` rows, not
   "largely". Two causes, both fixed: (1) a live bug — the pattern `"director interest notice"` silently

@@ -1966,13 +1966,25 @@ def classify_announcement(
     # means the model still picks its own value from the shared band table —
     # this only guarantees a PS announcement can never end up looking
     # low-impact regardless of which path (LLM or keyword fallback) produced it.
-    # R2: cap admin/registry filings to the "AGM / Admin / Other" band ceiling
-    # BEFORE the PS floor is applied — order matters. ASX's own price-sensitive
-    # flag is authoritative (CLAUDE.md gotcha, :716): if ASX flagged it PS, it
-    # isn't routine whatever the headline pattern-matches, so the floor below
-    # must be able to override this cap, never the reverse.
-    if isinstance(result, dict):
-        cap = impact_cap_for_admin(f"{headline} {result.get('summary', '')}")
+    # R2: cap admin/registry filings to the "AGM / Admin / Other" band ceiling.
+    # The ENTIRE admin block is skipped when ASX flagged the announcement
+    # price-sensitive — its flag is authoritative (CLAUDE.md gotcha, :716), so a
+    # keyword guess must never contradict it.
+    #
+    # This was originally cap-then-floor, on the theory that the PS floor could
+    # "override" the cap. It can't: the floor only lifts to 5.0, it never
+    # restores the model's original score. Measured against the live corpus
+    # after R7-A widened the deny-list to 24 patterns, the cap fired on 19 PS
+    # rows — of which ZERO were genuine registry boilerplate and six were real
+    # distribution announcements on holdings, crushed 8.0 -> 5.0 (SGP, VAP,
+    # VDHG, VHY, VVLU: for an income ETF the distribution IS the news). There is
+    # no case on the PS path the cap protects, so it does not run there at all.
+    if isinstance(result, dict) and not price_sensitive:
+        # Headline only — the summary is LLM-generated and matching against it
+        # would let a takeover summary mentioning "…becoming a substantial
+        # holder" cap the real announcement. Identical selection on the live
+        # corpus either way (180 rows), so the summary is pure risk.
+        cap = impact_cap_for_admin(headline or "")
         if cap is not None:
             try:
                 result["impact"] = min(float(result.get("impact", cap)), cap)
@@ -1987,9 +1999,9 @@ def classify_announcement(
             # content the headline alone doesn't show, and that specific
             # classification is worth keeping even though the filing is
             # routine; only the "learned nothing, fell to the catch-all" case
-            # gets relabeled. price_sensitive is excluded for the same reason
-            # as the cap above — ASX's own flag outranks a keyword guess.
-            if not price_sensitive and (result.get("type") or "Other") == "Other":
+            # gets relabeled. (price_sensitive rows never reach here — the
+            # enclosing guard already excluded them, same rationale.)
+            if (result.get("type") or "Other") == "Other":
                 result["type"] = "Admin"
 
     if price_sensitive and isinstance(result, dict):
@@ -2186,7 +2198,7 @@ def get_ann_brief(
         if not ps:
             if impact < _ANN_BRIEF_MIN_IMPACT:
                 continue
-            if is_admin_announcement(f"{row['headline'] or ''} {row['summary'] or ''}"):
+            if is_admin_announcement(row["headline"] or ""):   # headline only — see core.is_admin_announcement
                 continue
 
         # Parse key figures from details JSON (extracted by LLM during classification)

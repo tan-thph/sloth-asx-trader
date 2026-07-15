@@ -172,12 +172,14 @@ def backfill_admin_cap():
 
     with ae.get_db(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT id, headline, summary, impact, type FROM announcements WHERE price_sensitive = 0"
+            "SELECT id, headline, impact, type FROM announcements WHERE price_sensitive = 0"
         ).fetchall()
         impact_updates = []
         type_updates = []
         for row in rows:
-            cap = ae.impact_cap_for_admin(f"{row['headline'] or ''} {row['summary'] or ''}")
+            # Headline only, matching the live classify path — see
+            # core.is_admin_announcement. Identical selection on the live corpus.
+            cap = ae.impact_cap_for_admin(row["headline"] or "")
             if cap is None:
                 continue
             if (row['impact'] or 0) > cap:

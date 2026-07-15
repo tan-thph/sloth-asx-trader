@@ -620,12 +620,22 @@ _ADMIN_ANN_PATTERNS: tuple[str, ...] = (
 
 
 def is_admin_announcement(text: str) -> bool:
-    """True when `text` (typically the announcement headline) matches one of
-    the routine-registry-filing patterns in _ADMIN_ANN_PATTERNS. Normalises a
-    curly apostrophe (common in PDF-extracted text) to a straight one first so
-    "Director's Interest Notice" matches regardless of which one the source
-    used — a straight-quote-only pattern silently missed 7 director-notice
-    rows in the live corpus before this normalisation was added."""
+    """True when `text` matches one of the routine-registry-filing patterns in
+    _ADMIN_ANN_PATTERNS.
+
+    Pass the HEADLINE ONLY — never headline + summary. The summary is
+    LLM-generated, so matching against it widens the deny-list onto a moving
+    target: a takeover summary that happens to mention "…is becoming a
+    substantial holder" would cap and drop the real announcement. Measured on
+    the live corpus both forms select the identical 180 rows (and the identical
+    142/163 = 87% of the Other bucket), so the summary contributes nothing but
+    risk. Callers narrowed 2026-07-15.
+
+    Normalises a curly apostrophe (common in PDF-extracted text) to a straight
+    one first so "Director's Interest Notice" matches regardless of which one
+    the source used — a straight-quote-only pattern silently missed 7
+    director-notice rows in the live corpus before this normalisation.
+    """
     t = text.lower().replace("’", "'")
     return any(kw in t for kw in _ADMIN_ANN_PATTERNS)
 

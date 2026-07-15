@@ -13633,9 +13633,9 @@ class TestPromptRelevanceFixes(unittest.TestCase):
             )
         self.assertEqual(r["impact"], 3.0)
 
-    def test_classify_announcement_ps_floor_beats_admin_cap(self):
-        # ASX's own PS flag is authoritative even when the headline
-        # pattern-matches admin — order: cap then floor (R2 fix #3).
+    def test_classify_announcement_ps_skips_admin_cap_entirely(self):
+        """ASX's PS flag is authoritative — the admin cap must not run at all
+        for a PS row. A low-scored PS admin filing still gets the S1 floor."""
         with mock.patch.object(
             _ann_engine, "_classify_keyword",
             return_value={"type": "Other", "sentiment": "neutral", "impact": 2.0,
@@ -13645,7 +13645,74 @@ class TestPromptRelevanceFixes(unittest.TestCase):
                 "RIO", "Notification of cessation of securities", "text",
                 settings={"ann_llm_provider": "keyword"}, price_sensitive=True,
             )
-        self.assertEqual(r["impact"], 5.0)
+        self.assertEqual(r["impact"], 5.0)   # S1 floor, not the 3.0 admin cap
+
+    def test_classify_announcement_ps_admin_match_keeps_high_score(self):
+        """Regression (2026-07-15): the SGP/VAP/VDHG/VHY/VVLU case.
+
+        R7-A widened the deny-list to 24 patterns, adding "estimated
+        distribution" — which matches real, PS-flagged distribution
+        announcements on holdings. Under the old cap-then-floor ordering an 8.0
+        was capped to 3.0 then floored back to only 5.0: the floor lifts, it
+        never restores. Measured on the live corpus, the cap fired on 19 PS rows
+        of which ZERO were genuine boilerplate and six lost impact this way.
+        For an income ETF the distribution IS the news, so the score must survive."""
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Dividend", "sentiment": "positive", "impact": 8.0,
+                          "summary": "Estimated distribution of 42c per unit.", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "VAP", "Estimated Distribution Announcement", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=True,
+            )
+        self.assertEqual(r["impact"], 8.0)      # NOT crushed to 5.0
+        self.assertEqual(r["type"], "Dividend")  # and not relabelled Admin
+
+    def test_admin_matching_is_headline_only_not_summary(self):
+        """The summary is LLM-generated — matching it widens the deny-list onto
+        a moving target. A takeover whose summary mentions "becoming a
+        substantial holder" must NOT be capped/dropped as routine admin.
+
+        Verified on the live corpus: headline-only and headline+summary select
+        the identical 180 rows (and identical 142/163 of the Other bucket), so
+        narrowing costs nothing and removes the false-positive path."""
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Acquisition", "sentiment": "positive", "impact": 9.0,
+                          "summary": "Bidder Co acquired 25% and is becoming a "
+                                     "substantial holder of Target Ltd.", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "TGT", "Acquisition of 25% stake in Target Ltd", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
+            )
+        self.assertEqual(r["impact"], 9.0)          # not capped to 3.0
+        self.assertEqual(r["type"], "Acquisition")  # not relabelled Admin
+
+    def test_admin_matching_call_sites_pass_headline_only(self):
+        """All three call sites must agree, or the brief filter and the classify
+        cap disagree about what counts as admin."""
+        eng = open(os.path.join(ROOT, "announcement_engine.py"), encoding="utf-8").read()
+        rts = open(os.path.join(ROOT, "announcement_routes.py"), encoding="utf-8").read()
+        self.assertNotIn("impact_cap_for_admin(f\"{headline} {result.get('summary'", eng)
+        for src in (eng, rts):
+            self.assertNotIn("{row['summary'] or ''}\")", src.replace("\n", ""))
+
+    def test_classify_announcement_non_ps_admin_still_capped(self):
+        """The RIO cessation case must keep working — skipping the cap for PS
+        must not weaken the non-PS path that R2 exists for."""
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Other", "sentiment": "negative", "impact": 9.0,
+                          "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "RIO", "Notification of cessation of securities - RIO", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
+            )
+        self.assertEqual(r["impact"], 3.0)
+        self.assertEqual(r["type"], "Admin")
 
     def test_classify_announcement_genuine_halt_untouched(self):
         with mock.patch.object(
