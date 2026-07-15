@@ -2,6 +2,11 @@
 *.db-shm
 *.db-wal
 *.db.bak*
+# Pre-restore snapshots written before a WAL-corruption recovery (gotcha #49).
+# Needs its own pattern: these are named `<db>.pre-restore-<ts>` and their
+# sidecars `<db>.pre-restore-<ts>-shm/-wal` — neither *.db.bak* nor *.db-shm
+# / *.db-wal matches them, since the suffix falls after the timestamp.
+*.db.pre-restore-*
 asx_trader.lock
 
 # Understand-anything index (generated, local only)

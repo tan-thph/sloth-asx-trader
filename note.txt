@@ -10,3 +10,4 @@ I don't want that. Instead, I want a new entry for sale with today date. The ori
 5. I really like the way each rec showing from Claude API call in Recommendations. Can you keep those info for each ticker in History tab?
 
 6. Add a box to select a claude model or enter another model name before running analysis
+
