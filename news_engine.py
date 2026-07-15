@@ -2041,6 +2041,21 @@ def get_status() -> dict:
 
 
 # ── Portfolio news brief (used by analysis engine) ────────────────────────────
+# PROMPT_RELEVANCE_FIXES.md R3/R4 — impact floors per tier + a positive
+# relevance predicate for market_wide (category allow-list), so noise doesn't
+# win a slot just because a fixed slot count needs filling.
+_WIDE_MIN_IMPACT   = 5.0  # market_wide: high-enough impact to matter on its own
+_RECENT_MIN_IMPACT = 4.0  # market_wide: recency buys a concession, never a free pass
+_DIRECT_MIN_IMPACT = 3.0  # portfolio_direct: lower bar — article IS about a holding
+
+# R4: market_wide is defined by a positive relevance predicate, not by the
+# absence of a portfolio ticker match. Vocabulary verified against the live DB
+# (last 30d) — `other`/`analyst`/`technical`/`dividend`/`earnings`/`operational`
+# excluded (clickbait, TA fluff, or stock-specific — the latter belong in the
+# direct tier when they concern a holding). `geopolitics` stays first-class
+# (CLAUDE.md gotcha #72).
+_WIDE_RELEVANT_CATEGORIES = {"macro", "geopolitics", "sector", "regulatory", "merger"}
+
 
 def get_news_brief(
     db_path: Path,
@@ -2121,16 +2136,23 @@ def get_news_brief(
             "signal":            signal,
         }
 
+        category = (row["category"] or "other").lower()
+
         if is_direct:
-            portfolio_direct.append(item)
-        elif imp >= 5.0 or is_recent:
-            # Include market-wide article if: high-enough impact OR it's fresh (any impact)
+            if imp >= _DIRECT_MIN_IMPACT:
+                portfolio_direct.append(item)
+        elif category in _WIDE_RELEVANT_CATEGORIES and (
+            imp >= _WIDE_MIN_IMPACT or (is_recent and imp >= _RECENT_MIN_IMPACT)
+        ):
             market_wide.append(item)
 
-    def _select(pool: list, max_count: int, recency_slots: int = 2) -> list:
+    def _select(pool: list, max_count: int, recency_slots: int = 2,
+                recency_min_impact: float = 0.0) -> list:
         """Pick up to max_count items:
         - Fill recency_slots with the newest articles (pool already sorted by date DESC)
         - Fill remaining slots with highest impact×decay not already selected
+        Recency slots still respect recency_min_impact — recency buys a
+        concession over the impact-pass floor, never a free pass (R3).
         """
         if not pool:
             return []
@@ -2142,9 +2164,10 @@ def get_news_brief(
             if len(result) >= recency_slots:
                 break
             key = item["title"]
-            if key not in seen:
-                result.append(item)
-                seen.add(key)
+            if key in seen or item["impact_score"] < recency_min_impact:
+                continue
+            result.append(item)
+            seen.add(key)
 
         # Impact pass — fill remaining slots
         remaining = max_count - len(result)
@@ -2159,8 +2182,10 @@ def get_news_brief(
 
         return result
 
-    direct_result = _select(portfolio_direct, max_direct, recency_slots=2)
-    wide_result   = _select(market_wide,      max_wide,   recency_slots=1)
+    direct_result = _select(portfolio_direct, max_direct, recency_slots=2,
+                             recency_min_impact=_DIRECT_MIN_IMPACT)
+    wide_result   = _select(market_wide,      max_wide,   recency_slots=1,
+                             recency_min_impact=_RECENT_MIN_IMPACT)
 
     return direct_result + wide_result
 

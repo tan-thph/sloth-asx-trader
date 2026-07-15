@@ -33,7 +33,12 @@ from typing import Any, Dict, Generator, List, Optional
 
 import requests
 
-from core import classify_llm_http_error, impact_band_rubric_text
+from core import (
+    classify_llm_http_error,
+    impact_band_rubric_text,
+    impact_cap_for_admin,
+    is_admin_announcement,
+)
 
 # ---------------------------------------------------------------------------
 # Optional dependency guards
@@ -1961,6 +1966,19 @@ def classify_announcement(
     # means the model still picks its own value from the shared band table —
     # this only guarantees a PS announcement can never end up looking
     # low-impact regardless of which path (LLM or keyword fallback) produced it.
+    # R2: cap admin/registry filings to the "AGM / Admin / Other" band ceiling
+    # BEFORE the PS floor is applied — order matters. ASX's own price-sensitive
+    # flag is authoritative (CLAUDE.md gotcha, :716): if ASX flagged it PS, it
+    # isn't routine whatever the headline pattern-matches, so the floor below
+    # must be able to override this cap, never the reverse.
+    if isinstance(result, dict):
+        cap = impact_cap_for_admin(f"{headline} {result.get('summary', '')}")
+        if cap is not None:
+            try:
+                result["impact"] = min(float(result.get("impact", cap)), cap)
+            except (TypeError, ValueError):
+                result["impact"] = cap
+
     if price_sensitive and isinstance(result, dict):
         try:
             result["impact"] = max(float(result.get("impact", 5.0)), 5.0)
@@ -2093,6 +2111,9 @@ def get_announcements(
     return results
 
 
+_ANN_BRIEF_MIN_IMPACT = 5.0  # PROMPT_RELEVANCE_FIXES.md R1
+
+
 def get_ann_brief(
     db_path: Optional[str | Path] = None,
     tickers: Optional[List[str]] = None,
@@ -2105,6 +2126,16 @@ def get_ann_brief(
       1. Price-sensitive announcements (always included first)
       2. High-impact announcements (impact_score DESC)
       3. Recency (date DESC as tiebreak)
+
+    R1 (PROMPT_RELEVANCE_FIXES.md): `max_items` is a CEILING, not a quota — a
+    row is admitted only when `price_sensitive OR impact >= _ANN_BRIEF_MIN_IMPACT`,
+    and never when it matches an admin/registry filing pattern (ASX-mandated
+    notices with no trading implication, e.g. "cessation of securities",
+    "substantial holder"). `price_sensitive` remains an unconditional pass —
+    ASX's own flag is authoritative even for a headline that pattern-matches
+    admin (CLAUDE.md gotcha, announcement_engine.py:716). This is a
+    prompt-injection filter only — the Announcements page still shows every
+    stored row unfiltered.
 
     Each item includes a compact `signal` string (~15 tokens) ready for the
     Claude analysis userMessage, plus full fields for the frontend brief panel.
@@ -2123,9 +2154,8 @@ def get_ann_brief(
                            price_sensitive, summary, details
                     FROM announcements
                     WHERE date >= ? AND ticker IN ({placeholders})
-                    ORDER BY price_sensitive DESC, impact DESC, date DESC
-                    LIMIT ?""",
-                [cutoff, *ticker_upper, max_items],
+                    ORDER BY price_sensitive DESC, impact DESC, date DESC""",
+                [cutoff, *ticker_upper],
             ).fetchall()
     except Exception as exc:
         logger.warning("get_ann_brief: DB query failed — %s", exc)
@@ -2133,9 +2163,18 @@ def get_ann_brief(
 
     results = []
     for row in rows:
+        if len(results) >= max_items:
+            break
+
         import json as _json
         impact = row["impact"] or 0
         ps     = bool(row["price_sensitive"])
+
+        if not ps:
+            if impact < _ANN_BRIEF_MIN_IMPACT:
+                continue
+            if is_admin_announcement(f"{row['headline'] or ''} {row['summary'] or ''}"):
+                continue
 
         # Parse key figures from details JSON (extracted by LLM during classification)
         key_figures: dict = {}

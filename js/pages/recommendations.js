@@ -1801,10 +1801,15 @@ async function scrutinizeRec(recId) {
  * Pending tab is built) and their _learningId isn't known synchronously when
  * the summary is assembled (logRecsToLearningLoop() is fire-and-forget and
  * runs after analysisLastSummary is already set). So instead of a stored id,
- * resolve the most recently logged event for this ticker via the
- * action-agnostic /api/learning/recent-rec lookup, confirm it really is a
- * HOLD (guards against a stale click hitting a newer non-HOLD rec logged for
- * the same ticker since), then scrutinize it the normal way.
+ * resolve the most recently logged HOLD for this ticker via
+ * /api/learning/recent-rec?action=HOLD, then scrutinize it the normal way.
+ *
+ * The action filter is load-bearing: the endpoint's action-agnostic default
+ * returns the ticker's newest event of ANY action, so a ticker whose HOLD was
+ * followed by a TRIM/SELL came back non-HOLD, failed the guard below, and was
+ * permanently unscrutinizable behind a misleading "hasn't finished logging"
+ * toast (CBA/QBE/RIO, 2026-07-15). The guard is kept as a belt-and-braces
+ * assertion — with the filter applied it should now never reject.
  */
 async function scrutinizeHoldSummaryRec(idx) {
   const row = state.analysisLastSummary?.recs?.[idx];
@@ -1818,7 +1823,7 @@ async function scrutinizeHoldSummaryRec(idx) {
   let learningId = row._learningId;
   if (!learningId) {
     try {
-      const resp = await fetch(`${API}/api/learning/recent-rec?ticker=${encodeURIComponent(row.ticker)}`).then(r => r.json());
+      const resp = await fetch(`${API}/api/learning/recent-rec?ticker=${encodeURIComponent(row.ticker)}&action=HOLD`).then(r => r.json());
       if (resp?.ok && resp.rec && (resp.rec.recommendation || '').toUpperCase() === 'HOLD') {
         learningId = resp.rec.id;
       }

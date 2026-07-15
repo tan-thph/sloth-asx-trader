@@ -16,6 +16,7 @@ Run:  python test_app.py
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1362,6 +1363,63 @@ class TestWhipsawConsistencyCheck(unittest.TestCase):
         self.assertTrue(d["ok"])
         self.assertEqual(d["rec"]["recommendation"], "SELL")
         self.assertEqual(d["rec"]["entry_signals"]["rsi_14"], 62)
+
+    def test_recent_rec_action_filter_returns_latest_of_that_action(self):
+        """?action=HOLD must skip a NEWER non-HOLD event and return the HOLD.
+
+        Regression (2026-07-15): the scrutinize button resolves a HOLD's
+        _learningId through this endpoint. Without the filter it got the newer
+        TRIM, failed the caller's HOLD guard, and left CBA/QBE/RIO permanently
+        unscrutinizable behind a bogus "hasn't finished logging" toast."""
+        with _test_get_db() as conn:
+            conn.execute("DELETE FROM ai_learning_events WHERE ticker='ACTF.AX'")
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, timestamp)
+                VALUES ('recommendation','ACTF.AX','HOLD','2026-01-01 09:00:00')
+            """)
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, timestamp)
+                VALUES ('recommendation','ACTF.AX','TRIM','2026-01-05 09:00:00')
+            """)
+        # Unfiltered: newest wins (the whipsaw caller's contract, unchanged).
+        d = json.loads(self.client.get("/api/learning/recent-rec?ticker=ACTF.AX").data)
+        self.assertEqual(d["rec"]["recommendation"], "TRIM")
+        # Filtered: reaches past the TRIM to the older HOLD.
+        d = json.loads(
+            self.client.get("/api/learning/recent-rec?ticker=ACTF.AX&action=HOLD").data)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["rec"]["recommendation"], "HOLD")
+
+    def test_recent_rec_action_filter_null_when_action_never_logged(self):
+        with _test_get_db() as conn:
+            conn.execute("DELETE FROM ai_learning_events WHERE ticker='ACTN.AX'")
+            conn.execute("""
+                INSERT INTO ai_learning_events
+                  (event_type, ticker, recommendation, timestamp)
+                VALUES ('recommendation','ACTN.AX','BUY','2026-01-01 09:00:00')
+            """)
+        d = json.loads(
+            self.client.get("/api/learning/recent-rec?ticker=ACTN.AX&action=HOLD").data)
+        self.assertTrue(d["ok"])
+        self.assertIsNone(d["rec"])
+
+    def test_recent_rec_rejects_unknown_action(self):
+        """Action is whitelisted — it shapes the WHERE clause."""
+        resp = self.client.get("/api/learning/recent-rec?ticker=ACTF.AX&action=DROP+TABLE")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_recommendations_js_scrutinize_hold_uses_action_filter(self):
+        """The HOLD scrutiny lookup must pass action=HOLD, else it resolves a
+        newer non-HOLD event and the guard below it rejects forever."""
+        with open(os.path.join(ROOT, "js", "pages", "recommendations.js"),
+                  encoding="utf-8") as f:
+            src = f.read()
+        start = src.index("async function scrutinizeHoldSummaryRec")
+        body = src[start:start + 2000]
+        self.assertIn("recent-rec?ticker=", body)
+        self.assertIn("&action=HOLD", body)
 
     def test_entry_signature_ported_to_js_matches_python_fields(self):
         """js/utils.js entrySignature() must port _entry_signature() (same
@@ -6961,6 +7019,35 @@ class TestHoldOutcomeTracking(unittest.TestCase):
             second = self._log(client)
             self.assertFalse(second.get("deduped"))
             self.assertNotEqual(second["id"], first["id"])
+        finally:
+            asx_server.get_db = _orig_get_db
+
+    def test_hold_after_actionable_rec_is_not_deduped(self):
+        """A HOLD that FOLLOWS a TRIM/SELL on the same ticker is a reversal,
+        not a quiet repeat — it must insert a fresh row even inside the window.
+
+        Regression (2026-07-15, CBA/QBE/RIO): collapsing it into the pre-TRIM
+        HOLD both discarded the reversal signal and left the surviving row
+        carrying stale entry_signals_json/market_context — which is exactly
+        what the scrutinize critic reads."""
+        _install_in_memory_db()
+        asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+            client = asx_server.app.test_client()
+            hold1 = self._log(client)
+            # An actionable rec lands after the HOLD, inside the 7d window.
+            self._log(client, recommendation="TRIM",
+                      suggested_stop=1.0, suggested_target=2.0)
+            # Claude reverses back to HOLD — new information, must not dedupe.
+            hold2 = self._log(client)
+            self.assertFalse(hold2.get("deduped"))
+            self.assertNotEqual(hold2["id"], hold1["id"])
+            # And a plain repeat of that new HOLD still dedupes (guard intact).
+            hold3 = self._log(client)
+            self.assertTrue(hold3.get("deduped"))
+            self.assertEqual(hold3["id"], hold2["id"])
         finally:
             asx_server.get_db = _orig_get_db
 
@@ -13275,6 +13362,306 @@ class TestScoringFixes(unittest.TestCase):
         self.assertIn("_kw_floor = impact_floor_for_keywords(", src)
         self.assertIn('"impact":          _final_impact,', src)
         self.assertIn("max(_raw_impact, _kw_floor) if _kw_floor is not None else _raw_impact", src)
+
+
+class TestPromptRelevanceFixes(unittest.TestCase):
+    """PROMPT_RELEVANCE_FIXES.md R1-R7 — news + announcement relevance gating."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+
+    # ── R1/R2: admin filing patterns ─────────────────────────────────────────
+
+    def test_is_admin_announcement_matches_registry_boilerplate(self):
+        self.assertTrue(_core.is_admin_announcement("Notification of cessation of securities"))
+        self.assertTrue(_core.is_admin_announcement("Becoming a substantial holder"))
+        self.assertTrue(_core.is_admin_announcement("Ceasing to be a substantial holder"))
+        self.assertTrue(_core.is_admin_announcement("Change in substantial holding"))
+
+    def test_is_admin_announcement_does_not_match_real_filings(self):
+        self.assertFalse(_core.is_admin_announcement("Q2 production results"))
+        self.assertFalse(_core.is_admin_announcement("Further update on non-binding proposal"))
+        self.assertFalse(_core.is_admin_announcement("Trading Halt"))
+
+    def test_impact_cap_for_admin_caps_registry_boilerplate(self):
+        self.assertEqual(
+            _core.impact_cap_for_admin("Notification of cessation of securities"), 3.0
+        )
+
+    def test_impact_cap_for_admin_none_for_real_filing(self):
+        self.assertIsNone(_core.impact_cap_for_admin("Q2 production results"))
+
+    # ── R2: cap applied in classify_announcement, PS floor still wins ───────
+
+    def test_classify_announcement_caps_admin_impact(self):
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Other", "sentiment": "negative", "impact": 9.0,
+                          "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "RIO", "Notification of cessation of securities", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
+            )
+        self.assertEqual(r["impact"], 3.0)
+
+    def test_classify_announcement_ps_floor_beats_admin_cap(self):
+        # ASX's own PS flag is authoritative even when the headline
+        # pattern-matches admin — order: cap then floor (R2 fix #3).
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Other", "sentiment": "neutral", "impact": 2.0,
+                          "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "RIO", "Notification of cessation of securities", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=True,
+            )
+        self.assertEqual(r["impact"], 5.0)
+
+    def test_classify_announcement_genuine_halt_untouched(self):
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Trading Halt", "sentiment": "neutral", "impact": 8.0,
+                          "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "RIO", "Trading Halt", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
+            )
+        self.assertEqual(r["impact"], 8.0)
+
+    # ── R1: get_ann_brief admits only PS or impact-floor-clearing rows ──────
+
+    def _ann_tmpdb(self):
+        # announcement_engine.init_db() uses `with sqlite3.connect(...)`, which
+        # only commits/rollbacks — it does NOT close the connection, so a
+        # strict TemporaryDirectory.cleanup() hits a Windows file lock. Use
+        # mkdtemp + best-effort rmtree instead (same root cause noted for
+        # TestNewsLlmFixes, worked around there by closing explicitly — not
+        # possible here since init_db owns the connection internally).
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
+        db_path = Path(tmpdir) / "ann_test.db"
+        _ann_engine.init_db(db_path)
+        return db_path
+
+    def _insert_ann(self, db_path, id_, ticker, headline, impact, ps=False, date="2026-07-15"):
+        with _ann_engine.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO announcements
+                       (id, ticker, date, headline, pdf_url, doc_key, pdf_text, type,
+                        sentiment, impact, price_sensitive, summary, tags, llm_model,
+                        details, processed, fetched_at)
+                   VALUES (?, ?, ?, ?, '', '', '', 'Other', 'neutral', ?, ?, '', '[]', '', '', 1, ?)""",
+                (id_, ticker, date, headline, impact, 1 if ps else 0, date),
+            )
+
+    def test_get_ann_brief_excludes_admin_boilerplate(self):
+        db_path = self._ann_tmpdb()
+        self._insert_ann(db_path, "a1", "RIO", "Notification of cessation of securities", 9.0)
+        self._insert_ann(db_path, "a2", "RIO", "Q2 production results", 7.0)
+        items = _ann_engine.get_ann_brief(db_path, tickers=["RIO"], days=30, max_items=10)
+        headlines = [i["headline"] for i in items]
+        self.assertNotIn("Notification of cessation of securities", headlines)
+        self.assertIn("Q2 production results", headlines)
+
+    def test_get_ann_brief_ps_admin_filing_still_passes(self):
+        db_path = self._ann_tmpdb()
+        self._insert_ann(db_path, "a1", "RIO", "Notification of cessation of securities", 9.0, ps=True)
+        items = _ann_engine.get_ann_brief(db_path, tickers=["RIO"], days=30, max_items=10)
+        self.assertEqual(len(items), 1)
+
+    def test_get_ann_brief_excludes_low_impact_non_admin(self):
+        db_path = self._ann_tmpdb()
+        self._insert_ann(db_path, "a1", "MQG", "Becoming a substantial holder", 3.0)
+        items = _ann_engine.get_ann_brief(db_path, tickers=["MQG"], days=30, max_items=10)
+        self.assertEqual(items, [])
+
+    def test_get_ann_brief_does_not_pad_to_max_items(self):
+        # 1 real filing, rest admin boilerplate — result must shrink, not pad.
+        db_path = self._ann_tmpdb()
+        self._insert_ann(db_path, "a1", "RIO", "Q2 production results", 7.0)
+        for i in range(5):
+            self._insert_ann(db_path, f"noise{i}", "RIO", "Notification of cessation of securities", 3.0)
+        items = _ann_engine.get_ann_brief(db_path, tickers=["RIO"], days=30, max_items=10)
+        self.assertEqual(len(items), 1)
+
+    def test_get_ann_brief_all_admin_window_yields_empty(self):
+        db_path = self._ann_tmpdb()
+        self._insert_ann(db_path, "a1", "WDS", "Notification of cessation of securities", 3.0)
+        self._insert_ann(db_path, "a2", "WDS", "Notification re unquoted securities", 2.0)
+        items = _ann_engine.get_ann_brief(db_path, tickers=["WDS"], days=30, max_items=10)
+        self.assertEqual(items, [])
+
+    # ── R6/R7: backfill endpoints (dry-run default, then apply) ─────────────
+    # Both routes connect straight to a module-level DB_PATH file constant
+    # (news_items/announcements live in the physical asx_trader.db, not the
+    # in-memory shared connection other routes use) — patch that constant to
+    # a temp file for the duration of the test so the real db is never touched.
+
+    def test_news_backfill_impact_clamp_dry_run_then_apply(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        db_path = Path(tmpdir.name) / "news_backfill_test.db"
+        with _news_engine.news_db(db_path) as conn:
+            _news_engine.init_news_tables(conn)
+            conn.execute(
+                "INSERT INTO news_items (id, url, title, published_date, processed, impact_score) "
+                "VALUES ('bad1', 'https://x/1', 't', '2026-07-14T00:00:00', 1, -13479800000.0)"
+            )
+
+        import routes.news as _news_routes
+        with mock.patch.object(_news_routes, "DB_PATH", db_path):
+            r = self.client.post("/api/news/backfill-impact-clamp", json={"dry_run": True})
+            self.assertEqual(r.status_code, 200)
+            self.assertGreaterEqual(r.get_json()["rows_clamped"], 1)
+            with _news_engine.news_db(db_path) as conn:
+                still_bad = conn.execute(
+                    "SELECT impact_score FROM news_items WHERE id='bad1'"
+                ).fetchone()["impact_score"]
+            self.assertEqual(still_bad, -13479800000.0)  # dry-run must not write
+
+            r2 = self.client.post("/api/news/backfill-impact-clamp", json={"dry_run": False})
+            self.assertEqual(r2.status_code, 200)
+            with _news_engine.news_db(db_path) as conn:
+                fixed = conn.execute(
+                    "SELECT impact_score FROM news_items WHERE id='bad1'"
+                ).fetchone()["impact_score"]
+            self.assertEqual(fixed, 0.0)
+
+    def test_announcement_backfill_admin_cap_dry_run_then_apply(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
+        db_path = Path(tmpdir) / "ann_backfill_test.db"
+        _ann_engine.init_db(db_path)
+        with _ann_engine.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO announcements
+                       (id, ticker, date, headline, pdf_url, doc_key, pdf_text, type,
+                        sentiment, impact, price_sensitive, summary, tags, llm_model,
+                        details, processed, fetched_at)
+                   VALUES ('legacy1', 'RIO', '2026-07-01', 'Notification of cessation of securities',
+                           '', '', '', 'Other', 'negative', 9.0, 0, '', '[]', '', '', 1, '2026-07-01')"""
+            )
+
+        import announcement_routes as _ann_routes
+        with mock.patch.object(_ann_routes, "DB_PATH", db_path):
+            r = self.client.post("/api/announcements/backfill-admin-cap", json={"dry_run": True})
+            self.assertEqual(r.status_code, 200)
+            self.assertGreaterEqual(r.get_json()["rows_capped"], 1)
+            with _ann_engine.get_db(db_path) as conn:
+                still_bad = conn.execute(
+                    "SELECT impact FROM announcements WHERE id='legacy1'"
+                ).fetchone()["impact"]
+            self.assertEqual(still_bad, 9.0)  # dry-run must not write
+
+            r2 = self.client.post("/api/announcements/backfill-admin-cap", json={"dry_run": False})
+            self.assertEqual(r2.status_code, 200)
+            with _ann_engine.get_db(db_path) as conn:
+                fixed = conn.execute(
+                    "SELECT impact FROM announcements WHERE id='legacy1'"
+                ).fetchone()["impact"]
+            self.assertEqual(fixed, 3.0)
+
+    # ── R3/R4: news brief tier floors + category gate ────────────────────────
+
+    def _news_tmpdb(self):
+        self._tmpdir2 = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir2.cleanup)
+        db_path = Path(self._tmpdir2.name) / "news_brief_test.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            _news_engine.init_news_tables(conn)
+        finally:
+            conn.close()
+        return db_path
+
+    def _insert_news(self, db_path, id_, title, category, impact, primary=None, recent=True):
+        import datetime as _dt_mod
+        published = (
+            _dt_mod.datetime.utcnow() - (_dt_mod.timedelta(hours=1) if recent else _dt_mod.timedelta(days=2))
+        ).isoformat()
+        with _news_engine.news_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO news_items
+                       (id, url, title, published_date, processed, category,
+                        sentiment, impact_score, tickers, primary_tickers, decay_weight)
+                   VALUES (?, ?, ?, ?, 1, ?, 'neutral', ?, ?, ?, 1.0)""",
+                (id_, f"https://x/{id_}", title, published, category, impact,
+                 json.dumps(primary or []), json.dumps(primary or [])),
+            )
+
+    def test_get_news_brief_market_wide_zero_impact_recent_excluded(self):
+        # The measured-payload regression: a 0.0-impact "analyst" clickbait
+        # piece must no longer buy a slot on recency alone.
+        db_path = self._news_tmpdb()
+        self._insert_news(db_path, "n1", "Can CBA Outperform the ASX 200?", "analyst", 0.0, recent=True)
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(items, [])
+
+    def test_get_news_brief_market_wide_admits_fresh_moderate_impact(self):
+        db_path = self._news_tmpdb()
+        self._insert_news(db_path, "n1", "RBA signals rate pause", "macro", 4.5, recent=True)
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(len(items), 1)
+
+    def test_get_news_brief_market_wide_excludes_stale_moderate_impact(self):
+        db_path = self._news_tmpdb()
+        self._insert_news(db_path, "n1", "RBA signals rate pause", "macro", 4.5, recent=False)
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(items, [])
+
+    def test_get_news_brief_market_wide_admits_stale_high_impact(self):
+        db_path = self._news_tmpdb()
+        self._insert_news(db_path, "n1", "Major geopolitical escalation", "geopolitics", 9.0, recent=False)
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(len(items), 1)
+
+    def test_get_news_brief_market_wide_excludes_other_category_regardless_of_impact(self):
+        db_path = self._news_tmpdb()
+        self._insert_news(db_path, "n1", "Bangkok bar fire death toll rises", "other", 10.0, recent=True)
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(items, [])
+
+    def test_get_news_brief_market_wide_excludes_analyst_category_regardless_of_impact(self):
+        db_path = self._news_tmpdb()
+        self._insert_news(db_path, "n1", "Clickbait analyst take", "analyst", 10.0, recent=True)
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(items, [])
+
+    def test_get_news_brief_portfolio_direct_unaffected_by_category_gate(self):
+        # R4's category gate is market-wide-only — a direct article about a
+        # holding reaches the prompt via the direct tier regardless of category.
+        db_path = self._news_tmpdb()
+        self._insert_news(db_path, "n1", "BHP announces new mine", "other", 10.0,
+                          primary=["BHP"], recent=True)
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["portfolio_direct"])
+
+    def test_get_news_brief_portfolio_direct_has_impact_floor(self):
+        db_path = self._news_tmpdb()
+        self._insert_news(db_path, "n1", "BHP minor note", "other", 1.0,
+                          primary=["BHP"], recent=True)
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(items, [])
+
+    def test_get_news_brief_empty_pool_returns_empty_not_padded(self):
+        db_path = self._news_tmpdb()
+        items = _news_engine.get_news_brief(db_path, ["BHP"], days=3, max_direct=6, max_wide=3)
+        self.assertEqual(items, [])
+
+    # ── R5: comment documents the real contract ──────────────────────────────
+
+    def test_analysis_js_comment_points_to_news_engine_thresholds(self):
+        with open(os.path.join(ROOT, "js", "analysis.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("news_engine.get_news_brief() owns the", src)
+        self.assertNotIn("impact ≥ 6.0", src)
 
 
 if __name__ == "__main__":

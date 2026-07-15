@@ -342,6 +342,43 @@ def impact_floor_for_keywords(text: str) -> float | None:
     return None
 
 
+# ── Admin/registry filing patterns (PROMPT_RELEVANCE_FIXES.md R1/R2) ─────────
+# ASX-mandated administrative notices with no trading implication. Shared
+# between announcement_engine.py (R1: brief-time admission gate) and
+# core.impact_cap_for_admin (R2: score ceiling) so there is exactly one
+# deny-list, not two that can drift apart.
+_ADMIN_ANN_PATTERNS: tuple[str, ...] = (
+    "cessation of securities",
+    "substantial holder",
+    "substantial holding",
+    "unquoted securities",
+    "proposed sale of securities",
+    "notice of annual general meeting",
+    "change of address",
+    "director interest notice",
+    "appendix 3",
+    "appendix 2a",
+)
+
+
+def is_admin_announcement(text: str) -> bool:
+    """True when `text` (typically the announcement headline) matches one of
+    the routine-registry-filing patterns in _ADMIN_ANN_PATTERNS."""
+    t = text.lower()
+    return any(kw in t for kw in _ADMIN_ANN_PATTERNS)
+
+
+def impact_cap_for_admin(text: str) -> float | None:
+    """Mirror of impact_floor_for_keywords (PROMPT_RELEVANCE_FIXES.md R2): if
+    `text` matches an admin/registry filing pattern, return the "AGM / Admin /
+    Broad Commentary / Other" band's ceiling (3.0) so a model that ignores the
+    rubric upward can't turn a routine filing into a fabricated high-impact
+    signal. Returns None when nothing matches (no opinion on the score)."""
+    if is_admin_announcement(text):
+        return float(IMPACT_BAND_TABLE[-1][1][1])  # AGM/Admin/Other ceiling
+    return None
+
+
 # ── Sector map (used by market scanner) ──────────────────────────────────────
 # Curated lookup for ASX200-ish tickers. Each ticker appears exactly once.
 # Falls back to "Other" if a scanned ticker isn't here.

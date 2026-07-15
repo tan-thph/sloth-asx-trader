@@ -1057,6 +1057,14 @@ def learning_log():
             # miss-rate. One HOLD per ticker per window is the same passivity
             # signal; return the existing event id so the client's _learningId
             # bookkeeping still works.
+            #
+            # EXCEPT when an actionable rec landed AFTER that HOLD: a HOLD that
+            # follows a TRIM/SELL/BUY on the same ticker is a REVERSAL, not a
+            # quiet repeat — genuinely new information the dedupe rationale
+            # doesn't cover. Collapsing it would both discard that signal and
+            # leave the surviving row carrying pre-reversal entry_signals_json /
+            # market_context (what the scrutinize critic reads). So we only
+            # dedupe against a HOLD that is still the ticker's latest event.
             if (data.get("recommendation") == "HOLD"
                     and data.get("event_type", "recommendation") == "recommendation"):
                 cutoff = (datetime.now() - timedelta(days=_HOLD_DEDUP_DAYS)) \
@@ -1065,8 +1073,11 @@ def learning_log():
                     SELECT id FROM ai_learning_events
                      WHERE recommendation = 'HOLD' AND ticker = ?
                        AND timestamp >= ?
+                       AND id = (SELECT MAX(id) FROM ai_learning_events
+                                  WHERE ticker = ?
+                                    AND event_type = 'recommendation')
                      ORDER BY id DESC LIMIT 1
-                """, (data.get("ticker"), cutoff)).fetchone()
+                """, (data.get("ticker"), cutoff, data.get("ticker"))).fetchone()
                 if dup:
                     return jsonify({"ok": True, "id": dup["id"], "deduped": True})
             conn.execute("""
@@ -1331,28 +1342,39 @@ def thesis_snapshots():
 
 @bp.route("/api/learning/recent-rec", methods=["GET"])
 def recent_rec():
-    """Return the single most recent logged rec for one ticker, ANY action.
+    """Return the single most recent logged rec for one ticker.
 
-    GET /api/learning/recent-rec?ticker=BHP.AX
+    GET /api/learning/recent-rec?ticker=BHP.AX[&action=HOLD]
 
     Unlike entry-context (BUY/TOP_UP only, used for HOLDING_CONTEXT at SELL
-    time), this is action-agnostic — used by the whipsaw/contradiction check
-    in analysis.js to compare a new rec's entry signature + direction against
-    whatever was last recommended for the same ticker, regardless of action.
-    Returns {ok:true, rec:null} when the ticker has no history.
+    time), this defaults to action-agnostic — used by the whipsaw/contradiction
+    check in analysis.js to compare a new rec's entry signature + direction
+    against whatever was last recommended for the same ticker, regardless of
+    action. Returns {ok:true, rec:null} when the ticker has no history.
+
+    Optional `action` narrows to the most recent event of ONE action. The
+    scrutinize button needs this: HOLDs never enter state.recommendations
+    (gotcha #85) so the client has no _learningId and must resolve one at click
+    time — and the action-agnostic default silently returns a newer TRIM/SELL,
+    which the caller's HOLD guard then rejects, permanently blocking scrutiny
+    on any ticker whose HOLD was followed by an actionable rec (CBA/QBE/RIO).
     """
     ticker = (request.args.get("ticker") or "").strip().upper()
     if not ticker:
         return jsonify({"ok": False, "error": "ticker required"}), 400
+    action = (request.args.get("action") or "").strip().upper()
+    if action and action not in _VALID_RECENT_REC_ACTIONS:
+        return jsonify({"ok": False, "error": f"invalid action: {action}"}), 400
     try:
         with get_db() as conn:
-            row = conn.execute("""
+            row = conn.execute(f"""
                 SELECT id, recommendation, entry_signals_json, timestamp
                   FROM ai_learning_events
                  WHERE ticker = ?
+                       {"AND recommendation = ?" if action else ""}
                  ORDER BY id DESC
                  LIMIT 1
-            """, (ticker,)).fetchone()
+            """, (ticker, action) if action else (ticker,)).fetchone()
         if not row:
             return jsonify({"ok": True, "rec": None})
         try:
@@ -3315,6 +3337,13 @@ _FETCH_RETRY_DAYS = 7
 # without this the event volume (and the _resolve_hold_outcomes fetch queue)
 # grows linearly with run frequency while adding no new passivity signal.
 _HOLD_DEDUP_DAYS = 7
+
+# Actions accepted by GET /api/learning/recent-rec?action=... — whitelisted
+# because the value is interpolated into the WHERE clause's shape (the bound
+# parameter itself is still passed via placeholder, never formatted in).
+_VALID_RECENT_REC_ACTIONS = frozenset(
+    {"BUY", "SELL", "TOP_UP", "TRIM", "HOLD", "DRP", "RECLASSIFY"}
+)
 
 
 def _mark_fetch_failed(conn, row_id) -> None:

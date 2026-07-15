@@ -146,6 +146,39 @@ def get_ann_brief():
         return jsonify({"error": str(e)}), 500
 
 
+@ann_bp.route('/backfill-admin-cap', methods=['POST'])
+def backfill_admin_cap():
+    """One-time cleanup: cap already-stored admin/registry filings that were
+    mis-scored before R2's ceiling existed (PROMPT_RELEVANCE_FIXES.md R7),
+    e.g. RIO's "Notification of cessation of securities" scored 9.0. R1's
+    brief-time type gate already masks these from the prompt immediately, so
+    this only matters for the Announcements page's historical impact display
+    and get_market_sentiment's aggregate — genuinely optional cleanup, not a
+    blocker (rows age out of the days=3 prompt window regardless).
+
+    Body: {"dry_run": true|false}. Dry-run (default) returns the count that
+    WOULD change without writing. price_sensitive rows are never touched —
+    the PS floor outranks the admin cap (same ordering as R2's live path).
+    """
+    data = request.get_json(silent=True) or {}
+    dry_run = data.get('dry_run', True)
+
+    with ae.get_db(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, headline, summary, impact FROM announcements WHERE price_sensitive = 0"
+        ).fetchall()
+        updates = []
+        for row in rows:
+            cap = ae.impact_cap_for_admin(f"{row['headline'] or ''} {row['summary'] or ''}")
+            if cap is not None and (row['impact'] or 0) > cap:
+                updates.append((cap, row['id']))
+        if not dry_run and updates:
+            conn.executemany("UPDATE announcements SET impact = ? WHERE id = ?", updates)
+            conn.commit()
+
+    return jsonify({"ok": True, "dry_run": dry_run, "rows_capped": len(updates)})
+
+
 @ann_bp.route('/sync/stop', methods=['POST'])
 def sync_stop():
     try:

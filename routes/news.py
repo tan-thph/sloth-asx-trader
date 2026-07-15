@@ -11,6 +11,7 @@ Endpoints:
   /api/news/scan/stop         POST  — stop in-progress scan
   /api/news/status            GET   — scheduler + queue state
   /api/news/brief             GET   — compact tiered brief for AI prompt
+  /api/news/backfill-impact-clamp POST — one-time legacy impact_score clamp (R6)
   /api/news/settings          GET/POST — scanner config
   /api/news/models            GET   — Ollama installed models
   /api/news/ollama-ps         GET   — currently loaded Ollama model
@@ -718,3 +719,34 @@ def news_brief():
     max_wide   = max(1, limit - max_direct)
     items = _ne.get_news_brief(DB_PATH, tickers, days=days, max_direct=max_direct, max_wide=max_wide)
     return jsonify({"items": items})
+
+
+@bp.route("/api/news/backfill-impact-clamp", methods=["POST"])
+def news_backfill_impact_clamp():
+    """One-time cleanup for 41 legacy rows with impossible impact scores
+    (PROMPT_RELEVANCE_FIXES.md R6) — all predate the N7 _safe_float clamp
+    (NEWS_LLM_FIXES.md) landing in news_engine.py's LLM write path, so this
+    is residue, not an active leak. They poison get_market_sentiment's
+    AVG(impact_score) aggregate until clamped.
+
+    Body: {"dry_run": true|false}. Dry-run (default) returns the count that
+    WOULD change without writing.
+    """
+    if not _NE_OK:
+        return jsonify({"ok": False, "error": "news_engine not available"}), 503
+
+    data = request.get_json(silent=True) or {}
+    dry_run = data.get("dry_run", True)
+
+    with _ne.news_db(DB_PATH) as conn:
+        _ne.init_news_tables(conn)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM news_items WHERE impact_score < 0 OR impact_score > 10"
+        ).fetchone()[0]
+        if not dry_run and n:
+            conn.execute(
+                "UPDATE news_items SET impact_score = MAX(0.0, MIN(10.0, impact_score)) "
+                "WHERE impact_score < 0 OR impact_score > 10"
+            )
+
+    return jsonify({"ok": True, "dry_run": dry_run, "rows_clamped": n})

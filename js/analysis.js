@@ -626,8 +626,11 @@ Key drivers: ${(_m.keyDrivers||'n/a').slice(0,200)}${_macroMktLines}${_macroSect
 
 
   // ── News signals — compact tiered block ─────────────────────────────────────
-  // Tier 1: articles whose primary subject is a portfolio holding (high signal value)
-  // Tier 2: high-impact market-wide articles (impact ≥ 6.0, no holding as primary subject)
+  // Tier 1 (portfolio_direct): article's primary subject is a portfolio holding.
+  // Tier 2 (market_wide): category in {macro,geopolitics,sector,regulatory,merger}
+  // AND impact clears a floor (recency buys a lower floor, never a free pass).
+  // Client applies no further filtering — news_engine.get_news_brief() owns the
+  // actual thresholds (PROMPT_RELEVANCE_FIXES.md R3/R4); look there, not here.
   // Each article pre-formatted to ~15-20 tokens via the 'signal' field from the server.
   // Total budget: ~150 tokens vs ~3,500 tokens for the old separate API call approach.
   let newsOutlook = '';
