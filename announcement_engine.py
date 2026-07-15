@@ -1979,6 +1979,19 @@ def classify_announcement(
             except (TypeError, ValueError):
                 result["impact"] = cap
 
+            # NEWS_EVENT_MODEL_PLAN.md R7-A: relabel a routine filing out of
+            # the catch-all "Other" bucket so the eventual event-playbook
+            # taxonomy isn't 70% noise. Deliberately scoped to type=='Other'
+            # only — several admin patterns above also turn up under a real
+            # type (Dividend/Capital Raise) when the classifier keyed off PDF
+            # content the headline alone doesn't show, and that specific
+            # classification is worth keeping even though the filing is
+            # routine; only the "learned nothing, fell to the catch-all" case
+            # gets relabeled. price_sensitive is excluded for the same reason
+            # as the cap above — ASX's own flag outranks a keyword guess.
+            if not price_sensitive and (result.get("type") or "Other") == "Other":
+                result["type"] = "Admin"
+
     if price_sensitive and isinstance(result, dict):
         try:
             result["impact"] = max(float(result.get("impact", 5.0)), 5.0)

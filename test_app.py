@@ -13262,6 +13262,7 @@ class TestScoringFixes(unittest.TestCase):
         import news_engine as _ne
         news_prompt = _ne.OllamaLLM.CLASSIFY_PROMPT.format(
             title="t", content="c", tickers="BHP", context="", impact_rubric=rubric,
+            transmission_rubric=_core.transmission_rubric_text(),
         )
         self.assertIn(rubric, news_prompt)
 
@@ -13364,6 +13365,230 @@ class TestScoringFixes(unittest.TestCase):
         self.assertIn("max(_raw_impact, _kw_floor) if _kw_floor is not None else _raw_impact", src)
 
 
+class TestNewsClassificationFixes(unittest.TestCase):
+    """NEWS_CLASSIFICATION_FIXES.md C1-C3 — the transmission-channel test.
+
+    The old rubric told the model to score macro/geopolitics on "the magnitude
+    test alone", but every magnitude anchor it offered was financial, so the
+    model substituted casualty count. That inverted the scale: a Bangkok bar
+    fire scored 10.0 while the closure of the Strait of Hormuz scored 7.0 —
+    with WDS in the book.
+    """
+
+    def test_normalize_transmission_accepts_single_channel(self):
+        self.assertEqual(_core.normalize_transmission("oil_gas"), "oil_gas")
+        self.assertEqual(_core.normalize_transmission("OIL_GAS"), "oil_gas")
+        self.assertEqual(_core.normalize_transmission('"oil_gas"'), "oil_gas")
+
+    def test_normalize_transmission_accepts_multi_channel_answer(self):
+        """qwen3.5:9b mirrors the pipe-delimited vocabulary it is shown and
+        answers "oil_gas|shipping_supply_chain" for a strike on shipping — a
+        CORRECT multi-channel read. A strict membership test scored that as
+        unrecognised -> "no channel" -> capped the single best signal in the
+        live set down to 2.0. Verified against the real model, 2026-07-15."""
+        self.assertEqual(
+            _core.normalize_transmission("oil_gas|shipping_supply_chain"), "oil_gas")
+        self.assertEqual(
+            _core.normalize_transmission("shipping_supply_chain, oil_gas"), "shipping_supply_chain")
+        self.assertEqual(_core.normalize_transmission("oil_gas and gold"), "oil_gas")
+        # "none" must never win over a real channel that follows it
+        self.assertEqual(_core.normalize_transmission("none|oil_gas"), "oil_gas")
+
+    def test_normalize_transmission_unknown_or_missing_is_no_channel(self):
+        for bad in ("bogus", "", None, "none"):
+            self.assertEqual(_core.normalize_transmission(bad), _core.TRANSMISSION_NO_CHANNEL)
+
+    def test_impact_cap_no_transmission_caps_channelless_macro(self):
+        # The bar-fire case: category geopolitics, no channel -> capped.
+        self.assertEqual(
+            _core.impact_cap_no_transmission("geopolitics", "none"),
+            _core.NO_TRANSMISSION_IMPACT_CAP)
+        self.assertEqual(_core.impact_cap_no_transmission("macro", None),
+                         _core.NO_TRANSMISSION_IMPACT_CAP)
+        self.assertEqual(_core.impact_cap_no_transmission("geopolitics", "bogus"),
+                         _core.NO_TRANSMISSION_IMPACT_CAP)
+
+    def test_impact_cap_no_transmission_spares_channelled_macro(self):
+        # The Hormuz case: a real channel -> no opinion, keep the model's score.
+        self.assertIsNone(_core.impact_cap_no_transmission("geopolitics", "oil_gas"))
+        self.assertIsNone(
+            _core.impact_cap_no_transmission("geopolitics", "oil_gas|shipping_supply_chain"))
+
+    def test_impact_cap_no_transmission_ignores_non_macro_categories(self):
+        """A stock-specific article's relevance comes from primary_tickers, not
+        a macro channel — the cap must never touch it."""
+        for cat in ("earnings", "dividend", "merger", "sector", "other"):
+            self.assertIsNone(_core.impact_cap_no_transmission(cat, "none"))
+
+    def test_transmission_vocabulary_is_shared_with_the_prompt(self):
+        """The vocabulary the model may emit and the vocabulary the backstop
+        validates against must come from one constant, or they drift."""
+        rubric = _core.transmission_rubric_text()
+        for ch in _core.TRANSMISSION_CHANNELS:
+            self.assertIn(ch, rubric)
+        import news_engine as _ne
+        prompt = _ne.OllamaLLM.CLASSIFY_PROMPT.format(
+            title="t", content="c", tickers="BHP", context="",
+            impact_rubric=_core.impact_band_rubric_text(),
+            transmission_rubric=rubric,
+        )
+        self.assertIn(rubric, prompt)
+
+    def test_classify_prompt_states_casualties_are_not_magnitude(self):
+        """The one line that fixes the inverted scale — guard it explicitly."""
+        src = self._src("news_engine.py") if hasattr(self, "_src") else open(
+            os.path.join(ROOT, "news_engine.py"), encoding="utf-8").read()
+        self.assertIn("CASUALTY COUNTS ARE NOT MARKET MAGNITUDE", src)
+
+    def test_dead_is_portfolio_relevant_field_removed(self):
+        """Emitted by the prompt but consumed nowhere — portfolio_direct is
+        recomputed from primary_tickers at brief time."""
+        src = open(os.path.join(ROOT, "news_engine.py"), encoding="utf-8").read()
+        self.assertNotIn("is_portfolio_relevant", src)
+
+    # ── C5 (critics R5): per-category decay half-life ────────────────────────
+
+    def test_decay_half_life_orders_events_by_persistence(self):
+        """A war outlives a TA note. The absolute values past ~30d are cosmetic
+        inside a 3-day window; the ORDER is what changes the ranking."""
+        hl = _core.decay_half_life_for
+        self.assertLess(hl("technical"), hl("dividend"))
+        self.assertLess(hl("dividend"), hl("earnings"))
+        self.assertLess(hl("earnings"), hl("geopolitics"))
+        self.assertLess(hl("geopolitics"), hl("macro"))
+
+    def test_decay_half_life_unknown_category_keeps_flat_default(self):
+        """Must never make an unrecognised row decay slower than it does today."""
+        self.assertEqual(_core.decay_half_life_for("zzz"), _core.DECAY_HALF_LIFE_DEFAULT)
+        self.assertEqual(_core.decay_half_life_for(None), _core.DECAY_HALF_LIFE_DEFAULT)
+        self.assertEqual(_core.decay_half_life_for(""), _core.DECAY_HALF_LIFE_DEFAULT)
+        self.assertEqual(_core.decay_half_life_for("other"), _core.DECAY_HALF_LIFE_DEFAULT)
+
+    def test_decay_half_life_is_case_insensitive(self):
+        self.assertEqual(_core.decay_half_life_for("GeoPolitics"),
+                         _core.decay_half_life_for("geopolitics"))
+
+    def test_type_aware_decay_reranks_war_above_ta_noise(self):
+        """The concrete regression: at 3 days old a technical note at impact 8.0
+        used to outrank a geopolitics story at 6.0 on impact x decay."""
+        import news_engine as _ne
+        from datetime import datetime, timedelta
+        three_d = (datetime.utcnow() - timedelta(days=3)).isoformat()
+        geo = 6.0 * _ne.compute_decay(three_d, _core.decay_half_life_for("geopolitics"))
+        tech = 8.0 * _ne.compute_decay(three_d, _core.decay_half_life_for("technical"))
+        self.assertGreater(geo, tech)
+        # ...and under the old flat 3.0 half-life the order was inverted:
+        old_geo = 6.0 * _ne.compute_decay(three_d, 3.0)
+        old_tech = 8.0 * _ne.compute_decay(three_d, 3.0)
+        self.assertGreater(old_tech, old_geo)
+
+    def test_decay_refresh_loop_selects_category(self):
+        """The nightly refresh recomputes decay for every processed row — if it
+        doesn't read category it silently flattens every half-life back to 3.0
+        and undoes C5 entirely."""
+        src = open(os.path.join(ROOT, "news_engine.py"), encoding="utf-8").read()
+        self.assertIn("SELECT id, published_date, category FROM news_items", src)
+
+    # ── C6 (critics R4): channel → portfolio exposure annotation ─────────────
+
+    BOOK = ["WDS", "BHP", "FMG", "RIO", "SMR", "SGM", "CBA", "ANZ", "CHC", "WOW", "VAP"]
+
+    def test_exposure_commodity_channels_are_precise_not_sector_wide(self):
+        """Sector granularity produced confident falsehoods — "gold" -> Materials
+        -> FMG (pure iron ore, zero gold); "oil_gas" -> Energy -> SMR (met coal).
+        An annotation asserting a position is exposed when it isn't is worse than
+        no annotation. Commodity channels must resolve per-ticker."""
+        self.assertEqual(_core.exposed_holdings("oil_gas", self.BOOK), ["WDS"])
+        self.assertNotIn("SMR", _core.exposed_holdings("oil_gas", self.BOOK))
+        self.assertNotIn("WDS", _core.exposed_holdings("iron_ore_coal", self.BOOK))
+        self.assertNotIn("FMG", _core.exposed_holdings("gold", self.BOOK))
+
+    def test_exposure_iron_ore_coal_covers_miners_and_steel(self):
+        got = _core.exposed_holdings("iron_ore_coal", self.BOOK)
+        for t in ("BHP", "FMG", "RIO", "SMR", "SGM"):
+            self.assertIn(t, got)
+
+    def test_exposure_broad_channels_use_sector(self):
+        """rates_inflation genuinely IS a sector-level transmission."""
+        got = _core.exposed_holdings("rates_inflation", self.BOOK)
+        for t in ("CBA", "ANZ", "CHC"):
+            self.assertIn(t, got)
+        self.assertNotIn("WDS", got)
+
+    def test_exposure_aud_fx_deliberately_annotates_nothing(self):
+        """Touches every offshore earner — "exposed: <whole book>" is noise."""
+        self.assertEqual(_core.exposed_holdings("aud_fx", self.BOOK), [])
+
+    def test_exposure_empty_for_none_unknown_and_etfs(self):
+        self.assertEqual(_core.exposed_holdings("none", self.BOOK), [])
+        self.assertEqual(_core.exposed_holdings("bogus", self.BOOK), [])
+        self.assertEqual(_core.exposed_holdings(None, self.BOOK), [])
+        # A diversified ETF has no single sector/commodity — silence is correct.
+        self.assertEqual(_core.exposed_holdings("oil_gas", ["VAP", "VDHG"]), [])
+
+    def test_exposure_handles_ax_suffix_and_empty_book(self):
+        self.assertEqual(_core.exposed_holdings("oil_gas", ["WDS.AX"]), ["WDS"])
+        self.assertEqual(_core.exposed_holdings("oil_gas", []), [])
+        self.assertEqual(_core.exposed_holdings("oil_gas", None), [])
+
+    def test_previously_unmapped_holdings_now_in_sector_map(self):
+        """SMR (coal) was unmapped, so an iron_ore_coal story couldn't flag it."""
+        self.assertEqual(_core.SECTOR_MAP.get("SDF"), "Financials")
+        self.assertEqual(_core.SECTOR_MAP.get("SGM"), "Materials")
+        self.assertEqual(_core.SECTOR_MAP.get("SGP"), "REITs")
+        self.assertEqual(_core.SECTOR_MAP.get("SMR"), "Energy")  # matches CRN/WHC/YAL
+
+    # ── C4: incomplete classification must fail, not silently score 0.0 ──────
+
+    def test_validate_classification_rejects_missing_impact_score(self):
+        """The exact shape the local model truncates to — well-formed JSON that
+        just stops early. It is NOT None, so it used to sail past the N3
+        fallback trigger and land as a stored 0.0 (46% of the corpus)."""
+        import news_engine as _ne
+        truncated = {"summary": "Iran closed the strait.",
+                     "category": "geopolitics", "sentiment": "bearish"}
+        self.assertIsNone(_ne._validate_classification(truncated))
+
+    def test_validate_classification_accepts_complete_result(self):
+        import news_engine as _ne
+        good = {"summary": "s", "category": "geopolitics", "sentiment": "bearish",
+                "impact_score": 8.0, "transmission": "oil_gas"}
+        self.assertEqual(_ne._validate_classification(good), good)
+
+    def test_validate_classification_accepts_a_genuine_zero(self):
+        """A model that deliberately scores 0.0 is a judgement, not a failure —
+        only a MISSING field is a failure. Guards against conflating the two."""
+        import news_engine as _ne
+        zero = {"summary": "s", "category": "other", "sentiment": "neutral",
+                "impact_score": 0.0}
+        self.assertIsNotNone(_ne._validate_classification(zero))
+
+    def test_validate_classification_rejects_non_dict(self):
+        import news_engine as _ne
+        for bad in (None, "", [], "not json"):
+            self.assertIsNone(_ne._validate_classification(bad))
+
+    def test_all_three_providers_validate_before_returning(self):
+        """Ollama/Google/Groq share CLASSIFY_PROMPT, so all three can truncate —
+        each classify() must validate or the cloud fallback inherits the bug."""
+        src = open(os.path.join(ROOT, "news_engine.py"), encoding="utf-8").read()
+        self.assertEqual(src.count("_validate_classification("), 4)  # 1 def + 3 providers
+
+    def test_transmission_column_migrated_and_legacy_rows_left_null(self):
+        """C1 migration is additive; legacy rows stay NULL (user chose age-out
+        over rescore) so downstream must read NULL as "unknown", not "none"."""
+        import sqlite3 as _sq
+        import news_engine as _ne
+        conn = _sq.connect(":memory:")
+        conn.row_factory = _sq.Row
+        _ne.init_news_tables(conn)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(news_items)")]
+        self.assertIn("transmission", cols)
+        conn.execute("INSERT INTO news_items (id,url,title) VALUES ('1','u','t')")
+        self.assertIsNone(conn.execute("SELECT transmission FROM news_items").fetchone()[0])
+        conn.close()
+
+
 class TestPromptRelevanceFixes(unittest.TestCase):
     """PROMPT_RELEVANCE_FIXES.md R1-R7 — news + announcement relevance gating."""
 
@@ -13433,6 +13658,97 @@ class TestPromptRelevanceFixes(unittest.TestCase):
                 settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
             )
         self.assertEqual(r["impact"], 8.0)
+
+    # ── R7-A: apostrophe-agnostic matching + expanded admin patterns ────────
+
+    def test_is_admin_announcement_matches_straight_apostrophe(self):
+        self.assertTrue(_core.is_admin_announcement("Change of Director's Interest Notice"))
+
+    def test_is_admin_announcement_matches_curly_apostrophe(self):
+        self.assertTrue(_core.is_admin_announcement("Change of Director’s Interest Notice"))
+
+    def test_is_admin_announcement_matches_r7a_additions(self):
+        for headline in (
+            "Update - Notification of buy-back - ALL",
+            "Distribution Reinvestment Plan Issue Price Announcement",
+            "Distribution Tax Estimates",
+            "Estimated Distribution Announcement",
+            "Estimated Annual Distribution Component Information",
+            "Distribution Timetable Announcement",
+            "Outstanding ETF Securities and Fund Flows Announcement",
+            "Statement of Changes in Beneficial Ownership",
+            "Units on Issue Disclosure - June 2026",
+            "Statement of CDIs on issue - XYZ",
+            "Application for quotation of securities - JHX",
+            "Cleansing Notice",
+            "Change of CEO's Interest Notice",
+            "Appendix 4G",
+        ):
+            self.assertTrue(_core.is_admin_announcement(headline), f"expected admin match: {headline}")
+
+    def test_is_admin_announcement_does_not_match_appendix_4c(self):
+        # Appendix 4C/4D/4E are substantive quarterly/half-year financial
+        # reports — must never be swept in by a bare "appendix 4" pattern.
+        self.assertFalse(_core.is_admin_announcement("Appendix 4C - Quarterly Cashflow Report"))
+        self.assertFalse(_core.is_admin_announcement("Appendix 4D - Half Year Report"))
+        self.assertFalse(_core.is_admin_announcement("Appendix 4E - Preliminary Final Report"))
+
+    # ── R7-A: type relabel to "Admin", scoped to type=='Other' only ─────────
+
+    def test_classify_announcement_relabels_other_to_admin(self):
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Other", "sentiment": "neutral", "impact": 9.0,
+                          "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "RIO", "Notification of cessation of securities", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
+            )
+        self.assertEqual(r["type"], "Admin")
+
+    def test_classify_announcement_does_not_relabel_a_real_type(self):
+        # "Distribution Timetable Announcement" matches an admin pattern but
+        # the classifier assigned a real type here — the impact cap still
+        # applies, but the type label is left alone (R7-A scoping).
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Dividend", "sentiment": "neutral", "impact": 7.0,
+                          "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "STO", "Distribution Timetable Announcement", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
+            )
+        self.assertEqual(r["type"], "Dividend")
+        self.assertEqual(r["impact"], 3.0)
+
+    def test_classify_announcement_ps_admin_filing_keeps_its_type(self):
+        # ASX's PS flag outranks the keyword guess for type too, mirroring
+        # the impact-cap ordering — a PS-flagged filing is never relabeled.
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Other", "sentiment": "neutral", "impact": 2.0,
+                          "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "RIO", "Notification of cessation of securities", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=True,
+            )
+        self.assertEqual(r["type"], "Other")
+
+    def test_classify_announcement_non_admin_type_unaffected(self):
+        with mock.patch.object(
+            _ann_engine, "_classify_keyword",
+            return_value={"type": "Other", "sentiment": "positive", "impact": 6.0,
+                          "summary": "x", "tags": []},
+        ):
+            r = _ann_engine.classify_announcement(
+                "RIO", "Q2 production results", "text",
+                settings={"ann_llm_provider": "keyword"}, price_sensitive=False,
+            )
+        self.assertEqual(r["type"], "Other")
+        self.assertEqual(r["impact"], 6.0)
 
     # ── R1: get_ann_brief admits only PS or impact-floor-clearing rows ──────
 
@@ -13552,20 +13868,51 @@ class TestPromptRelevanceFixes(unittest.TestCase):
         with mock.patch.object(_ann_routes, "DB_PATH", db_path):
             r = self.client.post("/api/announcements/backfill-admin-cap", json={"dry_run": True})
             self.assertEqual(r.status_code, 200)
-            self.assertGreaterEqual(r.get_json()["rows_capped"], 1)
+            body = r.get_json()
+            self.assertGreaterEqual(body["rows_capped"], 1)
+            self.assertGreaterEqual(body["rows_retyped"], 1)
             with _ann_engine.get_db(db_path) as conn:
-                still_bad = conn.execute(
-                    "SELECT impact FROM announcements WHERE id='legacy1'"
-                ).fetchone()["impact"]
-            self.assertEqual(still_bad, 9.0)  # dry-run must not write
+                row = conn.execute(
+                    "SELECT impact, type FROM announcements WHERE id='legacy1'"
+                ).fetchone()
+            self.assertEqual(row["impact"], 9.0)  # dry-run must not write
+            self.assertEqual(row["type"], "Other")
 
             r2 = self.client.post("/api/announcements/backfill-admin-cap", json={"dry_run": False})
             self.assertEqual(r2.status_code, 200)
             with _ann_engine.get_db(db_path) as conn:
-                fixed = conn.execute(
-                    "SELECT impact FROM announcements WHERE id='legacy1'"
-                ).fetchone()["impact"]
-            self.assertEqual(fixed, 3.0)
+                row = conn.execute(
+                    "SELECT impact, type FROM announcements WHERE id='legacy1'"
+                ).fetchone()
+            self.assertEqual(row["impact"], 3.0)
+            self.assertEqual(row["type"], "Admin")
+
+    def test_announcement_backfill_admin_cap_does_not_retype_real_type(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
+        db_path = Path(tmpdir) / "ann_backfill_test2.db"
+        _ann_engine.init_db(db_path)
+        with _ann_engine.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO announcements
+                       (id, ticker, date, headline, pdf_url, doc_key, pdf_text, type,
+                        sentiment, impact, price_sensitive, summary, tags, llm_model,
+                        details, processed, fetched_at)
+                   VALUES ('legacy2', 'STO', '2026-07-01', 'Distribution Timetable Announcement',
+                           '', '', '', 'Dividend', 'neutral', 7.0, 0, '', '[]', '', '', 1, '2026-07-01')"""
+            )
+
+        import announcement_routes as _ann_routes
+        with mock.patch.object(_ann_routes, "DB_PATH", db_path):
+            r = self.client.post("/api/announcements/backfill-admin-cap", json={"dry_run": False})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.get_json()["rows_retyped"], 0)
+            with _ann_engine.get_db(db_path) as conn:
+                row = conn.execute(
+                    "SELECT impact, type FROM announcements WHERE id='legacy2'"
+                ).fetchone()
+            self.assertEqual(row["impact"], 3.0)   # cap still applies
+            self.assertEqual(row["type"], "Dividend")  # type left alone
 
     # ── R3/R4: news brief tier floors + category gate ────────────────────────
 
@@ -13662,6 +14009,14 @@ class TestPromptRelevanceFixes(unittest.TestCase):
             src = f.read()
         self.assertIn("news_engine.get_news_brief() owns the", src)
         self.assertNotIn("impact ≥ 6.0", src)
+
+    # ── R7-A: 'Admin' wired into the announcements page's type UI ───────────
+
+    def test_announcements_js_recognises_admin_type(self):
+        with open(os.path.join(ROOT, "js", "pages", "announcements.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("'Admin':", src)
+        self.assertIn("'Admin', 'Other'", src)  # ANN_TYPES filter dropdown
 
 
 if __name__ == "__main__":

@@ -14,12 +14,13 @@ const ANN_TYPE_COLORS = {
   'Trading Halt':     '#ef4444',
   'Asset Sale':       '#d97706',
   'Guidance Update':  '#0891b2',
+  'Admin':            '#94a3b8',
   'Other':            '#6b7280',
 };
 
 const ANN_TYPES = [
   'All', 'Earnings', 'Dividend', 'Capital Raise', 'CEO Change',
-  'Acquisition', 'AGM', 'Trading Halt', 'Asset Sale', 'Guidance Update', 'Other',
+  'Acquisition', 'AGM', 'Trading Halt', 'Asset Sale', 'Guidance Update', 'Admin', 'Other',
 ];
 
 // ── Impact border colour ──────────────────────────────────────

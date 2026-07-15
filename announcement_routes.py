@@ -156,7 +156,14 @@ def backfill_admin_cap():
     and get_market_sentiment's aggregate — genuinely optional cleanup, not a
     blocker (rows age out of the days=3 prompt window regardless).
 
-    Body: {"dry_run": true|false}. Dry-run (default) returns the count that
+    Also relabels stored type='Other' rows to 'Admin' when they match an
+    admin pattern (NEWS_EVENT_MODEL_PLAN.md R7-A) — the same scoping as the
+    live classify_announcement() path: never touches a row already carrying
+    a specific non-Other type, since a handful of admin-pattern headlines do
+    legitimately carry a real Dividend/Capital Raise classification from PDF
+    content the headline alone doesn't show.
+
+    Body: {"dry_run": true|false}. Dry-run (default) returns the counts that
     WOULD change without writing. price_sensitive rows are never touched —
     the PS floor outranks the admin cap (same ordering as R2's live path).
     """
@@ -165,18 +172,30 @@ def backfill_admin_cap():
 
     with ae.get_db(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT id, headline, summary, impact FROM announcements WHERE price_sensitive = 0"
+            "SELECT id, headline, summary, impact, type FROM announcements WHERE price_sensitive = 0"
         ).fetchall()
-        updates = []
+        impact_updates = []
+        type_updates = []
         for row in rows:
             cap = ae.impact_cap_for_admin(f"{row['headline'] or ''} {row['summary'] or ''}")
-            if cap is not None and (row['impact'] or 0) > cap:
-                updates.append((cap, row['id']))
-        if not dry_run and updates:
-            conn.executemany("UPDATE announcements SET impact = ? WHERE id = ?", updates)
+            if cap is None:
+                continue
+            if (row['impact'] or 0) > cap:
+                impact_updates.append((cap, row['id']))
+            if (row['type'] or 'Other') == 'Other':
+                type_updates.append((row['id'],))
+        if not dry_run:
+            if impact_updates:
+                conn.executemany("UPDATE announcements SET impact = ? WHERE id = ?", impact_updates)
+            if type_updates:
+                conn.executemany("UPDATE announcements SET type = 'Admin' WHERE id = ?", type_updates)
             conn.commit()
 
-    return jsonify({"ok": True, "dry_run": dry_run, "rows_capped": len(updates)})
+    return jsonify({
+        "ok": True, "dry_run": dry_run,
+        "rows_capped": len(impact_updates),
+        "rows_retyped": len(type_updates),
+    })
 
 
 @ann_bp.route('/sync/stop', methods=['POST'])

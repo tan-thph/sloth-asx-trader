@@ -7,6 +7,7 @@ no Flask, no DB writes at import time.
 """
 
 import logging
+import re
 import threading
 import time
 from logging.handlers import RotatingFileHandler
@@ -342,6 +343,229 @@ def impact_floor_for_keywords(text: str) -> float | None:
     return None
 
 
+# ── Market-transmission channels (NEWS_CLASSIFICATION_FIXES.md C1) ───────────
+# The channels by which a macro/geopolitical event can actually move a price an
+# ASX investor pays or receives. The old rubric told the model to score
+# macro/geopolitics on "the magnitude test alone", but every magnitude anchor it
+# offered was financial (earnings >5%, deal >$500M, index >2%) and none of those
+# fit a conflict story — so the model substituted the only magnitude such an
+# article carries: the casualty count. That inverted the scale against market
+# impact (a bar fire scored 10.0; the closure of the Strait of Hormuz scored
+# 7.0, while the book holds WDS). Requiring a NAMED channel replaces "how big is
+# this event" with "how does this reach a price".
+TRANSMISSION_CHANNELS: tuple[str, ...] = (
+    "oil_gas",       # crude/LNG supply, OPEC, shipping lanes → WDS, STO
+    "iron_ore_coal", # China steel demand, supply disruption → BHP, RIO, FMG
+    "gold",          # safe-haven bid, central-bank buying → NST, EVN
+    "base_metals",   # copper/nickel/lithium demand + supply
+    "agriculture",   # grain/livestock export flows
+    "aud_fx",        # AUD/USD moves — translates every offshore earner
+    "rates_inflation",  # RBA/Fed policy, CPI → banks, REITs, growth multiples
+    "trade_policy",  # tariffs/sanctions/quotas touching AU export or import flows
+    "shipping_supply_chain",  # freight rates, port/canal/strait closures
+    "none",          # no plausible channel — NOT market news
+)
+
+TRANSMISSION_NO_CHANNEL = "none"
+
+# Impact ceiling for a macro/geopolitics article with no transmission channel.
+# Matches the "AGM / Admin / Broad Commentary / Other" band ceiling — a world
+# event that cannot reach a price is, to this book, broad commentary.
+NO_TRANSMISSION_IMPACT_CAP = 2.0
+
+
+# ── Per-category decay half-lives (NEWS_CLASSIFICATION_FIXES.md C5 / critics R5) ──
+# Different events stay relevant for different lengths of time: a factory fire is
+# stale in days, a rate cycle matters for months. compute_decay() has taken a
+# `half_life_days` parameter since it was written, but BOTH call sites used the
+# 3.0 default — so a war and a TA puff piece decayed identically, and the
+# impact×decay ranking that picks the market_wide tier treated them the same.
+#
+# WINDOW CAVEAT: get_news_brief reads a 2-3 day window, where decay spans
+# 1.0 → ~0.5 (3d half-life) vs 1.0 → ~0.98 (90d). Anything past ~30 days is
+# therefore functionally "does not decay in-window" and the exact value is
+# cosmetic — 90 vs 180 is 0.977 vs 0.989 at 3 days old. The values below express
+# intent (and survive a wider window later); what actually bites is the ORDER:
+# technical/analyst < operational/sector/dividend < earnings/merger < macro/geopolitics.
+DECAY_HALF_LIFE_DAYS: dict[str, float] = {
+    "technical":   2.0,    # "52-week high!" — stale on arrival
+    "analyst":     3.0,    # opinion/ratings churn
+    "other":       3.0,    # catch-all; matches the previous flat default
+    "operational": 7.0,
+    "sector":     14.0,
+    "dividend":   14.0,
+    "earnings":   30.0,
+    "merger":     30.0,
+    "regulatory": 45.0,
+    "geopolitics": 90.0,   # a war is still the story three months on
+    "macro":     180.0,    # a rate cycle sets the regime for half a year
+}
+
+DECAY_HALF_LIFE_DEFAULT = 3.0  # unchanged from the old flat behaviour
+
+
+def decay_half_life_for(category: str | None) -> float:
+    """Half-life in days for a news category. Unknown/missing category keeps the
+    historical flat 3.0, so this can never make an unrecognised row decay slower
+    than it does today."""
+    return DECAY_HALF_LIFE_DAYS.get((category or "").strip().lower(),
+                                    DECAY_HALF_LIFE_DEFAULT)
+
+
+# ── Channel → portfolio exposure (critics R4, annotation form) ────────────────
+# "Who owns this risk?" — name the holdings a transmission channel actually
+# reaches, so a macro/geopolitics line reads "Hormuz closed … [exposed: WDS]".
+#
+# Deliberately an ANNOTATION, not a filter. A 26-ticker book spanning Materials,
+# Energy, Financials, Healthcare and REITs matches almost every channel, so
+# filtering on exposure would discriminate almost nothing — but telling the
+# reader WHICH holdings a channel reaches is real context.
+#
+# TWO resolutions, because sector is the wrong grain for a commodity:
+#
+#   Commodity channels (oil_gas/iron_ore_coal/gold/base_metals) use the EXPLICIT
+#   per-ticker map below. Sector-level mapping was tried first and produced
+#   confident falsehoods — "gold" → Materials → FMG (pure iron ore, zero gold),
+#   "oil_gas" → Energy → SMR (met coal, not oil). An annotation that asserts a
+#   position is exposed when it isn't is worse than no annotation, because the
+#   reader has no way to audit it.
+#
+#   Broad channels (rates_inflation/agriculture/trade_policy/shipping) use
+#   SECTOR_MAP, where sector genuinely IS the transmission grain — a rate move
+#   reaches Financials and REITs as sectors, not via any one company's assets.
+#
+# aud_fx maps to NOTHING on purpose: it touches every offshore earner and every
+# USD-revenue miner, so "exposed: <the whole book>" is noise pretending to be
+# signal. Better to say nothing than to say everything.
+
+# ASX resource names → the commodity channels they actually carry. Bounded and
+# slow-moving; a ticker absent here simply gets no commodity annotation, which
+# is the correct failure direction (silence, not a false claim).
+TICKER_COMMODITY_EXPOSURE: dict[str, frozenset[str]] = {
+    # Diversified majors
+    "BHP": frozenset({"iron_ore_coal", "base_metals"}),
+    "RIO": frozenset({"iron_ore_coal", "base_metals"}),
+    "S32": frozenset({"base_metals", "iron_ore_coal"}),
+    "MIN": frozenset({"iron_ore_coal", "base_metals"}),
+    # Iron ore pure-plays
+    "FMG": frozenset({"iron_ore_coal"}),
+    "MGX": frozenset({"iron_ore_coal"}),
+    # Coal
+    "SMR": frozenset({"iron_ore_coal"}),
+    "WHC": frozenset({"iron_ore_coal"}),
+    "NHC": frozenset({"iron_ore_coal"}),
+    "YAL": frozenset({"iron_ore_coal"}),
+    "CRN": frozenset({"iron_ore_coal"}),
+    # Steel / scrap — levered to steel demand, i.e. the iron-ore complex
+    "SGM": frozenset({"iron_ore_coal"}),
+    "BSL": frozenset({"iron_ore_coal"}),
+    # Oil & gas
+    "WDS": frozenset({"oil_gas"}),
+    "STO": frozenset({"oil_gas"}),
+    "BPT": frozenset({"oil_gas"}),
+    "KAR": frozenset({"oil_gas"}),
+    "ORG": frozenset({"oil_gas"}),
+    # Gold
+    "NST": frozenset({"gold"}),
+    "EVN": frozenset({"gold"}),
+    "CMM": frozenset({"gold"}),
+    "RRL": frozenset({"gold"}),
+    "PRU": frozenset({"gold"}),
+    "GOR": frozenset({"gold"}),
+    "RMS": frozenset({"gold"}),
+    # Base metals / lithium
+    "IGO": frozenset({"base_metals"}),
+    "PLS": frozenset({"base_metals"}),
+    "SFR": frozenset({"base_metals"}),
+    "OZL": frozenset({"base_metals"}),
+    "LYC": frozenset({"base_metals"}),
+    "AKE": frozenset({"base_metals"}),
+}
+
+_COMMODITY_CHANNELS = frozenset({"oil_gas", "iron_ore_coal", "gold", "base_metals"})
+
+# Broad channels only — where a SECTOR is the honest unit of transmission.
+CHANNEL_EXPOSURE_SECTORS: dict[str, frozenset[str]] = {
+    "agriculture":           frozenset({"Consumer Staples"}),
+    "rates_inflation":       frozenset({"Financials", "REITs"}),
+    "trade_policy":          frozenset({"Materials", "Energy"}),  # AU export flows
+    "shipping_supply_chain": frozenset({"Materials", "Energy", "Consumer Discretionary"}),
+    "aud_fx":                frozenset(),   # too broad to be useful — see note above
+    "none":                  frozenset(),
+}
+
+
+def exposed_holdings(channel: str | None, portfolio_tickers) -> list[str]:
+    """Holdings reached by `channel`, sorted for stable output.
+
+    Commodity channels resolve via TICKER_COMMODITY_EXPOSURE (precise); broad
+    channels via SECTOR_MAP. Returns [] for unknown/none/aud_fx, or when nothing
+    in the book is exposed. Tickers in neither map yield no annotation — correct
+    for the diversified ETFs (VAP/VDHG/VHY/VLC/VVLU/HBRD), which have no single
+    sector or commodity.
+    """
+    ch = (channel or "").strip().lower()
+    tickers = [str(t).upper().replace(".AX", "") for t in (portfolio_tickers or [])]
+
+    if ch in _COMMODITY_CHANNELS:
+        return sorted(t for t in tickers
+                      if ch in TICKER_COMMODITY_EXPOSURE.get(t, frozenset()))
+
+    sectors = CHANNEL_EXPOSURE_SECTORS.get(ch)
+    if not sectors:
+        return []
+    return sorted(t for t in tickers if SECTOR_MAP.get(t) in sectors)
+
+
+def transmission_rubric_text() -> str:
+    """Render TRANSMISSION_CHANNELS as prompt-ready text. Embedded in
+    news_engine's CLASSIFY_PROMPT so the vocabulary the model may emit and the
+    vocabulary the backstop validates against can never drift apart."""
+    return " | ".join(TRANSMISSION_CHANNELS)
+
+
+def normalize_transmission(raw: str | None) -> str:
+    """Reduce a model's transmission answer to ONE canonical channel, or
+    TRANSMISSION_NO_CHANNEL when nothing valid is named.
+
+    Lenient by necessity: the vocabulary is shown to the model pipe-delimited,
+    which reliably teaches it to answer in kind — qwen3.5:9b returns
+    "oil_gas|shipping_supply_chain" for a strike on shipping, which is a
+    genuinely CORRECT multi-channel read. A strict `in TRANSMISSION_CHANNELS`
+    membership test scored that as unrecognised → "no channel" → capped the
+    single best signal in the set down to 2.0. Splitting and taking the first
+    recognised channel keeps that article. Unknown/absent → no channel.
+    """
+    if not raw:
+        return TRANSMISSION_NO_CHANNEL
+    for part in re.split(r"[|,/;+&]| and ", str(raw).lower()):
+        part = part.strip().strip("\"' ")
+        if part in TRANSMISSION_CHANNELS and part != TRANSMISSION_NO_CHANNEL:
+            return part
+    return TRANSMISSION_NO_CHANNEL
+
+
+def impact_cap_no_transmission(category: str, transmission: str | None) -> float | None:
+    """Deterministic backstop (NEWS_CLASSIFICATION_FIXES.md C2) mirroring
+    impact_cap_for_admin: a macro/geopolitics article whose own declared
+    transmission channel is "none" (or absent, or unrecognised) cannot reach an
+    ASX price, so cap it to NO_TRANSMISSION_IMPACT_CAP regardless of the score
+    the model emitted. Returns None (no opinion) for every other category — a
+    stock-specific article's relevance is already established by its
+    primary_tickers, not by a macro channel.
+
+    Note this backstops the model's own STRUCTURED output rather than
+    keyword-matching the text: "Iran says Strait of Hormuz closed" contains no
+    commodity word at all, so pattern-matching the headline would drop exactly
+    the article that matters most.
+    """
+    if (category or "").lower() not in ("macro", "geopolitics"):
+        return None
+    if normalize_transmission(transmission) != TRANSMISSION_NO_CHANNEL:
+        return None
+    return NO_TRANSMISSION_IMPACT_CAP
+
+
 # ── Admin/registry filing patterns (PROMPT_RELEVANCE_FIXES.md R1/R2) ─────────
 # ASX-mandated administrative notices with no trading implication. Shared
 # between announcement_engine.py (R1: brief-time admission gate) and
@@ -356,15 +580,53 @@ _ADMIN_ANN_PATTERNS: tuple[str, ...] = (
     "notice of annual general meeting",
     "change of address",
     "director interest notice",
+    "director's interest notice",
     "appendix 3",
     "appendix 2a",
+    # NEWS_EVENT_MODEL_PLAN.md R7-A additions (2026-07-15) — the original 10
+    # patterns above only caught 84/163 (51%) of the live corpus's "Other"
+    # rows, well short of the plan's "largely" claim. Each addition below was
+    # checked against every non-Other-typed row in the live DB before
+    # inclusion: several DO also appear under a real type (e.g. "Distribution
+    # Timetable Announcement" sometimes lands as Dividend, "Application for
+    # quotation of securities" sometimes as Capital Raise) because the
+    # classifier keys off PDF content the headline alone doesn't show — but
+    # the underlying filing is routine/administrative regardless of which
+    # type it got sorted into, so the impact cap below is still correct to
+    # apply. The TYPE relabel in classify_announcement() is deliberately
+    # scoped to type=='Other' only, so it never overwrites one of those real
+    # classifications — see the comment there.
+    "notification of buy-back",
+    "distribution reinvestment plan",
+    "distribution tax estimate",
+    "estimated distribution",
+    "distribution component",       # catches "...Component Information" the plain
+                                     # "estimated distribution" substring misses
+                                     # when "annual" is inserted between the words
+    "distribution timetable",
+    "fund flows announcement",
+    "statement of changes in beneficial ownership",
+    "units on issue disclosure",
+    "statement of cdis on issue",
+    "quotation of securities",
+    "cleansing notice",
+    "ceo's interest notice",        # same ASX Listing Rule 3.19A family as the
+                                     # director's-interest-notice patterns above
+    "appendix 4g",                  # Corporate Governance Compliance Statement —
+                                     # administrative. NOT a bare "appendix 4": 4C/
+                                     # 4D/4E are substantive financial disclosures
+                                     # and must never be caught by this list.
 )
 
 
 def is_admin_announcement(text: str) -> bool:
     """True when `text` (typically the announcement headline) matches one of
-    the routine-registry-filing patterns in _ADMIN_ANN_PATTERNS."""
-    t = text.lower()
+    the routine-registry-filing patterns in _ADMIN_ANN_PATTERNS. Normalises a
+    curly apostrophe (common in PDF-extracted text) to a straight one first so
+    "Director's Interest Notice" matches regardless of which one the source
+    used — a straight-quote-only pattern silently missed 7 director-notice
+    rows in the live corpus before this normalisation was added."""
+    t = text.lower().replace("’", "'")
     return any(kw in t for kw in _ADMIN_ANN_PATTERNS)
 
 
@@ -389,6 +651,7 @@ SECTOR_MAP: dict[str, str] = {
         "CBA","WBC","ANZ","NAB","MQG","QBE","SUN","IAG","AMP","CGF",
         "HUB","PPT","PTM","MFG","CIN","EQT","ASX","IFL","AUB","GQG",
         "NWL","APE","JHG","PDL","SFG","AFG","CCP","OFX","MRM","WGB",
+        "SDF",   # Steadfast — insurance broker (was unmapped; held)
     ]},
     # Materials / Mining
     **{t: "Materials" for t in [
@@ -396,11 +659,13 @@ SECTOR_MAP: dict[str, str] = {
         "AWC","BSL","JHX","BLD","CSR","RWC","ILU","PLS","WHC","NHC",
         "YAL","CMM","RRL","PRU","SAR","OZL","MGX","SBM","WAF","RED",
         "DEG","GOR","AKE","CRN","TBN","CHN","RSG","MML","IPX","DDH",
+        "SGM",   # Sims — metal recycling (was unmapped; held)
     ]},
     # Energy
     **{t: "Energy" for t in [
         "WDS","STO","ORG","BPT","KAR","IPL","ORI","CEG","BOE","NHC",
         "WHC","YAL","CRN",
+        "SMR",   # Stanmore — met coal; Energy to match CRN/WHC/YAL (was unmapped; held)
     ]},
     # Healthcare
     **{t: "Healthcare" for t in [
@@ -421,6 +686,7 @@ SECTOR_MAP: dict[str, str] = {
     **{t: "REITs" for t in [
         "GMG","SCG","VCX","MGR","DXS","CHC","ARF","CIP","NSR","ABP",
         "BWP","HDN","CLW","GDI","HPI","360","LIC","WPR","RGN","AEF",
+        "SGP",   # Stockland — diversified property (was unmapped; held)
     ]},
     # Industrials / Infrastructure
     **{t: "Industrials" for t in [

@@ -27,7 +27,16 @@ from pathlib import Path
 
 import requests
 
-from core import classify_llm_http_error, impact_band_rubric_text, impact_floor_for_keywords
+from core import (
+    classify_llm_http_error,
+    decay_half_life_for,
+    exposed_holdings,
+    impact_band_rubric_text,
+    impact_cap_no_transmission,
+    impact_floor_for_keywords,
+    normalize_transmission,
+    transmission_rubric_text,
+)
 
 log = logging.getLogger("news_engine")
 
@@ -344,6 +353,15 @@ def init_news_tables(conn: sqlite3.Connection):
     # terminal-state tracking for articles the LLM can never classify).
     try:
         conn.execute("ALTER TABLE news_items ADD COLUMN attempts INTEGER DEFAULT 0")
+    except Exception:
+        pass  # column already exists
+    # C1: market-transmission channel for macro/geopolitics articles. NULL on
+    # every legacy row — deliberately NOT backfilled: the brief reads a 3-day
+    # window, so old body-count scores age out on their own rather than being
+    # rescored (user decision, 2026-07-15). Downstream must treat NULL as
+    # "unknown", never as "no channel".
+    try:
+        conn.execute("ALTER TABLE news_items ADD COLUMN transmission TEXT")
     except Exception:
         pass  # column already exists
     conn.commit()
@@ -745,6 +763,34 @@ def _sized_num_ctx(prompt_len: int, num_predict: int, cpu_mode: bool, has_contex
     return min(8192, max(base, est_prompt_tokens + num_predict + 128))
 
 
+def _validate_classification(result: dict | None) -> dict | None:
+    """C4: reject a structurally incomplete classification so it counts as a
+    FAILURE rather than a silent zero.
+
+    The local model frequently emits a well-formed JSON object that simply stops
+    early — {"summary":…, "category":…, "sentiment":…} with no impact_score. That
+    dict is not None, so it sailed past the N3 cloud-fallback trigger
+    (`if result is None`, :1732) and reached _safe_float(missing) → 0.0, which is
+    then stored and read downstream as if the model had judged the article
+    worthless. Measured 2026-07-15: 484/1048 processed articles (46%) sat at
+    impact_score 0/NULL from exactly this path, and the failure is
+    non-deterministic — the same article/model/prompt scored 7.0 on a re-run. So
+    returning None here lets the existing retry + fallback machinery have another
+    go, which is all these articles ever needed.
+
+    Only impact_score is required: it is the field every downstream floor gates
+    on, and the one the truncation actually drops. category/sentiment survive the
+    truncation and have safe defaults; demanding them too would reject usable rows.
+    """
+    if not isinstance(result, dict):
+        return None
+    if result.get("impact_score") is None:
+        log.debug("classification incomplete (no impact_score) — treating as failure: %s",
+                  list(result.keys()))
+        return None
+    return result
+
+
 def _headline_fallback_classification(title: str, content: str,
                                        portfolio_tickers: list[str]) -> dict:
     """Deterministic, LLM-free classification for articles too thin or too
@@ -911,28 +957,67 @@ def _fetch_ticker_context(ticker: str) -> str:
 # ── Ollama LLM ────────────────────────────────────────────────────────────────
 
 class OllamaLLM:
+    # Structure matters as much as content here (C1). The scoring rules live
+    # ABOVE the JSON template as numbered prose, and the template itself is kept
+    # terse. An earlier revision inlined the transmission rules inside the JSON
+    # spec and qwen3.5:9b began emitting hallucinated keys and truncated objects
+    # — a 9B model cannot follow a dense instruction wall while simultaneously
+    # generating valid JSON. Same lesson as SCORING_FIXES X1/S2: small models do
+    # selection reliably, but only when the choice is presented cleanly.
     CLASSIFY_PROMPT = """\
 You are a financial news analyst for Australian stocks (ASX).
-Analyse the article below and respond with ONLY valid JSON — no markdown fences, no extra text.
 
 Title: {title}
 Content: {content}
 Portfolio tickers: {tickers}
 {context}
-Required JSON (fill ALL fields):
+HOW TO SCORE impact_score (read fully, then answer):
+
+STEP 1 — Commentary test. If this is opinion/commentary/a question with NO new
+company data ('should I buy X?', 'top stocks for 2025', listicles), transmission
+"none" and set impact_score to 0.5-2.0 and stop.
+
+STEP 2 — Transmission test. Applies ONLY when category is macro or geopolitics.
+Name the channel by which this event reaches a price an ASX investor pays or
+receives. Ask "which price does this move?", NOT "how dramatic is this event".
+  oil_gas               crude/LNG supply, OPEC, refineries
+  iron_ore_coal         China steel demand, mine or port disruption
+  gold                  safe-haven bid, central-bank buying
+  base_metals           copper/nickel/lithium supply or demand
+  agriculture           grain/livestock export flows
+  aud_fx                moves the AUD
+  rates_inflation       RBA/Fed policy, CPI, bond yields
+  trade_policy          tariffs/sanctions/quotas on AU trade flows
+  shipping_supply_chain freight rates, port/canal/strait closures
+  none                  no such link
+A war that closes a shipping lane moves oil. A tariff on Australian exports moves
+trade_policy. A tragedy, crime, court case, accident or human-interest story has
+NO channel — that is "none", however many people it affects.
+If the channel is "none", set impact_score to 0.5-2.0 and stop.
+CASUALTY COUNTS ARE NOT MARKET MAGNITUDE. A fire killing 30 people with no
+channel scores 1.0. A strait closure that kills nobody but halts oil shipments
+scores 8.0. Score the PRICE move, never the drama.
+
+STEP 3 — Band lookup. Pick the ONE row matching the event (a lookup, not
+arithmetic — never add, subtract or sum):
+{impact_rubric}
+Pick a value inside that row's range: TOP if a portfolio ticker is the PRIMARY
+subject AND a specific large figure is cited (earnings >5%, deal >$500M, dividend
+cut >20%, index move >2%); BOTTOM if the ticker is only mentioned in passing or in
+an index list; otherwise MIDDLE.
+For macro/geopolitics rows, skip the primary-subject test (broad market relevance is the point, not a penalty) —
+pick TOP vs MIDDLE by how large a move the STEP 2 transmission channel implies for ASX prices.
+
+Respond with ONLY valid JSON — no markdown fences, no extra text, no extra keys:
 {{"summary":"2-3 sentence factual summary",\
 "category":"earnings|regulatory|macro|sector|dividend|analyst|merger|technical|geopolitics|other",\
 "sentiment":"bullish|bearish|neutral",\
 "sentiment_score":<float -1.0 to 1.0>,\
-"impact_score":<float 0.0-10.0; score the REAL PORTFOLIO IMPACT using this rubric — \
-STEP 1 — article type: if this is commentary/opinion/question with NO new company data (e.g. 'should I buy X?', 'top stocks for 2025', listicles), set score to 0.5-2.0 and stop; \
-STEP 2 — pick the ONE row below that best matches the event (a lookup, not arithmetic):
-{impact_rubric}
-Then choose a value WITHIN that row's range: the TOP of the range if a portfolio ticker is the PRIMARY subject AND a specific large figure is cited (earnings change >5%, deal >$500M, dividend cut >20%, market-wide index move >2%); the BOTTOM if the ticker is only mentioned in passing or as part of an index list; otherwise the MIDDLE of the range. For macro/geopolitics rows, skip the primary-subject test (broad market relevance is the point, not a penalty) — use the magnitude test alone to pick top vs middle. Do not add, subtract, or sum anything — one row, one value from within it>,\
-"primary_tickers":<ASX codes that are the MAIN SUBJECT — e.g. ["CBA"] for a CBA earnings article; [] for broad-market articles>,\
+"transmission":"<one of: {transmission_rubric}>",\
+"impact_score":<float 0.0-10.0>,\
+"primary_tickers":<ASX codes that are the MAIN SUBJECT — ["CBA"] for a CBA earnings article; [] for broad-market articles>,\
 "mentioned_tickers":<ALL other ASX codes referenced in passing>,\
-"tags":<list of 2-5 keyword tags>,\
-"is_portfolio_relevant":<true only if a primary_tickers code appears in the portfolio list above>}}"""
+"tags":<list of 2-5 keyword tags>}}"""
 
     def __init__(self, model: str = "", base_url: str = "http://localhost:11434"):
         self.model = model
@@ -1035,6 +1120,7 @@ Then choose a value WITHIN that row's range: the TOP of the range if a portfolio
             tickers=ticker_str,
             context=context_block,
             impact_rubric=impact_band_rubric_text(),
+            transmission_rubric=transmission_rubric_text(),
         )
         # For thinking models (qwen3/qwq/deepseek-r1 etc.), prepend /no_think to
         # disable chain-of-thought. Without it, the reasoning pass consumes most of
@@ -1191,7 +1277,7 @@ Then choose a value WITHIN that row's range: the TOP of the range if a portfolio
         result = _robust_json_parse(raw)
         if result is None:
             log.debug("LLM JSON parse failed after repair | raw=%s", raw[:300])
-        return result
+        return _validate_classification(result)
 
 
 class GoogleLLM:
@@ -1277,6 +1363,7 @@ class GoogleLLM:
             tickers=ticker_str,
             context=context_block,
             impact_rubric=impact_band_rubric_text(),
+            transmission_rubric=transmission_rubric_text(),
         )
         try:
             resp = requests.post(
@@ -1301,7 +1388,7 @@ class GoogleLLM:
             raw = re.sub(r"```(?:json)?\s*", "", raw)
             raw = re.sub(r"```", "", raw).strip()
             raw = _extract_json_object(raw)
-            return _robust_json_parse(raw)
+            return _validate_classification(_robust_json_parse(raw))
         except Exception as exc:
             log.debug("GoogleLLM classify failed: %s", exc)
             return None
@@ -1369,6 +1456,7 @@ class GroqLLM:
             tickers=ticker_str,
             context=context_block,
             impact_rubric=impact_band_rubric_text(),
+            transmission_rubric=transmission_rubric_text(),
         )
         try:
             resp = requests.post(
@@ -1397,7 +1485,7 @@ class GroqLLM:
             raw = re.sub(r"```(?:json)?\s*", "", raw)
             raw = re.sub(r"```", "", raw).strip()
             raw = _extract_json_object(raw)
-            return _robust_json_parse(raw)
+            return _validate_classification(_robust_json_parse(raw))
         except Exception as exc:
             log.warning("GroqLLM classify failed: %s", exc)
             return None
@@ -1726,7 +1814,13 @@ class NewsPipeline:
                         _scan_status["eta_secs"] = round(avg * remaining)
                     _scan_status["elapsed_secs"] = round(time.time() - t0, 1)
 
-                    dw = compute_decay(row["published_date"] or "")
+                    # C5: half-life by event type — a war is still the story in
+                    # 3 days, a TA note isn't. Category comes from `result`, so
+                    # an unclassified article keeps the historical flat default.
+                    dw = compute_decay(
+                        row["published_date"] or "",
+                        decay_half_life_for((result or {}).get("category")),
+                    )
                     try:
                         if result:
                             with news_db(self.db_path) as conn:
@@ -1753,6 +1847,25 @@ class NewsPipeline:
                                 _kw_floor = impact_floor_for_keywords(f"{row['title'] or ''} {row['content'] or ''}")
                                 _final_impact = max(_raw_impact, _kw_floor) if _kw_floor is not None else _raw_impact
 
+                                # C2: transmission backstop. A macro/geopolitics article
+                                # whose own declared channel is "none" (or missing, or
+                                # off-vocabulary) cannot reach an ASX price, so cap it —
+                                # this is what stops a 30-death bar fire outscoring a
+                                # Strait of Hormuz closure. Applied AFTER the S2 keyword
+                                # floor: the floor speaks to genuinely market-moving
+                                # events (halts/takeovers), which by definition have a
+                                # channel, so the two never fight over the same article.
+                                # normalize_transmission collapses a multi-channel answer
+                                # ("oil_gas|shipping_supply_chain" — the model mirrors the
+                                # pipe-delimited vocabulary it was shown) to one canonical
+                                # channel, so a correct multi-channel read isn't misread as
+                                # "no channel" and capped.
+                                _category = str(result.get("category") or "other").lower()[:30]
+                                _transmission = normalize_transmission(result.get("transmission"))
+                                _tx_cap = impact_cap_no_transmission(_category, _transmission)
+                                if _tx_cap is not None:
+                                    _final_impact = min(_final_impact, _tx_cap)
+
                                 conn.execute("""
                                     UPDATE news_items SET
                                         summary         = :summary,
@@ -1760,6 +1873,7 @@ class NewsPipeline:
                                         sentiment       = :sentiment,
                                         sentiment_score = :score,
                                         impact_score    = :impact,
+                                        transmission    = :transmission,
                                         tickers         = :tickers,
                                         primary_tickers = :primary_tickers,
                                         tags            = :tags,
@@ -1769,10 +1883,11 @@ class NewsPipeline:
                                     WHERE id = :id
                                 """, {
                                     "summary":         _sanitize_summary(str(result.get("summary") or "")),
-                                    "category":        str(result.get("category") or "other").lower()[:30],
+                                    "category":        _category,
                                     "sentiment":       _norm_sentiment(result.get("sentiment")),
                                     "score":           _safe_float(result.get("sentiment_score"), max_val=1.0, min_val=-1.0),
                                     "impact":          _final_impact,
+                                    "transmission":    _transmission,
                                     "tickers":         json.dumps(ann_tickers),
                                     "primary_tickers": json.dumps(primary),
                                     "tags":            json.dumps(
@@ -1819,10 +1934,14 @@ class NewsPipeline:
         try:
             with news_db(self.db_path) as conn:
                 rows = conn.execute(
-                    "SELECT id, published_date FROM news_items WHERE processed=1"
+                    "SELECT id, published_date, category FROM news_items WHERE processed=1"
                 ).fetchall()
                 for row in rows:
-                    dw = compute_decay(row["published_date"] or "")
+                    # C5: category is needed here too, or the nightly refresh would
+                    # silently flatten every half-life back to the 3.0 default and
+                    # undo the type-aware weighting set at classify time.
+                    dw = compute_decay(row["published_date"] or "",
+                                       decay_half_life_for(row["category"]))
                     conn.execute(
                         "UPDATE news_items SET decay_weight=? WHERE id=?", (dw, row["id"])
                     )
@@ -2077,6 +2196,10 @@ def get_news_brief(
               AND older high-impact articles (≥5.0).
 
     Each article carries a compact 'signal' string pre-built for token-efficient prompt injection.
+    Macro/geopolitics signals name their transmission channel (C3) so the reader sees WHY a
+    world event is in an ASX prompt — "Hormuz closed [geopolitics→oil_gas|bearish|7.0]" is
+    actionable where a bare category is not. Costs ~2 tokens; legacy rows (transmission NULL)
+    simply omit it.
     """
     cutoff          = (datetime.utcnow() - timedelta(days=days)).isoformat()
     recency_cutoff  = (datetime.utcnow() - timedelta(hours=6)).isoformat()
@@ -2088,7 +2211,7 @@ def get_news_brief(
             # Fetch sorted by published_date DESC so the recency loop just takes the first N
             rows = conn.execute("""
                 SELECT title, source, published_date, summary, category,
-                       sentiment, sentiment_score, impact_score,
+                       sentiment, sentiment_score, impact_score, transmission,
                        tickers, primary_tickers, tags, decay_weight
                 FROM news_items
                 WHERE published_date >= ? AND processed = 1
@@ -2110,15 +2233,31 @@ def get_news_brief(
         published = row["published_date"] or ""
         is_recent = published >= recency_cutoff   # within last 6h
 
+        # C3: name the transmission channel on macro/geopolitics lines so the
+        # reader sees WHY a world event is in an ASX prompt. NULL on legacy rows
+        # (never backfilled — see init_news_tables) so the arrow simply vanishes.
+        _tx = (row["transmission"] or "").strip().lower()
+        _cat = row["category"] or "other"
+        _cat_str = f"{_cat}→{_tx}" if _tx and _tx != "none" else _cat
+
+        # C6 (critics R4): answer "who owns this risk?" — name the holdings the
+        # channel actually reaches. Annotation, not a filter: a diversified book
+        # matches nearly every channel, so gating on exposure would discriminate
+        # almost nothing, but naming WHICH holdings is real context. Empty for
+        # aud_fx (too broad to be useful) and for legacy rows with no channel.
+        _exposed = exposed_holdings(_tx, ticker_set) if _tx else []
+        _exp_str = f" [exposed: {', '.join(_exposed)}]" if _exposed else ""
+
         # Compact signal string: ~15-20 tokens in the prompt
         signal = (
             f"{'|'.join(sorted(primary & ticker_set)) or '—'} "
-            f"[{row['category'] or 'other'}|{row['sentiment'] or 'neutral'}|{imp:.1f}] "
-            f"{(row['title'] or '')[:80]} ({published[:10]})"
+            f"[{_cat_str}|{row['sentiment'] or 'neutral'}|{imp:.1f}] "
+            f"{(row['title'] or '')[:80]} ({published[:10]}){_exp_str}"
         )
 
         item = {
             "title":             row["title"],
+            "transmission":      _tx or None,
             "source":            row["source"],
             "date":              published[:10],
             "published_at":      published,          # full ISO timestamp for recency comparison
