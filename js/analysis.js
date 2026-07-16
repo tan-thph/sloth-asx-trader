@@ -1147,8 +1147,15 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // computeTradeParams() replaces AI-computed qty/stopLoss/rrRatio/riskAUD/rewardAUD
     // for BUY/TOP_UP recs. The AI's confidence (winProb proxy) drives Kelly sizing.
     if (typeof computeTradeParams === 'function') {
+      // F10 (AUDIT_2026-07-16): a paper-view analysis run must not size against
+      // REAL cash — paper has no cash concept in the UI (gotcha #88), but this
+      // sizing math still needs SOME capital ceiling, so it uses the paper
+      // starting balance as the closest analogue to "how much capital is this
+      // simulated book working with".
+      const _isPaperView = state.portfolioViewMode === 'paper';
+      const _effectiveCash = _isPaperView ? (Number(state.settings.paperStartCash) || 0) : (state.cash || 0);
       const _portfolioCtx = {
-        allocatedCash: state.cash,
+        allocatedCash: _effectiveCash,
         portfolioValue: portfolioValue(),
         brokerage: state.settings.brokerage,
         rbaRate: state.rbaRate || 4.35,
@@ -1189,14 +1196,14 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
             warnings.push(`Quant engine declined to size: ${qt.reason || 'unknown'} — and no valid entry price for fallback sizing`);
             return { ...r, _ruleWarnings: warnings };
           }
-          const affordable = Math.floor((state.cash || 0) / entryMidQ);
+          const affordable = Math.floor(_effectiveCash / entryMidQ);
           const wanted     = Math.max(1, Math.round(minTrade / entryMidQ));
           const fbQty      = Math.min(wanted, affordable);
           if (fbQty < 1) {
-            warnings.push(`Quant engine declined to size: ${qt.reason || 'unknown'} — and cash $${fmt(state.cash || 0)} cannot cover 1 share at $${entryMidQ.toFixed(2)}`);
+            warnings.push(`Quant engine declined to size: ${qt.reason || 'unknown'} — and ${_isPaperView ? 'paper start cash' : 'cash'} $${fmt(_effectiveCash)} cannot cover 1 share at $${entryMidQ.toFixed(2)}`);
             return { ...r, _ruleWarnings: warnings };
           }
-          warnings.push(`Quant engine declined to size: ${qt.reason || 'unknown'}. Fallback min-trade sizing applied (${fbQty} sh ≈ $${fmt(fbQty * entryMidQ)}) — review before executing`);
+          warnings.push(`Quant engine declined to size: ${qt.reason || 'unknown'}. Fallback min-trade sizing applied (${fbQty} sh ≈ $${fmt(fbQty * entryMidQ)}${_isPaperView ? ', sized against paper start cash' : ''}) — review before executing`);
           return { ...r, qty: fbQty, _fallbackSized: true, _ruleWarnings: warnings };
         }
         return {
@@ -2100,10 +2107,29 @@ function _splitRecsByParcels(recs, cgtParcels, liveSignals, brokerage) {
     )];
     const _singleAcct = _holdingAccts.length === 1 ? _holdingAccts[0] : null;
 
-    // Open parcels for this ticker (account-scoped when unambiguous), sorted oldest-first (FIFO order)
-    const openParcels = _holdingAccts.length > 1 ? [] : (cgtParcels || [])
+    // F4: same guard for mode. A ticker legitimately held both real AND paper in
+    // the same account (UNIQUE(ticker, account, mode), gotcha #91) must not have
+    // its SELL/TRIM sub-recs blend parcels across books — a card the user executes
+    // as real could otherwise reference a paper lot's cost basis/qty, or vice versa.
+    // Prefer state.portfolioViewMode when it's book-scoped (the analysis ran
+    // against that book via mergedPortfolio()); otherwise fall back to whichever
+    // single mode actually holds the ticker, and skip splitting when both do.
+    const _viewMode = (state.portfolioViewMode === 'real' || state.portfolioViewMode === 'paper')
+      ? state.portfolioViewMode : null;
+    const _holdingModes = [...new Set(
+      (state.portfolio || [])
+        .filter(h => _normTk(h.ticker) === ticker)
+        .map(h => h.mode || 'paper')
+    )];
+    const _singleMode = _viewMode || (_holdingModes.length === 1 ? _holdingModes[0] : null);
+    const _modeAmbiguous = !_viewMode && _holdingModes.length > 1;
+
+    // Open parcels for this ticker (account- and mode-scoped when unambiguous),
+    // sorted oldest-first (FIFO order)
+    const openParcels = (_holdingAccts.length > 1 || _modeAmbiguous) ? [] : (cgtParcels || [])
       .filter(p => _normTk(p.ticker) === ticker && (p.remainingQty || 0) > 0
-                   && (!_singleAcct || (p.account || 'personal') === _singleAcct))
+                   && (!_singleAcct || (p.account || 'personal') === _singleAcct)
+                   && (!_singleMode || (p.mode || 'paper') === _singleMode))
       .slice()
       .sort((a, b) => {
         const da = (typeof parseDate === 'function') ? parseDate(a.date) : new Date(a.date);

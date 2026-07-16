@@ -15,7 +15,7 @@ import json
 import zipfile
 from datetime import datetime
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 
 from db import DB_PATH, get_db
 from indicators import get_sector_for_ticker
@@ -122,8 +122,24 @@ def db_save():
         # sector, parcelId, disposalIds, notes, thesis, entrySignals, exitSignals —
         # none were in the column list, so every save↔reload cycle erased them.
         if "tradeJournal" in data:
-            conn.execute("DELETE FROM trade_journal")
+            # F13 (AUDIT_2026-07-16): validate required fields BEFORE the DELETE
+            # runs. A bare KeyError partway through the insert loop used to 500
+            # the whole save — the `with get_db()` transaction rolls it back so
+            # there's no data loss, but the app then enters persistent-save-failure
+            # territory (its known worst failure mode, gotcha #91) until the bad
+            # row is found. Skip-and-log the malformed row instead of crashing
+            # every subsequent save of an otherwise-healthy journal.
+            _valid_journal = []
             for t in data["tradeJournal"]:
+                if not all(t.get(k) is not None for k in ("ticker", "action", "qty", "entryPrice")):
+                    current_app.logger.warning(
+                        "db_save: skipping malformed tradeJournal row id=%r "
+                        "(missing ticker/action/qty/entryPrice)", t.get("id"),
+                    )
+                    continue
+                _valid_journal.append(t)
+            conn.execute("DELETE FROM trade_journal")
+            for t in _valid_journal:
                 conn.execute("""
                     INSERT INTO trade_journal
                         (id, date, timestamp, ticker, action, qty, entry_price, exit_price, fees, pnl, status,
@@ -322,18 +338,26 @@ def db_load():
             except Exception:
                 settings[row["key"]] = row["value"]
 
-        # `settings` deliberately EXCLUDED: a wiped DB still carries settings, and
-        # counting them made an empty-portfolio DB report hasData=true, so a good tab
-        # that hit a 409 would reload and overwrite its own in-memory holdings with the
-        # empty DB — the self-perpetuating wipe of 2026-07-07. Only real user data counts.
-        has_data = bool(portfolio or trade_journal or rec_history)
-
         blobs = {}
         for row in conn.execute("SELECT key, value FROM blob_store").fetchall():
             try:
                 blobs[row["key"]] = json.loads(row["value"])
             except Exception:
                 blobs[row["key"]] = row["value"]
+
+        # `settings` deliberately EXCLUDED: a wiped DB still carries settings, and
+        # counting them made an empty-portfolio DB report hasData=true, so a good tab
+        # that hit a 409 would reload and overwrite its own in-memory holdings with the
+        # empty DB — the self-perpetuating wipe of 2026-07-07. Only real user data counts.
+        # F14 (AUDIT_2026-07-16): a DB whose only real data lives in blobs (e.g. CGT
+        # parcels/disposals carried over from a closed-out portfolio, or NAV history
+        # with no current holdings) previously reported hasData=false, letting a
+        # fresh client wrongly treat it as empty — same 409/reload risk as above,
+        # just from the blob side.
+        has_data = bool(
+            portfolio or trade_journal or rec_history
+            or blobs.get("cgtParcels") or blobs.get("cgtDisposals") or blobs.get("portfolioHistory")
+        )
 
         # Monotonic version for the optimistic-concurrency guard (see db_save).
         # Stored in blob_store under a leading-underscore key so it is not part

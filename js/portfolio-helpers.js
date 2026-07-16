@@ -76,8 +76,10 @@ function computeCriticalAlerts() {
     merged[t] = {
       ...alert,
       triggeredAt: prev?.triggeredAt || alert.triggeredAt,
-      // Don't re-dismiss if the alert worsened
-      dismissed: prev?.dismissed && prev.pct >= alert.pct,
+      // F12: pct values are negative (decline) — "worsened" means MORE negative.
+      // Stay dismissed only while it hasn't worsened (prev.pct <= alert.pct);
+      // once it deepens past where it was dismissed, re-surface it.
+      dismissed: prev?.dismissed && prev.pct <= alert.pct,
     };
   }
   state.criticalAlerts = merged;
@@ -88,8 +90,6 @@ function dismissCriticalAlert(ticker) {
   if (state.criticalAlerts[ticker]) {
     state.criticalAlerts[ticker].dismissed = true;
   }
-  if (!state.dismissedAlerts) state.dismissedAlerts = {};
-  state.dismissedAlerts[ticker] = Date.now();
   scheduleSave();
   // Re-render whatever page is visible to remove the banner
   renderPage();
@@ -627,6 +627,12 @@ function matchSaleAgainstParcels(ticker, saleQty, salePrice, saleDate, saleFees,
     const costBase = remaining * costPerShare;
     const grossGain = proceeds - costBase - (feePerShare * remaining);
     disposals.push({
+      // F2: give the fallback disposal a stable id too (same scheme as the
+      // parcel-matched loop above) — without one, buildDisposalJournalEntries's
+      // disposalIds ends up undefined and rollbackTradeJournalEntry() can never
+      // remove this row again, leaving a phantom disposal double-counted in the
+      // CGT liability summary and EOFY pack forever.
+      id: _disposalIdBase + disposals.length,
       saleDate,
       ticker: ticker.toUpperCase(),
       salePrice,
@@ -853,11 +859,23 @@ function rollbackTradeJournalEntry(t) {
     adjustCashForMode(t.qty * t.entryPrice + Number(t.fees || 0), tMode);
     if(Math.abs(holding.shares) < _SHARE_EPSILON) state.portfolio = state.portfolio.filter(h => !(h.ticker === holding.ticker && (h.account || 'personal') === (holding.account || 'personal') && (h.mode || 'paper') === tMode));
     // Remove matching parcel (last added for this ticker matching qty+price)
+    let _removedParcel = null;
     if(t.parcelId) {
+      _removedParcel = state.cgtParcels.find(p => p.id === t.parcelId) || null;
       state.cgtParcels = state.cgtParcels.filter(p => p.id !== t.parcelId);
     } else {
       const idx = [...state.cgtParcels].reverse().findIndex(p => p.ticker === t.ticker && p.qty === t.qty && Math.abs(p.costPerShare - t.entryPrice) < 0.001);
-      if(idx !== -1) state.cgtParcels.splice(state.cgtParcels.length - 1 - idx, 1);
+      if(idx !== -1) {
+        _removedParcel = state.cgtParcels[state.cgtParcels.length - 1 - idx];
+        state.cgtParcels.splice(state.cgtParcels.length - 1 - idx, 1);
+      }
+    }
+    // F3: a parcel linked to an open day-trade position (1:1 link, gotchas
+    // #75/#78) must have that position removed too, else rolling back the BUY
+    // leaves an orphaned position pointing at a now-deleted parcel.
+    if (_removedParcel) {
+      _removeIntradayPositionForParcel(_removedParcel);
+      if (typeof _removeSwingPositionForParcel === 'function') _removeSwingPositionForParcel(_removedParcel);
     }
     return true;
   }

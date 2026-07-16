@@ -56,8 +56,7 @@ const state = {
   polymarketData: null,  // {markets:[...], fetched_at:'...'} — Polymarket prediction markets
   includePolymarket: false, // when true, Polymarket probs are appended to the AI Macro Brief prompt
   liveSignals: {},      // ticker -> full analysis from backend
-  criticalAlerts: {},   // ticker -> {type, pct, days, triggeredAt} — price-decline critical alerts
-  dismissedAlerts: {},  // ticker -> timestamp — user-dismissed alerts
+  criticalAlerts: {},   // ticker -> {type, pct, days, triggeredAt, dismissed} — price-decline critical alerts
   lastSignalFetch: {},  // ticker -> timestamp
   lastPriceRefresh: 0,  // epoch ms of last successful refreshPrices()
   chatHistory: [],

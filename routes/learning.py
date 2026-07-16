@@ -1067,8 +1067,7 @@ def learning_log():
             # dedupe against a HOLD that is still the ticker's latest event.
             if (data.get("recommendation") == "HOLD"
                     and data.get("event_type", "recommendation") == "recommendation"):
-                cutoff = (datetime.now() - timedelta(days=_HOLD_DEDUP_DAYS)) \
-                    .strftime("%Y-%m-%d %H:%M:%S")
+                cutoff = _cutoff(_HOLD_DEDUP_DAYS)
                 dup = conn.execute("""
                     SELECT id FROM ai_learning_events
                      WHERE recommendation = 'HOLD' AND ticker = ?
@@ -1741,7 +1740,7 @@ def learning_coverage():
             # Work queues -----------------------------------------------------
             # Executed but never graded — after 60d these are almost always a
             # missed Sync (Performance page), not a genuinely open position.
-            stale_cutoff = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
+            stale_cutoff = _cutoff(60)
             n_stuck_open = _n(f"""SELECT COUNT(*) FROM {T}
                 WHERE was_executed = 1
                   AND (outcome_status IS NULL OR outcome_status = 'open')
@@ -1759,7 +1758,7 @@ def learning_coverage():
             days_until_virtual = None
             if oldest_pending:
                 try:
-                    age = (datetime.now() - datetime.fromisoformat(oldest_pending.replace(" ", "T"))).days
+                    age = (datetime.utcnow() - datetime.fromisoformat(oldest_pending.replace(" ", "T"))).days
                     days_until_virtual = max(0, 30 - age)
                 except (ValueError, TypeError):
                     pass
@@ -3338,6 +3337,26 @@ _FETCH_RETRY_DAYS = 7
 # grows linearly with run frequency while adding no new passivity signal.
 _HOLD_DEDUP_DAYS = 7
 
+
+def _cutoff(days: int) -> str:
+    """UTC cutoff string, in the exact format ai_learning_events.timestamp is
+    stored in (SQLite's DEFAULT CURRENT_TIMESTAMP: UTC, space-separated —
+    db.py:140). Every window/gate that filters on `timestamp` must be built
+    from this, not `datetime.now()` (machine-local = Sydney, UTC+10/11): a
+    local-time cutoff shifts every gate ~10-11h, and `.isoformat()`'s 'T'
+    separator vs the stored ' ' separator makes the shift worse on the
+    boundary day (' ' < 'T' lexically, so stored rows spuriously look
+    "earlier" than a same-day 'T'-cutoff). AUDIT_2026-07-16 F8."""
+    return (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _fetch_retry_cutoff() -> str:
+    """UTC isoformat cutoff for the fetch_failed_at retry gate. Must stay in
+    UTC to match _mark_fetch_failed's write side (AUDIT_2026-07-16 F8) — the
+    two are only ever compared to each other, so the format (isoformat 'T')
+    just needs to be internally consistent, not match `timestamp`."""
+    return (datetime.utcnow() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
+
 # Actions accepted by GET /api/learning/recent-rec?action=... — whitelisted
 # because the value is interpolated into the WHERE clause's shape (the bound
 # parameter itself is still passed via placeholder, never formatted in).
@@ -3352,7 +3371,7 @@ def _mark_fetch_failed(conn, row_id) -> None:
     of permanently occupying a slot in every future lazy-resolver call."""
     conn.execute(
         "UPDATE ai_learning_events SET fetch_failed_at=? WHERE id=?",
-        (datetime.now().isoformat(timespec="seconds"), row_id),
+        (datetime.utcnow().isoformat(timespec="seconds"), row_id),
     )
 
 
@@ -3370,8 +3389,8 @@ def _resolve_sell_outcomes(conn) -> int:
       better_opportunity — validated if alt outperformed sold by > 3pp, invalidated if < −3pp
       all others       — inconclusive (can't be price-validated)
     """
-    cutoff = (datetime.now() - timedelta(days=25)).isoformat()
-    retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
+    cutoff = _cutoff(25)
+    retry_cutoff = _fetch_retry_cutoff()
     try:
         rows = conn.execute("""
             SELECT id, ticker, alternative_ticker, sell_primary_driver,
@@ -3573,8 +3592,8 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
 
     Returns the number of events resolved this call.
     """
-    cutoff = (datetime.now() - timedelta(days=30)).isoformat()
-    retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
+    cutoff = _cutoff(30)
+    retry_cutoff = _fetch_retry_cutoff()
     try:
         rows = conn.execute("""
             SELECT id, ticker, timestamp, entry_signals_json
@@ -3707,8 +3726,8 @@ def _resolve_virtual_outcomes(conn) -> int:
 
     Returns the number of events resolved this call (for debug logging).
     """
-    cutoff = (datetime.now() - timedelta(days=30)).isoformat()  # ≥30d old per spec
-    retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
+    cutoff = _cutoff(30)  # ≥30d old per spec
+    retry_cutoff = _fetch_retry_cutoff()
     try:
         rows = conn.execute("""
             SELECT id, ticker, recommendation, suggested_stop, suggested_target, timestamp,
@@ -4281,8 +4300,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
     """
     sectors     = [s for s in sectors_str.split(",") if s]
     tickers_req = [t for t in tickers_str.split(",") if t]
-    cutoff      = (datetime.now() - timedelta(days=days)).isoformat()
-    cutoff_30   = (datetime.now() - timedelta(days=30)).isoformat()
+    cutoff      = _cutoff(days)
+    cutoff_30   = _cutoff(30)
 
     # Volatility-adaptive half-life: fast decay in volatile/panic regimes so
     # stale data from a different market state doesn't dilute the calibration;
@@ -4315,7 +4334,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
                 flip_dt = None
             if flip_dt is None:
                 raise ValueError(f"unparseable flipped_at: {flipped_at!r}")
-            flip_days = (datetime.now() - flip_dt).days
+            flip_days = (datetime.utcnow() - flip_dt).days
             if flip_days <= 30:
                 # Count executed trades logged since the flip
                 from db import get_db as _get_db_local
@@ -4337,7 +4356,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
     def _decay(ts, half_life=None):
         half_life = hl if half_life is None else half_life
         try:
-            d = (datetime.now() - datetime.fromisoformat(ts)).days
+            d = (datetime.utcnow() - datetime.fromisoformat(ts)).days
             return math.exp(-math.log(2) * d / half_life)
         except Exception:
             return 1.0
@@ -5445,7 +5464,7 @@ def _resolve_mae_mfe(conn, cap: int = 5) -> int:
     resolved). Capped per call to bound yfinance round-trips. On fetch failure for
     a row, that row is skipped (left unresolved) rather than crashing the batch.
     """
-    retry_cutoff = (datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat()
+    retry_cutoff = _fetch_retry_cutoff()
     try:
         rows = conn.execute("""
             SELECT id, ticker, actual_entry_price, timestamp, holding_period_days
@@ -5469,7 +5488,7 @@ def _resolve_mae_mfe(conn, cap: int = 5) -> int:
     except ImportError:
         return 0
 
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = datetime.utcnow().isoformat(timespec="seconds")
     resolved = 0
     for row in rows:
         try:
@@ -5643,7 +5662,7 @@ def _resolve_stop_tag_counterfactual(conn, cap: int = 5) -> int:
               AND timestamp IS NOT NULL
               AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
             ORDER BY timestamp DESC LIMIT ?
-        """, ((datetime.now() - timedelta(days=_FETCH_RETRY_DAYS)).isoformat(), cap)).fetchall()
+        """, (_fetch_retry_cutoff(), cap)).fetchall()
     except Exception:
         return 0
     if not rows:

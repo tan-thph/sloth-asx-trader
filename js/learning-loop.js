@@ -463,8 +463,12 @@ function computeThesisDrift(entryDriver, entrySignals, liveSnapshot) {
 
   } else if (entryDriver === 'momentum_breakout') {
     deltas = {};
-    if (nRet5 != null) deltas.return_5d = { entry: eRet5, now: nRet5 };
-    if (nBB   != null) deltas.bb_pct_b  = { entry: eBB,   now: nBB   };
+    // F11 (AUDIT_2026-07-16): gate on BOTH sides like mean_reversion above —
+    // gating on "now" alone let entry sit at null, rendering as "null→+2.1".
+    // The verdict math below only ever reads the "now" value, so this is
+    // purely a display fix.
+    if (eRet5 != null && nRet5 != null) deltas.return_5d = { entry: eRet5, now: nRet5 };
+    if (eBB   != null && nBB   != null) deltas.bb_pct_b  = { entry: eBB,   now: nBB   };
 
     // momentum_breakout: entry signal = positive return_5d and high BB%B (>0.55)
     // validated: momentum sustained (ret5d >0, bb >0.55)
@@ -489,8 +493,9 @@ function computeThesisDrift(entryDriver, entrySignals, liveSnapshot) {
 
   } else if (entryDriver === 'trend_pullback') {
     deltas = {};
-    if (nRet5 != null) deltas.return_5d = { entry: eRet5, now: nRet5 };
-    if (nAdx  != null) deltas.adx_14    = { entry: eAdx,  now: nAdx  };
+    // F11: same both-sides gate as momentum_breakout above.
+    if (eRet5 != null && nRet5 != null) deltas.return_5d = { entry: eRet5, now: nRet5 };
+    if (eAdx  != null && nAdx  != null) deltas.adx_14    = { entry: eAdx,  now: nAdx  };
 
     // trend_pullback: entry signal = positive return_20d + ADX >25; buying a dip
     // validated: trend resumed (ret5d >0, ADX still strong)

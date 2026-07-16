@@ -108,6 +108,25 @@ describe('validateRec — schema validation', () => {
     expect(validateRec(makeRec({ ticker: 'BHP.AX' })).valid).toBe(true);
   });
 
+  it('F1: canonicalizes .AX suffix off ticker so downstream consumers see a bare ticker', () => {
+    const { valid, fixed } = validateRec(makeRec({ ticker: 'BHP.AX' }));
+    expect(valid).toBe(true);
+    expect(fixed.ticker).toBe('BHP');
+  });
+
+  it('F1: canonicalizes .AX suffix off alternativeTicker (better_opportunity SELL)', () => {
+    const { fixed, errors } = validateRec(makeRec({
+      action: 'SELL',
+      stopLoss: 46.00,  // SELL stop must be above entry high (44.50)
+      primary_driver: 'better_opportunity',
+      alternativeTicker: 'CBA.AX',
+      secondary_factors: [],
+      urgency: 'routine',
+    }));
+    expect(errors).toEqual([]);
+    expect(fixed.alternativeTicker).toBe('CBA');
+  });
+
   it('rejects invalid action', () => {
     const { valid, errors } = validateRec(makeRec({ action: 'HOLD_FOREVER' }));
     expect(valid).toBe(false);

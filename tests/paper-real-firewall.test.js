@@ -18,6 +18,7 @@ loadScript('js/portfolio-helpers.js');
 // Browser-global stubs used by the helpers' side-effect paths.
 global.scheduleSave = () => {};
 global.toast = () => {};
+global.renderPage = () => {};
 
 function resetState() {
   global.state.portfolio = [];
@@ -267,6 +268,82 @@ describe('rollbackTradeJournalEntry routes cash by the row mode', () => {
     // restored holding carries the mode
     const h = state.portfolio.find(x => x.ticker === 'ANZ');
     expect(h.mode).toBe('real');
+  });
+});
+
+describe('critical-alert dismissal re-arms when the decline deepens (F12)', () => {
+  beforeEach(resetState);
+
+  function make3DayChart(cumulPct) {
+    // d1=100 (window open); d2,d3 strictly decreasing; d4 hits the target cumulPct.
+    const d1 = 100, d2 = 95, d3 = 90;
+    const d4 = d1 * (1 + cumulPct / 100);
+    return [{ close: d1 }, { close: d2 }, { close: d3 }, { close: d4 }];
+  }
+
+  function setupTicker(cumulPct) {
+    state.portfolio = [{ ticker: 'XYZ', shares: 10, avgPrice: 100, currentPrice: 100, account: 'personal', mode: 'real' }];
+    state.liveSignals = { XYZ: { chart_data: make3DayChart(cumulPct) } };
+  }
+
+  it('re-surfaces a dismissed alert once the decline deepens past where it was dismissed', () => {
+    setupTicker(-16);
+    computeCriticalAlerts();
+    dismissCriticalAlert('XYZ');
+    expect(state.criticalAlerts.XYZ.dismissed).toBe(true);
+
+    setupTicker(-18);   // worsened
+    computeCriticalAlerts();
+    expect(state.criticalAlerts.XYZ.dismissed).toBe(false);
+  });
+
+  it('stays dismissed when the decline has not deepened past the dismissed level', () => {
+    setupTicker(-16);
+    computeCriticalAlerts();
+    dismissCriticalAlert('XYZ');
+    expect(state.criticalAlerts.XYZ.dismissed).toBe(true);
+
+    setupTicker(-12);   // still triggers the ≤-10% gate, but less severe than -16
+    computeCriticalAlerts();
+    expect(state.criticalAlerts.XYZ.dismissed).toBe(true);
+  });
+});
+
+describe('rollback symmetry for the no-parcel fallback disposal (F2)', () => {
+  beforeEach(resetState);
+
+  it('rolling back a sell with no matching parcels removes the fallback disposal', () => {
+    // Pre-app position: holding exists, but no parcel was ever recorded for it
+    // (matchSaleAgainstParcels falls back to avgPrice cost basis in this case).
+    state.portfolio.push({ ticker: 'TLS', shares: 100, avgPrice: 4.00, currentPrice: 4.00, account: 'personal', mode: 'real' });
+    const res = applySellToPortfolio('TLS', 100, 4.50, 10, '01-07-2026', 'fifo', 'personal', 'real');
+    expect(res.ok).toBe(true);
+    expect(res.disposals).toHaveLength(1);
+    expect(res.disposals[0].id).not.toBeUndefined();   // F2: fallback disposal must get a stable id
+    expect(state.cgtDisposals).toHaveLength(1);
+
+    const row = {
+      action: 'SELL', status: 'closed', ticker: 'TLS', qty: 100,
+      entryPrice: 4.00, exitPrice: 4.50, fees: 10, account: 'personal', mode: 'real',
+      parcelId: null, disposalIds: [res.disposals[0].id],
+    };
+    expect(rollbackTradeJournalEntry(row)).toBe(true);
+    expect(state.cgtDisposals).toHaveLength(0);   // phantom disposal must not survive rollback
+  });
+});
+
+describe('rollback removes a linked day-trade position when a BUY is undone (F3)', () => {
+  beforeEach(resetState);
+
+  it('rolling back a BUY whose parcel is linked to an open intraday position removes the position too', () => {
+    applyBuyToPortfolio('XYZ', 50, 10, '01-07-2026', 5, 'Tech', 'trading', 'real');
+    const parcel = state.cgtParcels[0];
+    state.intraday.openPositions.push({ ticker: 'XYZ', parcelId: parcel.id, qty: 50, entryPrice: 10 });
+    const row = { action: 'BUY', status: 'open', ticker: 'XYZ', qty: 50,
+                  entryPrice: 10, fees: 5, account: 'trading', mode: 'real', parcelId: parcel.id };
+    expect(rollbackTradeJournalEntry(row)).toBe(true);
+    expect(state.intraday.openPositions).toHaveLength(0);
+    expect(state.cgtParcels.find(p => p.id === parcel.id)).toBeUndefined();
   });
 });
 

@@ -1804,6 +1804,77 @@ class TestLearningImprovements(unittest.TestCase):
         self.assertIn("_debate?.synthesis?.winner", src)
 
 
+class TestAuditF8UtcCutoffs(unittest.TestCase):
+    """AUDIT_2026-07-16 F8 — every window/cutoff in routes/learning.py must be
+    built from UTC (matching ai_learning_events.timestamp's storage — db.py's
+    DEFAULT CURRENT_TIMESTAMP is UTC), not machine-local time. A local-time
+    cutoff drifts by the Sydney UTC+10/11 offset, and — before the fix —
+    `.isoformat()`'s 'T' separator vs the stored ' ' separator could flip an
+    entire boundary day's worth of rows in/out of a window via lexical string
+    comparison."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+
+    def test_cutoff_helper_is_utc_based_and_correctly_formatted(self):
+        from datetime import datetime
+        from routes.learning import _cutoff
+        got = datetime.strptime(_cutoff(0), "%Y-%m-%d %H:%M:%S")
+        self.assertLess(
+            abs((got - datetime.utcnow()).total_seconds()), 5,
+            "_cutoff() must be built from datetime.utcnow(), not local now()",
+        )
+        # Format must match db.py's CURRENT_TIMESTAMP storage (space, not 'T') —
+        # a 'T' separator would sort lexically AFTER same-day ' '-separated rows.
+        self.assertRegex(_cutoff(7), r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_hold_dedupe_window_includes_a_row_near_the_boundary_under_sydney_offset(self):
+        """A HOLD logged ~6d22h ago (inside the 7-day dedupe window) must still be
+        found as a duplicate. Under the old `datetime.now()`-based cutoff, a
+        Sydney-local machine (UTC+10/11) computed a cutoff up to ~11h LATER than
+        correct, pushing this near-boundary row just outside the window and
+        letting a duplicate HOLD through unnoticed."""
+        from datetime import datetime, timedelta
+        with _test_get_db() as conn:
+            conn.execute("DELETE FROM ai_learning_events WHERE ticker='SKEWTEST'")
+            near_boundary = (datetime.utcnow() - timedelta(days=7) + timedelta(hours=2)) \
+                .strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "INSERT INTO ai_learning_events "
+                "(ticker, recommendation, event_type, timestamp) "
+                "VALUES ('SKEWTEST', 'HOLD', 'recommendation', ?)",
+                (near_boundary,),
+            )
+        resp = self.client.post(
+            "/api/learning/log",
+            data=json.dumps({
+                "ticker": "SKEWTEST", "event_type": "recommendation",
+                "recommendation": "HOLD", "ai_confidence": 0.5,
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body.get("deduped"),
+                         "a HOLD inside the 7-day window must be deduped, not double-logged")
+
+    def test_fetch_retry_cutoff_is_utc_based(self):
+        """_fetch_retry_cutoff() (fetch_failed_at gate) and _mark_fetch_failed's
+        write side must share the same UTC clock — a mismatch here would silently
+        re-introduce the skew between the two."""
+        from datetime import datetime, timedelta
+        from routes.learning import _fetch_retry_cutoff, _FETCH_RETRY_DAYS
+        got = datetime.fromisoformat(_fetch_retry_cutoff())
+        # _FETCH_RETRY_DAYS = 7, so this should be ~7 days before utcnow, not
+        # ~7 days before local now (which would differ by the machine's UTC offset).
+        expected = datetime.utcnow() - timedelta(days=_FETCH_RETRY_DAYS)
+        self.assertLess(abs((got - expected).total_seconds()), 5)
+
+
 class TestCalibrationEfficacy(unittest.TestCase):
     """Calibration-efficacy scoreboard: Brier(original) vs Brier(adjusted)."""
 
@@ -2579,6 +2650,53 @@ class TestSprint5(unittest.TestCase):
         self.assertEqual(loaded["ticker"], "CBA")
         self.assertEqual(loaded["outcome"], "win")
         self.assertEqual(loaded["actualProfit"], 45.0)
+
+    def test_db_save_skips_malformed_journal_row_instead_of_500ing(self):
+        """AUDIT_2026-07-16 F13: a trade_journal row missing a required field
+        (ticker/action/qty/entryPrice) must be skipped-and-logged, not crash the
+        whole bulk save with a 500 (which used to also roll back every OTHER,
+        healthy row in the same payload since DELETE+INSERT share one transaction)."""
+        payload = {
+            "tradeJournal": [
+                {"id": 9001, "date": "01-07-2026", "ticker": "CBA", "action": "BUY",
+                 "qty": 10, "entryPrice": 100.0, "account": "personal"},
+                {"id": 9002, "date": "01-07-2026", "action": "BUY",
+                 "qty": 5, "entryPrice": 50.0},  # missing ticker — malformed
+            ],
+        }
+        resp = self.client.post(
+            "/api/db/save",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        d = json.loads(self.client.get("/api/db/load").data)
+        ids = [t["id"] for t in d["tradeJournal"]]
+        self.assertIn(9001, ids)     # healthy row survives
+        self.assertNotIn(9002, ids)  # malformed row skipped, not persisted
+
+    def test_has_data_true_for_blob_only_state(self):
+        """AUDIT_2026-07-16 F14: hasData must be true when the only real data left
+        in the DB lives in blobs (cgtParcels/cgtDisposals/portfolioHistory) with no
+        current portfolio/journal/recHistory rows — e.g. a fully closed-out book
+        that still has CGT/NAV history worth not treating as an empty DB."""
+        self.client.post("/api/db/save", data=json.dumps({
+            "portfolio": [], "tradeJournal": [], "recHistory": [],
+            "cgtParcels": [{"id": "p1", "ticker": "BHP", "qty": 10, "costPerShare": 40,
+                             "remainingQty": 0, "date": "01-01-2026"}],
+        }), content_type="application/json")
+        d = json.loads(self.client.get("/api/db/load").data)
+        self.assertTrue(d["hasData"])
+
+    def test_has_data_false_when_everything_is_empty(self):
+        """Sanity check for F14: hasData stays false for a genuinely empty DB
+        (settings alone must not count — 2026-07-07 self-perpetuating wipe)."""
+        self.client.post("/api/db/save", data=json.dumps({
+            "portfolio": [], "tradeJournal": [], "recHistory": [],
+            "cgtParcels": [], "cgtDisposals": [], "portfolioHistory": [],
+        }), content_type="application/json")
+        d = json.loads(self.client.get("/api/db/load").data)
+        self.assertFalse(d["hasData"])
 
     def test_db_save_load_portfolio_round_trips_mode_dual_book(self):
         """FIXES #1/#2: the portfolio table must persist holding `mode`, and a ticker
@@ -8775,8 +8893,10 @@ class TestSprint44(unittest.TestCase):
         # Find _resolve_virtual_outcomes body and check the cutoff (docstring is long so use 3000)
         idx = src.find("def _resolve_virtual_outcomes(")
         body = src[idx:idx + 3000]
-        self.assertIn("timedelta(days=30)", body)
-        self.assertNotIn("timedelta(days=10)", body)
+        # AUDIT_2026-07-16 F8: cutoff is now built via the shared UTC _cutoff()
+        # helper rather than an inline `datetime.now() - timedelta(...)`.
+        self.assertIn("_cutoff(30)", body)
+        self.assertNotIn("_cutoff(10)", body)
 
     def test_n_virtual_resolved_in_stats_response(self):
         """GET /api/learning/stats must return n_virtual_resolved count."""
@@ -11736,7 +11856,10 @@ class TestSprint67CorrContextTraceabilityAndBatch(unittest.TestCase):
         cascading warnings and no stated cause (the WDS 15:35 incident)."""
         self.assertIn("Quant engine declined to size", self.analysis_js)
         self.assertIn("_fallbackSized: true", self.analysis_js)
-        self.assertIn("Math.floor((state.cash || 0) / entryMidQ)", self.analysis_js)
+        # AUDIT_2026-07-16 F10: fallback affordability now sizes against
+        # _effectiveCash (real cash, or paperStartCash in paper view) rather
+        # than raw state.cash unconditionally.
+        self.assertIn("Math.floor(_effectiveCash / entryMidQ)", self.analysis_js)
         self.assertIn("cannot cover 1 share", self.analysis_js)
         # the silent keep-AI-values path must be gone
         self.assertNotIn("if (!qt.ok) return r;", self.analysis_js)

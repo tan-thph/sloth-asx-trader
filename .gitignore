@@ -53,3 +53,6 @@ node_modules/
 
 # Logs
 *.log
+
+# Claude Code agent worktrees (leftover per-agent scratch checkouts)
+.claude/worktrees/

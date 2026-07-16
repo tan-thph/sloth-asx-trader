@@ -7,7 +7,7 @@
  * rather than just asserting the source contains certain strings.
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -89,6 +89,33 @@ describe('_isCandidate tier axis (source guard)', () => {
 
   it('delegates the not-held case to the pure setup helper', () => {
     expect(body).toContain('_unheldHasActiveSetup(s)');
+  });
+});
+
+// ── F10 (AUDIT_2026-07-16): paper-view sizing must not draw on real cash ──────
+// This logic lives inline inside the giant runAnalysis() orchestration function
+// (full Claude call + DOM rendering), so — like _isCandidate above — it's tested
+// as a source guard rather than invoked directly.
+describe('quant fallback sizing — paper view uses paper cash, not real (F10 source guard)', () => {
+  const src = readFileSync(join(_ROOT, 'js/analysis.js'), 'utf8');
+  const start = src.indexOf("if (typeof computeTradeParams === 'function')");
+  const body = src.slice(start, start + 4000);
+  // The fallback-sizing sub-block (after computeTradeParams is called and declines)
+  const fallbackStart = body.indexOf('if (!qt.ok)');
+  const fallbackBody = body.slice(fallbackStart, fallbackStart + 2000);
+
+  it('computes an effective cash figure keyed on portfolioViewMode', () => {
+    expect(body).toMatch(/_isPaperView\s*=\s*state\.portfolioViewMode\s*===\s*'paper'/);
+    expect(body).toContain('paperStartCash');
+  });
+
+  it('the Kelly-sizing context uses the effective cash, not raw state.cash', () => {
+    expect(body).toMatch(/allocatedCash:\s*_effectiveCash/);
+  });
+
+  it('the fallback affordability clamp uses the effective cash, not raw state.cash', () => {
+    expect(fallbackBody).toMatch(/Math\.floor\(_effectiveCash\s*\/\s*entryMidQ\)/);
+    expect(fallbackBody).not.toMatch(/state\.cash/);
   });
 });
 
@@ -281,5 +308,76 @@ describe('_classifyRuleWarnings — Critic B codes', () => {
 
   it('a clean rec produces no codes', () => {
     expect(_classifyRuleWarnings({ _ruleWarnings: [] })).toEqual([]);
+  });
+});
+
+// ── _splitRecsByParcels: F4 mode-blindness (real vs paper) ────────────────────
+// A ticker legitimately held both real AND paper in the same account must never
+// have its SELL/TRIM sub-recs blend parcels across books (mirrors the existing
+// multi-account guard).
+
+describe('_splitRecsByParcels — mode guard (F4)', () => {
+  const savedPortfolio = state.portfolio;
+  const savedParcels = state.cgtParcels;
+  const savedViewMode = state.portfolioViewMode;
+
+  afterEach(() => {
+    state.portfolio = savedPortfolio;
+    state.cgtParcels = savedParcels;
+    state.portfolioViewMode = savedViewMode;
+  });
+
+  function setupTwoBookHolding() {
+    state.portfolio = [
+      { ticker: 'CBA', account: 'personal', mode: 'real', shares: 10 },
+      { ticker: 'CBA', account: 'personal', mode: 'paper', shares: 20 },
+    ];
+    state.cgtParcels = [
+      { id: 'r1', ticker: 'CBA', account: 'personal', mode: 'real', remainingQty: 10, costPerShare: 100, date: '2025-01-01' },
+      { id: 'p1', ticker: 'CBA', account: 'personal', mode: 'paper', remainingQty: 20, costPerShare: 90, date: '2025-02-01' },
+    ];
+  }
+
+  it('skips splitting (and does not blend parcels) when both books hold the ticker and no view mode is set', () => {
+    setupTwoBookHolding();
+    state.portfolioViewMode = 'all';
+    const rec = { id: 'rec1', action: 'SELL', ticker: 'CBA', qty: 30, priceRange: [95, 96] };
+    const out = _splitRecsByParcels([rec], state.cgtParcels, {}, 0);
+    expect(out.length).toBe(1);
+    expect(out[0]._parcelId).toBeUndefined();
+    expect(out[0]._splitFrom).toBeUndefined();
+  });
+
+  it('scopes to the real book only when portfolioViewMode is real', () => {
+    setupTwoBookHolding();
+    state.portfolioViewMode = 'real';
+    const rec = { id: 'rec2', action: 'SELL', ticker: 'CBA', qty: 10, priceRange: [95, 96] };
+    const out = _splitRecsByParcels([rec], state.cgtParcels, {}, 0);
+    expect(out.length).toBe(1);
+    expect(out[0]._parcelId).toBe('r1');
+    expect(out[0]._parcelCostPerShare).toBe(100);
+  });
+
+  it('scopes to the paper book only when portfolioViewMode is paper', () => {
+    setupTwoBookHolding();
+    state.portfolioViewMode = 'paper';
+    const rec = { id: 'rec3', action: 'SELL', ticker: 'CBA', qty: 20, priceRange: [95, 96] };
+    const out = _splitRecsByParcels([rec], state.cgtParcels, {}, 0);
+    expect(out.length).toBe(1);
+    expect(out[0]._parcelId).toBe('p1');
+    expect(out[0]._parcelCostPerShare).toBe(90);
+  });
+
+  it('still splits normally across multiple same-mode parcels', () => {
+    state.portfolio = [{ ticker: 'CBA', account: 'personal', mode: 'real', shares: 20 }];
+    state.cgtParcels = [
+      { id: 'r1', ticker: 'CBA', account: 'personal', mode: 'real', remainingQty: 10, costPerShare: 100, date: '2025-01-01' },
+      { id: 'r2', ticker: 'CBA', account: 'personal', mode: 'real', remainingQty: 10, costPerShare: 105, date: '2025-02-01' },
+    ];
+    state.portfolioViewMode = 'all';
+    const rec = { id: 'rec4', action: 'SELL', ticker: 'CBA', qty: 20, priceRange: [95, 96] };
+    const out = _splitRecsByParcels([rec], state.cgtParcels, {}, 0);
+    expect(out.length).toBe(2);
+    expect(out.map(r => r._parcelId).sort()).toEqual(['r1', 'r2']);
   });
 });

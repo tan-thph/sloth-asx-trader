@@ -480,6 +480,16 @@ function validateRec(rec, ctx) {
     if (err) errors.push(err);
   }
 
+  // F1: canonicalize `.AX` off ticker/alternativeTicker (schema allows "CBA.AX")
+  // so every downstream consumer sees the same bare ticker — else a BUY on
+  // "CBA.AX" silently creates a second, disconnected holding/parcel.
+  if (typeof fixed.ticker === 'string') {
+    fixed.ticker = fixed.ticker.replace(/\.AX$/i, '').toUpperCase();
+  }
+  if (typeof fixed.alternativeTicker === 'string') {
+    fixed.alternativeTicker = fixed.alternativeTicker.replace(/\.AX$/i, '').toUpperCase();
+  }
+
   // Business rule checks
   for (const rule of _REC_BUSINESS_RULES) {
     if (!rule.check(fixed)) {

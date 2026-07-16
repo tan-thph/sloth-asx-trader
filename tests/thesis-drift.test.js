@@ -163,6 +163,18 @@ describe('computeThesisDrift — momentum_breakout', () => {
     // n_hold/n_total=0.5 ≥ 0.33 → partially_validated (one signal intact, one inverted)
     expect(result.verdict).toBe('partially_validated');
   });
+
+  it('F11: omits return_5d/bb_pct_b from deltas when entry side is null (never entry: null)', () => {
+    const result = computeThesisDrift(
+      'momentum_breakout',
+      entrySnap({}),  // no entry signals captured at all
+      liveSnap({ return_5d: 2.1, bb_pct_b: 0.70 })
+    );
+    expect(result.deltas.return_5d).toBeUndefined();
+    expect(result.deltas.bb_pct_b).toBeUndefined();
+    // the verdict itself is unaffected — it only ever reads the "now" side
+    expect(result.verdict).toBe('validated');
+  });
 });
 
 // ── trend_pullback ────────────────────────────────────────────────────────────
@@ -215,6 +227,17 @@ describe('computeThesisDrift — trend_pullback', () => {
     // nRet5=0 not >0 → no hold; not <-3 → no invert. nAdx=22>20 → n_hold=1; not <15 → no invert.
     // n_total=2, n_hold=1, n_inverted=0 → n_hold/n_total=0.5≥0.33 → partially_validated
     expect(result.verdict).toBe('partially_validated');
+  });
+
+  it('F11: omits return_5d/adx_14 from deltas when entry side is null (never entry: null)', () => {
+    const result = computeThesisDrift(
+      'trend_pullback',
+      entrySnap({}),  // no entry signals captured at all
+      liveSnap({ return_5d: 1.5, adx_14: 28 })
+    );
+    expect(result.deltas.return_5d).toBeUndefined();
+    expect(result.deltas.adx_14).toBeUndefined();
+    expect(result.verdict).toBe('validated');
   });
 });
 
