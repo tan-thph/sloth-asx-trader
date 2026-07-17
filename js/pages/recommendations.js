@@ -221,7 +221,7 @@ function renderRunAnalysisPanel() {
               <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;background:var(--bg-secondary);border-radius:var(--radius-md);border:0.5px solid var(--border-light)">
                 <div style="flex:1;min-width:0">
                   <div class="text-xs text-muted" style="margin-bottom:2px">${v.savedAt||''}</div>
-                  <div style="font-size:12px;color:var(--text-primary);white-space:pre-wrap;overflow:hidden;max-height:48px;text-overflow:ellipsis">${v.text}</div>
+                  <div style="font-size:12px;color:var(--text-primary);white-space:pre-wrap;overflow-y:auto;max-height:48px">${v.text}</div>
                 </div>
                 <div class="flex-row" style="gap:4px;flex-shrink:0">
                   <button class="btn btn-sm" onclick="restoreSavedView(${i})" title="Restore this view">↩ Use</button>
