@@ -37,10 +37,15 @@ function _btSwitch(mode) {
 // ── MODE 1: AI RECOMMENDATION REPLAY ─────────────────────────
 // ============================================================
 function _renderAiPanel() {
+  // Book lens (All / Live / Paper) — same global state.portfolioViewMode the
+  // Portfolio/Performance toggles drive (gotcha #88), so the replay scores only the
+  // selected book's executed recs. Recs default to 'paper' when mode is absent.
+  const _vm = state.portfolioViewMode || 'all';
+  const _recModeMatch = r => _vm === 'all' || (r.mode || 'paper') === _vm;
   const executed = (state.recHistory || []).filter(r =>
-    r.executed && r.action && r.action !== 'HOLD' && r.action !== 'WATCH'
+    r.executed && r.action && r.action !== 'HOLD' && r.action !== 'WATCH' && _recModeMatch(r)
   );
-  const allRecs  = (state.recHistory || []);
+  const allRecs  = (state.recHistory || []).filter(_recModeMatch);
 
   // Date range
   let dateRange = '—';
@@ -60,10 +65,17 @@ function _renderAiPanel() {
   return `
     <div class="card section-gap">
       <div class="card-title">AI Recommendation Replay</div>
-      <p class="text-xs text-muted" style="margin-bottom:14px">
+      <p class="text-xs text-muted" style="margin-bottom:10px">
         Measures actual forward price movement for every executed AI recommendation —
         the only honest way to evaluate whether the AI's calls made money.
       </p>
+
+      <div class="flex-row" style="gap:6px;margin-bottom:14px;flex-wrap:wrap">
+        <span class="text-xs text-muted" style="align-self:center">Book:</span>
+        ${['all', 'real', 'paper'].map(m =>
+          `<button class="btn btn-sm" style="${m === _vm ? 'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)' : ''}" onclick="state.portfolioViewMode='${m}';_btSwitch('ai')">${({ all: 'All', real: '● Live only', paper: '◦ Paper only' })[m]}</button>`
+        ).join('')}
+      </div>
 
       ${!hasData ? `
         <div class="empty-state" style="padding:2rem 1rem">
@@ -127,11 +139,14 @@ async function runAiReplay() {
   const horizon   = document.getElementById('bt-ai-horizon').value;
   const brokerage = Number(document.getElementById('bt-ai-brokerage').value) || state.settings.brokerage;
 
+  // Same book lens as _renderAiPanel — score only the selected book's executed recs.
+  const _vm = state.portfolioViewMode || 'all';
+  const _recModeMatch = r => _vm === 'all' || (r.mode || 'paper') === _vm;
   const executed = (state.recHistory || []).filter(r =>
-    r.executed && r.action && r.action !== 'HOLD' && r.action !== 'WATCH'
+    r.executed && r.action && r.action !== 'HOLD' && r.action !== 'WATCH' && _recModeMatch(r)
   );
 
-  if (!executed.length) { toast('No executed recommendations to analyse', 'error'); return; }
+  if (!executed.length) { toast('No executed recommendations to analyse in this book', 'error'); return; }
 
   const btn = document.getElementById('bt-ai-run-btn');
   if (btn) btn.disabled = true;

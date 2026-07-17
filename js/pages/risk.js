@@ -4,13 +4,33 @@
 
 let _riskPageScore = null; // set by buildRiskPage, read by renderRiskPage for gauge
 
+// Book lens (All / Live / Paper) — drives the SAME global state.portfolioViewMode
+// as the Portfolio/Performance/Dashboard toggles (gotcha #88), so the risk metrics,
+// concentration, and correlation all scope to the selected book. mergedPortfolio()
+// and portfolioValue() already follow this mode, so flipping it + renderPage()
+// re-fetches risk for the book's ticker set.
+function _riskModeToggle() {
+  const vm = state.portfolioViewMode || 'all';
+  const L = { all: 'All', real: '● Live only', paper: '◦ Paper only' };
+  return `<div class="flex-row" style="gap:6px;margin-bottom:12px;flex-wrap:wrap">
+    <span class="text-xs text-muted" style="align-self:center">Book:</span>
+    ${['all', 'real', 'paper'].map(m =>
+      `<button class="btn btn-sm" style="${m === vm ? 'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)' : ''}" onclick="state.portfolioViewMode='${m}';renderPage()">${L[m]}</button>`
+    ).join('')}
+  </div>`;
+}
+
 async function renderRiskPage(gen) {
   const el = document.getElementById('main-content');
   const merged = mergedPortfolio();
 
   if (!merged.length) {
-    el.innerHTML = _emptyCard('◎', 'No holdings yet',
-      'Add trades to your portfolio to see risk metrics, beta, Sharpe ratio, VaR, and correlation analysis here.',
+    const _vm = state.portfolioViewMode || 'all';
+    const _emptyMsg = _vm === 'all'
+      ? 'Add trades to your portfolio to see risk metrics, beta, Sharpe ratio, VaR, and correlation analysis here.'
+      : `No ${_vm === 'real' ? 'live' : 'paper'} holdings to analyse. Switch the Book filter above, or add ${_vm === 'real' ? 'live' : 'paper'} positions.`;
+    el.innerHTML = _riskModeToggle() + _emptyCard('◎', 'No holdings in this book',
+      _emptyMsg,
       `<button class="btn btn-primary" onclick="showPage('portfolio')">→ Go to Portfolio</button>`);
     return;
   }
@@ -182,6 +202,7 @@ function buildRiskPage(merged, riskData) {
   const heatLabel = heatPct < 60 ? 'Within budget' : heatPct < 85 ? 'Getting warm' : 'Over budget';
 
   return `
+  ${_riskModeToggle()}
   <!-- Portfolio Heat Gauge -->
   ${heatRows.length ? `<div class="card section-gap" style="margin-bottom:14px">
     <div class="flex-between" style="margin-bottom:8px">
@@ -600,7 +621,11 @@ function setTargetAlloc(ticker, value) {
 }
 
 function _buildRebalanceSuggestions() {
-  const totalValue = (state.cash || 0) + state.portfolio.reduce(
+  // Scope to the selected book (gotcha #88) so rebalancing analyses the same
+  // holdings the risk metrics above do. `viewCash()` returns 0 in Paper view.
+  const _bookHoldings = typeof _viewModeHoldings === 'function' ? _viewModeHoldings() : state.portfolio;
+  const _cash = typeof viewCash === 'function' ? viewCash() : (state.cash || 0);
+  const totalValue = _cash + _bookHoldings.reduce(
     (s, h) => s + h.shares * (h.currentPrice || h.avgPrice), 0);
   if (!totalValue) return '<p style="color:var(--text-muted)">No portfolio data.</p>';
 
@@ -608,12 +633,12 @@ function _buildRebalanceSuggestions() {
   const today = typeof todayStr === 'function' ? todayStr() : new Date().toLocaleDateString('en-AU').split('/').map((p,i)=>i===2?p:p.padStart(2,'0')).join('-');
   const rows = [];
   const allTickers = new Set([
-    ...state.portfolio.map(h => h.ticker),
+    ..._bookHoldings.map(h => h.ticker),
     ...Object.keys(targets),
   ]);
 
   for (const ticker of allTickers) {
-    const holding = state.portfolio.find(h => h.ticker === ticker);
+    const holding = _bookHoldings.find(h => h.ticker === ticker);
     const targetPct = targets[ticker] != null ? Number(targets[ticker]) : 0;
     const currentValue = holding ? holding.shares * (holding.currentPrice || holding.avgPrice) : 0;
     const currentPct = totalValue > 0 ? (currentValue / totalValue) * 100 : 0;
