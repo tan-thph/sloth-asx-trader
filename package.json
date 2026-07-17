@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test:js": "vitest run",
-    "test:js:watch": "vitest"
+    "test:js:watch": "vitest",
+    "eval": "vitest run tests/eval"
   },
   "devDependencies": {
     "vitest": "^1.6.0"

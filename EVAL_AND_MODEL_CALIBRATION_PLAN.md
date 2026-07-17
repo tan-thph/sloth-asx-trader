@@ -22,6 +22,14 @@ of real portfolio inputs + expected behaviors, run against every prompt or model
 
 ### Two layers (build Layer 1 first — it's free and catches most regressions)
 
+> **✅ Layer 1 IMPLEMENTED 2026-07-17.** `tests/eval/eval.test.js` + `tests/eval/fixtures/`
+> (bootstrapped from `ai_call_log` id=39 — the CBA `risk_management`+`peer_outperformance`
+> mis-tag run), `tests/eval/README.md`, and `npm run eval`. Auto-collected into `npm run test:js`
+> (260 JS tests). Asserts: parse shape, structural usability, no duplicate actionable tickers,
+> validator flags the mis-tagged rec, HOLDs never dropped, panic hard-blocks BUYs, no qty=0 leak.
+> Uses the engine globals `setup.js` already loads — no `runAnalysis()` refactor needed. Grow by
+> dropping a JSON fixture in `fixtures/`. **Layer 2 (live-model) not yet built.**
+
 **Layer 1 — deterministic pipeline checks (no API cost, run every commit)**
 Freezes `raw model output → post-processing → final recs` and asserts the *deterministic* layers
 behave. This is where the quant engine, validator, regime gate, dedup, and sizing live — all pure
