@@ -1013,7 +1013,15 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       lines.push(`REGIME FLIP: ${prior.regime} → ${_activeRegime}.`);
     }
     const curTickers = new Set(mp.map(h => h.ticker));
+    // Dedupe by ticker: every field emitted here is looked up by ticker
+    // (prior.prices[ticker], prior.recs[ticker]), so a ticker held across two
+    // account/mode rows in `mp` would otherwise print two byte-identical lines —
+    // pure redundancy + wasted prompt tokens (the Holdings JSON keeps both rows
+    // because those carry distinct share/weight/account data; here nothing does).
+    const _seenChangeTickers = new Set();
     for (const h of mp) {
+      if (_seenChangeTickers.has(h.ticker)) continue;
+      _seenChangeTickers.add(h.ticker);
       const prevPx = prior.prices[h.ticker];
       const curPx = state.liveSignals?.[h.ticker]?.current_price ?? h.currentPrice;
       const prevRec = prior.recs ? prior.recs[h.ticker] : null;
@@ -1027,7 +1035,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       if (parts.length) lines.push(`${h.ticker}: ${parts.join(' | ')}`);
     }
     const prevTickers = Object.keys(prior.prices || {});
-    const added  = mp.map(h => h.ticker).filter(t => !prevTickers.includes(t));
+    const added  = [...new Set(mp.map(h => h.ticker))].filter(t => !prevTickers.includes(t));
     const closed = prevTickers.filter(t => !curTickers.has(t));
     if (added.length)  lines.push(`NEW holdings since last review: ${added.join(', ')}.`);
     if (closed.length) lines.push(`EXITED since last review: ${closed.join(', ')}.`);
