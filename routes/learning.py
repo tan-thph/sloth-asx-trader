@@ -2423,13 +2423,19 @@ def learning_stats():
                 GROUP BY 1
                 ORDER BY n DESC
             """).fetchall()
-            by_model = {r["model"]: {
-                "n": r["n"], "wins": r["wins"],
-                "win_rate": round(r["wins"]/r["n"]*100, 1) if r["n"] else None,
-                "avg_pnl": round(r["avg_pnl"], 2) if r["avg_pnl"] is not None else None,
-                "avg_hold": round(r["avg_hold"], 1) if r["avg_hold"] is not None else None,
-                "first_seen": r["first_seen"], "last_seen": r["last_seen"],
-            } for r in by_model_rows}
+            by_model = {}
+            for r in by_model_rows:
+                ci = _wilson_ci(r["wins"], r["n"])
+                by_model[r["model"]] = {
+                    "n": r["n"], "wins": r["wins"],
+                    "win_rate": round(r["wins"]/r["n"]*100, 1) if r["n"] else None,
+                    "avg_pnl": round(r["avg_pnl"], 2) if r["avg_pnl"] is not None else None,
+                    "avg_hold": round(r["avg_hold"], 1) if r["avg_hold"] is not None else None,
+                    "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+                    "ci_lo": ci[0] if ci else None,
+                    "ci_hi": ci[1] if ci else None,
+                    "low_n": r["n"] < 30,
+                }
 
             # b) Capital efficiency (pnl/day by entry driver)
             cap_eff_rows = conn.execute("""

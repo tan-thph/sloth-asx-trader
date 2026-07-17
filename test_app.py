@@ -369,6 +369,33 @@ class TestLearningLoopRoutes(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["model"], "claude-opus-4-8")
 
+    def test_stats_by_model_includes_wilson_ci(self):
+        """GET /api/learning/stats' by_model entries must carry a Wilson CI
+        (ci_lo/ci_hi/low_n), same convention as regime_stats — the raw win_rate
+        alone invites over-trusting a thin per-model sample (Model-Aware
+        Calibration Part B, Step 3)."""
+        conn = _get_shared_conn()
+        for outcome in ("win", "win", "loss"):
+            conn.execute(
+                "INSERT INTO ai_learning_events (ticker, recommendation, outcome_status, "
+                "realized_pnl_pct, was_executed, model) VALUES (?,?,?,?,?,?)",
+                ("BYMODEL.AX", "BUY", outcome, 3.0 if outcome == "win" else -2.0, 1,
+                 "claude-test-model"),
+            )
+        conn.commit()
+
+        resp = self.client.get("/api/learning/stats")
+        body = json.loads(resp.data)
+        by_model = body.get("by_model", {})
+        self.assertIn("claude-test-model", by_model)
+        row = by_model["claude-test-model"]
+        self.assertGreaterEqual(row["n"], 3)
+        self.assertIsNotNone(row["ci_lo"])
+        self.assertIsNotNone(row["ci_hi"])
+        self.assertLessEqual(row["ci_lo"], row["win_rate"])
+        self.assertGreaterEqual(row["ci_hi"], row["win_rate"])
+        self.assertTrue(row["low_n"])  # n < 30
+
     def test_log_stores_bull_case_and_bear_case(self):
         """POST /api/learning/log must persist bull_case/bear_case -- Claude's own
         steelman text, used by _compute_exemplars() to show past reasoning."""

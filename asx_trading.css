@@ -422,6 +422,7 @@ table, .metric-value, .metric-sub, .ind-val, .sr-level, .conf-bar + span,
   .topbar { background: var(--bg-surface); }
 }
 .topbar h2 { font-size: 15px; font-weight: 650; letter-spacing: -0.2px; }
+.topbar-divider { width: 1px; align-self: stretch; margin: 2px 2px; background: var(--border-light); flex-shrink: 0; }
 .market-pill {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; padding: 4px 10px; border-radius: 20px;
@@ -777,7 +778,7 @@ body.compact .signal-row { padding: 4px 0; font-size: 12px; }
   td .btn, td button, .table-wrap button { min-height: 40px; min-width: 40px; }
 
   /* Topbar: drop low-priority pills, let the action row swipe instead of overflowing */
-  #sbc-mode-btn, .topbar .market-pill { display: none; }
+  #sbc-mode-btn, .topbar .market-pill, .topbar-divider { display: none; }
   .topbar { padding: 0.625rem 0.875rem; }
   .topbar > .flex-row:last-child {
     flex-wrap: nowrap; overflow-x: auto;

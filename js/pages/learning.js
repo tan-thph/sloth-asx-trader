@@ -14,6 +14,7 @@
 //     conf_bands: [{band, wins, total, win_rate}],
 //     regime_stats: [{regime, wins, total, win_rate}],
 //     version_stats: [{version, total_calls, wins, closed, win_rate}],
+//     by_model: {modelName: {n, wins, win_rate, ci_lo, ci_hi, low_n, avg_pnl, avg_hold}},
 //     recent_events: [{id, timestamp, ticker, recommendation, ai_confidence,
 //                      ensemble_confidence, outcome_status, realized_pnl_pct,
 //                      regime, prompt_version, was_executed}],
@@ -316,6 +317,7 @@ function _renderLearningContent(d, brier) {
   const phase8            = d.phase8             || null;  // Gap 2
   const nVirtualResolved  = d.n_virtual_resolved ?? 0;     // virtual outcomes resolved via OHLC scan
   const holdOutcomes      = d.hold_outcomes       || null; // HOLD passivity calibration (miss/correct rate)
+  const byModel           = d.by_model            || {};   // per-LLM track record (Model-Aware Calibration Part B, Step 3)
 
   // Cache events by id so viewStoredDebate() can look up postmortem_debate JSON
   // without an extra HTTP round-trip.
@@ -854,6 +856,48 @@ function _renderLearningContent(d, brier) {
       ${(rvpReal.win_rate != null && rvpPaper.win_rate != null && Math.abs(rvpReal.win_rate - rvpPaper.win_rate) >= 15 && rvpReal.n >= 5 && rvpPaper.n >= 5)
         ? `<p class="text-xs" style="margin-top:6px;color:#c2410c">⚠ ${Math.abs(rvpReal.win_rate - rvpPaper.win_rate).toFixed(0)}pp win-rate gap between live and paper — treat paper-derived confidence with caution.</p>`
         : ''}
+    </div>` : '';
+
+  // ── Per-model track record (Model-Aware Calibration Part B, Step 3) ──────────
+  // Purely descriptive — no nudge derives from this. The calibration block and
+  // go-live scorecard still blend every model's closed trades into one number
+  // (the go-live 🎯 card only flags a mixed sample, see model_mix); this table
+  // is what lets you SEE whether models actually differ before trusting any
+  // future model-segmented split. Sorted by n desc server-side (routes/learning.py).
+  const byModelEntries = Object.entries(byModel);
+  const byModelCard = byModelEntries.length ? `
+    <div class="card section-gap">
+      <div class="card-title">Performance by Model</div>
+      <p class="text-xs text-muted" style="margin-bottom:8px">Per-LLM track record — descriptive only, calibration still blends all models into one figure. A row spanning &gt;1 model is what the Go-Live 🎯 card's mixed-sample note is warning you about.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:4px 8px">Model</th>
+            <th style="text-align:right;padding:4px 8px">Trades</th>
+            <th style="text-align:right;padding:4px 8px">Win Rate</th>
+            <th style="text-align:left;padding:4px 8px">95% CI</th>
+            <th style="text-align:right;padding:4px 8px">Avg P&amp;L%</th>
+            <th style="text-align:right;padding:4px 8px">Avg Hold</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${byModelEntries.map(([name, r]) => {
+            const pnlColor = r.avg_pnl == null ? 'var(--text-secondary)' : r.avg_pnl >= 0 ? '#16a34a' : '#dc2626';
+            const ciStr = r.ci_lo != null
+              ? `<span style="font-size:10px;color:${r.low_n ? '#d97706' : 'var(--text-muted)'}">${r.ci_lo.toFixed(0)}–${r.ci_hi.toFixed(0)}%${r.low_n ? ' ⚠' : ''}</span>`
+              : '<span class="text-muted text-xs">—</span>';
+            return `<tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:5px 8px;font-family:monospace;font-size:11px">${escapeHTML(name)}${sampleBadge(r.n)}</td>
+              <td style="padding:5px 8px;text-align:right">${r.n}</td>
+              <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(r.win_rate)}">${pct(r.win_rate)}</td>
+              <td style="padding:5px 8px">${ciStr}</td>
+              <td style="padding:5px 8px;text-align:right;color:${pnlColor}">${r.avg_pnl != null ? (r.avg_pnl >= 0 ? '+' : '') + r.avg_pnl.toFixed(1) + '%' : '—'}</td>
+              <td style="padding:5px 8px;text-align:right;color:var(--text-secondary)">${r.avg_hold != null ? r.avg_hold.toFixed(0) + 'd' : '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      ${byModelEntries.length > 1 ? `<p class="text-xs text-muted" style="margin-top:6px">Model captured per rec since 2026-07-17; older rows may show as <code>unknown/legacy</code> until <code>POST /api/learning/backfill-models</code> is run.</p>` : ''}
     </div>` : '';
 
   // ── Capital efficiency by entry driver ─────────────────────────────────────
@@ -1443,7 +1487,7 @@ function _renderLearningContent(d, brier) {
   return introNote + _llWindowBar() + summaryCards + goLivePlaceholder + coveragePlaceholder + ruleEfficacyPlaceholder + regressionBanner + phase8Note + holdOutcomesCard + holdDecisionsPlaceholder + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard +
-    realVsPaperCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
+    realVsPaperCard + byModelCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
     `<div id="ll-factor-winrates-card" style="display:none"></div>` +
     recentCard + failedCard + debateInsightsCard +
     digestCard + lessonGenCard + lessonsPlaceholder + sellOutcomesPlaceholder + buyOutcomesPlaceholder + thesisDriftPlaceholder +
