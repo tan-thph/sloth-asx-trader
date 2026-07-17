@@ -111,7 +111,7 @@ function renderRunAnalysisPanel() {
             return `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
               <span class="text-xs text-muted">Analyse book:</span>
               ${['all','real','paper'].map(m => `
-                <button class="btn btn-sm" style="font-size:11px;padding:3px 8px;${m===_vm?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="state.portfolioViewMode='${m}';document.getElementById('rec-content').innerHTML=renderRunAnalysisPanel()">${_VM_LABELS[m]}</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:3px 8px;${m===_vm?'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)':''}" onclick="state.portfolioViewMode='${m}';document.getElementById('rec-content').innerHTML=renderRunAnalysisPanel();if(typeof _renderBookLensRibbon==='function')_renderBookLensRibbon()">${_VM_LABELS[m]}</button>
               `).join('')}
             </div>`;
           })()}

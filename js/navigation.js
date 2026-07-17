@@ -161,6 +161,40 @@ function _renderSystemCriticalBanner() {
     </div>`).join('');
 }
 
+// ── Global book lens (All / Live / Paper) — top ribbon ────────────────────────
+// A single app-wide control for state.portfolioViewMode (gotcha #88), always
+// visible in the topbar regardless of which page is open. Six pages (Dashboard,
+// Portfolio, Performance, Recommendations, Risk, Backtest AI-Replay) already
+// render their OWN inline copy of this same toggle — this does not replace
+// them, it just adds a fast path that doesn't require navigating to one of
+// those pages first. All of them write the same global, so nothing can drift
+// out of sync: this ribbon re-renders on every renderPage() call (below), and
+// the per-page toggles already call renderPage() themselves on click.
+const _BOOK_LENS_LABELS = { all: 'All', real: '● Live', paper: '◦ Paper' };
+function _getBookLensEl() {
+  return document.getElementById('book-lens-ribbon');
+}
+function _renderBookLensRibbon() {
+  const el = _getBookLensEl();
+  if (!el) return;
+  const vm = state.portfolioViewMode || 'all';
+  el.innerHTML = `
+    <span class="text-xs text-muted" style="align-self:center">Book:</span>
+    ${['all', 'real', 'paper'].map(m => `
+      <button class="btn btn-sm" style="${m === vm ? 'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)' : ''}"
+        onclick="setBookLens('${m}')"
+        title="${m === 'all' ? 'Show live + paper together' : m === 'real' ? 'Live trades only' : 'Paper trades only'}">${_BOOK_LENS_LABELS[m]}</button>
+    `).join('')}
+  `;
+}
+// Shared setter for the topbar ribbon. Per-page toggles keep setting
+// state.portfolioViewMode directly (unchanged) — this is just the ribbon's own
+// click handler, kept as a named function so it survives renderPage() re-renders.
+function setBookLens(mode) {
+  state.portfolioViewMode = mode;
+  renderPage();
+}
+
 // ── Mobile sidebar toggle ─────────────────────────────────────────────────────
 function toggleMobileSidebar() {
   const sidebar = document.querySelector('.sidebar');
@@ -229,6 +263,11 @@ function renderPage() {
     _renderPageHeader(state.page);
   } catch (err) {
     console.error('[renderPage] header render crashed:', err);
+  }
+  try {
+    _renderBookLensRibbon();
+  } catch (err) {
+    console.error('[renderPage] book lens ribbon render crashed:', err);
   }
   try {
     _renderPageUnsafe();
