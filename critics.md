@@ -168,8 +168,14 @@ Only Relevant News
 
 instead of every high-impact article.
 
-Recommendation 5
+Recommendation 5 — ALREADY SHIPPED (verified 2026-07-17, not a pending ask)
 Event Persistence
+
+`core.py`'s `DECAY_HALF_LIFE_DAYS` dict implements this almost verbatim — dividend=14d, earnings=30d,
+geopolitics=90d, macro=180d, plus finer-grained categories (technical=2d, analyst/other=3d,
+operational=7d, sector=14d, merger=30d, regulatory=45d) not enumerated in the example below.
+See `news.md` §1.2 Stage 5 for the current documented behaviour. Read the rest of this
+recommendation as historical context for why the feature was built, not an open request.
 
 Different events decay differently.
 

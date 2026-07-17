@@ -10,9 +10,9 @@ Every time you click **Analyse** on a ticker, run the **Market Scanner**, or req
 
 **Price series used:** `auto_adjust=True` — historical bars are dividend- and split-adjusted for continuity. The current (last) bar is the live market price. RSI, MACD, and Bollinger signals are internally consistent across ex-dividend gaps because the series is continuous. The `high_60d` / `low_60d` fields are computed on the raw High/Low columns, not Close, so they capture the actual intraday extremes.
 
-**Forming-bar guard:** Before any computation runs, `_drop_forming_bar()` removes today's bar before 07:00 UTC (i.e. before ASX data fully settles). This prevents a partial intraday candle from spiking RSI or distorting MACD during market hours.
+**Forming-bar guard:** Before any computation runs, `_drop_forming_bar()` removes today's bar unless the current **Sydney local time is ≥ 17:00** (i.e. before ASX data fully settles). This is a Sydney-local check via `zoneinfo`, not a flat UTC cutoff — a fixed UTC hour would drift against the actual ASX close across AEST/AEDT daylight-saving transitions. This prevents a partial intraday candle from spiking RSI or distorting MACD during market hours.
 
-**Sanity check:** `_sanity_check()` drops any bar with a >25% single-day close move (unadjusted split artefact or data error). Penny stocks (close < $0.50) are exempt.
+**Sanity check:** `_sanity_check()` drops any bar with a >25% single-day close move (unadjusted split artefact or data error). The penny-stock exemption requires **both** the pre-move and post-move close to be under $0.50 — a boundary-crossing move (e.g. $0.60 → $0.30) is not exempt just because the post-move close is a penny stock.
 
 ---
 
@@ -508,7 +508,7 @@ S2 = pivot − (50-day high − 50-day low)
 
 **The 14-day threshold is hardcoded.** To change it:
 ```python
-# indicators.py line ~725
+# indicators.py line ~870
 pre_earnings_risk = bool(days_to_earnings is not None and 0 <= days_to_earnings <= 14)
 ```
 Change `14` to your preferred days-out threshold. The quant engine's `earningsAdj = 1.3` multiplier is in `js/quant-engine.js` — update both if you want to change the stop-widening behaviour.
@@ -646,7 +646,7 @@ Fundamentals are not used in the scanner score or quant engine sizing. They appe
 
 `get_sector_for_ticker(ticker)` returns the sector in this order:
 
-1. **`ASX_SECTOR_MAP` lookup** (hardcoded in `indicators.py`) — ~180 tickers covering the ASX 200. Returns immediately without a network call.
+1. **`ASX_SECTOR_MAP` lookup** (hardcoded in `indicators.py`) — ~134 tickers covering the ASX 200. Returns immediately without a network call.
 2. **yfinance `info["sector"]`** — for unlisted or newer tickers not in the map.
 3. **Fallback: `"Other"`**
 

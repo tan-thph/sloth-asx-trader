@@ -8,19 +8,22 @@ A technical reference for how both pipelines collect, process, score, and surfac
 
 ### Overview
 
-The News Scanner collects articles from RSS feeds and per-ticker news sources, deduplicates them using TF-IDF cosine similarity, classifies each article with an LLM (Ollama, Groq, or Google Gemini), and stores results in `asx_trader.db`. A background scheduler runs the pipeline automatically four times per day.
+The News Scanner collects articles from RSS feeds and per-ticker news sources, deduplicates them using TF-IDF cosine similarity, classifies each article with an LLM (Ollama, Groq, or Google Gemini), and stores results in `asx_trader.db`. A background scheduler runs the pipeline automatically on a fixed interval (default every 6 hours, `scan_interval_hours` setting) starting ~30s after server boot — it is NOT clock-aligned to fixed times of day (the announcements scheduler in §2.5 is the one that fires at fixed AEST times).
 
 ---
 
 ### 1.1 Data Sources
 
-**Market-wide RSS feeds** (fetched on every scan):
+**Market-wide RSS feeds** (`MARKET_FEEDS` in `news_engine.py`, fetched on every scan when enabled):
 
-| Feed | Type | Notes |
-|---|---|---|
-| RBA Speeches | macro | `rba.gov.au` — interest rate speeches, board minutes |
-| ASX Market Announcements | filing | Official ASX filing feed — price-sensitive and general filings |
-| Investing.com AU | news | Off by default — requires browser UA header to avoid 403 |
+| Feed | Type | Enabled | Notes |
+|---|---|---|---|
+| RBA Speeches | macro | ✅ | `rba.gov.au` — interest rate speeches, board minutes |
+| Reuters Australia | news | ❌ | Reuters shut down public RSS feeds in 2020 — kept in config, feed 404s |
+| Oilprice.com | geopolitics | ✅ | Oil/gas supply and geopolitical energy stories |
+| ASX Market Announcements | filing | ✅ | Official ASX filing feed — price-sensitive and general filings |
+| Investing.com AU | news | ✅ | Requires browser UA header to avoid 403 |
+| BBC World News | geopolitics | ✅ | General geopolitics feed — conflict, sanctions, trade policy |
 
 **Per-ticker RSS** (Yahoo Finance + Google News, up to 30 portfolio/watchlist tickers):
 
@@ -63,7 +66,7 @@ Articles older than `max_age_days` (default 7, configurable in Settings → News
 `NewsPreprocessor.store_batch()` deduplicates before inserting into `news_items`. Two strategies run in order:
 
 1. **URL dedup** — exact URL match against existing rows; skipped immediately if seen before.
-2. **TF-IDF cosine similarity** (requires `scikit-learn`) — title + first 200 chars of content are vectorised. Any new article with cosine similarity ≥ 0.85 against an article already stored in the last 7 days is treated as a duplicate and skipped. This catches the same story from Yahoo Finance and Google News for the same ticker.
+2. **TF-IDF cosine similarity** (requires `scikit-learn`) — **titles only** (not content) are vectorised, compared against a rolling in-process list of the last 200 titles seen this scan (not a 7-day DB query). Any new article with cosine similarity **> 0.87** against a recent title is treated as a duplicate and skipped. This catches the same story from Yahoo Finance and Google News for the same ticker.
 
 If `scikit-learn` is not installed, only URL dedup runs (more duplicates will appear in the feed).
 
@@ -90,8 +93,8 @@ New (non-duplicate) articles are inserted into `news_items` with `processed=0`. 
 | `primary_tickers` | JSON list of tickers that are the primary subject |
 | `tags` | JSON list of keyword tags |
 | `llm_model` | Which model classified this article |
-| `processed` | 0 = pending, 1 = classified, −1 = LLM failed |
-| `decay_weight` | Exponential decay from `published_date` |
+| `processed` | 0 = fresh/pending, 1 = classified, −1 = LLM failed (retryable), −2 = terminal give-up after repeated retry failures (permanently excluded from future batches) |
+| `decay_weight` | Exponential decay from `published_date`, half-life is category-specific — see Stage 5 |
 
 **Stage 4 — LLM Classification**
 
@@ -110,6 +113,8 @@ The context block includes:
 
 Context is cached per ticker for 6 hours to avoid hammering yfinance during batch re-classify runs.
 
+**Transmission-channel scoring (macro/geopolitics only):** the prompt requires the LLM to name which of ten market-transmission channels (`oil_gas`, `iron_ore_coal`, `gold`, `base_metals`, `agriculture`, `aud_fx`, `rates_inflation`, `trade_policy`, `shipping_supply_chain`, or `none`) an event reaches an ASX price through. This exists because casualty-count or headline-magnitude framing (the old rubric) inverted the actual market-relevance scale — a bar fire scored higher than a Strait of Hormuz closure that directly threatens an oil-and-gas holding. If the model can't name a real channel (`none`), `impact_score` is capped at 2.0 regardless of how dramatic the story reads — "no channel, no entry."
+
 **LLM output validation:**
 
 After classification, `_sanitize_summary()` scans the `summary` field for three degenerate patterns:
@@ -125,13 +130,24 @@ Articles that return `None` from the LLM (parse failure, timeout) are marked `pr
 
 **Stage 5 — Decay Refresh**
 
-Every article's `decay_weight` is recalculated based on age:
+Every article's `decay_weight` is recalculated based on age, using a **category-specific half-life** (`DECAY_HALF_LIFE_DAYS` in `core.py`) rather than one flat rate — a factory-fire "technical" story is stale in days, a rate cycle stays relevant for months:
 
 ```
-decay_weight = 2^(−age_days / 3.0)   # half-life of 3 days, minimum 0.05
+decay_weight = 2^(−age_days / half_life_days)   # minimum 0.05
 ```
 
-An article published 3 days ago has weight 0.5. At 7 days old the weight is ~0.10. At 14 days it's ~0.01. This is used to rank articles in the UI — recent articles appear prominently, old ones fade without being deleted.
+| Category | Half-life |
+|---|---|
+| `technical` | 2 days |
+| `analyst`, `other` | 3 days |
+| `operational` | 7 days |
+| `sector`, `dividend` | 14 days |
+| `earnings`, `merger` | 30 days |
+| `regulatory` | 45 days |
+| `geopolitics` | 90 days |
+| `macro` | 180 days |
+
+A `technical` article published 2 days ago has weight 0.5; a `macro` article at 2 days old is still ~0.99. This is used to rank articles in the UI — recent articles appear prominently, old ones fade without being deleted. **Window caveat:** the macro brief only reads a 2–3 day window, so past ~30 days the exact half-life value is cosmetic — what matters is the *ordering* (technical < operational/sector/dividend < earnings/merger < macro/geopolitics).
 
 **Stage 6 — Prune**
 
@@ -145,7 +161,7 @@ Articles older than `2 × max_age_days` (default 14 days) are hard-deleted from 
 |---|---|---|
 | **Ollama** (default) | Settings → News → LLM Model | Local inference. Supports GPU/CUDA auto-detection. Streaming mode gives live token-per-second stats in the scan progress bar. |
 | **Groq** | Settings → News → Groq API Key | Cloud inference. Default model: `llama-3.1-8b-instant`. Fast (250 ms/article). Free tier limited to 6,000 tokens/min. |
-| **Google Gemini** | Settings → News → Google API Key | Cloud inference. Default model: `gemini-3.5-flash`. Free tier: ~15 RPM; 429 responses auto-retry with 5s/10s/20s back-off. |
+| **Google Gemini** | Settings → News → Google API Key | Cloud inference. Default model: `gemini-2.0-flash` (the News Scanner and Announcements Scanner have independent `gemini_model` settings — don't assume they match; Announcements currently defaults differently, see §2.4). Free tier: ~15 RPM; 429 responses auto-retry with 5s/10s/20s back-off. |
 
 All three providers now receive the same earnings/dividend context enrichment for relevant articles.
 
@@ -153,7 +169,7 @@ All three providers now receive the same earnings/dividend context enrichment fo
 
 ### 1.4 Scheduled Scans
 
-The scheduler fires 4 times per day at approximately 09:00, 12:00, 15:00, and 18:00 AEST (implementation is configurable via `next_scan` in the status response). Each scan:
+The scheduler is a simple interval loop (`_scheduler_loop()` in `news_engine.py`), not clock-aligned: it starts ~30s after server boot and re-fires every `scan_interval_hours` (default 6, Settings → News). `next_scan` in the status response reflects `now + interval_h`, so the actual times of day drift with server uptime — don't rely on it landing near fixed clock times the way the Announcements scheduler does (§2.5). Each scan:
 
 1. Fetches all enabled market-wide feeds
 2. Fetches per-ticker RSS for up to 30 portfolio/watchlist tickers
@@ -172,16 +188,22 @@ Each article in the News feed shows a score card with these fields:
 
 **Impact Score (0.0 – 10.0)**
 
-This is the primary ranking signal. The LLM scores portfolio impact using a four-step rubric:
+This is the primary ranking signal. The LLM selects a **band**, not a multi-step additive sum — small quantised local models follow band *selection* far more reliably than compound arithmetic. News and Announcements share one canonical table (`IMPACT_BAND_TABLE` in `core.py`) so the same event type lands in a comparable range regardless of which surface classified it:
 
-| Step | What it evaluates |
+| Event class | Band |
 |---|---|
-| Step 1 — Article type filter | Opinion, listicles, "should I buy X?" commentary → cap at 0.5–2.0 |
-| Step 2 — Base score by event class | Trading halt / M&A bid / regulatory decision → 7–9 · Earnings / dividend change / capital raise / guidance → 6–8 · CEO/exec change / analyst PT revision → 4–6 · RBA/APRA/macro policy → 3–5 · Operational update → 2–4 · Broad sector commentary → 1–3 |
-| Step 3 — Specificity bonus | +1.5 if a portfolio ticker is the PRIMARY subject · −2 if only mentioned in passing or in an index list |
-| Step 4 — Magnitude bonus | +1 if specific large figures cited (earnings change >5%, deal >$500M, dividend cut >20%) |
+| Trading Halt / Suspension | 8–9 |
+| Acquisition / Takeover / Merger / Scheme of Arrangement | 8–9 |
+| Capital Raise | 6–8 |
+| Earnings / Guidance Update | 6–8 |
+| Geopolitical Conflict / Sanctions / Major Trade-Policy Shift | 5–8 |
+| Dividend Change | 5–7 |
+| CEO / Board Change | 4–6 |
+| RBA / APRA / Macro Policy | 3–5 |
+| Asset Sale / Operational Update | 3–5 |
+| AGM / Admin / Broad Commentary / Other | 1–3 |
 
-Final score = min(10.0, sum of applicable steps).
+A deterministic keyword backstop (`impact_floor_for_keywords()`) floors trading-halt and acquisition/takeover language to their band minimum even if the LLM under-scores it. Macro/geopolitics articles are additionally capped at 2.0 if no transmission channel applies (see Stage 4 above) — the band table is a ceiling for those two categories, not a guarantee.
 
 **Sentiment (bullish / bearish / neutral)**
 
@@ -199,7 +221,7 @@ Age-adjusted weight. Articles published today have weight near 1.0. At 3 days ol
 
 **Category**
 
-One of: `earnings`, `regulatory`, `macro`, `sector`, `dividend`, `analyst`, `merger`, `technical`, `other`.
+One of: `earnings`, `regulatory`, `macro`, `geopolitics`, `sector`, `dividend`, `analyst`, `merger`, `technical`, `other`. `geopolitics` is first-class (BBC World, Oilprice.com feeds) — see §1.1.
 
 **Primary Tickers vs Mentioned Tickers**
 
@@ -242,14 +264,16 @@ Scrapes `listcorp.com/asx/{ticker}/news` — no Cloudflare, publicly accessible.
 
 ### 2.2 PDF Text Extraction
 
-When a PDF URL is available, `download_pdf()` tries six strategies in order:
+When a PDF URL is available, `download_pdf()` tries several strategies in order (docstring in `announcement_engine.py`, all responses validated with `%PDF-` magic bytes):
 
-1. **Direct URL fetch** — HTTP GET on the `pdf_url` field from Markit
-2. **Markit `doc_key` URL** — `https://announcements.asx.com.au/.../{doc_key}.pdf`
-3. **ASX announcements CDN** — alternative path pattern on the ASX CDN
-4. **cloudscraper on the PDF URL** — Cloudflare bypass in case the PDF endpoint is protected
-5. **todayAnns URL resolver** — for today's announcements, attempts a secondary Markit query to get the current PDF URL (the URL may change between filing and public availability)
-6. **listcorp PDF search** — search listcorp for a matching announcement and extract its PDF link
+0. **Recover a missing `doc_key`** — if empty but `ticker` is known, re-query the Markit API for it (0b: try the Markit document-metadata endpoint too).
+1. **Markit documents API** — `/asx-research/1.0/documents/{doc_key}/download`.
+2. **Stored `pdf_url`** (direct CDN link or `displayAnnouncement.do`) with redirects followed; if the response is HTML, parse it for a CDN link and retry (2b: construct a direct CDN URL from `doc_key`'s `idsId` + date for old records).
+3. **Reconstruct `displayAnnouncement.do`** from `doc_key`'s `idsId` (old system, last resort).
+4. **Scrape the ASX company announcements HTML page** for `asxpdf` links matching the `idsId`.
+5. **`todayAnns.do` + v2 `displayAnnouncement` viewer** — resolves hex MAP-system filenames; works for today's announcements only.
+
+This is the PDF *download* step, distinct from the earlier announcement-*list* fetch (§2.1), which is the stage that actually uses cloudscraper/listcorp as fallback data sources.
 
 Once PDF bytes are downloaded, text extraction uses (in preference order):
 1. `pdfplumber` — accurate layout-preserving extraction
@@ -339,16 +363,7 @@ Each announcement card in the UI shows:
 
 **Impact Score (1.0 – 10.0)**
 
-Scored by the LLM on a scale where:
-
-| Score range | Typical announcement |
-|---|---|
-| 8–10 | Major earnings result with large EPS beat/miss, acquisition, capital raise, trading halt |
-| 6–8 | Quarterly result, dividend change, guidance update with figures |
-| 4–6 | Director appointment, analyst rating change, AGM notice |
-| 1–4 | Routine administrative filings, security holder notices |
-
-The standard prompt uses a default hint of `impact: 6`. The price-sensitive prompt hints `impact: 8` because price-sensitive announcements are higher-value by definition. The LLM adjusts from these defaults based on the actual content.
+Scored by the LLM against the same shared `IMPACT_BAND_TABLE` used by the News Scanner (§1.5) — not a separate fixed-hint anchor. ASX's own `isPriceSensitive` flag is applied as a **floor** after classification (never an anchor the model just echoes back): a PS announcement can't end up scoring low regardless of which path (LLM or keyword fallback) produced the raw score, but the model still picks its own band value rather than being seeded with an example number to copy.
 
 Keyword fallback impact: `5.0 + (positive_keyword_count − negative_keyword_count) × 0.5`, clamped to 1.0–10.0.
 

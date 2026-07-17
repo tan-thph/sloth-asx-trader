@@ -44,7 +44,7 @@ pip install gunicorn
 gunicorn -c gunicorn.conf.py 'asx_server:app'
 ```
 
-**Set your API key:** go to **Settings → API Key** and paste your Anthropic key. It is stored in your browser's `localStorage` and is only ever sent to the Anthropic API. (Prefer it server-side? Enable proxy mode and the key lives in SQLite instead, never touching the browser.)
+**Set your API key:** go to **Settings → API Key** and paste your Anthropic key. It is stored in your browser's `localStorage` and is only ever sent to the Anthropic API. (Prefer it server-side? Enable proxy mode and the key is written to a git-ignored `claude-api.txt` file instead, never touching the browser.)
 
 That's the minimum. Everything else — local LLM, news feeds, Telegram, day trading — is optional and configured from the Settings page.
 
@@ -286,8 +286,8 @@ Everything is configurable from the Settings page — no code editing:
 ## Running Tests
 
 ```bash
-python test_app.py   # 758 backend + integration tests
-npm run test:js      # 154 JS unit tests (quant engine, regime classifier, validator, thesis drift)
+python test_app.py   # 1100+ backend + integration tests (run it for the current count)
+npm run test:js      # JS unit tests (quant engine, regime classifier, validator, thesis drift, day trading, analysis pipeline, paper/real firewall)
 ```
 
 The Python suite covers every backend route, the learning-loop logic, and source-level invariants for the frontend. The Vitest suite exercises the pure deterministic engines (sizing, regime classification, schema validation, thesis-drift) in isolation.

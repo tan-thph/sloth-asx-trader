@@ -1,6 +1,6 @@
 # Sloth ASX Trader — Prompt Architecture Reference
 
-**Last Updated:** 2026-06-11 (Sprint 67 — v11 CorrToHoldings context rule; §9.5 local-LLM size escalation; v10/v11 history rows)
+**Last updated:** 2026-07-17. **Live `PROMPT_VERSION` is `2026-07-v24`** (`js/prompts.js:18`) — thirteen versions ahead of this doc's last full pass (v11); several structural claims below (rule count, section labels, output schema) were refreshed against the current code on this date, but treat any unverified `vNN`-specific detail as suspect and check `js/prompts.js` directly.
 **Model:** `claude-sonnet-4-6` · all calls via `callClaude()` in `js/claude-client.js`
 
 This document is the authoritative reference for every Claude API call in the application:
@@ -33,16 +33,15 @@ callClaude(agentType, userMessage, options)    ← js/claude-client.js
 
 ### Caching strategy
 
-| Agent | Cached | Rationale |
-|---|---|---|
-| `portfolio` | ✅ yes (`ephemeral`) | Same static system prompt all day; dynamic content in user message only |
-| `analyst` | ✅ yes | Static system prompt |
-| `pm` | ✅ yes | Static system prompt |
-| `dayTrade` | ✅ yes | System prompt embeds only brokerage (rarely changes) |
-| `universe` | ✅ yes | Same as dayTrade |
-| `macro` | ❌ no (`noCache`) | Short, cheap, varies with live data |
-| `assistant` | ❌ no | Multi-turn; context varies every call |
-| `briefing` | ❌ no | Short, one-shot, daily freshness needed |
+These are the only five agent types `_resolveSystemPrompt()` (`js/claude-client.js`) actually knows about. Older docs referencing `analyst`, `pm`, or `briefing` agent types describe a design that was removed — those identifiers don't exist anywhere in the current code.
+
+| Agent | Cached | Max tokens | Rationale |
+|---|---|---|---|
+| `portfolio` | ✅ yes (`ephemeral`) | 12,000 | Same static system prompt all day; dynamic content in user message only |
+| `dayTrade` | ✅ yes | 4,000 | System prompt embeds only brokerage (rarely changes) |
+| `universe` | ✅ yes | 4,000 | Same as dayTrade |
+| `macro` | ❌ no (`noCache`) | 3,000 | Short, cheap, varies with live data |
+| `assistant` | ❌ no | 2,000 | Multi-turn; context varies every call |
 
 **Structured output (Sprint 62, §8.5):** the `portfolio` agent forces tool use on a static
 `emit_recommendations` tool (`_PORTFOLIO_TOOL` in `claude-client.js`) — the API constrains the
@@ -68,22 +67,24 @@ This prevents unintended Ollama calls during market hours and avoids priority-qu
 ## 1. Portfolio Analysis — `'portfolio'`
 
 **File:** `js/analysis.js → runAnalysis()`
-**Trigger:** "Run Analysis" button · max 10,000 output tokens *(8,000 → 10,000 Sprint 68: the 15:35 run hit the cap exactly; tool input counts against max_tokens)*
+**Trigger:** "Run Analysis" button · max tokens is a **budget tier**, not a flat number: `ANALYSIS_BUDGET_TIERS` (`js/config.js`) — lean 8,000 / **standard 12,000 (default)** / deep 20,000 / custom user-set (floored, no cap). `state.settings.analysisTokenBudget` selects the tier; it also deterministically rations watchlist tickers so holdings are always fully analysed first.
 **System prompt:** `ANALYSIS_SYSTEM_PROMPT` (static, cached) + optional regime/date modules from `buildSystemArray()` (uncached second block)
 
-### System prompt structure (8 sections)
+### System prompt structure
 
 | Section | Content |
 |---|---|
-| **1 — Hard Rules** (Rules 1–16) | Non-negotiable constraints: profitable entry, real-data-only, R:R ≥ 2:1, position sizing, conviction threshold, SELL/TRIM validity, watchlist handling, cash-as-position, sector concentration cap, ex-div protection, tax-aware trimming, macro override, CGT window, mandatory SELL escalation, risk-adjusted sizing, Sharpe context |
+| **1 — Hard Rules** (Rules 1–19) | Non-negotiable constraints: profitable entry, real-data-only, R:R ≥ 2:1, position sizing, conviction threshold, SELL/TRIM validity, watchlist handling, cash-as-position, sector concentration cap, ex-div protection, tax-aware trimming, macro override, CGT window, mandatory SELL escalation, risk-adjusted sizing, Sharpe context, ... through Rule 19 (fundamentals over technicals for established positions) |
+| **1C — Entry Driver Tagging** | `primary_entry_driver` required on every BUY/TOP_UP — a closed taxonomy tagging what actually drove the entry decision, feeds the Learning Loop's driver-matrix analytics |
 | **2 — SELL/TRIM Decision Tagging** | Closed taxonomy for `primary_driver` (9 values), `secondary_factors` (12 values, 0–3), `urgency` (3 values). Forbidden combos, required-secondary rules, `alternativeTicker` requirement |
-| **2B — Anti-Churn** | 7-day BUY→SELL block; catastrophe override definition; minimum hold 1 day; churn threshold ($100 or 2%) |
+| **2B — Thesis Validation at Exit and on Hold** | Uses the engine-computed `HOLDING_CONTEXT` Delta (entry-vs-now signal drift, computed by `computeThesisDrift()` in `analysis.js` — Claude cites it, doesn't re-derive it) |
+| **2C — Anti-Churn** | 7-day BUY→SELL block; catastrophe override definition; minimum hold 1 day; churn threshold ($100 or 2%) |
 | **3 — Multi-Factor Framework** | Priority 1: Earnings/revisions → Priority 2: Macro regime → Priority 3: Sector flows → Priority 4: Relative valuation → Priority 5: Technicals (confirming only, one indicator per independent category) |
 | **4 — Income & Tax** | Franking credit grossed-up yield formula; tax-loss harvest activation window; reporting season cluster risk |
 | **5 — Execution** | Liquidity cap (≤5% of volume_avg_20); sizing guidance; order types |
 | **6 — Learning from History** | Calibration algorithm; debate block interpretation; rec history review |
-| **7 — Pre-flight Checks** | Cash comparison test with worked arithmetic examples; 6 validation checks (a)–(f) |
-| **8 — Output Format** | Full JSON schema with worked example (BHP BUY + CSL TRIM) |
+| **7 — Pre-flight Checks** | Cash comparison test with worked arithmetic examples; **8** validation checks (a)–(h) — adds (g) scenarios-object-sums-to-1.0 and (h) bullCase/bearCase requirement |
+| **8 — Output Format** | Full JSON schema with worked example, `qty: 0` always (Rule 4), `bullCase`/`primary_entry_driver` required on BUY/TOP_UP |
 
 ### Optional modules (injected as second uncached system block)
 
@@ -94,9 +95,11 @@ These are assembled by `buildSystemArray()` in `prompt-modules.js` based on date
 | `TAX_LOSS_HARVEST` | Month = May or June |
 | `CGT_DISCOUNT_WINDOW` | Any holding has `daysHeld` between 330–365 |
 | `REPORTING_SEASON` | Month = February or August |
-| `MINING_SECTOR` | Portfolio contains BHP, RIO, FMG, or MIN |
-| `REIT_SECTOR` | Portfolio contains REITs (sector = Real Estate) |
-| `HIGH_VOL_REGIME` | Active regime = `highVol` or `bearVolatile` |
+| `MINING_SECTOR` | Sector = Materials/Mining/Resources, detected across three sources (portfolio, `state.liveSignals`, `context.sectors`) — NOT a fixed ticker list (BHP/RIO/FMG/MIN). |
+| `REIT_SECTOR` | Same sector-string detection, sector = Real Estate. Not ticker-based. |
+| `FINANCIALS_SECTOR` | Sector = Financials/Financial Services/Banks — bank NIM-specific rules |
+| `HIGH_VOL_REGIME` | Active regime = `highVol` only (`bearVolatile` is not a checked value) |
+| `RISK_OFF_REGIME` | Active regime = `riskOff` |
 
 ### User message — all injected by `analysis.js`
 
@@ -199,25 +202,27 @@ SYNTHESIS: {winner} | {key_pivot}
     "priceRange":            [44.20, 44.80],
     "target":                49.50,
     "stopLoss":              42.10,
-    "qty":                   50,
+    "qty":                   0,     // ALWAYS 0 (Rule 4) — quant engine sets the real qty, Claude's value is ignored
     "tranches":              1,
     "orderType":             "LIMIT",
     "limitPrice":            44.50,
     "confidence":            0.74,
     "scenarios":             {"bull":{"p":0.30,"ret":0.12},"base":{"p":0.50,"ret":0.07},"bear":{"p":0.20,"ret":-0.04}},
     "expectedTimeToTarget":  45,
-    "factorsUsed":           ["EPS revision: +3.1% over 30d", "Macro: weak AUD", "Valuation: fwdPE 10.2 vs sector 13.5x"],
+    "factorsUsed":           ["[FUNDAMENTAL] EPS revision: +3.1% over 30d", "[MACRO] weak AUD", "[FUNDAMENTAL] Valuation: fwdPE 10.2 vs sector 13.5x"],
     "reasoning":             "≤150 chars: top 2–3 factors; no RSI/MACD as primary",
     "risks":                 "≤100 chars: #1 macro or fundamental risk",
     "catalysts":             "≤120 chars: specific events e.g. RBA cut Jun25",
     "signals":               ["RSI14: 44 rising", "OBV: uptrend"],
     "invalidationCondition": "≤80 chars: must contain a measurable value",
-    "bearCase":              "≤100 chars: BUY/TOP_UP with conf ≥ 0.70 only",
+    "bullCase":              "≤100 chars: required for BUY/TOP_UP — steelman of why this goes right",
+    "bearCase":              "≤100 chars: required SELL/TRIM, and BUY/TOP_UP with conf ≥ 0.70",
     "weightGuidance":        "Accumulate (+1-2%)",
     "expectedProfit":        367.50,
     "netProfit":             329.30,
     "taxBenefitEstimate":    null,
     "grossedUpYield":        null,
+    "primary_entry_driver":  "fundamental_value", // BUY/TOP_UP only — required; one of: mean_reversion, momentum_breakout, trend_pullback, fundamental_value, macro_tailwind
     "primary_driver":        "thesis_broken",   // SELL/TRIM only
     "secondary_factors":     ["negative_news_flow"],  // SELL/TRIM only
     "urgency":               "immediate",        // SELL/TRIM only
@@ -283,7 +288,7 @@ Two call sites with different system prompts and inputs.
 
 **Trigger:** Once per trading day inside `runAnalysis()`, runs in parallel with signal fetch
 **System prompt:** `MACRO_SYSTEM_PROMPT` (static, 1 sentence)
-**Max tokens:** 1,000 · `noCache: true`
+**Max tokens:** 3,000 (`_AGENT_MAX_TOKENS.macro`, raised from 1,000 after a truncation incident) · `noCache: true`
 
 **System prompt:**
 ```
@@ -323,7 +328,7 @@ Return only JSON.
 
 **Trigger:** "Run AI Analysis" button on the Macro page
 **System prompt:** Inline string (not cached; includes `analysis` + `keyDrivers` fields)
-**Max tokens:** 1,000 · `noCache: true`
+**Max tokens:** 3,000 (`_AGENT_MAX_TOKENS.macro`, raised from 1,000 after a truncation incident) · `noCache: true`
 
 **Additional inputs vs 2a:**
 - Polymarket prediction market probabilities (if `state.includePolymarket` enabled): appended as `| Prediction market probabilities (Manifold Markets): {label}:{n}%...`
@@ -426,88 +431,9 @@ Signals for passing tickers:
 
 ---
 
-## 5. Analyst — `'analyst'`
+## 5–6. Analyst / Portfolio Manager — REMOVED
 
-> **⚠ Dormant pipeline.** The `'analyst'` and `'pm'` agent types are defined and tested but `runAnalysis()` calls `'portfolio'` directly. These prompts are available for explicit use via `callClaude('analyst', ...)` / `callClaude('pm', ...)` but are not part of any active user flow. Treat Sections 5–6 as reference specs, not live architecture.
-
-**System prompt:** `ANALYST_SYSTEM_PROMPT` (static, cached)
-**Max tokens:** 3,000
-
-**Purpose:** Phase 1 of the intended 3-phase pipeline (Analyst → Quant Engine → PM). Provides per-ticker qualitative conviction assessment without computing any trade math.
-
-**Constraint:** Explicitly told: *"Do NOT compute stops, position sizes, qty, EV, or R:R — those are handled deterministically downstream."*
-
-**Expected output:**
-```json
-{
-  "assessments": [{
-    "ticker":                 "BHP",
-    "winProb":                0.72,
-    "expectedTimeToTarget":   12,
-    "conviction":             0.68,
-    "keyFactors":             ["EPS revision +3.1%", "weak AUD tailwind", "iron ore supply discipline"],
-    "risks":                  ["China demand slowdown", "USD strengthening"],
-    "macroFit":               "tailwind",
-    "valuation":              "cheap",
-    "technicalConfirmation":  true
-  }],
-  "skipped": [{"ticker": "XYZ", "reason": "insufficient data for 3 factors"}]
-}
-```
-
-**Note:** See dormant-pipeline warning at the top of §5. To activate the 3-phase flow, wire `callClaude('analyst', ...)` → quant engine → `callClaude('pm', sizedProposals)` in a new `runAnalysisPipeline()` function in `analysis.js`. The system prompts and schemas are ready; only the orchestration is missing.
-
----
-
-## 6. Portfolio Manager — `'pm'`
-
-**System prompt:** `PM_SYSTEM_PROMPT` (static, cached)
-**Max tokens:** 3,000
-
-**Purpose:** Phase 3 of the pipeline. Receives pre-sized trade proposals from the quant engine and applies portfolio-level rules to approve/reject/rank.
-
-**Constraint:** Explicitly told: *"Do NOT recompute or second-guess sizing, stops, EV, or R:R — those are deterministic."*
-
-**Portfolio rules applied (in order):**
-- P1: Sector concentration ≤ 30%
-- P2: Anti-churn (7-day BUY→SELL block)
-- P3: CGT discount window flag
-- P4: Macro override (bearish + bullish<35)
-- P5: Portfolio risk score >80 → no new BUYs
-- P6: Ex-dividend protection
-- P7: Cash minimum 10%
-- P8: Ranking by EV + R:R + sector concentration
-
-**Expected output:**
-```json
-{
-  "recs": [{
-    "ticker":     "BHP",
-    "action":     "BUY",
-    "approved":   true,
-    "rejectReason": null,
-    "rank":       1,
-    "priceRange": [44.20, 44.80],
-    "target":     49.50,
-    "stopLoss":   42.10,
-    "qty":        50,
-    "confidence": 0.74,
-    "rrRatio":    2.27,
-    "riskAUD":    150,
-    "rewardAUD":  340,
-    "evNet":      180,
-    "holdDays":   45,
-    "netProfit":  329.30,
-    "reasoning":  ["EPS upgrade cycle intact", "Macro tailwind from weak AUD"],
-    "bearCase":   "China demand shock → iron ore $80/t",
-    "invalidationCondition": "Close below $42.10 or iron ore < $95/t for 5 sessions",
-    "scenarios":  [{"label":"bull","prob":0.30,"outcome":"+12%"},{"label":"base","prob":0.50,"outcome":"+7%"},{"label":"bear","prob":0.20,"outcome":"-4%"}],
-    "factorsUsed": ["EPS revision: +3.1%", "Macro: AUD/USD weak", "Valuation: fwdPE 10.2 vs sector 13.5x"]
-  }],
-  "summary":  "≤200 chars",
-  "dataGaps": []
-}
-```
+The 3-phase Analyst → Quant Engine → PM pipeline that older versions of this doc described as "dormant but ready to activate" no longer exists in the codebase at all — this isn't a currently-dormant feature, it was cut. `ANALYST_SYSTEM_PROMPT`, `PM_SYSTEM_PROMPT`, and the `'analyst'`/`'pm'` agent types do not appear anywhere in `js/`. `_resolveSystemPrompt()` (`js/claude-client.js`) only resolves `portfolio`, `macro`, `dayTrade`, `universe`, `assistant`. `callClaude('analyst', ...)` or `callClaude('pm', ...)` will silently fall through to an empty system prompt. If a multi-phase analyst/PM split is wanted again, it needs to be designed and built fresh — nothing here is salvageable scaffolding.
 
 ---
 
@@ -579,39 +505,9 @@ Please write a concise postmortem digest (under 250 words) in plain text:
 
 ---
 
-## 8. Morning Briefing — `'briefing'`
+## 8. Morning Briefing — REMOVED
 
-**File:** `js/pages/dashboard.js → generateMorningBrief()`
-**Trigger:** "Generate Brief" button on Dashboard
-**Max tokens:** 600 · `noCache: true` (not cached — daily freshness needed; `briefing: true` in `_AGENT_NO_CACHE`)
-
-**System prompt:** `MORNING_BRIEFING_SYSTEM_PROMPT`
-```
-You are a concise ASX trading briefing assistant. You receive portfolio and market data
-and write a brief morning session note. Plain text only — no JSON, no markdown headers,
-no bullet symbols. Use numbered sections. Be specific and actionable. Under 220 words total.
-```
-
-**User message:**
-```
-Date: {full date including weekday}
-{macroLine}: ASX200: {n}, AUD/USD: {n}, sentiment: {s} ({n}% bullish)
-{regimeLine}: Regime: {regime} ({n}% confidence)
-RBA cash rate: {n}%
-Portfolio: ${holdings value} holdings + ${cash} cash = ${net worth} net worth
-Pending recs: {n}
-
-Holdings:
-  {TICKER}: {n}sh @ ${n} | now ${n} | {pct} unrealised | Sector: {s} | Signals: {buy/sell list}
-
-Write a morning briefing covering:
-1. Market regime and macro context (1-2 sentences)
-2. Key risks or events to watch today (1-2 sentences)
-3. Any holdings that stand out based on their signals or recent price action (1-2 sentences)
-4. One suggested focus for the session (1 sentence)
-```
-
-**Expected output:** Numbered plain-text sections, ≤220 words. Stored in `window._morningBrief` and rendered in the Dashboard brief card.
+`generateMorningBrief()`, `MORNING_BRIEFING_SYSTEM_PROMPT`, and the `'briefing'` agent type described here in older versions of this doc do not exist anywhere in the current codebase (verified by grep across `js/`) — same status as §5–6. If it's wanted back, it needs rebuilding, not "re-enabling."
 
 ---
 
@@ -631,38 +527,53 @@ The backend (`routes/debate.py`) prepends `_LOCAL_ANALYSIS_SYSTEM` (a stripped-d
 
 ### Key constraints
 
+**SELL/TRIM is supported** (this was a documented future-enhancement in older versions of this doc — it has since shipped) with a simplified 5-driver taxonomy, not the full Claude-path taxonomy:
+
 | Constraint | Reason |
 |---|---|
-| BUY / TOP_UP / HOLD only — no SELL / TRIM | SELL/TRIM require `sell_primary_driver`, `sell_secondary_factors`, `sell_urgency` structured tagging which small models produce inconsistently |
-| §9.5 size escalation (Sprint 67) | A local SELL/TRIM touching a holding > 10% of portfolio value discards the local result and re-routes the run to Claude (`_localExitOnLargePosition` in `claude-client.js`); a keyless local-only install keeps the local result with a loud warning toast instead |
-| Context truncated to 4000 chars | Ollama small models (Qwen 4B–9B) have limited context windows; the most critical context (date, regime, holdings, top signals) is always first |
-| No calibration injection | Calibration nudges assume Claude-level instruction following; small models may ignore or invert them |
-| `🔒 Local` badge on rec cards | `_source === 'local'` triggers amber badge in `recommendations.js` so the user sees which recs came from Ollama |
-| Validator + quant engine still run | Ollama output flows through the same `analysis.js` post-processing as the Claude path: `validateRec()` local fix-or-drop (Sprint 61) + `computeTradeParams()`. No network repair loop in either path |
-| `ai_call_log` written by backend *(Sprint 42)* | `routes/debate.py` writes to `ai_call_log` with `agent_type='portfolio:local'` after each Ollama response. `callClaude()` client-side logging block is still bypassed (fast-path returns before it). Browsable via `GET /api/log/ai_calls?agent_type=portfolio:local` |
+| Actions: BUY / TOP_UP / HOLD / SELL / TRIM, 1–4 recs max | SELL/TRIM use a **5-driver** taxonomy — `thesis_broken`, `stop_triggered`, `target_reached`, `time_stop`, `risk_management` — a deliberately narrower set than the Claude path's 9-value `primary_driver` enum, since small models produce the wider tagging inconsistently. `primary_driver` + `urgency` (`immediate`/`routine`/`monitor`) are required on SELL/TRIM, omitted on BUY/TOP_UP. |
+| Stop direction validated post-response | For SELL/TRIM, `stopLoss` must be ABOVE `priceRange[1]` (exit-invalidation frame); if the model returns it below entry, the backend corrects it to `entry × 1.03` rather than trusting the raw value. |
+| §9.5 size escalation | A local SELL/TRIM touching a holding > 10% of portfolio value discards the local result and re-routes the run to Claude (`_localExitOnLargePosition` in `claude-client.js`); a keyless local-only install keeps the local result with a loud warning toast instead. |
+| Context truncated to **6000 chars** (not 4000) | Raised alongside indicator tiering (~30–40% smaller messages) to give headroom for exit-decision context — holdings state, unrealised P&L, stop levels — that SELL/TRIM support needs. Truncation keeps the most critical context (date, regime, holdings, top signals) first. |
+| No calibration injection | Calibration nudges assume Claude-level instruction following; small models may ignore or invert them. |
+| `🔒 Local` badge on rec cards | `_source === 'local'` triggers amber badge in `recommendations.js` so the user sees which recs came from Ollama. |
+| Validator + quant engine still run | Ollama output flows through the same `analysis.js` post-processing as the Claude path: `validateRec()` local fix-or-drop + `computeTradeParams()`. No network repair loop in either path. |
+| `ai_call_log` written by backend | `routes/debate.py` writes to `ai_call_log` with `agent_type='portfolio:local'` after each Ollama response. `callClaude()` client-side logging block is still bypassed (fast-path returns before it). Browsable via `GET /api/log/ai_calls?agent_type=portfolio:local` |
 
-### System prompt (`_LOCAL_ANALYSIS_SYSTEM`)
+### System prompt (`_LOCAL_ANALYSIS_SYSTEM`, `routes/debate.py`)
 
 ```
-You are a conservative ASX equity analyst. Analyse the portfolio context below and output
-structured trading recommendations.
+You are a conservative ASX equity analyst. Analyse the portfolio context and output
+structured trading recommendations as JSON.
 
-RULES:
-- Only output BUY (new position), TOP_UP (add to existing), or HOLD (keep existing) actions.
-  Do NOT output SELL or TRIM.
-- BUY/TOP_UP require all of: priceRange [lo,hi], target (above hi), stopLoss (below lo).
-- stopLoss must be BELOW priceRange[0] for BUY/TOP_UP.
-- target must be ABOVE priceRange[1] for BUY/TOP_UP.
-- confidence: 0.60 = marginal, 0.70 = moderate, 0.80 = strong. Use 0 for HOLD.
-- Output 1-3 recommendations maximum. Prefer HOLD when uncertain.
-- qty is not required — the quant engine will calculate it.
+=== ACTIONS ===
+BUY      — new position (watchlist entry or entirely new holding)
+TOP_UP   — add to an EXISTING holding that is underweight with a strong thesis
+HOLD     — keep existing holding, no change needed (use confidence=0)
+SELL     — close a FULL existing position (multi-factor deterioration)
+TRIM     — reduce an existing holding by 25–50% (overweight or thesis weakening)
 
-Output only the JSON object. No preamble, no markdown fences.
+=== ENTRY RULES (BUY / TOP_UP) ===
+- priceRange: [lo, hi] — limit entry range
+- target: ABOVE priceRange[1] — where thesis is proven
+- stopLoss: BELOW priceRange[0] — where thesis is wrong
+- confidence: 0.62 minimum. 0.70 = moderate conviction, 0.80 = strong.
+- Only recommend when ≥ 2 independent factors align (earnings, macro, valuation, technicals).
+
+=== EXIT RULES (SELL / TRIM) ===
+- priceRange: [lo, hi] — limit sell range near current price
+- target: BELOW priceRange[0] — price that confirms the exit was correct (further decline)
+- stopLoss: ABOVE priceRange[1] — price that would INVALIDATE the exit thesis (stock recovers)
+- primary_driver (required — one of): thesis_broken, stop_triggered, target_reached,
+  time_stop, risk_management
+- urgency (required): immediate | routine | monitor
+- confidence: 0.62 minimum for SELL/TRIM. Use 0 for HOLD.
+
+=== OUTPUT RULES ===
+- Output 1–4 recommendations maximum. Prefer HOLD when uncertain.
+- qty is NOT required — the quant engine calculates it after your response.
+- Output only the JSON object. No preamble, no markdown fences.
 ```
-
-### Future enhancements
-
-- Expand to SELL/TRIM once Ollama structured-output reliability is validated with the full tag taxonomy (requires `sell_primary_driver` / `sell_secondary_factors` / `sell_urgency` structured tagging — small models produce these inconsistently)
 
 ---
 
@@ -721,14 +632,14 @@ These exist in `state.liveSignals[t]` but are not currently included in any prom
 
 ## Prompt Versioning
 
-`PROMPT_VERSION = '2026-06-v11'` in `js/prompts.js`.
+`PROMPT_VERSION` is currently `'2026-07-v24'` in `js/prompts.js` — check the constant directly, this doc's version-history table below has not been kept current (it stops at v11; thirteen versions of changes since then are undocumented here).
 
 Increment this constant whenever `ANALYSIS_SYSTEM_PROMPT` changes materially. The version is:
 - Stored on every `ai_learning_events` row at log time
 - Shown in the Learning page Prompt Versions table with Δ vs prior version hit rate
 - Monitored by `_check_prompt_regression()` in `routes/learning.py` for automated regression detection
 
-**Version history:**
+**Version history (stale beyond v11 — see note above):**
 | Version | Key changes |
 |---|---|
 | `2026-06-v11` | Sprint 67 (§9.3): CorrToHoldings line in each ticker's indicator block (top |ρ| ≥ 0.60 vs holdings, incl. watchlist candidates); Section 3 CORRELATION rule — ρ ≥ 0.70 = concentration, thesis must be explicitly orthogonal and cited in factorsUsed[]; explicit ban on numeric confidence/qty adjustment for correlation (engine sizes deterministically) |

@@ -9,7 +9,7 @@ Operator handbook for Codex sessions in this repo. Keep this updated when major 
 A local-only decision-support tool for Australian equity trading. No SaaS, no cloud DB.
 - **Backend:** Python Flask (`asx_server.py`) on `localhost:5000`. Fetches market data via `yfinance`. Persists everything in SQLite (`asx_trader.db`, WAL mode).
 - **Frontend:** Vanilla JS single-page app (`asx_trading.html`). Talks to backend, calls Anthropic API directly from the browser, renders with `<canvas>` (no chart libraries).
-- **AI:** Codex Sonnet 4.6 for analysis, recommendations, day trading; Gemini for ASX announcements; local Ollama for news + internal "debate" pre-analysis.
+- **AI:** Claude Sonnet 4.6 for analysis, recommendations, day trading; Gemini for ASX announcements; local Ollama for news + internal "debate" pre-analysis.
 
 ---
 
@@ -29,12 +29,12 @@ gunicorn -c gunicorn.conf.py 'asx_server:app'
 
 API key options (one of these is required for analysis):
 1. **Direct mode (default)**: paste Anthropic key in Settings → kept in `localStorage`.
-2. **Proxy mode (opt-in)**: `POST /api/Codex/settings {api_key}` once; set `state.settings.useBackendProxy = true`. Key lives in SQLite, never touches the browser.
+2. **Proxy mode (opt-in)**: `POST /api/claude/settings {api_key}` once; set `state.settings.useBackendProxy = true`. Key is written to a git-ignored file `claude-api.txt` at repo root (file-first resolution) — never touches the browser. A legacy SQLite `settings` row is only used as a fallback for pre-existing installs.
 
 Tests:
 ```bash
 python test_app.py        # all Python tests (backend + frontend syntax/function checks)
-npm run test:js           # Vitest suite — 122 JS unit tests for pure engine files
+npm run test:js           # Vitest suite — pure engine files (quant-engine, regime-engine, response-validator, _detectExitReason, day-trading, analysis-pipeline, paper-real-firewall)
 ```
 
 ---
@@ -44,18 +44,18 @@ npm run test:js           # Vitest suite — 122 JS unit tests for pure engine f
 Every recommendation flows through four deterministic layers:
 
 ```
-Signals (indicators.py) ──► Regime gate (regime-engine.js) ──► Codex ──► Quant engine (quant-engine.js) ──► Validator (response-validator.js) ──► UI
+Signals (indicators.py) ──► Regime gate (regime-engine.js) ──► Claude ──► Quant engine (quant-engine.js) ──► Validator (response-validator.js) ──► UI
                             (deterministic)                   (LLM)      (deterministic)                    (deterministic)
 ```
 
 | Layer | Job |
 |---|---|
 | **Regime engine** | Classifies macro (`riskOn/riskOff/panic/highVol/trend/sideways`) from live data; gates which strategies are allowed; applies size modifiers. Panic regime returns `sizeMult=0` → `_regimeBlocked` flag, recs are dropped. |
-| **Codex** | Qualitative conviction only — what to buy/sell and why. Never does arithmetic. |
+| **Claude** | Qualitative conviction only — what to buy/sell and why. Never does arithmetic. |
 | **Quant engine** | Deterministic sizing: Kelly + vol scalar + multi-constraint (account-risk %, max-position %, liquidity, Kelly). Same input → same output. |
 | **Validator** | Schema + business rules; auto-repair loop (≤2 retries); HOLD recs use `requiredUnless` to skip target/stop/qty checks. |
 
-Calibration feedback (recent hit rates by confidence band and regime) is fetched from `GET /api/learning/calibration` and injected into every Codex user message.
+Calibration feedback (recent hit rates by confidence band and regime) is fetched from `GET /api/learning/calibration` and injected into every Claude user message.
 
 ---
 
@@ -63,49 +63,54 @@ Calibration feedback (recent hit rates by confidence band and regime) is fetched
 
 ### Backend (Python)
 
-| File | Lines | Purpose |
-|---|--:|---|
-| `asx_server.py` | ~205 | Flask app + middleware + blueprint registration + `__main__` bootstrap. **Holds no routes itself.** |
-| `core.py` | ~230 | Shared infrastructure: `ttl_cache`, `fetch_with_retry` (exponential backoff + `_last_good` stale-cache), `_HTTP_SESSION`, `log`, `LOG_DIR`, `SECTOR_MAP`, `ASX_UNIVERSE`, `OLLAMA_BASE`. No Flask import. |
-| `db.py` | ~270 | SQLite schema, `get_db()`, `init_db()`, migrations, `log_failed_ticker()`, `backup_db(keep=7)`. Single source of truth — never `sqlite3.connect()` directly. `init_db()` runs `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` on every startup (non-blocking; prevents index-stat decay and WAL bloat). |
-| `indicators.py` | ~750 | All technical indicators + `analyse_ticker()` + `_score_ticker()`. Pure compute, no Flask. `_drop_forming_bar(hist)` drops the current-day candle before 07:00 UTC to avoid incomplete intraday bars. `_fetch_stooq_history(ticker, period)` is a free fallback provider (stooq.com, no API key) used when yfinance returns empty. |
-| `announcement_engine.py` + `announcement_routes.py` | — | ASX announcements scraper, PDF parser, Gemini scorer, blueprint `/api/announcements/*`. |
-| `news_engine.py` | — | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
-| `gunicorn.conf.py` | — | Production WSGI config. 2 workers × 8 threads. |
-| `test_app.py` | ~2300 | 238 unit + integration tests. Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
+Exact line counts drift too fast to track here — check with `wc -l` if you need one. Purposes below are stable.
+
+| File | Purpose |
+|---|---|
+| `asx_server.py` | Flask app + middleware + blueprint registration + `__main__` bootstrap. Defines 6 static-file routes itself (`/`, `/asx_trading.css`, `/js/<path:f>`, `/manifest.json`, `/sw.js`, `/static/<path:filename>`) — everything else lives in `routes/` blueprints. Single-instance lockfile (`_acquire_single_instance_lock()`); startup `quick_integrity_check()`. |
+| `core.py` | Shared infrastructure: `ttl_cache`, `fetch_with_retry` (exponential backoff + `_last_good` stale-cache; 4xx except 429 break retry immediately), `stooq_quote()`, `_HTTP_SESSION`, `log`, `LOG_DIR`, `SECTOR_MAP`, `ASX_UNIVERSE`, `OLLAMA_BASE`. No Flask import. |
+| `db.py` | SQLite schema, `get_db()`, `init_db()`, migrations, `log_failed_ticker()`, `backup_db(keep=7)`. Single source of truth — never `sqlite3.connect()` directly. `init_db()` runs `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` on every startup (non-blocking; prevents index-stat decay and WAL bloat). |
+| `indicators.py` | All technical indicators + `analyse_ticker()` + `_score_ticker()`. Pure compute, no Flask. `_drop_forming_bar(hist)` drops the current-day candle unless Sydney local time is ≥ 17:00 (not a flat UTC cutoff — avoids AEST/AEDT seasonal skew). `_fetch_stooq_history(ticker, period)` is a free fallback provider (stooq.com, no API key) used when yfinance returns empty. |
+| `announcement_engine.py` + `announcement_routes.py` | ASX announcements scraper, PDF parser, LLM scorer (configured provider → keyword fallback, not an auto-cascade through all providers), blueprint `/api/announcements/*`. |
+| `news_engine.py` | RSS aggregator, TF-IDF dedup, LLM sentiment classifier (Ollama/Groq/Gemini). |
+| `gunicorn.conf.py` | Production WSGI config. 2 workers × 8 threads. |
+| `test_app.py` | Backend unit + integration tests (1100+, grows steadily — run it for the current count). Patches `get_db` across `db`, `asx_server`, and every `routes/*` module. |
 
 #### `routes/` — one blueprint per concern
 
-| File | Lines | URL prefix(es) | Notes |
-|---|--:|---|---|
-| `routes/portfolio.py`  | ~410 | `/api/cash`, `/api/db/*`, `/api/tax/eofy-pack`, `/api/portfolio/splits-check` | Bulk state save/load, cash balance, EOFY tax pack ZIP download. `GET /api/portfolio/splits-check?tickers=...` — uses `yf.Ticker.splits` to detect splits in the last 90 days; returns `{TICKER:[{date,ratio}]}`. |
-| `routes/dividends.py`  | ~395 | `/api/dividends/*`                              | yfinance + ASX scrape, 12 h cache, `_FRANKING_MAP` fallback. |
-| `routes/market.py`     | ~750 | `/health` (+ version/uptime/last_backup), `/api/{analyse,quote,macro,rba-rate,polymarket,risk,portfolio/nav-history,earnings-calendar,log/ai_response,log/ai_calls,log/ai_call/<id>}` | All yfinance read-only data + full prompt+response logging. ETFs skipped in `/api/earnings-calendar` via quoteType check. Uses `@ttl_cache`. |
-| `routes/backtest.py`   | ~610 | `/api/backtest`, `/api/backtest/ai-replay`     | Historical strategy backtest + replay scoring of executed AI recs. Supports `slippage_mode: 'flat'|'liquidity'`; liquidity mode applies ADV-tiered rates via `_adv_slippage(adv_aud)`. |
-| `routes/scanner.py`    | ~210 | `/api/market/scan*`                              | Background thread + `_scan_state` dict, sector diversification. Computes `breadth_ratio` (% of universe above 20-day SMA) after each scan; consumed by `/api/macro` via lazy import. |
-| `routes/learning.py`   | ~780 | `/api/learning/*`                                | Log → outcome → stats/calibration analytics. Decay-weighted win rates with volatility-adaptive half-life (`_HL_MAP`, 20–60d). `_calib_compute()` is a pure function cached 5 min. Step 6b: dominant success tag nudge (mirrors L2 for wins; ≥33% share + ESS≥2.5 → lean-in token). `GET /api/learning/calibration-stats` (Brier score + reliability-diagram bins). `GET /api/learning/digest-data` (structured failure data for postmortem digest AI prompt). Stats response includes `success_patterns`. |
-| `routes/debate.py`     | ~1100 | `/api/debate/*`                                  | Local Ollama bull/bear + postmortem + skill scoring + calibration quality debate. Direction-aware prompts (BUY vs SELL/TRIM). Uses `current_app.logger`. Sprint 26 added `GET /api/debate/calib-quality` (Phase 6) with `_norm_cdf`, `_calib_bands_raw`, `_calib_quality_prompt`, `_SCHEMA_CALIB_QUALITY`. |
-| `routes/news.py`       | ~690 | `/api/news/*`, `/api/groq/models`, `/api/google/models`, `/api/sbc-mode`, `/api/system/gpu`, `/api/ollama/start` | RSS scanner + LLM provider management + SBC toggle. Owns `_NE_OK`. |
-| `routes/Codex.py`     | ~85  | `/api/Codex/*`                                  | Backend proxy for the Anthropic API (opt-in). |
-| `routes/alerts.py`     | ~100 | `/api/alerts/*`                                  | Telegram off-device alerts. `POST /api/alerts/telegram` (send), `POST /api/alerts/telegram/save` (persist creds to settings table), `GET /api/alerts/config` (has_telegram?). Credentials stored in `settings` table as `tg_token`/`tg_chat_id` — never logged. |
-| `routes/import_csv.py` | ~200 | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. Returns BUY rows only; SELL rows reported as skipped (require manual entry). |
-| `routes/intraday.py`   | ~270 | `/api/intraday/<ticker>`, `/api/intraday/scan`  | ASX100 intraday day-trade strategy. `GET /api/intraday/<ticker>` — single ticker 5m analysis (2-min TTL). `POST /api/intraday/scan` — batch scan up to 100 tickers with 8-thread pool. Returns VWAP, intraday RSI, volume acceleration, setup score 0–100, `passes` bool (entry window + VWAP + RSI + score gates). |
+15 blueprints registered in `asx_server.py`, plus a conditionally-registered `announcements` blueprint = 16 total (route count changes too often to pin here — run `python asx_server.py` and hit `/health`, or grep `@bp.route`/`@ann_bp.route` across `routes/*.py` + `announcement_routes.py`, for the live number).
 
-Total: **12 blueprints, 81 routes** (including announcements blueprint). Sprint 11 added `GET /api/intraday/<ticker>` and `POST /api/intraday/scan`. Sprint 13 added `GET /api/portfolio/splits-check`.
+| File | URL prefix(es) | Notes |
+|---|---|---|
+| `routes/portfolio.py`  | `/api/cash`, `/api/db/*`, `/api/tax/eofy-pack`, `/api/portfolio/splits-check` | Bulk state save/load, cash balance, EOFY tax pack ZIP download. `GET /api/portfolio/splits-check?tickers=...` — uses `yf.Ticker.splits` to detect splits in the last 90 days; returns `{TICKER:[{date,ratio}]}`. |
+| `routes/dividends.py`  | `/api/dividends/*`                              | yfinance + ASX scrape, 12 h cache, `_FRANKING_MAP` fallback. |
+| `routes/market.py`     | `/health` (+ version/uptime/last_backup), `/api/{analyse,quote,macro,rba-rate,polymarket,risk,portfolio/nav-history,earnings-calendar,log/ai_response,log/ai_calls,log/ai_call/<id>}` | All yfinance read-only data + full prompt+response logging. ETFs skipped in `/api/earnings-calendar` via quoteType check. Uses `@ttl_cache`. |
+| `routes/backtest.py`   | `/api/backtest`, `/api/backtest/ai-replay`     | Historical strategy backtest + replay scoring of executed AI recs. Supports `slippage_mode: 'flat'|'liquidity'`; liquidity mode applies ADV-tiered rates via `_adv_slippage(adv_aud)`. Also `POST /api/backtest/walk-forward`. |
+| `routes/scanner.py`    | `/api/market/scan*`                              | Background thread + `_scan_state` dict, sector diversification. Computes `breadth_ratio` (% of universe above 20-day SMA) after each scan; consumed by `/api/macro` via lazy import. |
+| `routes/learning.py`   | `/api/learning/*`                                | Log → outcome → stats/calibration analytics. Decay-weighted win rates with volatility-adaptive half-life (`_HL_MAP`, 20–60d). `_calib_compute()` is a pure function cached 5 min. `GET /api/learning/calibration-stats` (Brier score + reliability-diagram bins). `GET /api/learning/digest-data` (structured failure data for postmortem digest AI prompt). Stats response includes `success_patterns`. See CLAUDE.md's endpoint reference for the full (long) list under this prefix. |
+| `routes/debate.py`     | `/api/debate/*`                                  | Local Ollama bull/bear + postmortem + skill scoring + calibration quality debate. Direction-aware prompts (BUY vs SELL/TRIM). Uses `current_app.logger`. `GET /api/debate/calib-quality` with `_norm_cdf`, `_calib_bands_raw`, `_calib_quality_prompt`, `_SCHEMA_CALIB_QUALITY`. |
+| `routes/news.py`       | `/api/news/*`, `/api/groq/models`, `/api/google/models`, `/api/sbc-mode`, `/api/system/gpu`, `/api/ollama/start` | RSS scanner + LLM provider management + SBC toggle. Owns `_NE_OK`. |
+| `routes/claude.py`     | `/api/claude/*`                                  | Backend proxy for the Anthropic API (opt-in). Key from `claude-api.txt` (file-first) then legacy SQLite row. |
+| `routes/alerts.py`     | `/api/alerts/*`                                  | Telegram off-device alerts. `POST /api/alerts/telegram` (send), `POST /api/alerts/telegram/save` (persist creds to settings table), `GET /api/alerts/config` (has_telegram?). Credentials stored in `settings` table as `tg_token`/`tg_chat_id` — never logged. |
+| `routes/import_csv.py` | `/api/import/csv`                                | Broker CSV parser. Auto-detects CommSec / SelfWealth / generic format; normalises to `{action, ticker, shares, price, date, brokerage}`. BUY→`rows`, SELL→`sells` (not `skipped`) — SELL rows are handled separately with FIFO matching. |
+| `routes/intraday.py`   | `/api/intraday/<ticker>`, `/api/intraday/scan`  | ASX100 intraday day-trade strategy. `GET /api/intraday/<ticker>` — single ticker 5m analysis (2-min TTL). `POST /api/intraday/scan` — batch scan with a thread pool. Returns VWAP, intraday RSI, `atr_5m`, `intraday_target = vwap + 2×atr_5m`, setup score 0–100, `passes` bool (entry window + VWAP + RSI + score gates). |
+| `routes/notifications.py` | `/api/notifications` | Notification centre persistence — separate `notifications.db`. |
+| `routes/day_trade_training.py` | `/api/daytrading/*` | Local logistic/ridge-regression ML pipeline (pure numpy) for day-trade sizing. |
+| `routes/auth.py` | — | Opt-in shared-password gate (reads `webapp-auth.txt`) for exposing the app over Tailscale Funnel or similar internet-facing tunnels. Off by default. |
 
 ### Frontend (JS) — load order matters
 
 Scripts in `asx_trading.html` load in this order. Anything that uses globals from a later file will be `undefined` at parse time but works at call time (functions hoist; lookups are runtime).
 
 ```
-config.js → utils.js → regime-engine.js → learning-loop.js → quant-engine.js
+config.js → utils.js → notifications.js → regime-engine.js → learning-loop.js → quant-engine.js
 → api.js → portfolio-helpers.js → scheduler.js → reconcile.js → prices.js → charts.js
 → pages/dashboard.js → pages/portfolio.js → pages/macro.js → pages/signals.js
 → pages/recommendations.js → pages/journal.js → pages/cgt.js → pages/performance.js
 → pages/backtest.js → pages/risk.js → pages/assistant.js
-→ prompts.js → prompt-modules.js → Codex-client.js → debate-client.js
+→ prompts.js → prompt-modules.js → claude-client.js → debate-client.js
 → response-validator.js → analysis.js
-→ asx-universe.js → strategy.js → intraday-strategy.js → day-trading-analysis.js → pages/day-trading.js
+→ asx-universe.js → strategy.js → intraday-strategy.js → day-trading-analysis.js → dt-training.js → pages/day-trading.js
 → pages/news.js → pages/announcements.js → pages/scanner.js → pages/watchlist.js → pages/compare.js → pages/learning.js
 → pages/settings.js → alerts.js → navigation.js → init.js
 ```
@@ -118,15 +123,15 @@ config.js → utils.js → regime-engine.js → learning-loop.js → quant-engin
 |---|---|
 | `js/config.js` | Global `state` object, `API` base URL, defaults |
 | `js/api.js` | All backend fetch wrappers + `saveStateToDb()` / `loadStateFromDb()` with input validators |
-| `js/Codex-client.js` | `callClaude(agentType, msg, opts)` — central wrapper; supports direct + proxy mode. Agent types: `portfolio`, `analyst`, `pm`, `dayTrade`, `universe`, `macro`, `assistant`, `briefing`. |
+| `js/claude-client.js` | `callClaude(agentType, msg, opts)` — central wrapper; supports direct + proxy mode. Agent types: `portfolio`, `dayTrade`, `universe`, `macro`, `assistant`. (`analyst`/`pm`/`briefing` prompts referenced in older docs no longer exist in code.) |
 | `js/regime-engine.js` | `classifyRegime()`, `applyRegimeModifiers()`; panic regime hard-blocks via `_regimeBlocked` |
 | `js/quant-engine.js` | `computeTradeParams()` — deterministic sizing. Reads `signals.adv_20` (AUD) and `signals.volume_avg_20` (shares); liquidity cap is in shares. |
 | `js/response-validator.js` | `validateRec()`, `getValidatedAnalysisWithRepair()`. Ticker pattern accepts `[A-Z0-9]{2,5}`. Fields use `requiredUnless: 'HOLD'`. |
 | `js/learning-loop.js` | Client-side calibration analytics + `fetchCalibrationBlock()` from backend. |
-| `js/prompts.js` | All Codex system prompts (`ANALYSIS_SYSTEM_PROMPT`, `MACRO_SYSTEM_PROMPT`, `MORNING_BRIEFING_SYSTEM_PROMPT`, day-trade prompts, analyst/PM prompts) |
+| `js/prompts.js` | All Claude system prompts (`ANALYSIS_SYSTEM_PROMPT`, `MACRO_SYSTEM_PROMPT`, day-trade prompts — the latter are dormant scaffolds, not invoked). `PROMPT_VERSION` bumps often; check the constant directly rather than trusting a cached value in any doc. |
 | `js/prompt-modules.js` | `RULE_MODULES` (tax-loss, CGT, reporting season, regime-specific) + dynamic system-prompt assembly |
 | `js/strategy.js` | `DT_FILTER` (pre-filter thresholds) + `DT_AI_PARAMS` (AI-phase params). Both editable at runtime via Day Trading → Rules. |
-| `js/analysis.js` | Portfolio analysis orchestration — fetches signals, builds prompt, calls Codex, post-processes through quant engine + validator + regime modifiers. |
+| `js/analysis.js` | Portfolio analysis orchestration — fetches signals, builds prompt, calls Claude, post-processes through quant engine + validator + regime modifiers. |
 | `js/day-trading-analysis.js` | Day-trade portfolio scan + universe scan orchestration. |
 | `js/navigation.js` | `showPage()` + `renderPage()` with error boundary (any page crash falls back to a graceful error card). |
 | `js/alerts.js` | `fireAlert(title, body, tag)` — desktop notification + optional Telegram mirror when `state.settings.telegramEnabled`. `checkRecStopTargetAlerts` tracks `_stopAlertedAt`/`_targetAlertedAt` to prevent spam. |
@@ -194,7 +199,7 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 | `triggerPostmortem(learningId)` | `debate-client.js` | Fired automatically on `loss`/`breakeven`. Runs the local Ollama bull/bear postmortem. Queued LOW priority via `_oqEnqueue`. |
 | `fetchSkillScore(learningId)` | `debate-client.js` | Scores the closed trade's process quality 0-10. Queued LOW priority. |
 | `triggerCalibQualityIfStale(regime)` | `debate-client.js` | Fires `GET /api/debate/calib-quality` once per calendar day (localStorage date guard). Called from `analysis.js` after `logRecsToLearningLoop()`. Queued LOW priority. *(Sprint 26)* |
-| `fetchCalibrationBlock(regime, sectors, tickers)` | `learning-loop.js` | Pulls the compact calibration string from `GET /api/learning/calibration`; injected into every Codex user message. |
+| `fetchCalibrationBlock(regime, sectors, tickers)` | `learning-loop.js` | Pulls the compact calibration string from `GET /api/learning/calibration`; injected into every Claude user message. |
 | `_calib_compute()` | `routes/learning.py` | Pure function, 5-min TTL cache. Decay-weighted win rate per confidence band; returns the `adj` nudge the prompt applies to confidence. |
 
 ### Gotchas specific to the Learning Loop
@@ -236,7 +241,7 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 - `GET /api/learning/stats` — confidence-band win rates + **Wilson 95% CI**, regime stats, prompt-version history, R:R stats, failure patterns, debate insights. Includes `calibration_active` (bool: n≥30) and `overall_ci_lo/hi`.
 - `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=BHP.AX,CBA.AX` — compact calibration block (~30–60 tokens) for prompt injection. Includes per-ticker stats for portfolio holdings. 5-min TTL cache via `_calib_compute()`. Gated at n<30 — returns `{available:false}` when sample too small.
 - `GET /api/learning/calibration-stats` — Brier score + reliability-diagram bins. Returns `{brier_score, n, bins:[{range,lo,hi,n,mean_confidence,actual_win_rate}]}`. Displayed on Learning page.
-- `GET /api/learning/digest-data` — structured failure data for the postmortem digest: `{recent_failures, regime_stats, overall_wins, overall_total, error_dist, exit_dist}`. Frontend builds a Codex prompt from this and calls `callClaude('assistant', …)`.
+- `GET /api/learning/digest-data` — structured failure data for the postmortem digest: `{recent_failures, regime_stats, overall_wins, overall_total, error_dist, exit_dist}`. Frontend builds a Claude prompt from this and calls `callClaude('assistant', …)`.
 
 ### Alerts (Telegram)
 - `GET /api/alerts/config` — `{has_telegram: bool}` — whether credentials are stored.
@@ -252,10 +257,10 @@ routes/learning.py  _calib_compute() / stats   → decay-weighted win rates fed 
 - `GET /api/log/ai_call/<id>` — full content for one logged call.
 - `GET /health` — now returns `{status, time, version, uptime_s, last_backup}`.
 
-### Codex proxy (opt-in)
-- `GET /api/Codex/settings` → `{has_key: bool}`
-- `POST /api/Codex/settings {api_key: 'sk-ant-...'}` — store / clear server-side key.
-- `POST /api/Codex/proxy` — forward request to api.anthropic.com using stored key.
+### Claude proxy (opt-in)
+- `GET /api/claude/settings` → `{has_key: bool}`
+- `POST /api/claude/settings {api_key: 'sk-ant-...'}` — store / clear server-side key (writes `claude-api.txt`; empty string clears it).
+- `POST /api/claude/proxy` — forward request to api.anthropic.com using stored key.
 
 ### Debate engine (local Ollama)
 - `GET /api/debate/status` — Ollama reachable? models available?
@@ -285,7 +290,7 @@ Recommendations page → **Rules** tab. Edits `state.analysisConfig.rules`, pers
 Day Trading page → **Rules** tab. Edits `state.dayTrading.filterParams` (pre-filter) and `state.dayTrading.aiParams` (AI-phase). Quant engine reads `state.dayTrading.aiParams` at compute time.
 
 ### Add a new system prompt
-Edit `js/prompts.js`. If it's reused, add the agent type to `_AGENT_MAX_TOKENS` and `_resolveSystemPrompt()` in `js/Codex-client.js`.
+Edit `js/prompts.js`. If it's reused, add the agent type to `_AGENT_MAX_TOKENS` and `_resolveSystemPrompt()` in `js/claude-client.js`.
 
 ### Add a new optional rule module
 1. Define the block in `RULE_MODULES` in `js/prompt-modules.js`.
@@ -313,7 +318,7 @@ Settings page → Telegram section. Enter bot token (from `@BotFather`) and chat
 python test_app.py   # all Python tests
 npm run test:js      # Vitest JS tests (quant-engine, regime-engine, response-validator, _detectExitReason)
 ```
-The Python suite covers: all learning-loop routes, Codex proxy endpoints, polymarket shape, JS syntax for every modified file, function presence (catches accidental deletion), regression tests for every fixed bug, infra invariants (db.py contract, ttl_cache memoisation, gunicorn config).
+The Python suite covers: all learning-loop routes, Claude proxy endpoints, polymarket shape, JS syntax for every modified file, function presence (catches accidental deletion), regression tests for every fixed bug, infra invariants (db.py contract, ttl_cache memoisation, gunicorn config).
 
 The Vitest suite (`tests/`) uses `vm.runInThisContext` to load browser-global scripts into Node context (mirrors the browser `<script>` tag loading order). `extractFunction()` in `tests/setup.js` uses brace-counting to extract individual functions from page files — used for `_detectExitReason` which is duplicated in `recommendations.js` and `performance.js`.
 
@@ -379,8 +384,8 @@ The Vitest suite (`tests/`) uses `vm.runInThisContext` to load browser-global sc
 | **FastAPI migration** | Half-day refactor of every route. Current Flask + gthread is fast enough. | Native async, auto-generated OpenAPI docs, faster I/O concurrency. |
 | **Walk-forward backtesting** | ~~Requires vectorised OHLCV replay engine + parameter grid.~~ **Shipped Sprint 20.** `POST /api/backtest/walk-forward`; Walk-Forward tab in Backtest page. | Robust strategy parameter tuning. |
 | **Mobile / responsive layout** | Needs CSS breakpoint pass on every card/table — compact mode toggle (shipped Sprint 13) helps on small screens but doesn't reflow columns. | Phone-friendly read-only mode during market hours. |
-| **DRP parcel tracking** | Dividend income forecast assumes no DRP (dividend reinvestment); DRP parcels need their own CGT lot management. | Accurate CGT cost-base for DRP investors. |
-| **Vitest frontend tests** | ~~JS test infrastructure needs setting up (jsdom, mocking globals).~~ **Shipped Sprint 19.** `npm run test:js` — 122 tests. | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
+| ~~**DRP parcel tracking**~~ | **Shipped.** `showDrpModal()`/`applyDrpEvent()` in `js/pages/portfolio.js` push `action:'DRP'` entries into `state.cgtParcels`; `js/pages/cgt.js` renders a DRP badge on them. | — |
+| **Vitest frontend tests** | ~~JS test infrastructure needs setting up (jsdom, mocking globals).~~ **Shipped Sprint 19**, coverage has grown steadily since — run `npm run test:js` for the current count. | Catch logic regressions in quant-engine, regime-engine, _detectExitReason. |
 | **Hoist `_detectExitReason` into `utils.js`** | Currently duplicated in two page files; dedup risks the fragile script order. | Single source of truth for exit classification. |
 | **`pip install feedparser`** | Optional dep; RSS falls back to a built-in XML parser when absent (logs a warning each scan). | More robust news-feed parsing. |
 | **Stooq rate-limiting** | Stooq.com has undocumented rate limits (typically 1 req/sec). Under parallel batch requests the fallback may 429 silently (returns empty CSV). A per-domain semaphore or retry delay would prevent silent fallback failures. | Reliable Stooq fallback under load. |

@@ -84,62 +84,37 @@ Prevents trading stocks where wide spreads and low float degrade technical execu
 
 ## 3. Entry Signals (Swing)
 
-**Requirement: PRIMARY signal must fire + at least 2 Confirmations.**
-
-### Primary (Mandatory)
+**Actual mechanism (`_dtBuildRecs()` / `_sigDefs` in `js/day-trading-analysis.js`): every ticked confirmation must fire — AND-of-ticked-rules, not "primary + at least 2 of N."** Each of the four signals below is independently toggled via `DT_AI_PARAMS.enabled.*` (`js/strategy.js`); a signal that's off is simply skipped, not counted against the setup. There is no separate mandatory "primary" signal distinct from these four — BB Reclaim is one of the toggleable confirmations, same as the others, not a hard gate that always fires first.
 
 **BB Reclaim:**
 - `Close_{t-1} < BB_Lower_{t-1}` AND `Close_t > BB_Lower_t`
 - Price breached the lower Bollinger Band and closes back inside it.
 - This is the single most reliable mean-reversion trigger on daily timeframes.
 
-### Confirmation 1 — RSI Recovery
+### RSI Recovery
 
 - `RSI_14 > RSI_{t-1}` AND `min(RSI over lookback) < threshold`
 - RSI dipped below the oversold threshold recently and is now turning up.
+- **Threshold is static, not regime-adaptive:** `ap.rsiThreshold ?? 35` (`day-trading-analysis.js`). A regime-scaled threshold table (tighter in riskOff/panic, shorter lookback in riskOn) is a documented idea, not implemented code — don't rely on it firing differently by regime.
 
-**Regime-adaptive thresholds:**
-
-| Regime | Oversold threshold | Lookback |
-|---|---|---|
-| `riskOn` / `trend` | < 35 | 3 bars |
-| `sideways` / `highVol` | < 35 | 5 bars |
-| `riskOff` | < 30 | 5 bars |
-| `panic` | < 28 | 7 bars |
-
-*In riskOff/panic regimes, RSI can stay below 35 for weeks and loses discriminatory power — tighten the threshold so only genuinely extreme readings qualify. In riskOn, oversold readings are rarer and carry higher mean-reversion probability — shorten the lookback to avoid lag.*
-
-### Confirmation 2 — Volume Z-Score
+### Volume Z-Score
 
 - `Volume Z-Score = (Volume_t − μ_Volume_20) / σ_Volume_20 > threshold`
 - The entry candle has statistically significant volume above the 20-day mean.
+- **Threshold is static, not regime-adaptive:** `ap.volZScore ?? 1.5` (`day-trading-analysis.js`). As with RSI above, a regime-scaled table is aspirational, not wired into the code.
 
-**Regime-adaptive thresholds:**
-
-| Regime | Z-Score threshold |
-|---|---|
-| `riskOn` / `trend` / `sideways` | > 1.50 |
-| `highVol` | > 2.00 |
-| `riskOff` / `panic` | > 1.50 |
-
-*In highVol regimes, 1.5σ volume spikes are frequent noise. Raising the bar to 2.0σ ensures only genuine institutional participation qualifies as confirmation.*
-
-### Confirmation 3 — Fibonacci Retracement Zone
+### Fibonacci Retracement Zone
 
 - Entry price falls within the **50%–61.8% retracement** of the dominant 100-day swing high/low.
 - `Price_t ∈ [Low_100 + 0.48 × (High_100 − Low_100), Low_100 + 0.63 × (High_100 − Low_100)]`
 - The "golden pocket" is where the highest concentration of institutional buy orders typically rests.
 
-### Confirmation 4 — Sector ETF Relative Strength
-
-- The target stock's sector ETF (XMJ/XFJ/XHJ/XEJ/XRJ) must have a **5-day return ≥ −2%**.
-- Sector ETF performance is shown on the Macro page (Sprint 30 addition to the macro payload).
-- **Rationale:** Entering a beaten-up Materials name when XMJ itself is down 4% on the week dramatically lowers the probability of a BB reclaim holding — the selling pressure is sector-wide, not stock-specific. At minimum, the sector must not be in active distribution.
-
-### Bonus Signal — OBV Bullish Divergence
+### OBV Rising
 
 - OBV is rising (or its 10-day average is rising) while price is still falling.
-- Reveals hidden accumulation. Not required for a valid setup, but materially increases confidence when present.
+- Reveals hidden accumulation. **Off by default** (`DT_AI_PARAMS.enabled.obvRising: false` in `js/strategy.js`) — when a user turns it on, it becomes a required confirmation like any other ticked signal, not a bonus/optional overlay.
+
+**Note — Sector ETF Relative Strength is NOT an entry gate.** `sector_rs_5d` (ticker 5-day return minus its sector ETF's 5-day return) is computed and surfaced for display/ML features (Journal, Recommendations, Signals pages) but is never checked in the swing entry-signal path. There is no sector-ETF confirmation signal in the code.
 
 ---
 
@@ -147,7 +122,7 @@ Prevents trading stocks where wide spreads and low float degrade technical execu
 
 ### 4.1 Stop-Loss Distance — Regime-Aware
 
-The stop-loss ATR multiplier is not fixed — it scales with the current market regime to account for elevated tail risk in volatile conditions:
+The stop-loss ATR multiplier is regime-scaled at the engine level (`quant-engine.js` resolves `stopMultiple = userStopMult ?? regimeMod.stopAtrMult ?? default`), but in practice **the user-set value wins by default** at initial position sizing: `state.dayTrading.aiParams.stopAtrMultiple` boots hardcoded to `2.5` (`js/config.js`) and is never null, so the regime table below only takes effect once you clear that override. Regime-awareness is enforced by default through a separate, real-time mechanism instead: `checkRegimeStopWidening()` (`js/alerts.js`) watches for a regime flip on an *open* position and widens its stop post-hoc — see §6 Step 4.
 
 | Regime | Stop ATR multiplier |
 |---|---|
@@ -311,9 +286,8 @@ Alerts are checked on every `refreshPrices()` call via `checkDayTradeStopTargetA
 |---|---|
 | **Timeframe** | 5-minute bars (yfinance, ~5–15 min latency — indicative only) |
 | **Entry window** | 10:45–15:00 AEST |
-| **Target** | +3.5% from entry (configurable 1–10%) |
-| **Stop** | −1.5% from entry (configurable 0.5–5%) |
-| **R:R** | Computed from actual price levels — typically ~2.3:1 at defaults |
+| **Target / Stop** | **ATR-based by default:** `stop = entry − 1.5×atr_5m`, `target = vwap + 2.0×atr_5m` (`js/intraday-strategy.js`, `routes/intraday.py`). Falls back to fixed **+3.5%/−1.5%** from entry only when `atr_5m` is unavailable. |
+| **R:R gate** | Uses the honest **reversion R:R** (reward-to-VWAP ÷ risk), not the extended to-target R:R — the latter is inflated by the ATR-overshoot term. `minRrRatio` default is **1.0** (lower than swing's 2.0, since it's a conservative reversion basis). `rrExtended` (to-target) is shown for display only. |
 | **Max positions** | 2 concurrent (configurable) |
 | **Universe** | ASX20 / 50 / 100 / 200 (selectable; ASX100 default) |
 | **Capital** | Separate allocation — 20% of cash by default |
@@ -521,7 +495,7 @@ The learning system is a **personalised expected-return estimator**. It records 
 
 > *Given these entry-time features (16 for swing, 19 for intraday), what R-multiple did my past trades with similar features actually achieve?*
 
-This is distinct from the Claude AI analysis (qualitative conviction) and from the regime gate (structural macro filter). The learning model operates on your realised outcomes — the other two layers operate on forward-looking analysis. All three run in parallel.
+This is distinct from the portfolio Claude analysis (qualitative conviction) and from the regime gate (structural macro filter) used elsewhere in the app. **The day-trading swing/intraday scan itself is fully quantitative — it never calls Claude.** `getDayTradeSystemPrompt`/`getDayTradeUniverseScanPrompt` exist in the codebase as dormant scaffolds but are not invoked by `runDayTradeAnalysis()`. The learning model operates on your realised outcomes; the regime gate operates on forward-looking macro structure; neither runs an LLM call as part of day-trading rec generation.
 
 **No external API is called. All computation is deterministic Python/numpy running on your local machine.**
 
@@ -538,7 +512,7 @@ dtSaveSnapshot()                    ← js/dt-training.js
     │
     ▼
 POST /api/daytrading/snapshot       ← routes/day_trade_training.py
-    │  persists 18 features + metadata to day_trade_history.db
+    │  persists FEATURES_SWING (16) or FEATURES_INTRADAY (19) + metadata to day_trade_history.db
     │
     │  (trade runs…)
     │
@@ -698,7 +672,7 @@ Negative values = losses. Threshold for win: y_R > 0.
 - Metrics: R² score, MAE in R-multiples
 - Minimum samples: 30 (regression needs more data than classification)
 
-Two independent models trained per run: Swing (15 features) and Intraday (18 features).
+Two independent models trained per run: Swing (16 features) and Intraday (19 features).
 
 #### Step 1 — Data preparation
 
@@ -903,8 +877,8 @@ If `|IC| < 0.03` for all features after 50+ trades, your entry rules are already
 
 #### Separate swing and intraday models (automatic since Sprint 53)
 
-Each **Train Model** run fits two independent models — swing (15 features) and intraday
-(18 features) — on their own snapshot subsets. No manual record juggling is needed. Each
+Each **Train Model** run fits two independent models — swing (16 features) and intraday
+(19 features) — on their own snapshot subsets. No manual record juggling is needed. Each
 scope requires its own 30 completed trades; a scope below threshold simply reports
 "insufficient data" while the other trains normally. `dtExpectedRLabel()` picks the model
 matching the setup's `tradeType` at prediction time.

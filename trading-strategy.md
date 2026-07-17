@@ -234,7 +234,7 @@ The validator (`response-validator.js`) checks every rec against `REC_SCHEMA`:
 
 Required fields for all non-HOLD recs: `ticker`, `action`, `confidence`, `priceRange`, `target`, `stopLoss`, `qty`, `scenarios`, `invalidationCondition`
 
-Up to **2 repair retries** are attempted automatically when Claude's output fails validation. If repair fails, the rec is dropped and a warning is shown.
+`getValidatedAnalysisWithRepair()` (a network-repair-loop function that would re-call Claude up to 2 times on validation failure) exists in the codebase but is **dead code in production** — `js/analysis.js` does not call it. What actually happens: `validateRec()` runs a **local, single-pass fix-or-drop** — fixable issues are corrected client-side without a network round-trip, and anything unfixable is dropped with a warning shown. There is no automatic re-prompt of Claude on validation failure.
 
 ### 4.5 Confidence Floor
 
@@ -302,12 +302,19 @@ Score is capped at 100. Confidence is derived as `min(0.85, score / 100 × 0.85)
 
 ### 5.4 Target and Stop
 
+**Default is ATR-based off actual 5-minute bars, not the fixed percentages below** — the fixed formula is only a fallback when `atr_5m` is unavailable:
+
 ```
-target  = entry × 1.035    (+3.5%)
+# Default (js/intraday-strategy.js, routes/intraday.py):
+stop   = entry − 1.5 × atr_5m
+target = vwap + 2.0 × atr_5m
+
+# Fallback only (atr_5m unavailable):
+target   = entry × 1.035    (+3.5%)
 stopLoss = entry × 0.985   (−1.5%)
 ```
 
-R:R ratio = 3.5 / 1.5 = **2.33** (above the 2.0 minimum).
+The R:R gate uses the **honest reversion R:R** (reward-to-VWAP ÷ risk), not reward-to-extended-target — the latter is inflated by the ATR-overshoot term and would pass almost any setup. `minRrRatio` for intraday defaults to **1.0** (lower than swing's 2.0, since it's a conservative reversion basis); the extended to-target ratio is shown for display only (`rrExtended`).
 
 If daily signals are available for the ticker, the quant engine is attempted first. When the quant engine produces a quantity, it overrides the fallback. The fallback risks 2% of allocated cash divided by the per-share stop distance.
 
@@ -532,10 +539,9 @@ Prompt cache hits show in console as `[agentType] cache read=X written=Y`. The c
 
 | Gap | Impact |
 |---|---|
-| **Intraday targets/stops use daily ATR** | Daily ATR is 10–20× intraday noise. Intraday positions should use σ(5m bars) for stops and `day_high − 0.5×(day_high − VWAP)` for targets. Current setup causes near-universal timeouts or whipsaws. |
-| **SPI defensive overlay blocks all setups; Mode A unimplemented** | On gap-down days (SPI ≤ −1.5%), scanner generates zero setups. Mode A (VWAP recapture on rally days) is referenced in comments but not implemented. The days with the most gap-down mean-reversion opportunity produce zero recs. |
+| ~~**Intraday targets/stops use daily ATR**~~ | **Resolved.** Intraday stops/targets are now ATR-based off actual 5-minute bars (`atr_5m`): `stop = entry − 1.5×atr_5m`, `target = vwap + 2.0×atr_5m` (`js/intraday-strategy.js`, `routes/intraday.py`), with the R:R gate using the honest reversion-to-VWAP ratio rather than the ATR-inflated to-target ratio. Fixed-% is now only a fallback when `atr_5m` is unavailable. |
 | **Min confidence is static at 0.62** | Calibration shows per-band win rates, but the floor never adjusts. If the 65–75% confidence band has a 35% historical win rate, the next rec at conf = 0.67 still fires unchanged. |
-| **Calibration lacks per-driver × regime cross-tabs** | "SELL on thesis_broken in sideways regime" is unknown. Losing patterns repeat because Claude cannot see the context-specific failure: which driver fails in which regime. |
+| ~~**Calibration lacks per-driver × regime cross-tabs**~~ | **Resolved.** `GET /api/learning/driver-matrix` (`routes/learning.py`) now returns a driver × regime × sector 3D cross-tab, gated at n≥3 per cell. |
 
 ### Significant
 
@@ -571,7 +577,7 @@ Prompt cache hits show in console as `[agentType] cache read=X written=Y`. The c
 | `maxLiquidityPct` | 0.05 (5% of ADV) | `QUANT_CONFIG` |
 | `kellyFraction` | 0.25 (¼ Kelly) | `QUANT_CONFIG` |
 | `accountRiskPct` | 0.01 (1%) | `QUANT_CONFIG` |
-| `minRrRatio` | 2.0 | Day Trading → Rules |
+| `minRrRatio` | 2.0 (swing default). **Intraday overrides this to 1.0** — a deliberately lower bar since it's gated on the conservative reversion-to-VWAP R:R, not the extended to-target R:R (`js/intraday-strategy.js`) | Day Trading → Rules |
 
 ### Regime Thresholds (`js/regime-engine.js` → `REGIME_THRESHOLDS`)
 
@@ -809,3 +815,5 @@ The feedback cycle completes when rule changes from step 2–8 affect the next m
 | `2026-06-v15` | Jun 2026 | Rule 20 (fundamentals > technicals), `reallocationSuggestion`, `FINANCIALS_SECTOR` module, `bullCase` required on BUY/TOP_UP, `invalidationCondition` validated, `_confidenceHeld` badge |
 | `2026-06-v14` | Jun 2026 | Pre-earnings badge, scenarios required, bearCase threshold |
 | Earlier | — | See git log |
+
+**Live version is `2026-07-v24`** (`js/prompts.js`) — nine versions ahead of the last entry logged above; see `prompts.md`'s Prompt Versioning section for the same staleness caveat. Check the constant directly rather than trusting this table for anything past v15.

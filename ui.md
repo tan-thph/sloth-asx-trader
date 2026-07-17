@@ -1,6 +1,6 @@
 # UI Redesign Spec — "Quiet Terminal"
 
-**Status:** design spec, ready to implement (2026-06-11)
+**Status:** design spec dated 2026-06-11 — **Phases A–D have since shipped** (sidebar, badges, `chartColor()` token system, theme toggle including a 4th `'terminal'` theme not described below). This file is now a historical spec, not a live TODO — check `asx_trading.css` and `js/pages/settings.js` for current implementation rather than treating this as unimplemented.
 **Target:** `asx_trading.css` (single stylesheet), `asx_trading.html` (head only), `js/charts.js` (palette helper), `js/pages/settings.js` + `js/init.js` (theme toggle, Phase D only).
 **Audience:** implementing agent. Everything needed is in this file; exact values are normative.
 
@@ -27,7 +27,7 @@ Principles (every decision below derives from these):
 
 ### Hard constraints (do not violate)
 
-- **Do not rename any class or ID.** All HTML is built as JS strings across 27 page files; the
+- **Do not rename any class or ID.** All HTML is built as JS strings across `js/pages/*.js` (19 files as of 2026-07); the
   redesign restyles existing selectors only.
 - **Do not touch** the mobile block (`@media (max-width:768px)`), `.tbl-stack` stacked-card CSS,
   safe-area insets, or `.compact` density mode — they shipped recently (IMPROVEMENTS.md §7).
@@ -517,16 +517,18 @@ Do the same pass in the page-level draws (`pages/backtest.js`, `pages/journal.js
 
 ---
 
-## 9. Theme toggle (Phase D)
+## 9. Theme toggle (Phase D) — shipped, plus a 4th option not in the original spec
 
-- `state.settings.theme: 'auto' | 'light' | 'dark'` (default `'auto'`; persists via existing
-  settings save path — it's inside `state.settings`, no backend change needed).
+- `state.settings.theme: 'auto' | 'light' | 'dark' | 'terminal'` (default `'auto'`; persists via existing
+  settings save path — it's inside `state.settings`, no backend change needed). The `'terminal'` value
+  was added later (Forven UI/UX adoption pass) and isn't part of this original spec — see
+  `Forven_UIUX_Adoption.md` for its palette/typography source-of-truth.
 - `js/init.js` startup + Settings → Display segmented control:
   `document.documentElement.dataset.theme = (theme === 'auto' ? '' : theme)` — empty removes the
   attribute so the `prefers-color-scheme` block applies.
 - Update `<meta name="theme-color">` dynamically: `#f4f3f0` light / `#101114` dark (PWA chrome).
 - The `:root[data-theme="dark"]` token block from §3 makes this pure attribute-driven — no other
-  CSS work.
+  CSS work. `:root[data-theme="terminal"]` is a separate block added later.
 
 ---
 
