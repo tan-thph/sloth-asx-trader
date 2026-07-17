@@ -271,10 +271,60 @@ Everything is configurable from the Settings page — no code editing:
 
 ---
 
+## Remote access — reach the app from your phone / another device
+
+The app runs on one machine and is reachable from your other devices over
+[**Tailscale**](https://tailscale.com), a zero-config private network (WireGuard-based).
+No port-forwarding, no public exposure, no reverse proxy. The server binds `0.0.0.0:5000`
+so it's reachable on both your LAN and your tailnet.
+
+### Private tailnet (recommended — this is the default)
+
+Only your own signed-in devices can reach the app. Nothing is exposed to the public internet.
+
+1. **Start the server** on the host machine:
+   ```bash
+   python waitress_server.py        # multi-threaded prod server; binds 0.0.0.0:5000
+   ```
+2. **Install Tailscale** on both the server machine and the other device (phone/laptop),
+   and **sign both into the same Tailscale account**.
+3. **Find the server's address** — on the host run:
+   ```bash
+   tailscale ip -4                  # prints the tailnet IP, e.g. 100.101.102.103
+   ```
+   or use its MagicDNS name (the machine name shown in the Tailscale admin console).
+4. **On the other device**, open:
+   ```
+   http://<machine-name>:5000       # MagicDNS name, e.g. http://sloth-pc:5000
+   http://100.101.102.103:5000      # or the tailnet IP from step 3
+   ```
+
+That's it — the trust boundary is your tailnet. Because only devices signed into your
+account can connect, there's no password on the app itself.
+
+### First time on a new device
+
+The Anthropic API key is stored **per device** in the browser's `localStorage`, so on a
+new phone/laptop paste it once in **Settings → API Key**. Prefer not to repeat that per
+device? Enable **backend proxy mode** (Settings) so the key lives on the server
+(`claude-api.txt`) and never touches the browser.
+
+### Exposing it beyond your tailnet (optional, only if you need it)
+
+If you ever need to reach the app from a device that is **not** on your tailnet, Tailscale
+[**Funnel**](https://tailscale.com/kb/1223/funnel) can publish it to the public internet.
+Because that removes the tailnet trust boundary, turn on the built-in shared-password gate
+first: create a `webapp-auth.txt` file at the repo root containing your password. With that
+file present, every request must authenticate via `/api/auth/password` before reaching the
+app (see `routes/auth.py`). Without the file the gate is off — which is correct for
+private-tailnet use, but **never run Funnel without it**.
+
+---
+
 ## Tips & Troubleshooting
 
 - **Save on API cost:** turn on local LLM mode for routine portfolio analysis and reserve Claude for high-stakes decisions.
-- **Mobile / remote read-only:** the app is served on a single origin, so it works over a [Tailscale](https://tailscale.com) connection without config changes — handy for checking positions from your phone during the day. Install Tailscale on both the server machine and your phone and sign into the same account; no public tunnel/exposure needed.
+- **Mobile / remote read-only:** access the app from your phone over Tailscale — see [Remote access](#remote-access--reach-the-app-from-your-phone--another-device) above.
 - **Low-power box:** enable SBC mode to slow refreshes and avoid background scans.
 - **"Page crashed" card:** a render error was caught by the error boundary; the stack is in the browser console. Reload the page.
 - **Stale prices / missing data:** the app falls back from yfinance to Stooq automatically; a `_source: stooq` flag and a stale-data badge (>25 min) tell you when live data is degraded.
