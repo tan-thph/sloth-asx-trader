@@ -420,6 +420,15 @@ _LE_MIGRATIONS = [
     # cross-tabs breached-AND-executed recs' outcomes vs baseline to judge whether a
     # rule is `too_strict` (breached-and-won) or `validated` (breached-and-lost).
     ("rule_warnings_json", "TEXT"),
+    # Model-aware calibration: the LLM that actually produced this rec (e.g.
+    # 'claude-sonnet-5', 'claude-opus-4-8', or an Ollama model on the local
+    # fast-path). Distinct from prompt_version — calibration validates a
+    # (prompt × model) system tuple, and the portfolio model has drifted run-to-run
+    # (sonnet-5 → opus-4-8), so blending their track records into one figure hides
+    # which engine an edge belongs to. Captured from callClaude's returned
+    # usage.model at logRecsToLearningLoop() time. NULL on pre-feature rows
+    # (treated as 'unknown/legacy'); backfillable from ai_call_log by timestamp.
+    ("model", "TEXT"),
 ]
 
 

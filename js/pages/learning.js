@@ -1618,6 +1618,17 @@ async function renderGoLiveCard() {
       </div>`;
   }).join('');
 
+  // Model-mix honesty note: calibration validates a (prompt × model) tuple, so a
+  // scorecard blended across models measures a moving target. Surface the mix when
+  // >1 model fed the sample (amber), otherwise a quiet confirmation line.
+  const _mm = d.model_mix;
+  const modelMixHtml = _mm ? `
+      <div class="text-xs" style="margin:6px 0 2px;padding:6px 8px;border-radius:6px;
+        background:${_mm.mixed ? 'rgba(217,119,6,0.08)' : 'transparent'};
+        color:${_mm.mixed ? '#d97706' : 'var(--text-muted)'}">
+        ${_mm.mixed ? '⚠ ' : ''}${escapeHTML(_mm.note || '')}
+      </div>` : '';
+
   el.innerHTML = `
     <div class="card section-gap" style="border-left:3px solid ${o.color}">
       <div class="flex-between" style="flex-wrap:wrap;gap:6px">
@@ -1633,6 +1644,7 @@ async function renderGoLiveCard() {
           : `Realistic paper fills are <strong>off</strong>, so P&amp;L criteria haircut ${d.friction_bps}bps/trade — real spread &amp; slippage would erode a frictionless paper edge.`}
         Thresholds are conservative by design.
       </div>
+      ${modelMixHtml}
       ${rows}
     </div>`;
 }

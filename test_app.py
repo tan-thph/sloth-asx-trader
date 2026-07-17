@@ -350,6 +350,25 @@ class TestLearningLoopRoutes(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["primary_entry_driver"], "mean_reversion")
 
+    def test_log_stores_model(self):
+        """POST /api/learning/log must persist the model (model-aware calibration) —
+        the LLM that produced the rec, so calibration/go-live never blend the track
+        records of different models."""
+        payload = {
+            "ticker": "FMG", "recommendation": "BUY",
+            "prompt_version": "2026-07-v24", "ai_confidence": 0.71,
+            "model": "claude-opus-4-8",
+        }
+        r = self.client.post("/api/learning/log",
+                             data=json.dumps(payload),
+                             content_type="application/json")
+        ev_id = json.loads(r.data)["id"]
+        with _test_get_db() as conn:
+            row = conn.execute(
+                "SELECT model FROM ai_learning_events WHERE id=?", (ev_id,)
+            ).fetchone()
+        self.assertEqual(row["model"], "claude-opus-4-8")
+
     def test_log_stores_bull_case_and_bear_case(self):
         """POST /api/learning/log must persist bull_case/bear_case -- Claude's own
         steelman text, used by _compute_exemplars() to show past reasoning."""

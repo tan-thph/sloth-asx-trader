@@ -1065,6 +1065,10 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       model: state.settings?.analysisModel || undefined,
       maxTokens: _budgetTier.maxTokens,
     });
+    // Model-aware calibration: the model that actually served this run (cloud or
+    // local fast-path), stamped onto every logged learning event below so
+    // calibration/go-live never blend the track records of different models.
+    const _analysisModel = _usage?.model || null;
 
     console.log(`[Token audit] recHistory sent: ${recentRecs.length} entries (last5=${last5.length} withPnl=${withPnl.length} withFeedback=${withFeedback.length})`);
     console.log(`[Token audit] indicatorCtx chars: ${indicatorCtx.length} | macroCtx chars: ${macroCtx.length} | divCtx chars: ${dividendCtx.length} | earningsCtx chars: ${earningsCtx.length}`);
@@ -2064,7 +2068,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
     // never graded on its passivity (FIXES #4). HOLDs carry ticker/confidence/
     // reasoning/signals; the logger tolerates their missing target/stop/qty.
     const _holdRecs = recs.filter(r => r.action && r.action.toUpperCase() === 'HOLD');
-    logRecsToLearningLoop([...cappedDedupedRecs, ..._holdRecs], _activeRegime, _debateResults);
+    logRecsToLearningLoop([...cappedDedupedRecs, ..._holdRecs], _activeRegime, _debateResults, _analysisModel);
     showPage('recommendations');
   } catch(e) {
     state.analysisRunning = false;
@@ -2324,7 +2328,7 @@ function _classifyRuleWarnings(r) {
 // Fire-and-forget: called after cappedDedupedRecs is finalised.
 // Stores _learningId on each rec so markExecuted / markSkipped can update it.
 // debates: optional map of ticker → debate result from fetchDebateBatch()
-async function logRecsToLearningLoop(recs, regime, debates = {}) {
+async function logRecsToLearningLoop(recs, regime, debates = {}, model = null) {
   if (!state.serverOk || !recs || !recs.length) return;
   const pv = typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unknown';
 
@@ -2441,6 +2445,7 @@ async function logRecsToLearningLoop(recs, regime, debates = {}) {
         regime:              regime || null,
         prompt_version:      pv,
         prompt_hash:         _promptHash,
+        model:               model,   // model-aware calibration: the LLM that served this run
         agent_type:          'portfolio-scanner',
         // §8.3: log Claude's ORIGINAL confidence — calibration stats measure the
         // model, so feeding back engine-adjusted values would compound the nudges.

@@ -420,6 +420,12 @@ async function callClaude(agentType, userMessage, options = {}) {
     }
 
     const usage = data.usage || {};
+    // Model-aware calibration: expose which model actually served this call so
+    // callers (analysis.js → logRecsToLearningLoop) can stamp it on the learning
+    // event. Prefer the API's echoed `data.model` (the model actually served) over
+    // the requested `model` var; fall back to the request when absent. Mirrors the
+    // local fast-path, which already returns usage.model.
+    usage.model = data.model || model;
     // §8.5: with forced tool use the result arrives as a tool_use block —
     // serialise its input so downstream parseClaudeJSON() consumes it exactly
     // like text output (zero changes in analysis.js). Falls back to the first

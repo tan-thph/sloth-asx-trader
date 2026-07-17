@@ -194,7 +194,7 @@ routes/learning.py _calib_compute() → decay-weighted WRs injected into next pr
 - `POST /api/learning/log` — log a rec event
 - `POST /api/learning/outcome` — patch outcome (partial update)
 - `DELETE /api/learning/event/<id>`
-- `GET /api/learning/stats` — confidence-band WRs, Wilson CIs, regime stats, sector stats, buy_vs_topup, capital_efficiency, ensemble_divergence, mae_mfe_summary, hold_outcomes, real_vs_paper. `success_patterns` carries `by_success_type` (win-tag distribution) + `disciplined_hold_stats` (holding-period days min/avg/max + avg return for `disciplined_hold` wins; min/max suppressed below n=3)
+- `GET /api/learning/stats` — confidence-band WRs, Wilson CIs, regime stats, sector stats, buy_vs_topup, capital_efficiency, ensemble_divergence, mae_mfe_summary, hold_outcomes, real_vs_paper, `by_model` (per-model track record — model-aware calibration; descriptive only, no nudge derives from it). `success_patterns` carries `by_success_type` (win-tag distribution) + `disciplined_hold_stats` (holding-period days min/avg/max + avg return for `disciplined_hold` wins; min/max suppressed below n=3)
 - `GET /api/learning/calibration?regime=X&sectors=A,B&tickers=...&deep=1` — compact calibration block for prompt injection. 5-min TTL. n<30 returns base-rate prior.
 - `GET /api/learning/calibration-stats` — Brier score + reliability diagram. Writes daily snapshot.
 - `GET /api/learning/calibration-trend` — Brier history (last 180d)
@@ -218,10 +218,11 @@ routes/learning.py _calib_compute() → decay-weighted WRs injected into next pr
 - `GET /api/learning/thesis-drift` — manual vs target-hit exit P&L gap
 - `GET /api/learning/execution-alpha` — actual vs simulated mechanical exits
 - `POST /api/learning/backfill-entry-drivers` — fills `primary_entry_driver` on historical rows
+- `POST /api/learning/backfill-models` — attributes the LLM (`model` column) to pre-feature learning events by joining `ai_call_log` on nearest portfolio call at/before each event's timestamp. Body `{dry_run:true}` (default) previews the mapping; `{dry_run:false}` commits. Recovers the real model mix (sonnet-4-6 → opus-4-8 → sonnet-5) so the go-live model-mix note + `by_model` stats aren't all `unknown/legacy`. Run after a server restart (needs the migrated column)
 - `GET /api/learning/digest-data` — structured data for AI Postmortem Digest (150 trades, 15 exemplars)
 - `GET /api/learning/scrutiny-stats` — local-LLM critic track record vs outcomes
 - `GET /api/learning/coverage` — per-capture fill rates + work queues for the Learning page 🧹 Capture Coverage strip (read-only, no resolvers)
-- `GET /api/learning/go-live-readiness` — paper-validation scorecard (🎯 card): 5 friction-adjusted criteria → `ready`/`almost`/`not_ready`. Calibration criterion uses the confidence-vs-WR gap, NOT Brier (Brier's p(1−p) floor would punish an honest 60-70% model)
+- `GET /api/learning/go-live-readiness` — paper-validation scorecard (🎯 card): 5 friction-adjusted criteria → `ready`/`almost`/`not_ready`. Calibration criterion uses the confidence-vs-WR gap, NOT Brier (Brier's p(1−p) floor would punish an honest 60-70% model). Also returns `model_mix` — a NON-gating honesty note (amber when the closed sample spans >1 model) since calibration validates a (prompt × model) tuple and the portfolio model has drifted run-to-run
 
 ### Debate engine
 - `GET /api/debate/status`

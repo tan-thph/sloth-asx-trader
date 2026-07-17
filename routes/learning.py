@@ -1092,8 +1092,8 @@ def learning_log():
                      sell_primary_driver, sell_secondary_factors, sell_urgency,
                      alternative_ticker, primary_entry_driver, thesis_verdict,
                      bull_case, bear_case, calibrated_confidence, trade_mode,
-                     rule_warnings_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     rule_warnings_json, model)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 data.get("event_type", "recommendation"),
                 data.get("ticker"),
@@ -1145,6 +1145,7 @@ def learning_log():
                 (data.get("rule_warnings_json")
                  if isinstance(data.get("rule_warnings_json"), (str, type(None)))
                  else json.dumps(data.get("rule_warnings_json"))),
+                data.get("model"),
             ))
             row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -1198,6 +1199,62 @@ def backfill_entry_drivers():
                 updated += 1
         return jsonify({"ok": True, "updated": updated, "skipped": skipped,
                         "candidates": len(rows)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/backfill-models", methods=["POST"])
+def backfill_models():
+    """One-shot: attribute the LLM to historical learning events that pre-date the
+    `model` column, using ai_call_log (which has always stored the model per call).
+
+    Each event is matched to the most recent portfolio ai_call_log row at or before
+    the event's timestamp — the call that produced it. This recovers the real model
+    mix of the existing sample (e.g. sonnet-4-6 → opus-4-8 → sonnet-5), so the
+    go-live scorecard's homogeneity note and the per-model stats reflect reality
+    instead of collapsing everything to 'unknown/legacy'.
+
+    Body: {"dry_run": true} (default) returns the proposed mapping counts without
+    writing; {"dry_run": false} commits. No network, no LLM spend.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        dry_run = data.get("dry_run", True)
+        with get_db() as conn:
+            # Guard: column must exist (added by init_db migration on startup).
+            le_cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(ai_learning_events)").fetchall()}
+            if "model" not in le_cols:
+                return jsonify({"ok": False,
+                                "error": "model column missing — restart the server so init_db() migrates it first"}), 400
+            rows = conn.execute("""
+                SELECT id, timestamp FROM ai_learning_events
+                 WHERE model IS NULL OR model = ''
+            """).fetchall()
+            counts = {}       # model → n
+            unmatched = 0
+            updates = []      # (model, id)
+            for r in rows:
+                # Nearest portfolio call at or before this event's generation time.
+                m = conn.execute("""
+                    SELECT model FROM ai_call_log
+                     WHERE agent_type IN ('portfolio', 'portfolio:local')
+                       AND model IS NOT NULL AND model != ''
+                       AND timestamp <= ?
+                     ORDER BY timestamp DESC LIMIT 1
+                """, (r["timestamp"],)).fetchone()
+                if not m:
+                    unmatched += 1
+                    continue
+                model = m["model"]
+                counts[model] = counts.get(model, 0) + 1
+                updates.append((model, r["id"]))
+            if not dry_run:
+                conn.executemany(
+                    "UPDATE ai_learning_events SET model=? WHERE id=?", updates)
+        return jsonify({"ok": True, "dry_run": dry_run,
+                        "candidates": len(rows), "matched": len(updates),
+                        "unmatched": unmatched, "by_model": counts})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1825,13 +1882,37 @@ def _compute_go_live_readiness(conn, friction_bps=_GOLIVE_FRICTION_BPS):
 
     rows = conn.execute("""
         SELECT outcome_status, realized_pnl_pct, regime, primary_entry_driver,
-               ai_confidence, recommendation
+               ai_confidence, recommendation, model
         FROM ai_learning_events
         WHERE was_executed = 1
           AND outcome_status IN ('win','loss','breakeven')
     """).fetchall()
     rows = [dict(r) for r in rows]
     n_closed = len(rows)
+
+    # Sample homogeneity: calibration validates a (prompt × model) tuple, and the
+    # portfolio model has drifted run-to-run. If the closed trades feeding this
+    # scorecard span >1 model, the edge estimate blends their track records — surface
+    # that so the go-live number is honest about what it measures. This is a NOTE,
+    # not a pass/fail criterion (splitting the sample by model at low n would just add
+    # noise); it makes the mix visible without gating on it.
+    _model_counts = {}
+    for r in rows:
+        _m = r.get("model") or "unknown/legacy"
+        _model_counts[_m] = _model_counts.get(_m, 0) + 1
+    _n_models = len(_model_counts)
+    _mix_str = ", ".join(f"{m}: {c}" for m, c in
+                         sorted(_model_counts.items(), key=lambda kv: -kv[1]))
+    model_mix = {
+        "n_models": _n_models,
+        "counts": _model_counts,
+        "mixed": _n_models > 1,
+        "note": (f"Track record spans {_n_models} models ({_mix_str}) — the edge "
+                 f"estimate blends them; treat cross-model comparison with care."
+                 if _n_models > 1 else
+                 (f"All {n_closed} closed trades from one model ({_mix_str})."
+                  if n_closed else "No closed trades yet.")),
+    }
 
     crit = []
 
@@ -1957,7 +2038,7 @@ def _compute_go_live_readiness(conn, friction_bps=_GOLIVE_FRICTION_BPS):
 
     return {"ok": True, "n_closed": n_closed, "friction_bps": friction_bps,
             "overall": overall, "n_pass": n_pass, "n_total": len(crit),
-            "criteria": crit}
+            "criteria": crit, "model_mix": model_mix}
 
 
 @bp.route("/api/learning/go-live-readiness")
@@ -2324,6 +2405,32 @@ def learning_stats():
                 "avg_hold": round(r["avg_hold"], 1) if r["avg_hold"] is not None else None,
             } for r in real_vs_paper_rows}
 
+            # a2) Per-model history — win rate + avg P&L by the LLM that produced the
+            # rec. Purely descriptive (no nudge derives from it): lets you SEE whether
+            # models differ before trusting any model-segmented calibration. Model
+            # drift is silent otherwise. NULL model → 'unknown/legacy' (pre-feature).
+            by_model_rows = conn.execute("""
+                SELECT COALESCE(model, 'unknown/legacy') AS model,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN outcome_status='win' THEN 1 ELSE 0 END) AS wins,
+                       AVG(realized_pnl_pct) AS avg_pnl,
+                       AVG(holding_period_days) AS avg_hold,
+                       MIN(timestamp) AS first_seen,
+                       MAX(timestamp) AS last_seen
+                FROM ai_learning_events
+                WHERE was_executed=1
+                  AND outcome_status IN ('win','loss','breakeven')
+                GROUP BY 1
+                ORDER BY n DESC
+            """).fetchall()
+            by_model = {r["model"]: {
+                "n": r["n"], "wins": r["wins"],
+                "win_rate": round(r["wins"]/r["n"]*100, 1) if r["n"] else None,
+                "avg_pnl": round(r["avg_pnl"], 2) if r["avg_pnl"] is not None else None,
+                "avg_hold": round(r["avg_hold"], 1) if r["avg_hold"] is not None else None,
+                "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+            } for r in by_model_rows}
+
             # b) Capital efficiency (pnl/day by entry driver)
             cap_eff_rows = conn.execute("""
                 SELECT primary_entry_driver,
@@ -2418,6 +2525,7 @@ def learning_stats():
             "hold_outcomes":      hold_outcomes,  # HOLD passivity calibration (virtual_hold_miss/correct)
             "buy_vs_topup":       buy_vs_topup,
             "real_vs_paper":      real_vs_paper,  # gotcha #88: paper as predictor of real
+            "by_model":           by_model,       # model-aware calibration: per-model track record
             "capital_efficiency": capital_efficiency,
             "ensemble_divergence": ensemble_divergence,
             "mae_mfe_summary":    mae_mfe_summary,
