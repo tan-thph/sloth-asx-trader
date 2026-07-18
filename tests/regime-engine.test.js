@@ -135,6 +135,27 @@ describe('classifyRegime — trend signals', () => {
   });
 });
 
+describe('classifyRegime — tie-break goes to the more defensive regime', () => {
+  it('a riskOff/riskOn vote tie classifies as riskOff, not riskOn', () => {
+    // Construct an exact 2–2 tie: 5d return < −2% → riskOff +2;
+    // VIX < 16 → riskOn +1; A/D > 0.6 → riskOn +1. Everything else neutral.
+    const r = classifyRegime(makeMacro({
+      asx200_5d_return: -3.0,       // riskOff +2
+      vix: { value: 14 },           // riskOn +1
+      advance_decline_ratio: 0.70,  // riskOn +1
+      asx_vol_20d: 20,              // neutral — no A-VIX vote
+      asx200_20d_return: 1.0,       // no trend/riskOff vote
+      asx200_adx: null,             // no ADX vote (would add sideways)
+      asx200_atr_pct: 0.8,          // no highVol vote
+      iron_ore_change_5d: 0.5,      // no commodity riskOff vote
+      aud_usd_change_5d: 0.1,       // no FX riskOff vote
+    }));
+    // Sanity: it must be one of the two tied regimes, and the defensive one wins.
+    expect(['riskOff', 'riskOn']).toContain(r.regime);
+    expect(r.regime).toBe('riskOff');
+  });
+});
+
 describe('classifyRegime — confidence is a value in (0, 1]', () => {
   it('confidence is within (0, 1] when regime is determined', () => {
     const r = classifyRegime(makeMacro({ asx200_5d_return: -3.0, asx_vol_20d: 20 }));

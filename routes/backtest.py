@@ -509,7 +509,14 @@ def _run_strategy_slice(close, high, low, volume, strategy, params, capital, bro
             avg_l = (avg_l * (period - 1) + losses[i]) / period
             rs = avg_g / avg_l if avg_l > 0 else 100
             rsi.append(100 - 100 / (1 + rs))
-        return [50.0] + rsi  # align length
+        # rsi is already aligned: len == len(prices), rsi[i] ↔ prices[i].
+        # (initial period+1 neutral 50s, then the loop appends the value for
+        # price index i+1 at list index i+1). A former "[50.0] + rsi" prepend
+        # here made the list n+1 long and shifted every value one bar LATE, so
+        # the walk-forward engine traded on the prior bar's RSI while the main
+        # /api/backtest engine used the current bar's — silently masked by the
+        # `i < len(rsi_vals)` guard at the call site.
+        return rsi
 
     def _ema(prices, period):
         k = 2 / (period + 1)

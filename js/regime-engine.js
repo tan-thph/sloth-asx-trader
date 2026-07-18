@@ -130,7 +130,14 @@ function classifyRegime(macroData) {
   const total = Object.values(votes).reduce((s, v) => s + v, 0);
   if (total === 0) return { regime: 'unknown', confidence: 0, signals };
 
-  const sorted = Object.entries(votes).sort((a, b) => b[1] - a[1]);
+  // Tie-break by defensiveness, not object insertion order. Array.sort is
+  // stable, so equal vote counts used to resolve to whichever regime was
+  // declared first in `votes` — riskOn — i.e. a riskOn/riskOff tie classified
+  // the market as risk-on. For a risk engine the tie must go to the MORE
+  // defensive regime (higher number = more defensive).
+  const _DEFENSIVE_RANK = { panic: 6, riskOff: 5, highVol: 4, sideways: 3, trend: 2, riskOn: 1 };
+  const sorted = Object.entries(votes).sort((a, b) =>
+    (b[1] - a[1]) || ((_DEFENSIVE_RANK[b[0]] || 0) - (_DEFENSIVE_RANK[a[0]] || 0)));
   const regime = sorted[0][0];
   const confidence = +(sorted[0][1] / total).toFixed(2);
 
