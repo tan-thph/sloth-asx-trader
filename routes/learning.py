@@ -1453,7 +1453,8 @@ def recent_rec():
 def hold_recs():
     """List logged HOLD recommendations with their 30-day passivity verdict.
 
-    GET /api/learning/hold-recs[?limit=N]   (default 100, cap 200)
+    GET /api/learning/hold-recs[?limit=N][&days=N]   (limit default 100, cap 200;
+    days follows the Learning page's master window filter — see _days_window_sql)
 
     HOLD recs never enter client rec state (analysis.js strips them from
     filteredRecs before state.recommendations is built) — they live only here,
@@ -1467,17 +1468,19 @@ def hold_recs():
         limit = min(200, max(1, int(request.args.get("limit", 100))))
     except (TypeError, ValueError):
         limit = 100
+    dclause, dparam = _days_window_sql()
     out = []
     try:
         with get_db() as conn:
-            rows = conn.execute("""
+            params = ((dparam,) if dparam is not None else ()) + (limit,)
+            rows = conn.execute(f"""
                 SELECT id, ticker, timestamp, ai_confidence, rationale_summary,
                        regime, sector, virtual_outcome
                   FROM ai_learning_events
-                 WHERE recommendation = 'HOLD'
+                 WHERE recommendation = 'HOLD'{dclause}
                  ORDER BY timestamp DESC
                  LIMIT ?
-            """, (limit,)).fetchall()
+            """, params).fetchall()
         now = datetime.now()
         resolved_n = 0
         for r in rows:

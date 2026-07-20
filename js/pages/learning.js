@@ -209,7 +209,7 @@ function _llWindowBar() {
   return `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:12px;padding:8px 10px;border:0.5px solid var(--border-light);border-radius:var(--radius-md,6px);background:var(--bg-inset)">
     <span class="text-xs" style="font-weight:600">📅 Show trades from:</span>
     ${_LL_WINDOW_PRESETS.map(([d, lab]) => `<button class="btn btn-sm" style="${d === cur ? 'background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)' : ''}" onclick="setLlWindow(${d})">${lab}</button>`).join('')}
-    <span class="text-xs text-muted" style="margin-left:4px">Applies to the dated lists (Recent Events, Buy/Sell Trackers). Stats &amp; calibration always use full history.</span>
+    <span class="text-xs text-muted" style="margin-left:4px">Applies to the dated lists (Recent Events, Buy/Sell Trackers, HOLD Decisions). Stats &amp; calibration always use full history.</span>
   </div>`;
 }
 
@@ -1505,7 +1505,7 @@ async function renderHoldDecisionsCard() {
   if (!el) return;
   let d;
   try {
-    const r = await fetch(`${API}/api/learning/hold-recs?limit=100`);
+    const r = await fetch(`${API}/api/learning/hold-recs?limit=100${_llWindowParam()}`);
     d = await r.json();
   } catch { el.innerHTML = ''; return; }
   if (!d || !d.ok || !Array.isArray(d.holds) || d.holds.length === 0) {
@@ -1548,9 +1548,9 @@ async function renderHoldDecisionsCard() {
     <p class="text-xs text-muted" style="margin-bottom:8px">
       Positions the model reviewed and chose to <strong>keep</strong> — logged separately from actionable recs. The <strong>30-day review</strong> is the redesigned passivity check: endpoint return over a 20-trading-day forward window vs a volatility-scaled band (a held long that sat through a sustained drawdown = ⚠️; up or flat = ✅). ${d.resolved_n} of ${d.n} graded so far.
     </p>
-    <div style="overflow-x:auto">
+    <div style="overflow:auto;max-height:340px">
       <table class="tbl tbl-stack" style="width:100%;font-size:13px">
-        <thead><tr>
+        <thead><tr style="position:sticky;top:0;background:var(--bg-primary);z-index:1">
           <th style="text-align:left">Ticker</th><th style="text-align:left">Date</th>
           <th style="text-align:left">Conf</th><th style="text-align:left">Regime</th>
           <th style="text-align:left">30-day review</th><th style="text-align:left">Rationale</th>
@@ -3923,10 +3923,10 @@ async function renderSellOutcomesCard() {
       ${pending > 0  ? `${pending} pending (need ≥25 days).` : ''}
     </p>
     ${!events.length ? '<p class="text-xs text-muted">No events match this filter.</p>' : `
-    <div style="overflow-x:auto">
+    <div style="overflow:auto;max-height:340px">
       <table style="width:100%;border-collapse:collapse">
         <thead>
-          <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
+          <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px;position:sticky;top:0;background:var(--bg-primary);z-index:1">
             <th style="text-align:left;padding:4px 8px">Date</th>
             <th style="text-align:left;padding:4px 8px">Ticker</th>
             <th style="text-align:left;padding:4px 8px">Action</th>

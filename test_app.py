@@ -6988,6 +6988,36 @@ class TestHoldOutcomeTracking(unittest.TestCase):
         finally:
             asx_server.get_db = _orig_get_db
 
+    def test_hold_recs_endpoint_respects_days_window(self):
+        """GET /api/learning/hold-recs?days=N applies the Learning page's master
+        window filter (_days_window_sql), matching Recent Events / Buy-Sell Trackers."""
+        from datetime import datetime, timedelta
+        _install_in_memory_db(); asx_server.init_db()
+        try:
+            with _test_get_db() as conn:
+                self._clean_events(conn)
+                recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+                old = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type,ticker,recommendation,timestamp,ai_confidence)
+                    VALUES ('recommendation','AAA.AX','HOLD',?,0.6)""", (recent,))
+                conn.execute("""INSERT INTO ai_learning_events
+                    (event_type,ticker,recommendation,timestamp,ai_confidence)
+                    VALUES ('recommendation','CCC.AX','HOLD',?,0.6)""", (old,))
+                conn.commit()
+            client = asx_server.app.test_client()
+            d_all = json.loads(client.get("/api/learning/hold-recs").data)
+            tickers_all = {h["ticker"] for h in d_all["holds"]}
+            self.assertIn("AAA.AX", tickers_all)
+            self.assertIn("CCC.AX", tickers_all)
+
+            d_windowed = json.loads(client.get("/api/learning/hold-recs?days=30").data)
+            tickers_windowed = {h["ticker"] for h in d_windowed["holds"]}
+            self.assertIn("AAA.AX", tickers_windowed)
+            self.assertNotIn("CCC.AX", tickers_windowed)
+        finally:
+            asx_server.get_db = _orig_get_db
+
     def test_stats_disciplined_hold_stats_days_and_return(self):
         """success_patterns.disciplined_hold_stats exposes days min/avg/max AND
         avg return for wins tagged disciplined_hold (n≥3 → min/max shown)."""
