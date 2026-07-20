@@ -145,7 +145,7 @@ Scope: (1) the Claude API call pipeline — `js/prompts.js`, `js/claude-client.j
 
 ## 8. [HIGH] HOLD outcome tracking is dead again on the Claude path — the forced tool schema and Rule 5 both forbid HOLD
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — `HOLD` re-admitted to `_PORTFOLIO_TOOL` action enum + `required` narrowed; Rule 5 reworded to emit HOLD for evaluated-and-kept holdings.
 **Files:** `js/claude-client.js` (`_PORTFOLIO_TOOL` action enum ~:68), `js/prompts.js` (Rule 5 ~:76), `js/analysis.js` (`_holdRecs` ~:1750)
 
 **Problem:** FIXES #4 (2026-07-03) wired `_holdRecs` so HOLD recs reach `POST /api/learning/log`. But on the cloud path a HOLD can never exist to be logged:
@@ -160,7 +160,7 @@ So `recs.filter(action === 'HOLD')` is always empty when `useLocalLLM` is off; `
 
 ## 9. [HIGH] The VaR1d size reduction promised to Claude never runs — `signals.var_1d` has no writer
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — `_riskMetrics[t].var_95` passed as `signals.var_1d` into `computeTradeParams()` so the Rule-16 VaR size reduction fires.
 **Files:** `js/quant-engine.js` (~:148-160), `js/analysis.js` (quant post-processing ~:981-991, `_riskMetrics` ~:222-251), `js/prompts.js` (Rule 16), rules block (`analysis.js` ~:670 "VaR1d thresholds: <-3.5% → qty−25%; <-5.0% → qty−50%")
 
 **Problem:** `computeTradeParams()` implements the VaR modifier (`varMult` 0.75/0.50) off `signals.var_1d` — but a repo-wide grep shows **nothing ever writes `var_1d`** into `state.liveSignals` or the signals object passed in. The per-ticker VaR lives in `_riskMetrics[t].var_95` (fetched from `GET /api/risk` at the top of `runAnalysis()`) and is only used to build the prompt's risk table. Meanwhile the system prompt (Rule 16: "the quant engine will reduce position size") and the ACTIVE RULE OVERRIDES block explicitly promise the reductions. Net effect: high-VaR positions are sized as if VaR were normal, and Claude has been told not to compensate.
@@ -177,7 +177,7 @@ const qt = computeTradeParams(r.ticker,
 
 ## 10. [MEDIUM] `primary_entry_driver` is missing from the forced tool schema — the keystone field of the entry-driver taxonomy is emitted only by luck
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — `primary_entry_driver` (enum) + `reallocationSuggestion` added to the tool schema.
 **Files:** `js/claude-client.js` (`_PORTFOLIO_TOOL.properties` ~:67-98)
 
 **Problem:** The schema declares `primary_driver`, `secondary_factors`, `urgency`, `alternativeTicker` (SELL-side tags) but **not** `primary_entry_driver` (BUY/TOP_UP side) and not `reallocationSuggestion`. `additionalProperties` defaults to true so the field *can* still arrive, but constrained decoding biases generation toward declared properties — this is the most likely cause of the historical null-driver rows that required `POST /api/learning/backfill-entry-drivers`. Everything downstream (thesis matrix, driver playbook, driver×regime cross-tabs, `computeThesisDrift`) keys off this field.
@@ -191,7 +191,7 @@ reallocationSuggestion: { type: ['string','null'] },
 
 ## 11. [MEDIUM] `ensembleConfidence` is direction-blind — a bullish indicator score *raises* the ensemble confidence of a SELL/TRIM
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — `ensembleConfidence` inverts the bullish setup score (`100 - indScore`) for SELL/TRIM.
 **Files:** `js/analysis.js` (~:1266-1273)
 
 **Problem:** `ensembleConfidence = 0.5×confidence + 0.5×(score/100)` for every rec. `score` is the bullish setup score (0–100). For SELL/TRIM, a strongly bullish score should *contradict* the exit, not reinforce it. As written, a SELL on a ticker scoring 85 gets a higher ensemble confidence than one scoring 30 — inverted. This pollutes `ensemble_confidence` in `ai_learning_events` and the `ensemble_divergence` stat for all exit recs.
@@ -200,7 +200,7 @@ reallocationSuggestion: { type: ['string','null'] },
 
 ## 12. [MEDIUM] `HIGH_VOL_REGIME` module contradicts the regime engine's stop policy and Rule 4
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — stripped 2.0×ATR stop + qty−30% arithmetic from `HIGH_VOL_REGIME`; `MINING_SECTOR` no longer says "HOLD or TRIM only".
 **Files:** `js/prompt-modules.js` (~:87-100), `js/regime-engine.js` (`stopAtrMult` map), `js/analysis.js` (ATR floor ~:1092-1114)
 
 **Problem:** In a highVol regime the model receives three mutually contradictory stop instructions in one request: the module says "Stop distance: use 2.0×ATR (tighter than 2.5×)", the ACTIVE RULE OVERRIDES line says `Stop ATR: 3×ATR14` (`getRegimeModifiers('highVol').stopAtrMult` = 3.0), and the post-response ATR floor then silently enforces 3.0× anyway. The module also says "Reduce qty by 30%" although Rule 4 mandates qty=0 (the engine sizes; any qty arithmetic is discarded). `MINING_SECTOR` similarly says "Recommend HOLD or TRIM only" although HOLD is banned/schema-blocked (finding #8). Conflicting instructions measurably degrade rule compliance across the board, not just on the conflicting rules.
@@ -209,7 +209,7 @@ reallocationSuggestion: { type: ['string','null'] },
 
 ## 13. [LOW] The JSON example in `ANALYSIS_SYSTEM_PROMPT` contradicts Rule 4 (`"qty": 50`) and contains a `//` comment inside JSON
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — example `qty` set to 0; inline `//` comment removed.
 **Files:** `js/prompts.js` (schema example ~:587-621)
 
 **Problem:** Rule 4 (and the field spec: `"qty": 0 // always 0`) mandates qty=0, but the worked example emits `"qty": 50`. Models imitate examples over rules when they conflict. The example also carries an inline `//` comment on the scenarios line — harmless under forced tool use, but it models invalid JSON for the no-tool escape hatch (`options.noTool`).
@@ -218,7 +218,7 @@ reallocationSuggestion: { type: ['string','null'] },
 
 ## 14. [LOW] `callClaude()` retry loop is bypassed by non-JSON error bodies
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — `resp.json()` wrapped in try/catch inside the retry loop.
 **Files:** `js/claude-client.js` (~:296)
 
 **Problem:** `const data = await resp.json();` is unguarded. A proxy-side 502/504 (HTML body from waitress or an intermediary) throws a SyntaxError that escapes the retry loop entirely — the one failure class the backoff was built for. Network errors and 429/529 are handled; malformed bodies are not.
@@ -227,7 +227,7 @@ reallocationSuggestion: { type: ['string','null'] },
 
 ## 15. [LOW] `netProfit`/EV gate computed at a qty that later shrinks — correlation sizing and heat budget run after the §8.2 recompute
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — `_recomputeBuyEv()` helper + final refresh pass so netProfit reflects post-correlation/heat-budget qty.
 **Files:** `js/analysis.js` (order: EV recompute ~:1324-1357 → `_applyCorrSizing` ~:1398-1411 → `_applyHeatBudget` ~:1417-1484)
 
 **Problem:** The engine-side net-EV gate and the displayed `netProfit`/`expectedProfit` are computed from the quant qty, but `_applyCorrSizing` (−30 %/−50 %) and the heat budget (`_budgetScaled`) can halve qty afterwards without recomputing. The rec card then shows a P&L inconsistent with its own qty, and a rec that would fail the EV gate at its *final* (post-correlation) qty passes it at the pre-correlation qty (brokerage is fixed, so smaller qty ⇒ worse net EV).
@@ -236,7 +236,7 @@ reallocationSuggestion: { type: ['string','null'] },
 
 ## 16. [LOW] Whipsaw check runs a full calibration compute per rec ticker
 
-**Status:** Open
+**Status:** Resolved (2026-07-08, see Resolution log below) — whipsaw check fetches historical calibration only for tickers that flipped direction within 10d.
 **Files:** `js/analysis.js` (~:1209-1221), `routes/learning.py` (`learning_calibration` cache key ~:4635)
 
 **Problem:** For every unique rec ticker the whipsaw block fetches `GET /api/learning/calibration?tickers=<tk>&days=180` just to regex one per-ticker line out of the text block. Each cache miss runs `_calib_compute()` — including all eight lazy resolvers (yfinance-backed) — and inserts a per-ticker cache key (cache capped at 50, evicting the useful keys). With 6–8 recs this adds seconds of backend work per analysis for ~15 tokens of context, and only *flipped* tickers ever use the result.

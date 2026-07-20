@@ -228,6 +228,7 @@ Trades with no captured exit comparison keep a neutral weight rather than gettin
 - **Notification centre** (bell button) captures every toast, alert, and error in a dedicated `notifications.db` with a paginated log
 - **Desktop notifications** for stop proximity, targets, drawdown, and high-conviction setups
 - **Telegram** off-device push (credentials stored server-side, never logged)
+- **Daily health digest** — a once-a-day check of DB integrity, backup freshness/validity, news-scanner liveness, and yfinance failure volume, delivered to the notification centre always and to Telegram only when something needs attention (a healthy system never spams your phone)
 
 ---
 
@@ -262,7 +263,7 @@ Everything is configurable from the Settings page — no code editing:
 - Brokerage per trade, max trades/day, minimum trade size
 - Cash balance and term-deposit tracking
 - LLM provider for news/debate (Ollama model, Groq, Gemini)
-- **Theme** (Auto / Light / Dark) and **Compact mode** for smaller screens
+- **Theme** (Auto / Light / Dark / Terminal — Terminal is the default) and **Compact mode** for smaller screens
 - Morning briefing schedule (AEST)
 - Telegram bot credentials
 - Heat budget and drawdown alert thresholds

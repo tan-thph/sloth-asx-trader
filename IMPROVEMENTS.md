@@ -159,6 +159,8 @@ The morning macro brief emits `sentiment`, `sentimentConf`, `bullish` daily, but
 
 ### I-7. Day-trade prompts still have the AI doing sizing arithmetic
 
+**Status:** Open — the DT Claude path is dormant (scans are quantitative-only per CLAUDE.md gotcha "`getDayTradeSystemPrompt`/`getDayTradeUniverseScanPrompt` are DORMANT scaffolds — not invoked"), so this is not live risk, but the prompt text itself hasn't been updated.
+
 `getDayTradeSystemPrompt()`/`getDayTradeUniverseScanPrompt()` instruct the model to compute `qty = floor(riskPerTrade / (2.5 × atr_14))` — the exact arithmetic-in-LLM pattern the portfolio path eliminated. `buildDtSystemArray()`'s comment notes the DT Claude path is currently dormant (scans are quantitative-only), so this is not live risk — but if the path is reactivated, route DT recs through `computeTradeParams()` and set qty=0 in the prompt, same as portfolio. Flag it in the prompt file header so reactivation doesn't ship the old pattern.
 
 ### I-8. Consider a symmetric per-ticker nudge
