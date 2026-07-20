@@ -713,7 +713,11 @@ def backup_db(keep: int = 7) -> str | None:
         shutil.copy2(DB_PATH, dst)
     # prune oldest dated backups, keep the most recent `keep` copies
     pattern = str(DB_PATH.parent / f"{DB_PATH.name}.bak-2*")
-    backups = sorted(glob.glob(pattern))
+    # Exclude -wal/-shm sidecars (see health_digest._check_backup) — the bare
+    # filename is a string prefix of its own sidecar names, so an unfiltered
+    # sort ranks a stray sidecar as "newest" and can prune the real backup
+    # it belongs to instead.
+    backups = sorted(p for p in glob.glob(pattern) if not p.endswith(("-wal", "-shm")))
     for old in backups[:-keep]:
         try:
             Path(old).unlink()

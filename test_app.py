@@ -13511,6 +13511,70 @@ class TestHealthDigest(unittest.TestCase):
             self._level_for(self._health(yfinance={"ok": False, "detail": "spike"})),
             "warning")
 
+    def test_check_backup_ignores_wal_shm_sidecars(self):
+        # Real bug caught by manual endpoint testing (2026-07-20): opening a
+        # backup read-only used to spawn -wal/-shm sidecars next to it, and
+        # because the bare filename is a string PREFIX of those sidecar names,
+        # an unfiltered sorted(glob(...)) ranked the sidecar as "newest" —
+        # silently validating a 0-byte WAL file (stat age 0h, trivially passes
+        # quick_check as an "empty db") instead of the real backup.
+        import sqlite3, tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "asx_trader.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("CREATE TABLE t (x INTEGER)")
+            conn.commit(); conn.close()
+            real_backup = Path(td) / "asx_trader.db.bak-20260101"
+            shutil.copy2(db_path, real_backup)
+            # Simulate the sidecars a prior buggy run would have left behind,
+            # named to sort AFTER the real backup and with a fresher mtime.
+            (Path(td) / "asx_trader.db.bak-20260101-wal").write_bytes(b"")
+            (Path(td) / "asx_trader.db.bak-20260101-shm").write_bytes(b"")
+            with patch.object(_health_digest, "DB_PATH", db_path):
+                result = _health_digest._check_backup()
+            self.assertTrue(result["ok"])
+            self.assertIn("asx_trader.db.bak-20260101", result["detail"])
+            self.assertNotIn("-wal", result["detail"])
+            self.assertNotIn("-shm", result["detail"])
+            # The check itself must not spawn new sidecars for the backup it validates.
+            self.assertFalse((Path(td) / "asx_trader.db.bak-20260101-wal2").exists())
+
+    def test_backup_db_prune_ignores_wal_shm_sidecars(self):
+        # Same bug, pruning side (db.py backup_db keep=N): a sidecar sorting
+        # after the real file it belongs to must not be treated as the newest
+        # backup when deciding which dated copies to delete.
+        import sqlite3, tempfile
+        import db as _db
+        from unittest.mock import patch
+        from datetime import datetime
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "asx_trader.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("CREATE TABLE t (x INTEGER)")
+            conn.commit(); conn.close()
+            for day in ("20260101", "20260102", "20260103"):
+                shutil.copy2(db_path, Path(td) / f"asx_trader.db.bak-{day}")
+            (Path(td) / "asx_trader.db.bak-20260101-wal").write_bytes(b"")
+            (Path(td) / "asx_trader.db.bak-20260101-shm").write_bytes(b"")
+            # Pin "today" to 20260103 (an already-existing dated backup) so
+            # backup_db() doesn't add a real system-date entry the fixture
+            # can't control, keeping the scenario deterministic.
+            class _FixedDatetime(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return datetime(2026, 1, 3)
+            with patch.object(_db, "DB_PATH", db_path), patch.object(_db, "datetime", _FixedDatetime):
+                _db.backup_db(keep=2)
+            remaining = {p.name for p in Path(td).glob("asx_trader.db.bak-2*")}
+            # keep=2 must retain the 2 most recent REAL dated backups
+            # (20260102, 20260103) and prune the oldest (20260101) — the
+            # -wal/-shm sidecars from 20260101 must not fool the sort into
+            # keeping 20260101 (or its sidecars) instead.
+            self.assertIn("asx_trader.db.bak-20260102", remaining)
+            self.assertIn("asx_trader.db.bak-20260103", remaining)
+            self.assertNotIn("asx_trader.db.bak-20260101", remaining)
+
     def test_format_digest_marks_failures(self):
         health = {
             "level": "warning",

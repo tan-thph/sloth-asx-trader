@@ -54,7 +54,12 @@ def _check_backup() -> dict:
     by the time you need one.
     """
     pattern = str(DB_PATH.parent / f"{DB_PATH.name}.bak-2*")
-    backups = sorted(glob.glob(pattern))
+    # Exclude -wal/-shm sidecars: opening a backup below with mode=ro (no
+    # immutable flag) used to spawn them next to the backup, and because the
+    # bare filename is a string PREFIX of its own "-wal"/"-shm" variants,
+    # sorted() ranked the sidecar as the "newest" backup on the next run —
+    # silently validating a 0-byte WAL file instead of the real copy.
+    backups = sorted(p for p in glob.glob(pattern) if not p.endswith(("-wal", "-shm")))
     if not backups:
         return {"ok": False, "detail": "no backup files found"}
     newest = Path(backups[-1])
@@ -62,7 +67,10 @@ def _check_backup() -> dict:
     if age_h > _BACKUP_MAX_AGE_H:
         return {"ok": False, "detail": f"newest backup {newest.name} is {age_h:.0f}h old"}
     try:
-        conn = sqlite3.connect(f"file:{newest}?mode=ro", uri=True)
+        # immutable=1 tells SQLite the file is static (no other writer will
+        # ever touch it), skipping the WAL consistency check that otherwise
+        # creates -shm/-wal sidecars for a plain read-only open.
+        conn = sqlite3.connect(f"file:{newest}?mode=ro&immutable=1", uri=True)
         try:
             rows = conn.execute("PRAGMA quick_check").fetchall()
         finally:
