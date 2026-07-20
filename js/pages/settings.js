@@ -307,7 +307,7 @@ python3 asx_server.py</pre>
         </div>
         <div style="display:flex;gap:4px">
           ${['auto','light','dark','terminal'].map(t => {
-            const active = (state.settings.theme || 'auto') === t;
+            const active = (state.settings.theme || 'terminal') === t;
             const lbl = {auto:'Auto',light:'Light',dark:'Dark',terminal:'Terminal'}[t];
             return `<button class="btn btn-sm${active ? ' btn-primary' : ''}" onclick="settingsSetTheme('${t}')">${lbl}</button>`;
           }).join('')}

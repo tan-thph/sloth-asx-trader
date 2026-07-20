@@ -84,7 +84,7 @@ async function initApp() {
   }
   renderPage();
   if (state.settings.compactMode) document.body.classList.add('compact');
-  _applyTheme(state.settings.theme || 'auto');
+  _applyTheme(state.settings.theme || 'terminal');
   checkMacroBriefSchedule();
 }
 

@@ -79,7 +79,7 @@ const state = {
     sbcMode: false,
     stopProximityPct: 3,
     compactMode: false,
-    theme: 'auto',          // 'auto' | 'light' | 'dark'
+    theme: 'terminal',      // 'auto' | 'light' | 'dark' | 'terminal'
     useLocalLLM: false,
     useBackendProxy: false, // route AI calls through /api/claude/proxy (server-side claude-api.txt) instead of this browser's localStorage key — lets every device on a tailnet share one key
     maxRiskBudgetPct: 5,

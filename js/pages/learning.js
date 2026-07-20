@@ -1562,6 +1562,17 @@ async function renderHoldDecisionsCard() {
         <tbody>${rows}</tbody>
       </table>
     </div>
+    <details style="margin-top:8px">
+      <summary class="text-xs text-muted" style="cursor:pointer">ℹ How the 30-day review is decided</summary>
+      <div class="text-xs text-muted" style="margin-top:6px;padding:8px 10px;background:var(--bg-secondary);border-radius:6px;line-height:1.6">
+        <div>Once a HOLD is ≥30 days old, its ticker's price return over the first 20 trading days after the rec is checked against a <strong>volatility-scaled threshold</strong> (wider for a jumpy stock, narrower for a calm one — floored at 5%, capped at 20%) rather than a flat percentage, so a normal wobble in a volatile name isn't mistaken for a real miss.</div>
+        <div style="margin-top:6px">• <strong>✅ Held correctly</strong> — return stayed inside the band, or was positive (patience paid off / no real move existed)</div>
+        <div>• <strong>⚠️ Sat through drawdown</strong> — return fell through the band and stayed down (a sustained decline, not a bounce-back dip)</div>
+        <div>• <strong>⏳ Review in Nd</strong> — still inside the 30-day waiting period</div>
+        <div>• <strong>○ Not gradable</strong> — fewer than 10 trading bars of forward price history available</div>
+        <div style="margin-top:6px">This only judges the passivity call itself — it says nothing about whether the ORIGINAL entry thesis was right, just whether continuing to hold was the correct choice at review time.</div>
+      </div>
+    </details>
   </div>`;
 }
 
@@ -3945,7 +3956,19 @@ async function renderSellOutcomesCard() {
         </thead>
         <tbody>${rows}</tbody>
       </table>
-    </div>`}`;
+    </div>`}
+    <details style="margin-top:8px">
+      <summary class="text-xs text-muted" style="cursor:pointer">ℹ How the 30d Verdict is decided</summary>
+      <div class="text-xs text-muted" style="margin-top:6px;padding:8px 10px;background:var(--bg-secondary);border-radius:6px;line-height:1.6">
+        The verdict checks whether the price move ≥25 days after the sell <em>confirms or contradicts the stated driver</em> — not every driver can be checked this way.
+        <div style="margin-top:6px"><strong>Price-checkable drivers:</strong></div>
+        <div>• <strong>Target Reached</strong> — validated if price stayed ≤+5% since sell; invalidated if it ran &gt;+10% (target was too conservative)</div>
+        <div>• <strong>Thesis Broken</strong> / <strong>Stop Triggered</strong> — validated if price fell &gt;5% (thesis confirmed); invalidated if price rose &gt;5% (thesis was wrong)</div>
+        <div>• <strong>Better Opportunity</strong> — validated if the named alt ticker beat the sold ticker by &gt;3pp; invalidated if it lagged by &gt;3pp</div>
+        <div style="margin-top:6px"><strong>Always inconclusive</strong> (not a price-direction claim, so never validated/invalidated): Risk Mgmt, Regime Change, Technical Breakdown, Tax Optimisation, Time Stop, Position Sizing, Rebalance.</div>
+        <div style="margin-top:6px">A verdict only appears once a sell is ≥25 days old, and up to 5 resolve per calibration refresh — recent sells stay blank until they cross that window.</div>
+      </div>
+    </details>`;
 }
 
 async function refreshSellOutcomes() {
@@ -4159,6 +4182,22 @@ async function renderRuleEfficacyCard() {
           <tbody>${rows}</tbody>
         </table>
       </div>
+      <details style="margin-top:8px">
+        <summary class="text-xs text-muted" style="cursor:pointer">ℹ What each rule checks, and how the verdict is decided</summary>
+        <div class="text-xs text-muted" style="margin-top:6px;padding:8px 10px;background:var(--bg-secondary);border-radius:6px;line-height:1.6">
+          <div><strong>Quant engine declined to size</strong> — the deterministic sizing engine returned zero/negative Kelly and you overrode it with a manual size.</div>
+          <div><strong>Negative expected value</strong> — the trade's own numbers say it can't profit (net-EV ≤ 0, or the stop sits above/target below entry).</div>
+          <div><strong>Below confidence floor</strong> — executed despite Claude's stated confidence being under the required minimum to act.</div>
+          <div><strong>Whipsaw / self-contradiction</strong> — contradicts your own rec on the same ticker from the last 10 days under a near-identical technical setup.</div>
+          <div><strong>Reasoning contradicts action</strong> — the reasoning text argues one direction but the action field says another.</div>
+          <div><strong>Heat budget constraint</strong> — position size was blocked or scaled down by the portfolio-level risk-budget cap.</div>
+          <div><strong>Rec on Tier-2 (compressed) ticker</strong> — a BUY/TOP_UP issued on a ticker shown to Claude only as a compressed one-line summary, not full data — higher fabrication risk.</div>
+          <div><strong>Fewer than 3 non-technical factors</strong> — a BUY/TOP_UP backed by fewer than 3 fundamental/macro-tagged reasons (mostly technical-only case).</div>
+          <div><strong>Fallback min-trade sizing</strong> — the position was floored to the minimum tradeable size rather than sized normally.</div>
+          <div><strong>Validator rule failure</strong> — catch-all for any other schema/business-rule breach the validator flagged but didn't drop (flag-don't-drop).</div>
+          <div style="margin-top:6px">A rule's own <strong>Verdict</strong> only fires once its breached-and-closed trades clear ${data.min_n || 12} and the 95% CI vs the whole-book baseline win rate doesn't overlap — <strong>Too strict?</strong> means overridden trades actually beat baseline (the rule may be too cautious); <strong>Rule was right</strong> means they underperformed it. Below that bar, or with an overlapping CI, the verdict stays "Insufficient data" rather than guessing.</div>
+        </div>
+      </details>
     </div>`;
 }
 
@@ -4255,7 +4294,20 @@ async function renderBuyOutcomesCard() {
         </thead>
         <tbody>${rows}</tbody>
       </table>
-    </div>`}`;
+    </div>`}
+    <details style="margin-top:8px">
+      <summary class="text-xs text-muted" style="cursor:pointer">ℹ How Thesis Held / Exit Quality / Skill are decided</summary>
+      <div class="text-xs text-muted" style="margin-top:6px;padding:8px 10px;background:var(--bg-secondary);border-radius:6px;line-height:1.6">
+        <div><strong>Thesis Held?</strong> — compares the entry-driver's signals at entry vs at close (5 states):</div>
+        <div>• <strong>✓ validated</strong> — every signal behind the entry driver is still intact at exit</div>
+        <div>• <strong>partially validated</strong> — at least a third of those signals are still intact</div>
+        <div>• <strong>✗ invalidated</strong> — fewer than a third intact (or none)</div>
+        <div>• <strong>reversed</strong> — 2+ signals clearly flipped direction (worse than plain invalidated)</div>
+        <div>• <strong>irrelevant</strong> — the entry driver has no defined signal check to compare against</div>
+        <div style="margin-top:6px"><strong>Exit Quality</strong> — deterministic read of RSI/BB%b/MACD at the moment of exit, not a P&amp;L judgement: <strong>⚠ Cut winner early</strong> (exited into continuing strength) · <strong>✓ Reversal confirmed</strong> (exited after the reversal was already visible) · <strong>⚠ Panic-risk exit</strong> (exited into active weakness) · <strong>— Neutral</strong>.</div>
+        <div style="margin-top:6px"><strong>Skill</strong> (0–10) — a process-quality score from the thesis-verdict × outcome quadrant (e.g. validated+win scores higher than invalidated+win, which is "right for the wrong reason"/luck) — it grades the reasoning, not just whether the trade made money.</div>
+      </div>
+    </details>`;
 }
 
 async function refreshBuyOutcomes() {
