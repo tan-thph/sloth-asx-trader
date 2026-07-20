@@ -1,0 +1,31 @@
+#!/bin/sh
+# pre-commit guard for the git-based multi-device DB sync workflow.
+#
+# Committing asx_trader.db while the server is running (or while the WAL
+# sidecar still holds un-checkpointed pages) pushes a DB file that is
+# mid-write / silently missing the most recent transactions — the sync-level
+# equivalent of the two-writer WAL corruption in CLAUDE.md gotcha #49.
+#
+# Install (once per clone):  git config core.hooksPath scripts/hooks
+
+case "$(git diff --cached --name-only)" in
+*asx_trader.db*) ;;
+*) exit 0 ;;
+esac
+
+if [ -f asx_trader.lock ]; then
+    echo "ERROR: asx_trader.lock present — the server appears to be RUNNING." >&2
+    echo "Stop the server first, then commit. (A clean shutdown checkpoints the" >&2
+    echo "WAL so the committed .db file is complete.)" >&2
+    echo "If the lockfile is stale from a crash, delete it and retry." >&2
+    exit 1
+fi
+
+if [ -s asx_trader.db-wal ]; then
+    echo "ERROR: asx_trader.db-wal is non-empty — the .db file is missing recent writes." >&2
+    echo "Start and cleanly stop the server (shutdown runs a TRUNCATE checkpoint)," >&2
+    echo "or run:  python -c \"import db; db.checkpoint_truncate()\"" >&2
+    exit 1
+fi
+
+exit 0

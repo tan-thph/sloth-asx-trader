@@ -615,9 +615,10 @@ function _renderLearningContent(d, brier) {
   const versionsCard = `
     <div class="card">
       <div class="card-title">Prompt Version History</div>
+      <div style="overflow:auto;max-height:340px">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead>
-          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-primary);z-index:1">
             <th style="text-align:left;padding:4px 8px">Version</th>
             <th style="text-align:right;padding:4px 8px">Calls</th>
             <th style="text-align:right;padding:4px 8px">Closed</th>
@@ -653,6 +654,7 @@ function _renderLearningContent(d, brier) {
             </tr>`;}).join('') : '<tr><td colspan="6" style="padding:8px;color:var(--text-muted)">No prompt version data yet.</td></tr>'}
         </tbody>
       </table>
+      </div>
     </div>`;
 
   // ── Failure patterns ───────────────────────────────────────────────────────
@@ -869,9 +871,10 @@ function _renderLearningContent(d, brier) {
     <div class="card section-gap">
       <div class="card-title">Performance by Model</div>
       <p class="text-xs text-muted" style="margin-bottom:8px">Per-LLM track record — descriptive only, calibration still blends all models into one figure. A row spanning &gt;1 model is what the Go-Live 🎯 card's mixed-sample note is warning you about.</p>
+      <div style="overflow:auto;max-height:340px">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead>
-          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+          <tr style="color:var(--text-muted);border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-primary);z-index:1">
             <th style="text-align:left;padding:4px 8px">Model</th>
             <th style="text-align:right;padding:4px 8px">Trades</th>
             <th style="text-align:right;padding:4px 8px">Win Rate</th>
@@ -897,6 +900,7 @@ function _renderLearningContent(d, brier) {
           }).join('')}
         </tbody>
       </table>
+      </div>
       ${byModelEntries.length > 1 ? `<p class="text-xs text-muted" style="margin-top:6px">Model captured per rec since 2026-07-17; older rows may show as <code>unknown/legacy</code> until <code>POST /api/learning/backfill-models</code> is run.</p>` : ''}
     </div>` : '';
 
@@ -3365,10 +3369,10 @@ async function renderLessonsCard() {
     </p>
     ${lessons.length === 0
       ? '<p class="text-xs text-muted">No lessons yet. Run the cloud adjudicator (⚖AI) on a closed trade to auto-generate one, or add manually.</p>'
-      : `<div style="overflow-x:auto">
+      : `<div style="overflow:auto;max-height:340px">
           <table style="width:100%;border-collapse:collapse">
             <thead>
-              <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
+              <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px;position:sticky;top:0;background:var(--bg-primary);z-index:1">
                 <th style="text-align:left;padding:4px 8px">Date</th>
                 <th style="text-align:left;padding:4px 8px">Scope</th>
                 <th style="text-align:left;padding:4px 8px">Lesson</th>
@@ -4102,12 +4106,14 @@ async function renderRuleEfficacyCard() {
     <tr id="rule-ev-${r.code}" style="display:${open ? '' : 'none'}">
       <td colspan="7" style="background:var(--bg-inset);padding:6px 10px">
         <div class="text-xs text-muted" style="margin-bottom:4px">${r.closed_n} closed · ${r.open_n} open · ${r.skipped_n} skipped — realized P&amp;L shown for closed disposals; open entries show live move since entry.</div>
+        <div style="overflow:auto;max-height:260px">
         <table style="width:100%;border-collapse:collapse">
-          <thead><tr style="color:var(--text-muted);font-size:10px;text-align:left">
+          <thead><tr style="color:var(--text-muted);font-size:10px;text-align:left;position:sticky;top:0;background:var(--bg-inset);z-index:1">
             <th style="padding:2px 8px">Date</th><th style="padding:2px 8px">Ticker</th><th style="padding:2px 8px">Action</th><th style="padding:2px 8px">State</th><th style="padding:2px 8px;text-align:right">Entry</th><th style="padding:2px 8px">P&amp;L</th>
           </tr></thead>
           <tbody>${evRows || '<tr><td colspan="6" class="text-xs text-muted" style="padding:4px 8px">No events.</td></tr>'}</tbody>
         </table>
+        </div>
       </td>
     </tr>`;
   }).join('');
@@ -4137,10 +4143,10 @@ async function renderRuleEfficacyCard() {
         Verdicts fire only past ${data.min_n || 12} closed trades with a statistically clear gap. ${baseTxt}
       </p>
       ${_decisiveStrip}
-      <div style="overflow-x:auto">
+      <div style="overflow:auto;max-height:400px">
         <table style="width:100%;border-collapse:collapse">
           <thead>
-            <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
+            <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px;position:sticky;top:0;background:var(--bg-primary);z-index:1">
               <th style="text-align:left;padding:4px 8px">Rule</th>
               <th style="text-align:right;padding:4px 8px">Closed</th>
               <th style="text-align:right;padding:4px 8px">Open</th>
@@ -4230,10 +4236,10 @@ async function renderBuyOutcomesCard() {
       ${withThesis > 0 ? `Thesis held (fully/partially) on <strong>${nValidated}/${withThesis}</strong> closed trades.` : ''}
     </p>
     ${!events.length ? '<p class="text-xs text-muted">No events match this filter.</p>' : `
-    <div style="overflow-x:auto">
+    <div style="overflow:auto;max-height:340px">
       <table style="width:100%;border-collapse:collapse">
         <thead>
-          <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px">
+          <tr style="color:var(--text-muted);border-bottom:2px solid var(--border);font-size:11px;position:sticky;top:0;background:var(--bg-primary);z-index:1">
             <th style="text-align:left;padding:4px 8px">Date</th>
             <th style="text-align:left;padding:4px 8px">Ticker</th>
             <th style="text-align:left;padding:4px 8px">Action</th>

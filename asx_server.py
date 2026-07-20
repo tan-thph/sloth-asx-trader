@@ -115,7 +115,7 @@ def _req_end(resp):
 # ── SQLite database ─────────────────────────────────────────────────────────────
 # Schema, get_db(), init_db(), log_failed_ticker() live in db.py so route
 # modules can import them without dragging in Flask.
-from db import DB_PATH, get_db, init_db, backup_db, quick_integrity_check, log_failed_ticker as _log_failed_ticker_impl
+from db import DB_PATH, get_db, init_db, backup_db, quick_integrity_check, checkpoint_truncate, log_failed_ticker as _log_failed_ticker_impl
 
 # Separate notifications database (notifications.db — not mixed into trading data)
 from notifications_db import init_notif_db
@@ -176,6 +176,11 @@ def _schedule_daily_backup():
 
 
 threading.Thread(target=_schedule_daily_backup, daemon=True, name="db-backup").start()
+
+# Fold the WAL into the main .db on clean shutdown so the committed file is
+# self-contained for the git-based multi-device DB sync (see checkpoint_truncate).
+import atexit as _atexit_ckpt
+_atexit_ckpt.register(checkpoint_truncate)
 
 
 # ── Register blueprints ────────────────────────────────────────────────────────
@@ -385,6 +390,12 @@ def _acquire_single_instance_lock():
 
 if __name__ == "__main__":
     _acquire_single_instance_lock()
+    # Daily system-health digest (notification centre + Telegram-on-warn).
+    # Started in the entry points (here + waitress_server.py), NOT at module
+    # level — test_app.py imports this module and the digest thread would
+    # otherwise fire mid-suite and write to the real notifications/blob DBs.
+    from health_digest import start_digest_scheduler
+    start_digest_scheduler()
     print("=" * 60)
     print("  ASX Trading Assistant – Backend Server")
     print("  http://localhost:5000")

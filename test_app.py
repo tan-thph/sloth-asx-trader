@@ -13247,6 +13247,51 @@ class TestNewsLlmFixes(unittest.TestCase):
         result = _news_engine._headline_fallback_classification("Some headline", "", [])
         self.assertEqual(result["summary"], "Some headline")
 
+    # ── N2b: title-echo detection (content = title + publisher) ─────────────
+
+    def test_content_beyond_title_detects_title_echo(self):
+        # The real failure pattern (2026-07-20 audit): Google News RSS content
+        # is literally the title plus the publisher name — 71 chars, passes the
+        # old absolute ≥40 gate, contains zero information beyond the headline.
+        title = "Could the Healthcare Dip Put CSL (ASX:CSL) Back in Focus?"
+        content = "Could the Healthcare Dip Put CSL (ASX:CSL) Back in Focus? Kalkine Media"
+        self.assertLess(
+            _news_engine._content_beyond_title(title, content),
+            _news_engine._HEADLINE_FALLBACK_MIN_CONTENT,
+        )
+
+    def test_content_beyond_title_real_article_passes(self):
+        title = "Yemen's Houthis Threaten New Oil Shock as Civil War Reignites"
+        content = (
+            "Yemen's Houthi Rebels are threatening to make the global energy "
+            "crisis worse at the same time that the nation's own energy "
+            "infrastructure is under renewed attack from rival factions."
+        )
+        self.assertGreaterEqual(
+            _news_engine._content_beyond_title(title, content),
+            _news_engine._HEADLINE_FALLBACK_MIN_CONTENT,
+        )
+
+    def test_content_beyond_title_subsumes_absolute_thin_check(self):
+        # Content shorter than the threshold with the title NOT embedded —
+        # the old absolute check's case must still be caught.
+        self.assertLess(
+            _news_engine._content_beyond_title("Completely different title", "short blurb"),
+            _news_engine._HEADLINE_FALLBACK_MIN_CONTENT,
+        )
+
+    def test_content_beyond_title_case_and_whitespace_insensitive(self):
+        title = "BHP Falls  On Copper   Warning"
+        content = "bhp falls on copper warning SMH.com.au"
+        self.assertLess(
+            _news_engine._content_beyond_title(title, content),
+            _news_engine._HEADLINE_FALLBACK_MIN_CONTENT,
+        )
+
+    def test_scan_loop_uses_beyond_title_gate(self):
+        src = self._src("news_engine.py")
+        self.assertIn('_content_beyond_title(row["title"] or "", row["content"] or "")', src)
+
     # ── N1: attempts column + terminal state + two-phase batch select ───────
 
     def test_attempts_column_exists_after_init(self):
@@ -13415,6 +13460,98 @@ class TestNewsLlmFixes(unittest.TestCase):
     def _src(self, rel):
         with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
             return f.read()
+
+
+# ── health_digest.py — daily system-health digest ────────────────────────────
+import health_digest as _health_digest
+
+
+class TestHealthDigest(unittest.TestCase):
+    def _src(self, rel):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            return f.read()
+
+    def _health(self, **overrides):
+        checks = {
+            "db_integrity": {"ok": True, "detail": "ok"},
+            "backup":       {"ok": True, "detail": "fresh"},
+            "news_scanner": {"ok": True, "detail": "recent"},
+            "yfinance":     {"ok": True, "detail": "0 failed"},
+        }
+        checks.update(overrides)
+        return checks
+
+    def _level_for(self, checks):
+        # Drive collect_health's level derivation through the real function by
+        # patching the individual check functions it calls.
+        from unittest.mock import patch
+        with patch.object(_health_digest, "_check_db_integrity", return_value=checks["db_integrity"]), \
+             patch.object(_health_digest, "_check_backup", return_value=checks["backup"]), \
+             patch.object(_health_digest, "_check_news", return_value=checks["news_scanner"]), \
+             patch.object(_health_digest, "_check_yfinance", return_value=checks["yfinance"]):
+            return _health_digest.collect_health()["level"]
+
+    def test_all_ok_is_info(self):
+        self.assertEqual(self._level_for(self._health()), "info")
+
+    def test_db_or_backup_failure_is_error(self):
+        # Data-loss-risk checks escalate to error, not just warning.
+        self.assertEqual(
+            self._level_for(self._health(db_integrity={"ok": False, "detail": "corrupt"})),
+            "error")
+        self.assertEqual(
+            self._level_for(self._health(backup={"ok": False, "detail": "stale"})),
+            "error")
+
+    def test_service_degradation_is_warning(self):
+        self.assertEqual(
+            self._level_for(self._health(news_scanner={"ok": False, "detail": "stuck"})),
+            "warning")
+        self.assertEqual(
+            self._level_for(self._health(yfinance={"ok": False, "detail": "spike"})),
+            "warning")
+
+    def test_format_digest_marks_failures(self):
+        health = {
+            "level": "warning",
+            "checks": self._health(news_scanner={"ok": False, "detail": "last scan 30h ago"}),
+            "generated_at": "2026-07-20T10:00:00",
+        }
+        title, body = _health_digest.format_digest(health)
+        self.assertIn("attention needed", title)
+        self.assertIn("✗ news scanner: last scan 30h ago", body)
+        self.assertIn("✓ db integrity", body)
+
+    def test_format_digest_all_ok_title(self):
+        health = {"level": "info", "checks": self._health(), "generated_at": ""}
+        title, _ = _health_digest.format_digest(health)
+        self.assertIn("all systems OK", title)
+
+    def test_server_starts_scheduler_and_registers_checkpoint(self):
+        # Scheduler must start in BOTH entry points but NOT at module level in
+        # asx_server (test imports would fire the digest thread mid-suite).
+        src = self._src("asx_server.py")
+        self.assertIn("start_digest_scheduler()", src)
+        self.assertIn("start_digest_scheduler()", self._src("waitress_server.py"))
+        # Clean-shutdown WAL checkpoint — the committed .db file must be
+        # self-contained for the git-based multi-device DB sync.
+        self.assertIn("_atexit_ckpt.register(checkpoint_truncate)", src)
+
+    def test_endpoint_registered(self):
+        src = self._src(os.path.join("routes", "news.py"))
+        self.assertIn('@bp.route("/api/system/health-digest")', src)
+
+    def test_telegram_only_on_non_info(self):
+        # A healthy system must never spam the alert channel — Telegram is
+        # gated on level != info in send_digest.
+        src = self._src("health_digest.py")
+        self.assertIn('if health["level"] != "info":', src)
+
+    def test_checkpoint_truncate_exists_and_is_best_effort(self):
+        import db as _db
+        self.assertTrue(callable(_db.checkpoint_truncate))
+        src = self._src("db.py")
+        self.assertIn("PRAGMA wal_checkpoint(TRUNCATE)", src)
 
 
 # ── SCORING_FIXES.md — X1/S1/S2: shared impact-band scale ────────────────────

@@ -35,6 +35,11 @@ except ImportError:
 
 from asx_server import app
 
+# Daily system-health digest — started per entry point (asx_server.py __main__
+# starts its own); module-level in asx_server would fire during test imports.
+from health_digest import start_digest_scheduler
+start_digest_scheduler()
+
 HOST    = "0.0.0.0"
 PORT    = 5000
 THREADS = 16        # matches gunicorn's 2 workers × 8 threads

@@ -730,6 +730,29 @@ def _extract_article_tickers(title: str, content: str,
 # post-classify degenerate-repetition fallback (N6) below.
 _HEADLINE_FALLBACK_MIN_CONTENT = 40
 
+
+def _content_beyond_title(title: str, content: str) -> int:
+    """N2b: chars of information `content` carries BEYOND the title.
+
+    Google News RSS entries (Kalkine Media, SMH, …) often set content to
+    literally the title plus the publisher name — e.g. 71 chars for
+    "Could the Healthcare Dip Put CSL … Kalkine Media". That passes the
+    absolute-length N2 gate (≥40 chars) yet contains zero real information,
+    so the model is still asked to invent every schema field from a bare
+    headline; measured 2026-07-20, title-echo articles were ~14 of the 22
+    terminal (processed=-2) failures while the N2 gate had fired 0 times.
+    Measure information beyond the title instead: normalise whitespace+case,
+    remove the first occurrence of the title from the content, and return
+    the remaining length. A plain thin article (title not embedded) returns
+    its full cleaned length, so this strictly subsumes the old absolute check.
+    """
+    clean = _strip_urls(content or "").strip()
+    c = re.sub(r"\s+", " ", clean).lower()
+    t = re.sub(r"\s+", " ", (title or "")).strip().lower()
+    if t and t in c:
+        c = c.replace(t, "", 1)
+    return len(c.strip())
+
 # N1: after this many classify() -> None attempts, an article moves from
 # processed=-1 (retryable) to the terminal processed=-2 (excluded from every
 # future batch select). Without a cap, an article that always fails re-occupies
@@ -1734,7 +1757,10 @@ class NewsPipeline:
                     # if a cloud fallback is the one that succeeds) so the DB
                     # write reflects the true source, not always the primary.
                     result_model = llm.model
-                    _clean_len = len(_strip_urls(row["content"] or "").strip())
+                    # N2b: measure content beyond the title, not absolute length —
+                    # title-echo articles (content = title + publisher) otherwise
+                    # slip past this gate and burn 3 LLM attempts on nothing.
+                    _clean_len = _content_beyond_title(row["title"] or "", row["content"] or "")
                     if _clean_len < _HEADLINE_FALLBACK_MIN_CONTENT:
                         result = _headline_fallback_classification(
                             row["title"] or "", row["content"] or "", all_tickers

@@ -499,6 +499,23 @@ def system_gpu():
     return jsonify(_get_gpu_info())
 
 
+@bp.route("/api/system/health-digest")
+def system_health_digest():
+    """On-demand system-health digest (health_digest.py).
+
+    Plain GET returns the check results as JSON. `?notify=1` additionally
+    delivers it through the notification centre + Telegram-on-warn, bypassing
+    the once-per-day guard the daily scheduler uses.
+    """
+    try:
+        import health_digest as _hd
+        if request.args.get("notify"):
+            return jsonify(_hd.send_digest(force=True))
+        return jsonify(_hd.collect_health())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @bp.route("/api/ollama/start", methods=["POST"])
 def ollama_start():
     """Try to launch `ollama serve` if it is not already running."""

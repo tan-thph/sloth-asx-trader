@@ -663,6 +663,23 @@ def init_db():
         """)
 
 
+def checkpoint_truncate() -> None:
+    """Fold the WAL back into the main .db file and truncate it.
+
+    Registered atexit by asx_server.py so that after a CLEAN shutdown the
+    asx_trader.db file alone is complete and self-contained. This matters for
+    the git-based multi-device sync workflow: only the .db file is committed
+    (*.db-wal/-shm are git-ignored), so committing while un-checkpointed WAL
+    pages exist would push a DB silently missing the most recent writes.
+    Best-effort — a locked/busy DB at exit is not worth crashing over.
+    """
+    try:
+        with get_db() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
+
+
 def quick_integrity_check() -> str:
     """Run PRAGMA quick_check (fast structural sanity check, not a full
     integrity_check) once at startup. Returns 'ok' on success, or a

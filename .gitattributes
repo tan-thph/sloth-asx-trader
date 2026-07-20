@@ -1,0 +1,2 @@
+# Git hooks are executed by sh — CRLF line endings break them on non-Windows.
+scripts/hooks/* text eol=lf
