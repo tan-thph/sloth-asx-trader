@@ -1,13 +1,264 @@
-1. In Trade Journal, don't commit sell info to original buy entry. For example, WBC, bought on 01-01-2025 and sold today, and the app committed the sell to it and close the entry.
-I don't want that. Instead, I want a new entry for sale with today date. The original buy entry will show as closed, parcel number carried forward to the sell rec today. And the sell rec is also closed.
+1. Need to renmove notification like "QBE stop pierced ($21.78 <= $23.78) — no exit recorded yet.". Add a "x" button
+2. Modify to connect to a LLM server via URL. Server will run on google colab and generate a pynrok url.
+3. In learning loop, check why some hold transactions were not evaluated. and tell me how they are evaluated and is the methodology correct
+4. News scanner generated more failed results
+5. Further improve news scanner, feel like it only focuses on Middle East situations, not AU poltics and policies
+6.
+Verdict on CSL analysis - AI Call #67 2026-08-24 11:22:30 • portfolio • claude-sonnet-5
 
-2. Why ALL in Watchlist has BB%B of 106%? Shouldn't it have max 101%?
+My verdict: the analysis has a sensible idea, but the implementation is weak — about 5/10
 
-3. Redesign the "What Changed (24h)" in Morning Macro card. Ensure the cartegories and notes are well distributed evenly
+The TRIM conclusion is defensible, especially after CSL's very sharp move following its FY26 results. CSL went from about $134.60 immediately before the 18 August results to $168.30 by 21 August, roughly a 25% move in only a few trading days.
 
-4. Exclude trading tickers from Claude API calls.
+But several parts of your AI's reasoning need fixing before I would let it execute trades automatically.
 
-5. I really like the way each rec showing from Claude API call in Recommendations. Can you keep those info for each ticker in History tab?
+1. 🚨 The scenario math contradicts the recommendation
 
-6. Add a box to select a claude model or enter another model name before running analysis
+Your model says:
 
+Scenario	Probability	Return
+Bull	25%	+5%
+Base	50%	-6%
+Bear	25%	-15%
+
+The weighted expected return is:
+
+(25% × 5%) + (50% × -6%) + (25% × -15%) = -5.5%
+
+So the model is implicitly saying CSL has an expected return of -5.5% over 12 months.
+
+If that is genuinely the model's forecast, then "trim 38%" is oddly conservative. The model should explain why it wants to retain 62% of a position for which its own probability-weighted forecast is negative.
+
+Alternatively, the scenario returns or probabilities are simply poorly calibrated.
+
+This is the biggest flaw.
+
+2. ❌ "Position oversized" is objectively inconsistent with your own rule
+
+Your validator correctly caught this:
+
+Position at 8.8% weight
+Oversized threshold ≤10%
+
+Therefore, 8.8% is not oversized under the system's own rule.
+
+The AI should not output:
+
+risk_management · position_oversized
+
+while simultaneously saying the position does not exceed the concentration threshold.
+
+A better classification would be something like:
+
+profit_taking
+momentum_extended
+valuation_reassessment
+portfolio_rebalancing
+
+If healthcare is already 11% of the portfolio, that may justify avoiding additional purchases, but it does not automatically mean an 8.8% CSL position is oversized.
+
+3. ⚠️ The 90-day maximum drawdown factor is being misused
+
+This statement concerns me:
+
+MaxDD90d 32.9% — elevated drawdown risk after parabolic run
+
+Maximum drawdown is a backward-looking statistic. It tells you how far the share price fell from a previous peak during that measurement window.
+
+It does not automatically mean the stock currently has a 32.9% downside risk.
+
+For CSL, this is particularly problematic because the stock had already experienced a major decline before its recent recovery. A large historical drawdown can therefore remain in the 90-day calculation even while the current move is strongly upward.
+
+I would replace this with separate metrics:
+
+20-day realised volatility
+ATR as a percentage of price
+distance from 20/50/200-day moving averages
+downside beta
+post-earnings gap risk
+
+That would make the risk analysis much more meaningful.
+
+4. ⚠️ RSI 80.5 is a valid warning — but not automatically a sell signal
+
+This is probably the strongest technical argument for trimming.
+
+An RSI around 80 indicates very strong momentum and potentially extended conditions. But your model appears to make this leap:
+
+RSI high → therefore sell 38%
+
+That is too simplistic.
+
+Strong stocks can remain overbought for extended periods. In fact, after a major earnings surprise or guidance reset, a high RSI can reflect a fundamental repricing, not merely temporary speculation.
+
+CSL's FY26 results were released on 18 August, and the market reacted strongly afterwards. Official CSL and ASX records confirm the FY26 results and presentation were released that day.
+
+Therefore, your model should distinguish:
+
+Type A: technical overbought
+
+No material change in fundamentals
+Price simply runs ahead of itself
+Higher confidence in trimming
+
+Type B: fundamental repricing
+
+Earnings surprise
+Guidance upgrade
+Major business restructuring
+Analysts revising forecasts
+RSI may remain high while the stock establishes a new valuation range.
+
+That distinction is missing.
+
+5. 🚨 The analyst target argument may be stale
+
+The model says:
+
+Analyst buy target: $162.97
+Current price: $168.30
+
+Therefore, it treats CSL as being above target.
+
+But CSL's results caused a very rapid repricing. Analyst targets can lag the market immediately after results because analysts may not yet have updated their models.
+
+There are already differing target estimates across market data sources; for example, one current source showed an average target around $137 while another recent analysis discussed a materially higher fair-value estimate. That dispersion itself is a warning against treating a single aggregated target as a precise sell trigger.
+
+Your system should record:
+
+target date
+number of analysts
+whether the target was issued before or after the latest earnings
+target revision trend
+percentage of analysts upgrading vs downgrading
+
+A pre-results target should have a much lower weighting after a major earnings event.
+
+6. ❌ The "invalidation" logic doesn't make much sense
+
+It says:
+
+RSI falls below 60 with no further downside, or price reclaims $175.94
+
+For a TRIM recommendation, this is confusing.
+
+If the price falls and RSI goes below 60, why does that invalidate the decision to trim?
+
+If the price reclaims $175.94, that makes more sense as a sign that momentum remains intact, but it should be defined as:
+
+Re-entry / trim invalidation: Close above the post-results high for X days, accompanied by volume confirmation or upward analyst revisions.
+
+The current wording:
+
+"RSI falls below 60 with no further downside"
+
+is almost backwards. It could actually indicate that the stock has cooled off without breaking down, potentially creating a better entry or add-back opportunity.
+
+7. 💰 The brokerage calculation should influence this particular trade
+
+Your screenshot proposes selling:
+
+9 shares
+Price: $166
+Gross proceeds: approximately $1,494
+Brokerage: $10
+
+That means the brokerage is approximately:
+
+0.67% of the sale value
+
+And if you later buy those 9 shares back, another $10 applies.
+
+So the round-trip cost is approximately $20, or 1.34% of the transaction value, before considering bid/ask spread.
+
+Given your $10 brokerage below $2,000, I would not let an AI mechanically produce a 38% trim without considering discrete share quantities and transaction efficiency.
+
+For example, if you own approximately 24 shares:
+
+Action	Shares	Approx. trade value at $166	Brokerage
+Trim 25%	6	$996	$10
+Trim 38%	9	$1,494	$10
+Trim 50%	12	$1,992	$10
+Trim 60%	14	$2,324	potentially different fee treatment depending on your broker
+
+So 38% looks like an algorithmic output rather than a practical portfolio decision.
+
+I would build a brokerage-aware sizing optimiser into your app.
+
+What I think the recommendation should actually say
+
+[Inference] Based on the information currently available, I would rate CSL as HOLD / PARTIAL TRIM, rather than a strong automatic TRIM.
+
+My preferred logic:
+
+Reasons to trim:
+
+Extremely sharp post-results rally.
+RSI around 80 indicates extended short-term momentum.
+Price is near or above some pre-existing analyst targets.
+Taking partial profits reduces the risk of a post-earnings retracement.
+
+Reasons not to aggressively sell:
+
+The recent move followed a material earnings event rather than purely speculative momentum.
+FY27 guidance and the recovery thesis need to be incorporated before treating the rally as unjustified. Recent reporting described the FY27 outlook as better than consensus, while also highlighting significant operational challenges and impairments.
+The position is only 8.8%, which does not meet your system's stated oversized threshold.
+CSL remains a potential long-term core healthcare holding.
+I would change the action to:
+
+TRIM 20–30%, confidence: medium
+
+Not 38% based purely on a midpoint formula.
+
+Or, if your long-term thesis remains strong:
+
+HOLD — no new purchases until momentum normalises.
+
+How I would redesign your AI decision
+
+Your system currently appears to do:
+
+Fundamental + technical + risk signals → weighted score → action
+
+I would add a regime layer:
+
+Step 1 — Identify the event regime
+Normal trading
+Pre-earnings
+Post-earnings repricing
+Guidance revision
+Macro shock
+Step 2 — Adjust signal weights
+
+For example, immediately after earnings:
+
+Factor	Current approach	Better approach
+RSI	High weight	Medium
+Historical MaxDD	High	Low
+Analyst target	High	Low if stale
+Earnings surprise	Missing/low	Very high
+Guidance revision	Missing/low	Very high
+Analyst revisions after results	Missing	High
+Portfolio concentration	High	High, but rule-consistent
+Brokerage efficiency	Missing	Mandatory
+
+That would substantially improve the quality of recommendations.
+
+Bottom line
+
+The AI correctly spotted that CSL is technically extended and that partial profit-taking deserves consideration. But I would not call this a good analysis yet.
+
+The main problems are:
+
+Scenario expected return is -5.5%, but the recommendation only trims 38%.
+"Position oversized" contradicts the 10% risk rule.
+Historical max drawdown is being presented as current downside risk.
+RSI is overweighted immediately after a major earnings repricing.
+The analyst target may be stale after the FY26 result.
+The invalidation logic is poorly defined.
+The 38% trim ignores practical brokerage optimisation.
+
+My score: 5/10 for the current analysis, but the underlying framework could become quite good with those fixes.
+
+
+6. 
