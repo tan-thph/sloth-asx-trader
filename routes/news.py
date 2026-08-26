@@ -450,6 +450,12 @@ def news_settings_route():
             (json.dumps(updated),)
         )
 
+    # Invalidate the models cache if the Ollama URL changed — otherwise
+    # /api/news/models keeps serving the previous server's model list for
+    # up to _MODELS_TTL seconds after the user points at a new Colab/ngrok URL.
+    if current.get("ollama_url") != updated.get("ollama_url"):
+        _models_cache["payload"] = None
+
     # Restart scheduler if interval or enabled changed (only if not in SBC mode)
     if _NE_OK:
         _ne.stop_scheduler()

@@ -432,7 +432,15 @@ function _newsPageHTML(status, sentiment) {
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             ${ollamaStatusHtml}
             ${gpuBadge}
-            <span style="font-size:11px;color:var(--text-muted)">${cfg.ollama_url || 'http://localhost:11434'}</span>
+          </div>
+          <div class="form-row" style="margin-bottom:8px">
+            <div class="form-label" style="font-size:11px">Ollama URL <span style="color:var(--text-muted);font-weight:400">(local or Colab/ngrok tunnel)</span></div>
+            <div style="display:flex;gap:6px">
+              <input type="text" id="news-ollama-url" value="${cfg.ollama_url || 'http://localhost:11434'}"
+                placeholder="http://localhost:11434 or https://xxxx.ngrok-free.app"
+                style="flex:1;font-size:12px;padding:4px 7px;border:1px solid var(--border-light);border-radius:var(--radius-sm);background:var(--bg-secondary);color:var(--text-primary)">
+              <button class="btn btn-sm btn-primary" id="news-ollama-url-save-btn" onclick="newsSetOllamaUrl()" style="font-size:11px;padding:3px 10px">Save &amp; Test</button>
+            </div>
           </div>
           ${ollamaOk ? `
             <div class="form-row" style="margin-bottom:8px">
@@ -911,6 +919,47 @@ async function _loadGoogleModels(selectId, savedModel) {
     }
   } catch {
     el.innerHTML = `<option value="${savedModel || 'gemini-2.0-flash'}" selected>${savedModel || 'gemini-2.0-flash'}</option>`;
+  }
+}
+
+async function newsSetOllamaUrl() {
+  const input = document.getElementById('news-ollama-url');
+  const btn = document.getElementById('news-ollama-url-save-btn');
+  if (!input) return;
+  const url = input.value.trim().replace(/\/$/, '');
+  if (!url) { toast('Enter an Ollama URL first', 'error'); return; }
+
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ Testing…'; }
+  try {
+    state.news.settings.ollama_url = url;
+    await _saveNewsSettings();
+
+    // Re-fetch models directly against the new URL to give immediate feedback
+    // rather than waiting on the next full page poll cycle.
+    const d = await fetch(`${API}/api/news/models`).then(r => r.json());
+    if (d.available) {
+      state.news.models = d.models || [];
+      // If the currently-saved model isn't actually pulled on this new server,
+      // clear it instead of silently classifying every article against a
+      // model name Ollama can't find (the previous server's model doesn't
+      // carry over just because the URL changed).
+      const currentModel = state.news.settings.llm_model;
+      const stillExists = state.news.models.some(m => m.name === currentModel);
+      if (currentModel && !stillExists) {
+        state.news.settings.llm_model = '';
+        await _saveNewsSettings();
+        toast(`Connected — ${d.models.length} model(s) found. "${currentModel}" isn't on this server — pick a model below.`, 'error');
+      } else {
+        toast(`Connected — ${d.models.length} model(s) found at ${url}`, 'success');
+      }
+    } else {
+      toast(`Saved, but could not reach Ollama at ${url}`, 'error');
+    }
+  } catch (e) {
+    toast(`Failed to save: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save & Test'; }
+    renderPage();
   }
 }
 
