@@ -261,4 +261,5 @@ The 38% trim ignores practical brokerage optimisation.
 My score: 5/10 for the current analysis, but the underlying framework could become quite good with those fixes.
 
 
-6. 
+6. Check all AI responses and runs and cross check with real market situation and evaluate
+7. Group closed trades in Swing day-trading as well as add a filter to avoid displaying too many history trades. 
