@@ -20,7 +20,7 @@ Endpoints:
   /api/log/ai_call/<id>            GET     — full detail for one logged call
 """
 
-import json
+import json, math
 import re
 import time as _time
 import urllib.request
