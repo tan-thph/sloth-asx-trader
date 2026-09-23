@@ -400,7 +400,7 @@ def _macro_payload() -> dict:
 @bp.route("/api/macro")
 def macro():
     """Real market data for macro dashboard (yfinance). Cached 5 min upstream."""
-    return jsonify(_macro_payload())
+    return jsonify(_json_safe(_macro_payload()))
 
 
 @bp.route("/api/macro/sentiment", methods=["POST"])
