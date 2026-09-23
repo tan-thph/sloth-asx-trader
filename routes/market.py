@@ -40,6 +40,18 @@ from indicators import analyse_ticker, asx, safe_float, compute_adx
 
 bp = Blueprint("market", __name__)
 
+def _json_safe(value):
+    """Replace NaN and infinities so Flask never emits invalid JSON."""
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+
+    if isinstance(value, (float, np.floating)):
+        return float(value) if math.isfinite(float(value)) else None
+
+    return value
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
