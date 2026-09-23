@@ -254,10 +254,10 @@ def _macro_payload() -> dict:
          def _do():
              h = yf.Ticker(sym).history(period=period)
 
-           # Yahoo can return the current/incomplete candle with NaN OHLC
-            # values. Remove those rows before checking history length or
-            # calculating the percentage change.
-            if not h.empty:
+             # Yahoo can return the current/incomplete candle with NaN OHLC
+             # values. Remove those rows before checking history length or
+             # calculating the percentage change.
+             if not h.empty:
                 h = h.dropna(subset=["Close"])
 
              if not h.empty and len(h) >= 2:
