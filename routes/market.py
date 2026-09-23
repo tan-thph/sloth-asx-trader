@@ -250,47 +250,68 @@ def _macro_payload() -> dict:
 
     
     def _fetch_symbol(item):
-         name, (sym, period) = item
-         def _do():
-             h = yf.Ticker(sym).history(period=period)
+        name, (sym, period) = item
 
-             # Yahoo can return the current/incomplete candle with NaN OHLC
-             # values. Remove those rows before checking history length or
-             # calculating the percentage change.
-             if not h.empty:
+        def _do():
+            h = yf.Ticker(sym).history(period=period)
+
+            # Yahoo can return an incomplete candle containing NaN values.
+            # Remove those rows before calculating changes.
+            if not h.empty:
                 h = h.dropna(subset=["Close"])
 
-             if not h.empty and len(h) >= 2:
-                 return h  # full DataFrame; summary computed below
-             raise ValueError("Empty history")
-         try:
-             hist = fetch_with_retry(_do, cache_key=f"macro:{sym}:hist", max_retries=2, backoff=1.5)
-             latest = float(hist["Close"].iloc[-1])
-             prev   = float(hist["Close"].iloc[-2])
+            if not h.empty and len(h) >= 2:
+                return h
 
-             if not np.isfinite(latest) or not np.isfinite(prev) or prev == 0:
-                raise ValueError(f"Invalid market prices for {sym}: latest={latest}, prev={prev}")
+            raise ValueError("Empty history")
 
-             summary = {
-                 "value":       round(latest, 2),
-                 "change_pct":  round((latest / prev - 1) * 100, 2),
-                 "prev_close":  round(prev, 2),
-             }
+        try:
+            hist = fetch_with_retry(
+                _do,
+                cache_key=f"macro:{sym}:hist",
+                max_retries=2,
+                backoff=1.5,
+            )
+            latest = float(hist["Close"].iloc[-1])
+            prev = float(hist["Close"].iloc[-2])
+
+            if not np.isfinite(latest) or not np.isfinite(prev) or prev == 0:
+                raise ValueError(
+                    f"Invalid market prices for {sym}: "
+                    f"latest={latest}, prev={prev}"
+                )
+
+            summary = {
+                "value": round(latest, 2),
+                "change_pct": round((latest / prev - 1) * 100, 2),
+                "prev_close": round(prev, 2),
+            }
 
             return name, hist, summary
+
         except Exception:
-            # yfinance failed + no stale cache — try Stooq for price-only symbols
+            # yfinance failed and no stale cache is available; use Stooq.
             fb = stooq_quote(sym)
             if fb:
-                log.warning("macro: yfinance failed for %s (%s) — Stooq fallback", name, sym)
-                if not all(np.isfinite(float(fb.get(k))) for k in ("price", "change_pct")):
-                  return name, None, None
+                log.warning(
+                    "macro: yfinance failed for %s (%s) — Stooq fallback",
+                    name,
+                    sym,
+                )
+
+                if not all(
+                    np.isfinite(float(fb.get(key)))
+                    for key in ("price", "change_pct")
+                ):
+                    return name, None, None
+
                 return name, None, {
-                    "value":      fb["price"],
+                    "value": fb["price"],
                     "change_pct": fb["change_pct"],
                     "prev_close": None,
-                    "_source":    "stooq",
+                    "_source": "stooq",
                 }
+
             return name, None, None
 
     with ThreadPoolExecutor(max_workers=len(symbols)) as pool:
