@@ -246,11 +246,15 @@ def _macro_payload() -> dict:
         try:
             hist = fetch_with_retry(_do, cache_key=f"macro:{sym}:hist", max_retries=2, backoff=1.5)
             latest = float(hist["Close"].iloc[-1])
-            prev   = float(hist["Close"].iloc[-2])
+            prev = float(hist["Close"].iloc[-2])
+            
+            if not math.isfinite(latest) or not math.isfinite(prev) or prev == 0:
+                raise ValueError("Non-finite or zero market price")
+            
             summary = {
-                "value":       round(latest, 2),
-                "change_pct":  round((latest / prev - 1) * 100, 2),
-                "prev_close":  round(prev, 2),
+                "value": round(latest, 2),
+                "change_pct": round((latest / prev - 1) * 100, 2),
+                "prev_close": round(prev, 2),
             }
             return name, hist, summary
         except Exception:
