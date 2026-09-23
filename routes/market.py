@@ -249,7 +249,7 @@ def _macro_payload() -> dict:
     _histories: dict = {}
 
     
-     def _fetch_symbol(item):
+    def _fetch_symbol(item):
          name, (sym, period) = item
          def _do():
              h = yf.Ticker(sym).history(period=period)
