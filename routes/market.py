@@ -268,7 +268,7 @@ def _macro_payload() -> dict:
              latest = float(hist["Close"].iloc[-1])
              prev   = float(hist["Close"].iloc[-2])
 
-            if not np.isfinite(latest) or not np.isfinite(prev) or prev == 0:
+             if not np.isfinite(latest) or not np.isfinite(prev) or prev == 0:
                 raise ValueError(f"Invalid market prices for {sym}: latest={latest}, prev={prev}")
 
              summary = {
