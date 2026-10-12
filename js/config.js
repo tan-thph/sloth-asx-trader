@@ -96,7 +96,7 @@ const state = {
   lastKnownRegime:   null,     // previous regime string before the most recent transition
   regimeChangedAt:   null,     // Date.now() ms when the last regime transition was detected
   serverOk: false,
-  rbaRate: 4.35,               // auto-fetched from /api/rba-rate on init
+  rbaRate: 4.6,                // auto-fetched from /api/rba-rate on init
   rbaRateSource: 'fallback',   // 'live-rba' | 'cached' | 'fallback'
   rbaRateDate: null,
   dividendData: {},             // ticker -> {dividendYield, annualDivPerShare, exDividendDate, frequencyLabel, nextEstAmount, history[]}

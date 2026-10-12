@@ -495,7 +495,7 @@ const ANALYSIS_SYSTEM_PROMPT =
     Rec is only valid if netProfit > 0. The engine re-runs this gate at the final
     engine-computed qty after your response; your value is a min-size estimate for display.
 
-    Example (BUY ALL, N = $1,000 min trade size, base ret=7%, RBA=4.35%, 60 days, brokerage=$10):
+    Example (BUY ALL, N = $1,000 min trade size, base ret=7%, RBA=4.6%, 60 days, brokerage=$10):
       Return = 1000 × 0.07 = $70.00
       Opp cost = 1000 × 0.0435 × (60/365) = $7.15
       Brokerage = 2 × $10 = $20

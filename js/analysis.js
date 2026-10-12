@@ -103,7 +103,7 @@ function _recomputeBuyEv(r, rbaRate, fees) {
   const target    = Number(r.target);
   if (!isFinite(entryMid) || entryMid <= 0 || !isFinite(target)) return null;
   const grossReward = qty * (target - entryMid);
-  const oppCost = qty * entryMid * ((rbaRate || 4.35) / 100)
+  const oppCost = qty * entryMid * ((rbaRate || 4.6) / 100)
                   * ((Number(r.expectedTimeToTarget) || 30) / 365);
   const engineNet = grossReward - oppCost - 2 * (Number(fees) || 0);
   return { expectedProfit: +grossReward.toFixed(2), netProfit: +engineNet.toFixed(2) };
@@ -332,7 +332,7 @@ async function runAnalysis(opts = {}) {
   let _corrMatrixPre = {}; // §9.3: correlation matrix captured pre-prompt (bare tickers)
   if (state.serverOk && portfolioTickers.length) {
     try {
-      const rf = state.rbaRate || 4.35;
+      const rf = state.rbaRate || 4.6;
       const riskResp = await fetch(`${API}/api/risk?tickers=${[...new Set(allTickers)].join(',')}&rf=${rf}`);
       if (riskResp.ok) {
         const rd = await riskResp.json();
@@ -1170,7 +1170,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
         allocatedCash: _effectiveCash,
         portfolioValue: portfolioValue(),
         brokerage: state.settings.brokerage,
-        rbaRate: state.rbaRate || 4.35,
+        rbaRate: state.rbaRate || 4.6,
       };
       recs = recs.map(r => {
         const action = (r.action || '').toUpperCase();
@@ -1634,7 +1634,7 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       try {
         const _corrTickers = [...new Set([...portfolioTickers, ..._buyRecs.map(r => r.ticker)])];
         if (_corrTickers.length >= 2) {
-          const _corrResp = await fetch(`${API}/api/risk?tickers=${_corrTickers.join(',')}&rf=${state.rbaRate||4.35}`);
+          const _corrResp = await fetch(`${API}/api/risk?tickers=${_corrTickers.join(',')}&rf=${state.rbaRate|4.6}`);
           if (_corrResp.ok) {
             const _corrData = await _corrResp.json();
             const _corrMatrix = _corrData.correlation || {};

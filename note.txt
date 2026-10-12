@@ -263,3 +263,6 @@ My score: 5/10 for the current analysis, but the underlying framework could beco
 
 6. Check all AI responses and runs and cross check with real market situation and evaluate
 7. Group closed trades in Swing day-trading as well as add a filter to avoid displaying too many history trades. 
+8. Split learning Loop page into multiple component pages to avoid long info. Also, does hold decions card above and the recent event trades overlapped? 
+9. Database health notificatin disappeared
+10. Do local LLM-s debate really work? If yes, add 3 phases for each model

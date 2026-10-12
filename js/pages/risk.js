@@ -48,7 +48,7 @@ async function renderRiskPage(gen) {
 
   if (state.serverOk) {
     try {
-      const rf = state.rbaRate || 4.35;
+      const rf = state.rbaRate || 4.6;
       const resp = await fetch(`${API}/api/risk?tickers=${tickers.join(',')}&rf=${rf}`);
       if (resp.ok) riskData = await resp.json();
       else riskFetchError = `Server returned ${resp.status}`;
@@ -337,7 +337,7 @@ function buildRiskPage(merged, riskData) {
     </div>
     <p class="text-xs text-muted" style="margin-top:8px">
       Beta &amp; volatility sourced from 90-day daily returns via yfinance. Benchmark: VAS.AX (ASX 300).
-      Sharpe uses RBA cash rate ${(state.rbaRate||4.35).toFixed(2)}% as risk-free rate.
+      Sharpe uses RBA cash rate ${(state.rbaRate||4.6).toFixed(2)}% as risk-free rate.
     </p>
   </div>
 
