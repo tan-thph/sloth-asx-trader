@@ -11,7 +11,7 @@
 //   options.systemArray  — raw system array [{type,text,cache_control?}] for dynamic prompts
 // ============================================================
 
-const CLAUDE_MODEL = 'claude-sonnet-4-6';
+const CLAUDE_MODEL = 'claude-sonnet-4.6';
 
 const _AGENT_MAX_TOKENS = {
   // Raised over time (8000 → 10000 Sprint 68 → 12000): the 2026-06-11 15:35 run
