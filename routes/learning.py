@@ -1097,6 +1097,34 @@ def learning_log():
                 """, (data.get("ticker"), cutoff, data.get("ticker"))).fetchone()
                 if dup:
                     return jsonify({"ok": True, "id": dup["id"], "deduped": True})
+            if (data.get("recommendation") in _ACTION_DEDUP_ACTIONS
+                    and data.get("event_type", "recommendation") == "recommendation"
+                    and not data.get("was_executed")):
+                dup = conn.execute("""
+                    SELECT id FROM ai_learning_events
+                     WHERE recommendation = ? AND ticker = ? AND timestamp >= ?
+                       AND event_type = 'recommendation' AND COALESCE(was_executed, 0) = 0
+                       AND id = (SELECT MAX(id) FROM ai_learning_events
+                                  WHERE ticker = ? AND event_type = 'recommendation')
+                     ORDER BY id DESC LIMIT 1
+                """, (data.get("recommendation"), data.get("ticker"),
+                      _cutoff(_ACTION_DEDUP_DAYS), data.get("ticker"))).fetchone()
+                if dup:
+                    # Keep the surviving row current: if it is executed later, the stop/target/
+                    # confidence on it should be what the user last saw, not the first run's.
+                    conn.execute("""
+                        UPDATE ai_learning_events SET
+                            ai_confidence = COALESCE(?, ai_confidence),
+                            calibrated_confidence = COALESCE(?, calibrated_confidence),
+                            suggested_stop = COALESCE(?, suggested_stop),
+                            suggested_target = COALESCE(?, suggested_target),
+                            rr_ratio = COALESCE(?, rr_ratio),
+                            rule_warnings_json = COALESCE(?, rule_warnings_json)
+                        WHERE id = ?
+                    """, (data.get("ai_confidence"), data.get("calibrated_confidence"),
+                          data.get("suggested_stop"), data.get("suggested_target"),
+                          data.get("rr_ratio"), data.get("rule_warnings_json"), dup["id"]))
+                    return jsonify({"ok": True, "id": dup["id"], "deduped": True})
             conn.execute("""
                 INSERT INTO ai_learning_events
                     (event_type, ticker, regime, prompt_version, agent_type,
@@ -3530,6 +3558,13 @@ _FETCH_RETRY_DAYS = 7
 # grows linearly with run frequency while adding no new passivity signal.
 _HOLD_DEDUP_DAYS = 7
 
+# Same idea for actionable recs: a TRIM/SELL/TOP_UP/BUY that is re-fired on every analysis run
+# while still UNEXECUTED is one decision, not N. 14 calendar days ≈ 10 trading days. Executed
+# events are never deduped (a second executed lot is a genuine new trade). cal_weight already
+# down-weights historical repeats; this stops new ones inflating the sample and the resolver queue.
+_ACTION_DEDUP_DAYS = 14
+_ACTION_DEDUP_ACTIONS = frozenset({"BUY", "TOP_UP", "TRIM", "SELL"})
+
 
 def _cutoff(days: int) -> str:
     """UTC cutoff string, in the exact format ai_learning_events.timestamp is
@@ -3750,9 +3785,55 @@ def classify_hold_decision(ret_stock, ret_mkt, band, beta=_DEC_BETA_DEFAULT) -> 
             "attrib": "market" if abs(excess) <= band else "idiosyncratic"}
 
 
-def _fwd_returns(yf, ticker, start_dt, entry_px=None):
+# Min age (calendar days) before a decision's forward window is trusted to be full:
+# 20 trading bars + the entry bar ≈ 29-31 calendar days, +ASX holidays and a lagging
+# data feed. 33 avoids judging a row on a short window (the old 30d gate did, and the
+# HOLD resolver then parked such rows in the terminal 'virtual_open' state).
+_RESOLVE_MIN_AGE_DAYS = 33
+# Rows that still have no usable price window after this long are genuinely unresolvable
+# (delisted / suspended) and may be parked as 'virtual_open'.
+_RESOLVE_GIVE_UP_DAYS = 90
+
+
+def _naive_dates(idx):
+    """DatetimeIndex → tz-naive, midnight-normalised, so stock and ^AXJO bars align by date."""
+    try:
+        idx = idx.tz_localize(None)
+    except TypeError:
+        idx = idx.tz_convert(None)
+    return idx.normalize()
+
+
+def _fetch_xjo(yf, start_dt, end_dt):
+    """ONE ^AXJO history call per resolver run (was one per row — 2 Yahoo requests per
+    decision, which is what trips rate-limits on a Pi). Returns a Series or None."""
+    try:
+        mk = yf.Ticker("^AXJO").history(
+            start=(start_dt - timedelta(days=5)).strftime("%Y-%m-%d"),
+            end=(end_dt + timedelta(days=50)).strftime("%Y-%m-%d"), interval="1d")["Close"]
+        mk.index = _naive_dates(mk.index)
+        return mk[~mk.index.duplicated(keep="last")]
+    except Exception:
+        return None
+
+
+def _mkt_ret(mk_all, closes, horizon=None):
+    """Market return over the same bars as `closes` (forward-filled by date); 0.0 if unavailable."""
+    horizon = horizon or _EXIT_HORIZON_DAYS
+    if mk_all is None or len(closes) <= horizon:
+        return 0.0
+    try:
+        mk = mk_all.reindex(_naive_dates(closes.index), method="ffill").dropna()
+        if len(mk) > horizon:
+            return float(mk.iloc[horizon] / mk.iloc[0] - 1.0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _fwd_returns(yf, ticker, start_dt, entry_px=None, mk_all=None):
     """(ret_stock, ret_market) from the entry bar to bar H, or None if the window isn't full.
-    Market = ^AXJO aligned to the stock's own bar dates."""
+    `mk_all` is a pre-fetched ^AXJO series (see _fetch_xjo)."""
     sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
     end = (start_dt + timedelta(days=45)).strftime("%Y-%m-%d")
     st = start_dt.strftime("%Y-%m-%d")
@@ -3764,20 +3845,12 @@ def _fwd_returns(yf, ticker, start_dt, entry_px=None):
     if ref <= 0:
         return None
     ret_stock = float(closes.iloc[_EXIT_HORIZON_DAYS]) / ref - 1.0
-    ret_mkt = 0.0
-    try:
-        mk = yf.Ticker("^AXJO").history(start=st, end=end, interval="1d")["Close"]
-        mk = mk.reindex(closes.index, method="ffill").dropna()
-        if len(mk) > _EXIT_HORIZON_DAYS:
-            ret_mkt = float(mk.iloc[_EXIT_HORIZON_DAYS] / mk.iloc[0] - 1.0)
-    except Exception:
-        pass   # market leg unavailable → absolute-only scoring for this row
-    return ret_stock, ret_mkt
+    return ret_stock, _mkt_ret(mk_all, closes)
 
 
 def _resolve_exit_decisions(conn, cap: int = 5) -> int:
     """Score executed SELL/TRIM decisions against the counterfactual (kept holding)."""
-    cutoff = _cutoff(30)
+    cutoff = _cutoff(_RESOLVE_MIN_AGE_DAYS)
     retry_cutoff = _fetch_retry_cutoff()
     try:
         rows = conn.execute("""
@@ -3789,7 +3862,7 @@ def _resolve_exit_decisions(conn, cap: int = 5) -> int:
               AND outcome_status IN ('win','loss','breakeven')
               AND timestamp < ?
               AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
-            ORDER BY timestamp DESC LIMIT ?
+            ORDER BY timestamp ASC LIMIT ?
         """, (cutoff, retry_cutoff, cap)).fetchall()
     except Exception:
         return 0
@@ -3799,16 +3872,22 @@ def _resolve_exit_decisions(conn, cap: int = 5) -> int:
         import yfinance as yf
     except ImportError:
         return 0
+    # Oldest-first (not newest-first): rows whose window is somehow still short are retried
+    # via the fetch_failed_at sentinel, so they can't hog the head of the queue and starve the rest.
+    _d = [datetime.strptime(r["timestamp"][:10], "%Y-%m-%d") for r in rows]
+    mk_all = _fetch_xjo(yf, min(_d), max(_d))
     n = 0
     for row in rows:
+        time.sleep(0.2)
         try:
             start_dt = datetime.strptime(row["timestamp"][:10], "%Y-%m-%d")
-            fr = _fwd_returns(yf, row["ticker"] or "", start_dt, row["actual_exit_price"])
+            fr = _fwd_returns(yf, row["ticker"] or "", start_dt, row["actual_exit_price"], mk_all)
         except Exception:
             _mark_fetch_failed(conn, row["id"])
             continue
         if fr is None:
-            continue   # window not full yet — retry on a later call
+            _mark_fetch_failed(conn, row["id"])   # empty/short window: retry in _FETCH_RETRY_DAYS
+            continue
         regime = row["regime_at_execution"] or row["regime"]
         band = _decision_band(row["entry_signals_json"], regime)
         v = classify_exit_decision(fr[0], fr[1], band)
@@ -3818,6 +3897,101 @@ def _resolve_exit_decisions(conn, cap: int = 5) -> int:
                         WHERE id=?""",
                      (v["outcome"], round(fr[0] * 100, 2), round(v["excess"] * 100, 2),
                       round(v["z"], 2) if v["z"] is not None else None, v["attrib"], row["id"]))
+        n += 1
+    return n
+
+
+
+# ── Peer-relative excess (2026-10) ──────────────────────────────────────────────
+# Market excess (vs ^AXJO) still carries stock-vs-index noise (sector tilts, ASX200 vs
+# your book). The sharper question for a SELL/TRIM/HOLD is: did this stock do worse/better
+# than the OTHER holdings the model reviewed in the same run, over the same 20 bars?
+#   peer_excess = ret_stock − mean(ret of other reviewed holdings, same dates)
+# Peers = tickers with a HOLD/TRIM/SELL/TOP_UP event within ±3 days (one analysis run), so the
+# peer set is time-consistent without needing historical portfolio snapshots. ≥3 peers needed.
+_PEER_WINDOW_DAYS = 3
+_PEER_MIN_N = 3
+
+
+def _peer_fwd_return(series, start_dt, horizon):
+    """Return from the first bar on/after start_dt to `horizon` bars later, or None."""
+    try:
+        i = int(series.index.searchsorted(start_dt.replace(hour=0, minute=0, second=0, microsecond=0)))
+        if i + horizon >= len(series):
+            return None
+        a, b = float(series.iloc[i]), float(series.iloc[i + horizon])
+        return (b / a - 1.0) if a > 0 else None
+    except Exception:
+        return None
+
+
+def _resolve_peer_excess(conn, cap: int = 60) -> int:
+    """Fill exit_cf_peer_excess_pct / exit_cf_peer_n for scored HOLD/SELL/TRIM decisions.
+    One Yahoo call per distinct ticker per run (cached), not per decision."""
+    cutoff = _cutoff(_RESOLVE_MIN_AGE_DAYS)
+    try:
+        rows = conn.execute("""
+            SELECT id, ticker, timestamp, exit_cf_ret_pct
+            FROM ai_learning_events
+            WHERE decision_outcome IS NOT NULL AND exit_cf_ret_pct IS NOT NULL
+              AND exit_cf_peer_n IS NULL
+              AND recommendation IN ('HOLD','SELL','TRIM')
+              AND timestamp < ?
+            ORDER BY timestamp ASC LIMIT ?
+        """, (cutoff, cap)).fetchall()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+
+    peers_of = {}
+    for r in rows:
+        peers_of[r["id"]] = [x[0] for x in conn.execute("""
+            SELECT DISTINCT ticker FROM ai_learning_events
+            WHERE recommendation IN ('HOLD','TRIM','SELL','TOP_UP') AND ticker IS NOT NULL
+              AND ticker != ? AND ABS(julianday(timestamp) - julianday(?)) <= ?
+        """, (r["ticker"], r["timestamp"], _PEER_WINDOW_DAYS)).fetchall()]
+
+    dts = [datetime.strptime(r["timestamp"][:10], "%Y-%m-%d") for r in rows]
+    lo = (min(dts) - timedelta(days=5)).strftime("%Y-%m-%d")
+    hi = (max(dts) + timedelta(days=50)).strftime("%Y-%m-%d")
+    cache = {}
+
+    def _series(tk):
+        if tk not in cache:
+            cache[tk] = None
+            try:
+                time.sleep(0.2)
+                sym = tk if tk.endswith(".AX") else tk + ".AX"
+                c = yf.Ticker(sym).history(start=lo, end=hi, interval="1d")["Close"]
+                if not c.empty:
+                    c.index = _naive_dates(c.index)
+                    cache[tk] = c[~c.index.duplicated(keep="last")]
+            except Exception:
+                cache[tk] = None
+        return cache[tk]
+
+    n = 0
+    for r, dt in zip(rows, dts):
+        rets = []
+        for tk in peers_of[r["id"]]:
+            ser = _series(tk)
+            if ser is None:
+                continue
+            x = _peer_fwd_return(ser, dt, _EXIT_HORIZON_DAYS)
+            if x is not None:
+                rets.append(x)
+        if len(rets) >= _PEER_MIN_N:
+            peer_ex = float(r["exit_cf_ret_pct"]) - (sum(rets) / len(rets)) * 100.0
+            conn.execute("UPDATE ai_learning_events SET exit_cf_peer_excess_pct=?, exit_cf_peer_n=? WHERE id=?",
+                         (round(peer_ex, 2), len(rets), r["id"]))
+        else:
+            # Attempted but too few peers: record n so it isn't re-queued every call.
+            conn.execute("UPDATE ai_learning_events SET exit_cf_peer_n=? WHERE id=?", (len(rets), r["id"]))
         n += 1
     return n
 
@@ -3853,27 +4027,48 @@ def _ensure_calib_view(conn) -> None:
 
 @bp.route("/api/learning/backfill-exit-decisions", methods=["POST"])
 def learning_backfill_exit_decisions():
-    """One-shot: score historical SELL/TRIM (and optionally re-score HOLDs) market-relatively.
-    ?cap=40 rows per call (needs network for yfinance); ?rescore_holds=1 re-judges resolved HOLDs."""
+    """Score historical SELL/TRIM, re-judge HOLDs market-relatively, fill peer-relative excess.
+    ?cap=40 rows per call (needs network for yfinance); repeat until the *_pending counts are 0.
+    ?rescore_holds=1 re-judges HOLDs that still carry the OLD absolute-drawdown label and
+    un-parks HOLDs wrongly stuck in 'virtual_open'. It never re-resets rows already re-judged."""
     try:
         cap = max(1, min(int(request.args.get("cap", 40)), 200))
     except ValueError:
         cap = 40
     rescore = request.args.get("rescore_holds", "0") == "1"
+    old_cut = _cutoff(_RESOLVE_MIN_AGE_DAYS)
     try:
         with get_db() as conn:
+            reset_old = reset_open = 0
             if rescore:
-                conn.execute("""UPDATE ai_learning_events SET virtual_outcome=NULL, decision_outcome=NULL
-                                WHERE recommendation='HOLD'
-                                  AND virtual_outcome IN ('virtual_hold_correct','virtual_hold_miss')""")
+                reset_old = conn.execute("""UPDATE ai_learning_events SET virtual_outcome=NULL
+                                WHERE recommendation='HOLD' AND decision_outcome IS NULL
+                                  AND virtual_outcome IN ('virtual_hold_correct','virtual_hold_miss')""").rowcount
+                # 'virtual_open' is terminal; older code parked rows there on a transient empty/short
+                # price frame. Give every such HOLD that is now old enough another chance.
+                reset_open = conn.execute("""UPDATE ai_learning_events
+                                SET virtual_outcome=NULL, fetch_failed_at=NULL
+                                WHERE recommendation='HOLD' AND virtual_outcome='virtual_open'
+                                  AND decision_outcome IS NULL AND fetch_failed_at IS NULL
+                                  AND timestamp < ?""", (old_cut,)).rowcount
             exits = _resolve_exit_decisions(conn, cap=cap)
             holds = _resolve_hold_outcomes(conn, cap=cap) if rescore else 0
+            peers = _resolve_peer_excess(conn, cap=cap)
             _ensure_calib_view(conn)
-            left = conn.execute("""SELECT COUNT(*) FROM ai_learning_events
-                                   WHERE was_executed=1 AND recommendation IN ('SELL','TRIM')
-                                     AND decision_outcome IS NULL
-                                     AND outcome_status IN ('win','loss','breakeven')""").fetchone()[0]
-        return jsonify({"ok": True, "exits_scored": exits, "holds_rescored": holds, "exits_remaining": left})
+            exits_left = conn.execute("""SELECT COUNT(*) FROM ai_learning_events
+                           WHERE was_executed=1 AND recommendation IN ('SELL','TRIM')
+                             AND decision_outcome IS NULL AND timestamp < ?
+                             AND outcome_status IN ('win','loss','breakeven')""", (old_cut,)).fetchone()[0]
+            holds_left = conn.execute("""SELECT COUNT(*) FROM ai_learning_events
+                           WHERE recommendation='HOLD' AND decision_outcome IS NULL
+                             AND timestamp < ?""", (old_cut,)).fetchone()[0]
+            peer_left = conn.execute("""SELECT COUNT(*) FROM ai_learning_events
+                           WHERE decision_outcome IS NOT NULL AND exit_cf_ret_pct IS NOT NULL
+                             AND exit_cf_peer_n IS NULL AND recommendation IN ('HOLD','SELL','TRIM')
+                             AND timestamp < ?""", (old_cut,)).fetchone()[0]
+        return jsonify({"ok": True, "exits_scored": exits, "holds_scored": holds, "peer_scored": peers,
+                        "reset_old_hold_labels": reset_old, "reset_virtual_open": reset_open,
+                        "exits_pending": exits_left, "holds_pending": holds_left, "peer_pending": peer_left})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -3983,7 +4178,7 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
 
     Returns the number of events resolved this call.
     """
-    cutoff = _cutoff(30)
+    cutoff = _cutoff(_RESOLVE_MIN_AGE_DAYS)
     retry_cutoff = _fetch_retry_cutoff()
     try:
         rows = conn.execute("""
@@ -3993,7 +4188,7 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
               AND virtual_outcome IS NULL
               AND timestamp < ?
               AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
-            ORDER BY timestamp DESC LIMIT ?
+            ORDER BY timestamp ASC LIMIT ?
         """, (cutoff, retry_cutoff, cap)).fetchall()
     except Exception:
         return 0
@@ -4011,8 +4206,30 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
             "UPDATE ai_learning_events SET virtual_outcome='virtual_open' WHERE id=?",
             (row_id,))
 
+    def _defer_or_park(row_id, start_dt):
+        """No usable window. 'virtual_open' is TERMINAL (the resolver's WHERE needs
+        virtual_outcome IS NULL), so only park rows that are genuinely unresolvable. A
+        transient empty frame (Yahoo throttling) or a window a bar short used to park the
+        row forever — the cause of '>30 days old but never scored'. Everything younger
+        than _RESOLVE_GIVE_UP_DAYS is retried after _FETCH_RETRY_DAYS instead."""
+        if (datetime.utcnow() - start_dt).days >= _RESOLVE_GIVE_UP_DAYS:
+            _mark_open(row_id)
+            _mark_fetch_failed(conn, row_id)   # also stamp it, so the backfill's un-park skips it next time
+            return 1
+        _mark_fetch_failed(conn, row_id)
+        return 0
+
+    _dts = []
+    for r_ in rows:
+        try:
+            _dts.append(datetime.strptime(r_["timestamp"][:10], "%Y-%m-%d"))
+        except ValueError:
+            pass
+    mk_all = _fetch_xjo(yf, min(_dts), max(_dts)) if _dts else None
+
     resolved = 0
     for row in rows:
+        time.sleep(0.2)
         ticker = row["ticker"] or ""
         yf_sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
         start  = row["timestamp"][:10]  # YYYY-MM-DD
@@ -4028,7 +4245,7 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
         try:
             hist = yf.Ticker(yf_sym).history(start=start, end=end, interval="1d")
             if hist.empty or len(hist) < _HOLD_MIN_BARS:
-                _mark_open(row["id"]); resolved += 1
+                resolved += _defer_or_park(row["id"], start_dt)
                 continue
         except Exception:
             _mark_fetch_failed(conn, row["id"])
@@ -4051,14 +4268,7 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
         # Market-relative (same yardstick as exits): a HOLD is only a miss if the stock
         # fell beyond the vol-scaled band AND lagged the market beyond it — a market-wide
         # drawdown is neutral, and neutral stays 'correct' (passivity wasn't the error).
-        ret_mkt = 0.0
-        try:
-            mk = yf.Ticker("^AXJO").history(start=start, end=end, interval="1d")["Close"]
-            mk = mk.reindex(closes.index, method="ffill").dropna()
-            if len(mk) > _HOLD_HORIZON_DAYS:
-                ret_mkt = float(mk.iloc[_HOLD_HORIZON_DAYS] / mk.iloc[0] - 1.0)
-        except Exception:
-            pass
+        ret_mkt = _mkt_ret(mk_all, closes, _HOLD_HORIZON_DAYS)
         band = _decision_band(row["entry_signals_json"], None)
         v = classify_hold_decision(ret_end, ret_mkt, band)
         outcome = "virtual_hold_miss" if v["outcome"] == "regretted" else "virtual_hold_correct"
@@ -4854,6 +5064,7 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             _resolve_sell_outcomes(conn)
             # Market-relative decision verdicts for executed SELL/TRIM — capped at 5.
             _resolve_exit_decisions(conn)
+            _resolve_peer_excess(conn, cap=10)
             # Exit-signals capture: lazily classify SELL/TRIM exit timing quality
             # from the captured exit_signals_json snapshot — capped at 50, idempotent.
             _resolve_exit_quality_tags(conn)
