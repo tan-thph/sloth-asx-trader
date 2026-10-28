@@ -229,7 +229,7 @@ def _seed():
         print(f"{r['ticker']:7}{r['recommendation']:7}{(r['primary_entry_driver'] or '-'):18}"
               f"{(r['thesis_verdict'] or '-'):12}{r['outcome_status']:9}"
               f"{r['realized_pnl_pct']:>7.1f}  {(r['error_type'] or '-'):16}"
-              f"{('-' if r['skill_score'] is None else f'{r['skill_score']:.1f}'):>5}")
+              f"{('-' if r['skill_score'] is None else format(r['skill_score'], '.1f')):>5}")
     print(f"\nClean up with:  env/Scripts/python.exe seed_test_data.py --clean")
 
 
