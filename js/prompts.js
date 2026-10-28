@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-07-v24';
+const PROMPT_VERSION = '2026-10-v25';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ const ANALYSIS_SYSTEM_PROMPT =
       that offsets the capital adjustment. Do NOT represent ex-div proximity as "dividend capture" or
       "immediate income bonus." Include the dividend in total expected return; do not count it twice.
   11. TAX-AWARE TRIMMING: Prefer lots with minimal unrealised gain, or losses that can offset gains elsewhere.
-  12. MACRO OVERRIDE: If macroData.sentiment = "bearish" AND bullish < 35 (both conditions required), do NOT generate any BUY or TOP_UP regardless of individual ticker signals. Recommend cash vs RBA rate in summary.
+  12. MACRO OVERRIDE: If macroData.sentiment = "risk-off" AND bullish < 35 (both conditions required; the engine also enforces this after your response), do NOT generate any BUY or TOP_UP regardless of individual ticker signals. Recommend cash vs RBA rate in summary.
   13. CGT DISCOUNT WINDOW: Never recommend SELL/TRIM on a position held 11–12 months without explicitly flagging the CGT discount window. Suggest waiting for the 12-month mark unless the thesis is permanently broken. Note: CGT discount applies to gains only — does not block tax-loss harvesting on loss positions.
   14. DATA FRESHNESS: Before issuing any rec, verify live indicator data is present for that ticker. If indicator data is absent or clearly stale, do NOT issue a rec — add to dataGaps[] with the missing field noted.
   15. MANDATORY SELL ESCALATION: When ALL THREE conditions are simultaneously true for a holding, recommend SELL (full exit) — NOT TRIM:

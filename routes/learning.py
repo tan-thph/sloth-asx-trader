@@ -6689,6 +6689,7 @@ _RULE_CODE_LABELS = {
     "fallback_sized":    "Fallback min-trade sizing",
     "tier2_rec":         "Rec on Tier-2 (compressed) ticker",
     "factor_thin":       "Fewer than 3 non-technical factors",
+    "macro_override":    "Macro override (Rule 12)",
 }
 
 

@@ -829,7 +829,7 @@ ${recCtx}__CHANGES_PLACEHOLDER__${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__
 
 TASK:
 1. Read the CALIBRATION block above as context for your reasoning. Do NOT pre-adjust confidence scores — numeric band/per-ticker adjustments are applied by the engine after your response.
-2. Assess macro regime — Rule 12: if sentiment = "bearish" AND bullish < 35, block all BUY/TOP_UP.
+2. Assess macro regime — Rule 12: if sentiment = "risk-off" AND bullish < 35, block all BUY/TOP_UP (the engine also enforces this).
 3. Run the Section 3 multi-factor framework on EVERY holding FIRST (holdings are the priority — never skip or truncate one), then on any watchlist ticker the ANALYSIS_BUDGET allows. Exclude any ticker with < 3 independent non-technical factors from recs[].
 4. For each candidate rec: compute priceRange, target (next S/R), stopLoss (stopAtrMultiple×ATR from ACTIVE RULE OVERRIDES), set qty=0 (quant engine sizes), optionally scenarios (if included, p must sum to 1.0), invalidationCondition (must include a measurable value), bearCase (if conf ≥ 0.70), factorsUsed (≥ 3 specific data points).
 5. Apply Section 7 pre-flight checks. Fix all failures before writing JSON.
@@ -1625,6 +1625,28 @@ PROMPT_VERSION: ${typeof PROMPT_VERSION !== 'undefined' ? PROMPT_VERSION : 'unkn
       summary = (summary ? summary + ' ' : '') + note.trim();
     }
 
+    // ── Rule 12 (macro override), code-enforced ────────────────────────────────
+    {
+      const _mo = _applyMacroOverride(recs, state.macroData, state.macroDate === todayStr(),
+                                      state.analysisConfig.rules);
+      if (_mo.active && _mo.blocked.length) {
+        recs = _mo.recs;
+        if (_mo.mode === 'block' && typeof dtSaveSnapshot === 'function') {
+          _mo.blocked.forEach(function(r) {       // shadow-log so the ML/efficacy see what was held back
+            var sigs = (state.liveSignals && state.liveSignals[r.ticker]) || {};
+            if (r.stopLoss && r.target) {
+              dtSaveSnapshot(r, 'swing', sigs, state.macroData || {},
+                sigs.current_price || (Array.isArray(r.priceRange) ? r.priceRange[0] : 0), 0,
+                { record_type: 'shadow', shadow_reason: 'macro_override' });
+            }
+          });
+        }
+        const _verb = _mo.mode === 'flag' ? 'flagged' : 'blocked';
+        summary = (summary ? summary + ' ' : '') +
+          `[Macro override (Rule 12): risk-off, bullish ${_mo.bullish}/100 < ${_mo.threshold} -- ${_mo.blocked.length} BUY/TOP_UP ${_verb}: ${_mo.blocked.map(r => r.ticker).join(', ')}. Consider cash vs RBA ${(state.rbaRate || 0).toFixed(2)}%]`;
+      }
+    }
+
     // ── Correlation-aware size reduction ──────────────────────────────────────
     // Fetch exact correlation between BUY rec tickers and existing holdings.
     // Reduces qty when |corr| > 0.7 (−30%) or > 0.85 (−50%) to limit
@@ -2267,6 +2289,37 @@ function _splitRecsByParcels(recs, cgtParcels, liveSignals, brokerage) {
 }
 
 // ── Failed-quant-rule classifier ─────────────────────────────────────────────
+// ── Rule 12: macro override — enforced in code, not just asked of the model ──────────
+// Was prompt-only, and worded as sentiment = "bearish" — a value the macro agent never emits
+// (it returns "risk-on" / "risk-off"), so it could only fire if the model guessed the mapping.
+// Fires only on a FRESH (today's) AI brief: sentiment risk-off AND bullish < threshold.
+//   mode 'block' (default): BUY/TOP_UP removed from the actionable list and shadow-logged
+//   mode 'flag'           : kept, with a warning (the rule-override efficacy report then shows
+//                           whether trading through the rule paid off)
+//   mode 'off'            : disabled
+// Pure function so it can be unit-tested; the pipeline applies the result.
+function _applyMacroOverride(recs, macro, macroFresh, rules) {
+  const r12 = rules || {};
+  const mode = r12.macroOverrideMode ?? 'block';
+  const threshold = Number(r12.macroBlockBullish ?? 35);
+  const sentiment = String((macro && macro.sentiment) || '').toLowerCase();   // 'bearish' kept for legacy briefs
+  const bullish = macro && macro.bullish != null ? Number(macro.bullish) : NaN;
+  const active = mode !== 'off' && !!macroFresh && Number.isFinite(bullish)
+    && (sentiment === 'risk-off' || sentiment === 'bearish') && bullish < threshold;
+  if (!active) return { recs, blocked: [], active: false, mode, bullish, threshold };
+  const kept = [], blocked = [];
+  for (const r of recs) {
+    const act = String(r.action || '').toUpperCase();
+    if (act !== 'BUY' && act !== 'TOP_UP') { kept.push(r); continue; }
+    if (mode === 'flag') {
+      kept.push({ ...r, _macroFlagged: true, _ruleWarnings: [...(r._ruleWarnings || []),
+        `Macro override (Rule 12): risk-off, bullish ${bullish}/100 < ${threshold} -- ${act} should not be opened`] });
+    }
+    blocked.push(r);
+  }
+  return { recs: kept, blocked, active: true, mode, bullish, threshold };
+}
+
 // Maps a rec's ephemeral UI warnings (_ruleWarnings strings) + explicit boolean
 // flags into a STABLE, queryable taxonomy persisted on the learning event
 // (rule_warnings_json). The `code` enum is the join key for
@@ -2302,6 +2355,9 @@ function _classifyRuleWarnings(r) {
   if (r._confidenceHeld || find(/below the \d+% floor/i)) {
     push('confidence_floor', find(/below the \d+% floor/i) || 'below confidence floor', 'warn');
   }
+  const macroOv = find(/Macro override \(Rule 12\)/i);
+  if (r._macroFlagged || macroOv) push('macro_override', macroOv || 'Rule 12 macro override', 'block');
+
   const whip = find(/contradicts your own/i);
   if (whip) push('whipsaw', whip, 'warn');
 
@@ -2317,7 +2373,7 @@ function _classifyRuleWarnings(r) {
   // Any remaining warning string that didn't match a specific code → generic
   // validator failure (schema / business-rule breach kept via flag-don't-drop).
   for (const w of warns) {
-    if (!/declined to size|net-EV|cannot profit|≤ entry high|below the \d+% floor|contradicts your own|reasoning says .* but action=|Tier-2 data only|Thin non-technical basis/i.test(w)) {
+    if (!/declined to size|net-EV|cannot profit|≤ entry high|below the \d+% floor|contradicts your own|reasoning says .* but action=|Tier-2 data only|Thin non-technical basis|Macro override \(Rule 12\)/i.test(w)) {
       push('validator_fail', w, 'warn');
     }
   }

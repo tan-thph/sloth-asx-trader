@@ -125,6 +125,9 @@ const state = {
       // Position sizing
       maxPositionPct:         15,
       maxSectorPct:           30,
+      // Macro override (Rule 12): 'block' | 'flag' | 'off'
+      macroOverrideMode:      'block',
+      macroBlockBullish:      35,
       // Anti-churn
       sameTickerWindowDays:   7,
       minHoldingDays:         1,

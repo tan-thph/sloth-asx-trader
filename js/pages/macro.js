@@ -574,7 +574,9 @@ async function runMacroAnalysis(force=false) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          date: today,
+          // Server requires YYYY-MM-DD; `today` is DD-MM-YYYY (todayStr) and was rejected with 400,
+          // so no brief was ever captured or graded.
+          date: new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' }),
           sentiment: macroAI.sentiment,
           sentimentConf: macroAI.sentimentConf,
           bullish: macroAI.bullish,
