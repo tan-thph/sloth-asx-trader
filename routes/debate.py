@@ -909,6 +909,17 @@ def _call_groq_json(api_key: str, model: str, prompt: str, timeout: int = 30) ->
         return {"ok": False, "error": str(ex)}
 
 
+def _claude_json_body(model: str, prompt: str) -> dict:
+    """Request body for the short adjudicator call. On Sonnet 5.5, thinking tokens share
+    max_tokens, so turn up-front thinking off (between_tools needs effort low/medium/high)."""
+    body = {"model": model, "max_tokens": 500,
+            "messages": [{"role": "user", "content": prompt}]}
+    if model.startswith("claude-sonnet-5-5"):
+        body["output_config"] = {"effort": "low"}
+        body["thinking"] = {"type": "between_tools"}
+    return body
+
+
 def _call_claude_json(api_key: str, model: str, prompt: str, timeout: int = 30) -> dict:
     """Call Anthropic Claude directly; same return shape as other cloud callers."""
     try:
@@ -919,16 +930,13 @@ def _call_claude_json(api_key: str, model: str, prompt: str, timeout: int = 30) 
                 "anthropic-version": "2023-06-01",
                 "Content-Type":      "application/json",
             },
-            json={
-                "model":      model,
-                "max_tokens": 500,
-                "messages":   [{"role": "user", "content": prompt}],
-            },
+            json=_claude_json_body(model, prompt),
             timeout=timeout,
         )
         if r.status_code != 200:
             return {"ok": False, "error": f"Claude HTTP {r.status_code}: {r.text[:120]}"}
-        text = r.json()["content"][0]["text"]
+        # Adaptive thinking can put a thinking block first — pick the text block by type.
+        text = next((b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text"), "")
         return {"ok": True, "text": (text or "").strip()}
     except requests.exceptions.Timeout:
         return {"ok": False, "error": f"Claude timeout after {timeout}s"}

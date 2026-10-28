@@ -1692,10 +1692,19 @@ def _is_ann_thinking_model(model_name: str) -> bool:
     return any(m in name for m in _ANN_THINKING_MODELS)
 
 
+_OLLAMA_THINK_OFF_MODELS = ("gemma4",)   # reason by default; need think=false via the API
+
+
+def _is_remote_ollama(url: str) -> bool:
+    return not any(h in (url or "") for h in ("localhost", "127.0.0.1", "0.0.0.0"))
+
+
 def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
     ollama_url = settings.get("ollama_url", "http://localhost:11434").rstrip("/")
     model = settings.get("ann_llm_model", "qwen2.5:1.5b")
     cpu_mode = bool(settings.get("cpu_mode", False))
+    if _is_remote_ollama(ollama_url):
+        cpu_mode = False   # SBC/CPU mode describes this box, not the remote GPU
     thinking = _is_ann_thinking_model(model)
 
     # format:"json" (GBNF grammar) forces pure JSON output for all models.
@@ -1727,7 +1736,9 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
         "repeat_penalty": 1.3,
         "repeat_last_n":  128,
     }
-    if cpu_mode:
+    remote = _is_remote_ollama(ollama_url)
+    # cpu_mode describes this machine; never force num_gpu=0 on a remote (Colab GPU) Ollama.
+    if cpu_mode and not remote:
         options["num_gpu"] = 0  # force CPU-only; omit entirely otherwise so Ollama auto-selects
 
     payload: Dict = {
@@ -1737,6 +1748,10 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
         "format":  "json",
         "options": options,
     }
+    think_off = thinking or any(m in model.lower() for m in _OLLAMA_THINK_OFF_MODELS)
+    if think_off:
+        payload["think"] = False   # newer Ollama ignores the /no_think prefix
+    headers = {"ngrok-skip-browser-warning": "true"} if remote else {}
 
     # 300 s covers model cold-load (~60 s on Jetson) + inference in all modes
     read_timeout = 300
@@ -1745,8 +1760,12 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
         resp = requests.post(
             f"{ollama_url}/api/generate",
             json=payload,
+            headers=headers,
             timeout=(30, read_timeout),
         )
+        if resp.status_code != 200:
+            logger.warning("_classify_ollama [%s] HTTP %s from %s: %s",
+                           model, resp.status_code, ollama_url, resp.text[:200])
         if resp.status_code == 200:
             resp_json = resp.json()
             raw = resp_json.get("response", "").strip()
@@ -1780,7 +1799,7 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
                     "repeat_penalty": 1.3,
                     "repeat_last_n":  128,
                 }
-                if cpu_mode:
+                if cpu_mode and not remote:
                     retry_opts["num_gpu"] = 0
                 retry_payload = {
                     "model":   model,
@@ -1789,10 +1808,13 @@ def _classify_ollama(prompt: str, settings: Dict) -> Optional[Dict]:
                     "format":  "json",
                     "options": retry_opts,
                 }
+                if think_off:
+                    retry_payload["think"] = False
                 try:
                     r2 = requests.post(
                         f"{ollama_url}/api/generate",
                         json=retry_payload,
+                        headers=headers,
                         timeout=(30, read_timeout),
                     )
                     if r2.status_code == 200:

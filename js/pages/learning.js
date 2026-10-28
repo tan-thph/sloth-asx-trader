@@ -296,8 +296,13 @@ async function renderLearningPage(gen) {
 function _renderLearningContent(d, brier) {
   // Backend fields (flat, win_rate already 0-100)
   const total        = d.total            ?? 0;
-  const closed       = d.closed           ?? 0;
-  const wins         = d.wins             ?? 0;
+  // Defensive: coerce to finite numbers. Weighted ESS (or any float) must never
+  // leak into "N closed trades" copy — that produced "6.333333333333333 closed trades".
+  const closedRaw    = Number(d.closed);
+  const closed       = Number.isFinite(closedRaw) ? closedRaw : 0;
+  const closedDisp   = Number.isInteger(closed) ? closed : Math.round(closed * 10) / 10;
+  const winsRaw      = Number(d.wins);
+  const wins         = Number.isFinite(winsRaw) ? winsRaw : 0;
   const overallWR    = d.overall_win_rate;                // null or 0-100
   const overallCiLo  = d.overall_ci_lo;                  // Wilson CI low (%)
   const overallCiHi  = d.overall_ci_hi;                  // Wilson CI high (%)
@@ -328,9 +333,20 @@ function _renderLearningContent(d, brier) {
   const fmt = (v, dp = 1) => v == null ? '—' : Number(v).toFixed(dp);
   const pct = (v) => v == null ? '—' : Number(v).toFixed(0) + '%';
   const rateColor = r => r == null ? 'var(--text-secondary)' : r >= 60 ? '#16a34a' : r >= 45 ? '#d97706' : '#dc2626';
-  const sampleBadge = n => n < 5
-    ? `<span title="Limited data — treat with caution" style="margin-left:4px;font-size:10px;color:#d97706;background:#fef3c7;border-radius:3px;padding:1px 5px">n=${n} ⚠</span>`
-    : `<span style="margin-left:4px;font-size:10px;color:var(--text-muted)">(n=${n})</span>`;
+  // Format sample sizes: integers stay clean; fractional ESS shows one decimal
+  // so we never paint "n=0.3333333333333333".
+  const fmtN = (n) => {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return '0';
+    return Number.isInteger(x) ? String(x) : x.toFixed(1);
+  };
+  const sampleBadge = n => {
+    const x = Number(n);
+    const low = !Number.isFinite(x) || x < 5;
+    return low
+      ? `<span title="Limited data — treat with caution" style="margin-left:4px;font-size:10px;color:#d97706;background:#fef3c7;border-radius:3px;padding:1px 5px">n=${fmtN(x)} ⚠</span>`
+      : `<span style="margin-left:4px;font-size:10px;color:var(--text-muted)">(n=${fmtN(x)})</span>`;
+  };
 
   // Derive summary stats from conf_bands for high-conf win rate
   const hcBands = confBands.filter(b => !isNaN(parseFloat(b.band)) && parseFloat(b.band) >= 70);
@@ -347,12 +363,12 @@ function _renderLearningContent(d, brier) {
       <div class="metric-card">
         <div class="metric-label">Total AI Events</div>
         <div class="metric-value">${total}</div>
-        <div class="metric-sub">${total - closed} open · ${closed} closed</div>
+        <div class="metric-sub">${Math.max(0, Math.round(total - closed))} open · ${fmtN(closedDisp)} closed</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Overall Win Rate</div>
         <div class="metric-value ${overallWR != null && overallWR >= 50 ? 'up' : 'down'}">${pct(overallWR)}</div>
-        <div class="metric-sub">${wins}W / ${closed - wins}L (${closed} closed)</div>
+        <div class="metric-sub">${fmtN(wins)}W / ${fmtN(Math.max(0, closed - wins))}L (${fmtN(closedDisp)} closed)</div>
         ${overallCiLo != null ? `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">95% CI: ${overallCiLo.toFixed(0)}–${overallCiHi.toFixed(0)}%${!calibActive ? ' · <span style="color:#d97706">n&lt;30, calibration paused</span>' : ''}</div>` : ''}
       </div>
       <div class="metric-card">
@@ -503,7 +519,7 @@ function _renderLearningContent(d, brier) {
       <div style="background:var(--warn-bg,#fef3c7);border:1px solid var(--warn,#d97706);border-radius:5px;padding:8px 10px;font-size:12px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start;color:var(--text-primary)">
         <span style="font-size:16px;line-height:1">⚠️</span>
         <div>
-          <strong>Not enough data yet (${closed} closed trade${closed !== 1 ? 's' : ''})</strong> — calibration signals are unreliable below 10 closed trades.
+          <strong>Not enough data yet (${fmtN(closedDisp)} closed trade${closedDisp !== 1 ? 's' : ''})</strong> — calibration signals are unreliable below 10 closed trades.
           Keep running analyses and marking trade outcomes; patterns will emerge naturally.
         </div>
       </div>` : ''}
@@ -598,11 +614,13 @@ function _renderLearningContent(d, brier) {
             const ciStr = r.ci_lo != null
               ? `<span style="font-size:10px;color:${r.low_n ? '#d97706' : 'var(--text-muted)'}">${r.ci_lo.toFixed(0)}–${r.ci_hi.toFixed(0)}%${r.low_n ? ' ⚠' : ''}</span>`
               : '<span class="text-muted text-xs">—</span>';
+            const rTotal = Number(r.total);
+            const rWins  = Number(r.wins);
             return `
-            <tr style="border-bottom:1px solid var(--border);${r.total < 5 ? 'opacity:0.65' : ''}">
-              <td style="padding:5px 8px">${r.regime || 'unknown'}${sampleBadge(r.total)}</td>
-              <td style="padding:5px 8px;text-align:right">${r.total}</td>
-              <td style="padding:5px 8px;text-align:right">${r.wins}</td>
+            <tr style="border-bottom:1px solid var(--border);${!Number.isFinite(rTotal) || rTotal < 5 ? 'opacity:0.65' : ''}">
+              <td style="padding:5px 8px">${r.regime || 'unknown'}${sampleBadge(rTotal)}</td>
+              <td style="padding:5px 8px;text-align:right">${fmtN(rTotal)}</td>
+              <td style="padding:5px 8px;text-align:right">${fmtN(rWins)}</td>
               <td style="padding:5px 8px;text-align:right;font-weight:600;color:${rateColor(r.win_rate)}">${pct(r.win_rate)}</td>
               <td style="padding:5px 8px">${ciStr}</td>
             </tr>`;

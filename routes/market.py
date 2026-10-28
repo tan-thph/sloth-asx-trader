@@ -1255,6 +1255,8 @@ def get_ai_call(call_id):
 
 # USD cost per million tokens for each model (input/output/cache_read/cache_write)
 _MODEL_PRICING = {
+    # Claude Sonnet 5.5 ($2/$10 per MTok, cache read $0.10; cache_write assumed 1.25x input)
+    "claude-sonnet-5-5":            {"input": 2.00, "output": 10.00, "cache_read": 0.10,  "cache_write": 2.50},
     # Claude Sonnet 4.x
     "claude-sonnet-4-6":            {"input": 3.00, "output": 15.00, "cache_read": 0.30,  "cache_write": 3.75},
     # Claude Haiku 4.5

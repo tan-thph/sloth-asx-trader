@@ -429,6 +429,14 @@ _LE_MIGRATIONS = [
     # usage.model at logRecsToLearningLoop() time. NULL on pre-feature rows
     # (treated as 'unknown/legacy'); backfillable from ai_call_log by timestamp.
     ("model", "TEXT"),
+    # Market-relative decision scoring (2026-10). `decision_outcome` is the DECISION verdict
+    # for SELL/TRIM (and HOLD): validated | neutral | regretted, judged on the forward
+    # window vs holding/market — NOT the sold lot's P&L (that stays in outcome_status).
+    ("decision_outcome", "TEXT"),
+    ("exit_cf_ret_pct", "REAL"),      # stock return exit→+H bars (%), had it been held
+    ("exit_cf_excess_pct", "REAL"),   # …minus beta × market return (%)
+    ("exit_cf_z", "REAL"),            # excess in vol-scaled units (σ_H)
+    ("exit_cf_attrib", "TEXT"),       # market | idiosyncratic
 ]
 
 

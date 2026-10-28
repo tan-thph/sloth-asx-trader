@@ -427,21 +427,28 @@ def compute_skill_score_deterministic(row):
     # A clean win (shallow MAE, comfortable MFE headroom) reflects a well-timed
     # entry → small bonus. Only applied to wins; losses already carry the verdict
     # and discipline signal. Guards all None values (legacy rows are unaffected).
-    if win:
-        mae = _g("mae_pct")
-        mfe = _g("mfe_pct")
-        try:
-            mae = float(mae) if mae is not None else None
-            mfe = float(mfe) if mfe is not None else None
-        except (TypeError, ValueError):
-            mae, mfe = None, None
-        if mae is not None and mfe is not None:
+    mae = _g("mae_pct")
+    mfe = _g("mfe_pct")
+    try:
+        mae = float(mae) if mae is not None else None
+        mfe = float(mfe) if mfe is not None else None
+    except (TypeError, ValueError):
+        mae, mfe = None, None
+    if mae is not None and mfe is not None:
+        if win:
             # Deep-MAE win (drawdown worse than −8%) with thin MFE headroom → luck.
             if mae <= -8.0 and mfe < 8.0:
                 base -= 0.5
             # Clean win: shallow drawdown and healthy favourable excursion → skill.
             elif mae >= -3.0 and mfe >= 5.0:
                 base += 0.5
+        else:
+            # Loss path quality (small ±0.25): a tight, honoured stop reads as discipline;
+            # a deep drawdown with no favourable excursion reads as a poor entry.
+            if mae >= -3.0 and (_g("exit_reason") or "") == "stop_hit":
+                base += 0.25
+            elif mae <= -8.0 and mfe < 3.0:
+                base -= 0.25
 
     return round(max(0.0, min(10.0, base)), 1)
 
@@ -462,6 +469,8 @@ def compute_process_score_deterministic(row):
         not P&L: a thesis can be validated on a losing trade stopped by noise, or
         invalidated on a lucky win)
       • planned R:R    — was the trade structured ≥2:1 reward:risk at entry
+      • exit discipline — target_hit / stop_hit respect the plan (independent of
+        whether the outcome finished as a win or a loss)
     No win/loss branch, no confidence-vs-outcome term, no MAE/MFE-of-win term.
 
     Returns None when thesis_verdict is absent (nothing outcome-independent to score).
@@ -488,6 +497,15 @@ def compute_process_score_deterministic(row):
             base += 0.5   # planned discipline, fixed at entry — outcome-independent
     except (TypeError, ValueError):
         pass
+
+    # Exit discipline is path-independent of P&L: hitting the pre-committed target
+    # or stop is process quality regardless of colour. Manual early exits are not
+    # penalised here (that needs thesis context → skill_score).
+    exit_r = (_g("exit_reason") or "")
+    if exit_r == "target_hit":
+        base += 0.5
+    elif exit_r == "stop_hit":
+        base += 0.25
 
     return round(max(0.0, min(10.0, base)), 1)
 
@@ -1883,10 +1901,11 @@ def _compute_go_live_readiness(conn, friction_bps=_GOLIVE_FRICTION_BPS):
     """
     haircut = friction_bps / 100.0   # bps → percentage points (30 bps = 0.30 pp)
 
+    _ensure_calib_view(conn)
     rows = conn.execute("""
         SELECT outcome_status, realized_pnl_pct, regime, primary_entry_driver,
-               ai_confidence, recommendation, model
-        FROM ai_learning_events
+               ai_confidence, recommendation, model, cal_weight
+        FROM ai_learning_calib
         WHERE was_executed = 1
           AND outcome_status IN ('win','loss','breakeven')
     """).fetchall()
@@ -1944,11 +1963,13 @@ def _compute_go_live_readiness(conn, friction_bps=_GOLIVE_FRICTION_BPS):
           and r["ai_confidence"] is not None]
     n_wl = len(wl)
     if n_wl:
-        mean_conf = _mean([float(r["ai_confidence"]) for r in wl])
-        actual_wr = sum(1 for r in wl if r["outcome_status"] == "win") / n_wl
+        _w = [float(r.get("cal_weight") or 1.0) for r in wl]
+        _ws = sum(_w) or 1.0
+        mean_conf = sum(w * float(r["ai_confidence"]) for w, r in zip(_w, wl)) / _ws
+        actual_wr = sum(w for w, r in zip(_w, wl) if r["outcome_status"] == "win") / _ws
         gap = abs(mean_conf - actual_wr)
-        brier = sum((float(r["ai_confidence"]) - (1.0 if r["outcome_status"] == "win" else 0.0)) ** 2
-                    for r in wl) / n_wl   # kept for the detail line only
+        brier = sum(w * (float(r["ai_confidence"]) - (1.0 if r["outcome_status"] == "win" else 0.0)) ** 2
+                    for w, r in zip(_w, wl)) / _ws   # de-duplicated; detail line only
     else:
         mean_conf = actual_wr = gap = brier = None
     # Brier trend: earliest vs latest daily snapshot (secondary signal only).
@@ -2074,30 +2095,77 @@ def learning_stats():
         events_limit = 2000 if events_limit <= 0 else min(events_limit, 2000)
 
         with get_db() as conn:
+            _ensure_calib_view(conn)
             total  = conn.execute("SELECT COUNT(*) FROM ai_learning_events").fetchone()[0]
+            # Headline closed/wins: executed only (agrees with coverage / go-live / digest),
+            # decision-scored for exits and de-duplicated (cal_weight) = effective independent
+            # decisions. Virtual/skipped resolutions still feed weighted calibration elsewhere.
             closed = conn.execute(
-                "SELECT COUNT(*) FROM ai_learning_events WHERE outcome_status IN ('win','loss','breakeven')"
+                "SELECT COALESCE(SUM(cal_weight),0) FROM ai_learning_calib "
+                "WHERE outcome_status IN ('win','loss','breakeven') AND was_executed = 1"
             ).fetchone()[0]
             wins   = conn.execute(
-                "SELECT COUNT(*) FROM ai_learning_events WHERE outcome_status='win'"
+                "SELECT COALESCE(SUM(cal_weight),0) FROM ai_learning_calib "
+                "WHERE outcome_status='win' AND was_executed = 1"
             ).fetchone()[0]
+
+            # Per-row inputs: Kish ESS (all closed executed rows) and ENTRY-ONLY expectancy / R.
+            _cal_rows = conn.execute("""
+                SELECT regime, ai_confidence, recommendation, realized_pnl_pct,
+                       actual_entry_price, suggested_stop, cal_weight
+                FROM ai_learning_calib
+                WHERE outcome_status IN ('win','loss','breakeven') AND was_executed = 1
+            """).fetchall()
+
+            def _entry_stats(rs):
+                """(expectancy %, avg R, n) over BUY/TOP_UP only. For SELL/TRIM, realized_pnl_pct is the
+                sold lot's P&L (profit-taking), not an edge measure — judged by decision verdicts instead.
+                R is clamped to ±5 so one tight-stop outlier can't dominate."""
+                es = [r for r in rs if r["recommendation"] in ("BUY", "TOP_UP")
+                      and r["realized_pnl_pct"] is not None]
+                if not es:
+                    return None, None, 0
+                wsum = sum(float(r["cal_weight"]) for r in es)
+                exp = sum(float(r["cal_weight"]) * float(r["realized_pnl_pct"]) for r in es) / wsum
+                rw = []
+                for r in es:
+                    ep, sp = r["actual_entry_price"], r["suggested_stop"]
+                    if ep and sp and float(ep) != 0:
+                        risk = abs(float(ep) - float(sp)) / abs(float(ep)) * 100.0
+                        if risk > 0:
+                            rw.append((float(r["cal_weight"]),
+                                       max(-5.0, min(5.0, float(r["realized_pnl_pct"]) / risk))))
+                avg_r = (sum(w * x for w, x in rw) / sum(w for w, _ in rw)) if rw else None
+                return round(exp, 3), (round(avg_r, 3) if avg_r is not None else None), len(es)
+
+            # `closed`/`wins`/`total` are EFFECTIVE counts (sum of cal_weight = independent decisions).
+            # Raw row counts are returned alongside as n_raw. (Kish ESS is deliberately not used here:
+            # it measures weight imbalance, and on de-dup weights it would exceed the effective count.)
+            closed_raw = len(_cal_rows)
 
             # Confidence bands (with Wilson 95% CI)
             conf_bands = []
             for lo, hi in [(0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]:
                 rows = conn.execute("""
-                    SELECT outcome_status, COUNT(*) as cnt FROM ai_learning_events
+                    SELECT outcome_status, SUM(cal_weight) as cnt FROM ai_learning_calib
                     WHERE ai_confidence >= ? AND ai_confidence < ?
                       AND outcome_status IN ('win','loss','breakeven')
+                      AND was_executed = 1
                     GROUP BY outcome_status
                 """, (lo, hi)).fetchall()
                 band_wins  = sum(r['cnt'] for r in rows if r['outcome_status'] == 'win')
                 band_total = sum(r['cnt'] for r in rows)
                 ci = _wilson_ci(band_wins, band_total)
+                _band_rows = [r for r in _cal_rows
+                              if r["ai_confidence"] is not None and lo <= float(r["ai_confidence"]) < hi]
+                _bexp, _bavg_r, _bn = _entry_stats(_band_rows)
                 conf_bands.append({
                     "band":     f"{int(lo*100)}-{int(hi*100)}%",
-                    "wins":     band_wins,
-                    "total":    band_total,
+                    "wins":     round(band_wins, 1),
+                    "total":    round(band_total, 1),
+                    "expectancy_pct": _bexp,
+                    "entry_n":  _bn,
+                    "n_raw":    len(_band_rows),
                     "win_rate": round(band_wins / band_total * 100, 1) if band_total else None,
                     "ci_lo":    ci[0] if ci else None,
                     "ci_hi":    ci[1] if ci else None,
@@ -2109,8 +2177,9 @@ def learning_stats():
 
             # Regime stats
             regime_rows = conn.execute("""
-                SELECT regime, outcome_status, COUNT(*) as cnt FROM ai_learning_events
+                SELECT regime, outcome_status, SUM(cal_weight) as cnt FROM ai_learning_calib
                 WHERE regime IS NOT NULL AND outcome_status IN ('win','loss','breakeven')
+                  AND was_executed = 1
                 GROUP BY regime, outcome_status
             """).fetchall()
             regime_agg: dict = {}
@@ -2124,10 +2193,16 @@ def learning_stats():
             regime_list = []
             for k, v in sorted(regime_agg.items()):
                 ci = _wilson_ci(v['wins'], v['total'])
+                _rrows = [r for r in _cal_rows if r["regime"] == k]
+                _rexp, _ravg_r, _rn = _entry_stats(_rrows)
                 regime_list.append({
                     "regime":   k,
-                    "wins":     v['wins'],
-                    "total":    v['total'],
+                    "wins":     round(v['wins'], 1),
+                    "total":    round(v['total'], 1),
+                    "expectancy_pct": _rexp,
+                    "avg_r_multiple": _ravg_r,
+                    "entry_n":  _rn,
+                    "n_raw":    len(_rrows),
                     "win_rate": round(v['wins'] / v['total'] * 100, 1) if v['total'] else None,
                     "ci_lo":    ci[0] if ci else None,
                     "ci_hi":    ci[1] if ci else None,
@@ -2507,9 +2582,10 @@ def learning_stats():
         prompt_regression = _check_prompt_regression(version_list)
 
         return jsonify({
-            "total":              total,
-            "closed":             closed,
-            "wins":               wins,
+            "total":              int(total),
+            "closed":             round(closed, 1),   # effective (de-duplicated) count
+            "wins":               round(wins, 1),
+            "closed_raw":         closed_raw,
             "overall_win_rate":   round(wins / closed * 100, 1) if closed else None,
             "overall_ci_lo":      oci[0] if oci else None,
             "overall_ci_hi":      oci[1] if oci else None,
@@ -3144,29 +3220,28 @@ def learning_calibration_stats():
             # Sprint 70: Brier is a binary-outcome score. Breakevens were previously
             # folded in as 'loss' (0.0), biasing the score and the reliability bins.
             # Exclude them — only unambiguous win/loss outcomes belong here.
+            # Exits are scored on the DECISION verdict (not lot P&L) and each
+            # ticker+action cluster within ±5d is down-weighted to ~one decision.
+            _ensure_calib_view(conn)
             rows = conn.execute("""
-                SELECT ai_confidence, outcome_status
-                FROM ai_learning_events
+                SELECT ai_confidence, outcome_status, cal_weight
+                FROM ai_learning_calib
                 WHERE outcome_status IN ('win','loss')
                   AND ai_confidence IS NOT NULL
             """).fetchall()
 
-        n = len(rows)
-        if n == 0:
+        n_raw = len(rows)
+        wsum = sum(float(r["cal_weight"]) for r in rows)
+        if n_raw == 0 or wsum <= 0:
             return jsonify({"brier_score": None, "n": 0, "bins": []})
+        n = round(wsum, 1)   # effective number of independent decisions
 
-        sq_errors = [
+        brier = round(sum(
+            float(r["cal_weight"]) *
             (float(r["ai_confidence"]) - (1.0 if r["outcome_status"] == "win" else 0.0)) ** 2
-            for r in rows
-        ]
-        brier = round(sum(sq_errors) / n, 4)
+            for r in rows) / wsum, 4)
 
-        # Learning Loop improvement E: persist one snapshot per calendar day so
-        # Brier score can be plotted over time instead of only ever showing the
-        # latest value — this endpoint already runs regularly from the Learning
-        # page, so piggybacking here avoids a separate scheduler thread.
-        # UNIQUE(snapshot_date) makes this idempotent (INSERT OR REPLACE updates
-        # the same-day row rather than duplicating on repeated calls).
+        # Learning Loop improvement E: persist one snapshot per calendar day.
         try:
             with get_db() as conn:
                 today = datetime.now().date().isoformat()
@@ -3177,7 +3252,7 @@ def learning_calibration_stats():
                 conn.execute(
                     "INSERT OR REPLACE INTO calibration_snapshots "
                     "(snapshot_date, brier_score, n, prompt_version) VALUES (?,?,?,?)",
-                    (today, brier, n, latest_pv["prompt_version"] if latest_pv else None),
+                    (today, brier, int(round(wsum)), latest_pv["prompt_version"] if latest_pv else None),
                 )
         except Exception:
             pass  # snapshotting must never break the stats response
@@ -3187,15 +3262,16 @@ def learning_calibration_stats():
             subset = [r for r in rows if lo <= float(r["ai_confidence"]) < hi]
             if not subset:
                 continue
-            mean_conf = sum(float(r["ai_confidence"]) for r in subset) / len(subset)
-            wins = sum(1 for r in subset if r["outcome_status"] == "win")
+            w = sum(float(r["cal_weight"]) for r in subset)
+            mean_conf = sum(float(r["cal_weight"]) * float(r["ai_confidence"]) for r in subset) / w
+            wins = sum(float(r["cal_weight"]) for r in subset if r["outcome_status"] == "win")
             bins.append({
                 "range":           f"{int(lo*100)}-{int(min(hi, 1.0)*100)}%",
                 "lo":              lo,
                 "hi":              min(hi, 1.0),
-                "n":               len(subset),
+                "n":               round(w, 1),
                 "mean_confidence": round(mean_conf, 3),
-                "actual_win_rate": round(wins / len(subset), 3),
+                "actual_win_rate": round(wins / w, 3),
             })
 
         return jsonify({"brier_score": brier, "n": n, "bins": bins})
@@ -3604,6 +3680,204 @@ def _resolve_sell_outcomes(conn) -> int:
     return resolved
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Market-relative DECISION scoring for exits and HOLDs (2026-10)
+# ══════════════════════════════════════════════════════════════════════════════
+# Problem: outcome_status for SELL/TRIM is the sold LOT's realised P&L, so trimming a
+# position that is under water always scores 'loss' — even when exiting was right.
+# HOLD was scored on absolute drawdown only, so in a rising market it was ~always
+# 'correct'. Both judge the decision against a different yardstick.
+#
+# One yardstick for all three actions — forward return vs the alternative decision,
+# adjusted for the market and for the stock's own volatility:
+#   ret_stock = stock return from the exit/hold price to bar H (H = 20 trading days)
+#   excess    = ret_stock − beta × ret_market          (market-relative)
+#   band      = clamp(atr% × √H, 3%, 20%) × regime multiplier   (vol-scaled, widens when volatile)
+#   EXIT   regretted ⇔ ret_stock − cash > band AND excess > band   (rose a lot AND not just the market)
+#          validated ⇔ ret_stock − cash < −band OR  excess < −band (avoided a fall / sold a laggard)
+#          else neutral — NOT a failure; excluded from win/loss calibration
+#   HOLD   mirror image: regretted ⇔ ret_stock < −band AND excess < −band.
+# A market-wide move inside the band is neutral for both, so volatile markets neither
+# fail a sound exit nor flatter a lazy hold.
+_EXIT_HORIZON_DAYS = _HOLD_HORIZON_DAYS if "_HOLD_HORIZON_DAYS" in globals() else 20
+_DEC_BAND_FLOOR = 0.03
+_DEC_BAND_CAP = 0.20
+_DEC_REGIME_MULT = {"highVol": 1.25, "riskOff": 1.25, "panic": 1.5}
+_DEC_CASH_ANNUAL = 0.046          # ≈ RBA cash rate; opportunity cost of sitting in cash
+_DEC_BETA_DEFAULT = 1.0           # no per-stock beta is stored on the event yet
+
+
+def _decision_band(entry_signals_json, regime=None) -> float:
+    """Vol-scaled neutral band (fraction). Falls back to a 5% band without ATR."""
+    atr = None
+    try:
+        atr = float(json.loads(entry_signals_json or "{}").get("atr_pct"))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    raw = (atr / 100.0) * math.sqrt(_EXIT_HORIZON_DAYS) if atr and atr > 0 else 0.05
+    band = min(_DEC_BAND_CAP, max(_DEC_BAND_FLOOR, raw))
+    return band * _DEC_REGIME_MULT.get(regime or "", 1.0)
+
+
+def classify_exit_decision(ret_stock, ret_mkt, band, beta=_DEC_BETA_DEFAULT,
+                           cash_ret=None) -> dict:
+    """Pure: verdict for a SELL/TRIM. Returns {outcome, excess, z, attrib}."""
+    if cash_ret is None:
+        cash_ret = _DEC_CASH_ANNUAL * _EXIT_HORIZON_DAYS / 252.0
+    excess = ret_stock - beta * ret_mkt
+    abs_cf = ret_stock - cash_ret
+    if abs_cf > band and excess > band:
+        outcome = "regretted"
+    elif abs_cf < -band or excess < -band:
+        outcome = "validated"
+    else:
+        outcome = "neutral"
+    return {"outcome": outcome, "excess": excess, "z": excess / band if band else None,
+            "attrib": "market" if abs(excess) <= band else "idiosyncratic"}
+
+
+def classify_hold_decision(ret_stock, ret_mkt, band, beta=_DEC_BETA_DEFAULT) -> dict:
+    """Pure: verdict for a HOLD — mirror image of classify_exit_decision."""
+    excess = ret_stock - beta * ret_mkt
+    if ret_stock < -band and excess < -band:
+        outcome = "regretted"
+    elif ret_stock > band and excess > band:
+        outcome = "validated"
+    else:
+        outcome = "neutral"
+    return {"outcome": outcome, "excess": excess, "z": excess / band if band else None,
+            "attrib": "market" if abs(excess) <= band else "idiosyncratic"}
+
+
+def _fwd_returns(yf, ticker, start_dt, entry_px=None):
+    """(ret_stock, ret_market) from the entry bar to bar H, or None if the window isn't full.
+    Market = ^AXJO aligned to the stock's own bar dates."""
+    sym = ticker if ticker.endswith(".AX") else ticker + ".AX"
+    end = (start_dt + timedelta(days=45)).strftime("%Y-%m-%d")
+    st = start_dt.strftime("%Y-%m-%d")
+    hist = yf.Ticker(sym).history(start=st, end=end, interval="1d")
+    if hist.empty or len(hist) < _EXIT_HORIZON_DAYS + 1:
+        return None
+    closes = hist["Close"]
+    ref = float(entry_px) if entry_px else float(closes.iloc[0])
+    if ref <= 0:
+        return None
+    ret_stock = float(closes.iloc[_EXIT_HORIZON_DAYS]) / ref - 1.0
+    ret_mkt = 0.0
+    try:
+        mk = yf.Ticker("^AXJO").history(start=st, end=end, interval="1d")["Close"]
+        mk = mk.reindex(closes.index, method="ffill").dropna()
+        if len(mk) > _EXIT_HORIZON_DAYS:
+            ret_mkt = float(mk.iloc[_EXIT_HORIZON_DAYS] / mk.iloc[0] - 1.0)
+    except Exception:
+        pass   # market leg unavailable → absolute-only scoring for this row
+    return ret_stock, ret_mkt
+
+
+def _resolve_exit_decisions(conn, cap: int = 5) -> int:
+    """Score executed SELL/TRIM decisions against the counterfactual (kept holding)."""
+    cutoff = _cutoff(30)
+    retry_cutoff = _fetch_retry_cutoff()
+    try:
+        rows = conn.execute("""
+            SELECT id, ticker, timestamp, regime, regime_at_execution, actual_exit_price,
+                   entry_signals_json
+            FROM ai_learning_events
+            WHERE was_executed = 1 AND recommendation IN ('SELL','TRIM')
+              AND decision_outcome IS NULL
+              AND outcome_status IN ('win','loss','breakeven')
+              AND timestamp < ?
+              AND (fetch_failed_at IS NULL OR fetch_failed_at < ?)
+            ORDER BY timestamp DESC LIMIT ?
+        """, (cutoff, retry_cutoff, cap)).fetchall()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    try:
+        import yfinance as yf
+    except ImportError:
+        return 0
+    n = 0
+    for row in rows:
+        try:
+            start_dt = datetime.strptime(row["timestamp"][:10], "%Y-%m-%d")
+            fr = _fwd_returns(yf, row["ticker"] or "", start_dt, row["actual_exit_price"])
+        except Exception:
+            _mark_fetch_failed(conn, row["id"])
+            continue
+        if fr is None:
+            continue   # window not full yet — retry on a later call
+        regime = row["regime_at_execution"] or row["regime"]
+        band = _decision_band(row["entry_signals_json"], regime)
+        v = classify_exit_decision(fr[0], fr[1], band)
+        conn.execute("""UPDATE ai_learning_events
+                        SET decision_outcome=?, exit_cf_ret_pct=?, exit_cf_excess_pct=?,
+                            exit_cf_z=?, exit_cf_attrib=?
+                        WHERE id=?""",
+                     (v["outcome"], round(fr[0] * 100, 2), round(v["excess"] * 100, 2),
+                      round(v["z"], 2) if v["z"] is not None else None, v["attrib"], row["id"]))
+        n += 1
+    return n
+
+
+def _ensure_calib_view(conn) -> None:
+    """(Re)create ai_learning_calib: ai_learning_events with
+      • outcome_status for SELL/TRIM replaced by the DECISION verdict
+        (validated→win, regretted→loss, neutral/unscored→NULL; lot P&L kept as lot_outcome_status)
+      • cal_weight = 1 / (# scored events of the same ticker+action within ±5 days), so a
+        thesis re-recommended daily counts once, not N times.
+    Calibration readers use this view; P&L analytics keep reading the raw table."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(ai_learning_events)")]
+    if "decision_outcome" not in cols:
+        return
+    keep = ", ".join(f"e.{c}" for c in cols if c != "outcome_status")
+    conn.execute("DROP VIEW IF EXISTS ai_learning_calib")
+    conn.execute(f"""
+        CREATE VIEW ai_learning_calib AS
+        SELECT {keep},
+               CASE WHEN e.recommendation IN ('SELL','TRIM') THEN
+                      CASE e.decision_outcome WHEN 'validated' THEN 'win'
+                                              WHEN 'regretted' THEN 'loss' ELSE NULL END
+                    ELSE e.outcome_status END AS outcome_status,
+               e.outcome_status AS lot_outcome_status,
+               1.0 / MAX(1, (SELECT COUNT(*) FROM ai_learning_events e2
+                              WHERE e2.ticker = e.ticker AND e2.recommendation = e.recommendation
+                                AND ABS(julianday(e2.timestamp) - julianday(e.timestamp)) <= 5
+                                AND (e2.outcome_status IN ('win','loss','breakeven')
+                                     OR e2.decision_outcome IN ('validated','regretted')))) AS cal_weight
+        FROM ai_learning_events e
+    """)
+
+
+@bp.route("/api/learning/backfill-exit-decisions", methods=["POST"])
+def learning_backfill_exit_decisions():
+    """One-shot: score historical SELL/TRIM (and optionally re-score HOLDs) market-relatively.
+    ?cap=40 rows per call (needs network for yfinance); ?rescore_holds=1 re-judges resolved HOLDs."""
+    try:
+        cap = max(1, min(int(request.args.get("cap", 40)), 200))
+    except ValueError:
+        cap = 40
+    rescore = request.args.get("rescore_holds", "0") == "1"
+    try:
+        with get_db() as conn:
+            if rescore:
+                conn.execute("""UPDATE ai_learning_events SET virtual_outcome=NULL, decision_outcome=NULL
+                                WHERE recommendation='HOLD'
+                                  AND virtual_outcome IN ('virtual_hold_correct','virtual_hold_miss')""")
+            exits = _resolve_exit_decisions(conn, cap=cap)
+            holds = _resolve_hold_outcomes(conn, cap=cap) if rescore else 0
+            _ensure_calib_view(conn)
+            left = conn.execute("""SELECT COUNT(*) FROM ai_learning_events
+                                   WHERE was_executed=1 AND recommendation IN ('SELL','TRIM')
+                                     AND decision_outcome IS NULL
+                                     AND outcome_status IN ('win','loss','breakeven')""").fetchone()[0]
+        return jsonify({"ok": True, "exits_scored": exits, "holds_rescored": holds, "exits_remaining": left})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # §9.2: virtual fills must not assume perfect execution — thin ASX names would
 # teach the calibration optimism from fills that wouldn't have happened.
 # One-way slippage = ADV tier (core.adv_slippage) × regime multiplier.
@@ -3774,11 +4048,25 @@ def _resolve_hold_outcomes(conn, cap: int = 5, move_threshold: float = 0.08) -> 
             continue
         ret_end = float((window.iloc[-1] - entry_close) / entry_close)
 
-        thr = _hold_move_threshold(row["entry_signals_json"], move_threshold)
-        outcome = "virtual_hold_miss" if ret_end <= -thr else "virtual_hold_correct"
+        # Market-relative (same yardstick as exits): a HOLD is only a miss if the stock
+        # fell beyond the vol-scaled band AND lagged the market beyond it — a market-wide
+        # drawdown is neutral, and neutral stays 'correct' (passivity wasn't the error).
+        ret_mkt = 0.0
+        try:
+            mk = yf.Ticker("^AXJO").history(start=start, end=end, interval="1d")["Close"]
+            mk = mk.reindex(closes.index, method="ffill").dropna()
+            if len(mk) > _HOLD_HORIZON_DAYS:
+                ret_mkt = float(mk.iloc[_HOLD_HORIZON_DAYS] / mk.iloc[0] - 1.0)
+        except Exception:
+            pass
+        band = _decision_band(row["entry_signals_json"], None)
+        v = classify_hold_decision(ret_end, ret_mkt, band)
+        outcome = "virtual_hold_miss" if v["outcome"] == "regretted" else "virtual_hold_correct"
         conn.execute(
-            "UPDATE ai_learning_events SET virtual_outcome=? WHERE id=?",
-            (outcome, row["id"]))
+            "UPDATE ai_learning_events SET virtual_outcome=?, decision_outcome=?, "
+            "exit_cf_ret_pct=?, exit_cf_excess_pct=?, exit_cf_z=?, exit_cf_attrib=? WHERE id=?",
+            (outcome, v["outcome"], round(ret_end * 100, 2), round(v["excess"] * 100, 2),
+             round(v["z"], 2) if v["z"] is not None else None, v["attrib"], row["id"]))
         resolved += 1
 
     return resolved
@@ -4469,6 +4757,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
     # Phase 8 gate — set to True after rows are fetched if scores predict outcomes.
     # Captured by closure in _weight() below; Python reads the name at call time.
     _phase8_active = False
+    # Real-fill count for the adaptive paper discount; set once rows are loaded.
+    _n_real_trades = 0
 
     def _decay(ts, half_life=None):
         half_life = hl if half_life is None else half_life
@@ -4513,7 +4803,12 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         # in, paper correctly contributes less statistical weight so real
         # outcomes dominate. Non-'real' (paper or missing) ⇒ discounted, matching
         # the isRealTrade() firewall invariant.
-        pm = 1.0 if (r.get("trade_mode") == "real") else 0.5
+        # Adaptive: a pure-paper book stays ~1.0 (ratios cancel); as real fills accumulate,
+        # paper is pulled toward 0.5 so real outcomes dominate. n_real=10 → 0.75.
+        if r.get("trade_mode") == "real":
+            pm = 1.0
+        else:
+            pm = max(0.5, 1.0 - 0.5 * _n_real_trades / (_n_real_trades + 10.0))
         base *= pm
         # Fix #18: virtual rows get 0.75× multiplier × speed_weight (Sprint 44: fast hits weighted higher)
         if r.get("is_virtual"):
@@ -4557,6 +4852,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
             _resolve_hold_outcomes(conn)
             # Sprint 37: lazy-resolve sell tag outcomes (Gap 3 + Gap 7) — capped at 5.
             _resolve_sell_outcomes(conn)
+            # Market-relative decision verdicts for executed SELL/TRIM — capped at 5.
+            _resolve_exit_decisions(conn)
             # Exit-signals capture: lazily classify SELL/TRIM exit timing quality
             # from the captured exit_signals_json snapshot — capped at 50, idempotent.
             _resolve_exit_quality_tags(conn)
@@ -4703,6 +5000,8 @@ def _calib_compute(regime: str, sectors_str: str, tickers_str: str, days: int,
         # Fix #18: merge virtual outcomes (0.75× weight) into rows for all downstream calcs.
         # Virtual rows don't count toward `n` (the real-data gate) — only toward weighted stats.
         rows_all = [dict(r) for r in rows] + virtual_rows
+        # sqlite3.Row has no .get() — count via dict(r), else this is silently always 0.
+        _n_real_trades = sum(1 for r in rows_all if r.get("trade_mode") == "real" and not r.get("is_virtual"))
 
         # ── Phase 8 gate: activate skill weighting only when scores predict outcomes ──
         # Python closures read names at call time, so assigning _phase8_active here

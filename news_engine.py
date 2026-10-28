@@ -767,6 +767,20 @@ _NEWS_CLASSIFY_ATTEMPT_CAP = 3
 _CONTEXT_BLOCK_MAX_CHARS = 1500
 
 
+# Models that reason by default and need think=false via the Ollama API (no /no_think prefix).
+_OLLAMA_THINK_OFF_MODELS = ("gemma4",)
+
+
+def _is_remote_ollama(url: str) -> bool:
+    """True when Ollama is reached over the network (ngrok/Colab) rather than on this box."""
+    return not any(h in (url or "") for h in ("localhost", "127.0.0.1", "0.0.0.0"))
+
+
+def _ollama_headers(url: str) -> dict:
+    """ngrok's free tier can answer API clients with an HTML interstitial; this header skips it."""
+    return {"ngrok-skip-browser-warning": "true"} if _is_remote_ollama(url) else {}
+
+
 def _sized_num_ctx(prompt_len: int, num_predict: int, cpu_mode: bool, has_context: bool) -> int:
     """N4: pick num_ctx large enough for the actual assembled prompt when
     earnings/dividend context enrichment (context_block) is present, instead
@@ -808,8 +822,8 @@ def _validate_classification(result: dict | None) -> dict | None:
     if not isinstance(result, dict):
         return None
     if result.get("impact_score") is None:
-        log.debug("classification incomplete (no impact_score) — treating as failure: %s",
-                  list(result.keys()))
+        log.warning("classification incomplete (no impact_score) — treating as failure: %s",
+                    list(result.keys()))
         return None
     return result
 
@@ -1048,14 +1062,19 @@ Respond with ONLY valid JSON — no markdown fences, no extra text, no extra key
 
     def is_available(self) -> bool:
         try:
-            r = requests.get(f"{self.base_url}/api/tags", timeout=3)
+            r = requests.get(f"{self.base_url}/api/tags",
+                             headers=_ollama_headers(self.base_url),
+                             timeout=10 if _is_remote_ollama(self.base_url) else 3)
+            if not r.ok:
+                log.warning("Ollama /api/tags HTTP %s at %s: %s", r.status_code, self.base_url, r.text[:150])
             return r.ok
         except Exception:
             return False
 
     def list_models(self) -> list[dict]:
         try:
-            r = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            r = requests.get(f"{self.base_url}/api/tags",
+                             headers=_ollama_headers(self.base_url), timeout=10)
             if r.ok:
                 return r.json().get("models", [])
         except Exception:
@@ -1090,6 +1109,10 @@ Respond with ONLY valid JSON — no markdown fences, no extra text, no extra key
         stop_event=None,
     ) -> dict | None:
         """Classify via streaming Ollama — status_ref gets live token counts."""
+        # cpu_mode/SBC mode describes THIS machine. When inference runs on a remote GPU
+        # (Colab/ngrok), the small CPU token budgets only cause truncation.
+        if _is_remote_ollama(self.base_url):
+            cpu_mode = False
         ticker_str = ", ".join(portfolio_tickers[:20]) if portfolio_tickers else "none"
         # Trim inputs more aggressively on CPU/SBC to reduce inference time
         content_limit = 400 if cpu_mode else 700
@@ -1184,7 +1207,9 @@ Respond with ONLY valid JSON — no markdown fences, no extra text, no extra key
             "repeat_penalty": 1.3,
             "repeat_last_n":  128,
         }
-        if cpu_mode:
+        # cpu_mode describes THIS machine (Pi/Jetson). Never send num_gpu=0 to a remote
+        # Ollama (Colab GPU) — it would force the T4 idle and run on the Colab CPU.
+        if cpu_mode and not _is_remote_ollama(self.base_url):
             options["num_gpu"] = 0  # force CPU-only; omit entirely otherwise so Ollama auto-selects
 
         payload = {
@@ -1197,6 +1222,11 @@ Respond with ONLY valid JSON — no markdown fences, no extra text, no extra key
                                    # article (each respawn flashes a console on Windows)
             "options": options,
         }
+        # Some models (gemma4, newer qwen3 builds) think by default and ignore the Qwen-style
+        # "/no_think" prefix; the reasoning then eats num_predict and no JSON is emitted.
+        # The API-level switch is the reliable control.
+        if thinking or any(m in self.model.lower() for m in _OLLAMA_THINK_OFF_MODELS):
+            payload["think"] = False
         raw_parts: list[str] = []       # chunk["response"] tokens (the JSON answer)
         thinking_parts: list[str] = []  # chunk["thinking"] tokens (fallback only)
         token_count = 0
@@ -1210,11 +1240,13 @@ Respond with ONLY valid JSON — no markdown fences, no extra text, no extra key
             with requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
+                headers=_ollama_headers(self.base_url),
                 stream=True,
                 timeout=(30, read_timeout),
             ) as resp:
                 if not resp.ok:
-                    log.debug("Ollama HTTP %s: %s", resp.status_code, resp.text[:200])
+                    log.warning("Ollama classify HTTP %s from %s: %s",
+                                resp.status_code, self.base_url, resp.text[:200])
                     return None
 
                 for line in resp.iter_lines():
@@ -1274,6 +1306,9 @@ Respond with ONLY valid JSON — no markdown fences, no extra text, no extra key
             log.debug("LLM response empty; using thinking field as fallback (old Ollama?)")
             raw = "".join(thinking_parts).strip()
         if not raw:
+            log.warning("Ollama returned no text (%d tokens streamed, model=%s) — "
+                        "thinking model not honouring think=false, or num_predict exhausted?",
+                        token_count, self.model)
             return None
 
         # ── Post-processing pipeline ──────────────────────────────────────────
@@ -1293,13 +1328,13 @@ Respond with ONLY valid JSON — no markdown fences, no extra text, no extra key
         raw = _extract_json_object(raw)
 
         if not raw:
-            log.debug("LLM returned no JSON after stripping (thinking model?)")
+            log.warning("LLM returned no JSON after stripping | model=%s", self.model)
             return None
 
         # 4. Robust parse — handles trailing commas and truncation
         result = _robust_json_parse(raw)
         if result is None:
-            log.debug("LLM JSON parse failed after repair | raw=%s", raw[:300])
+            log.warning("LLM JSON parse failed after repair | raw=%s", raw[:300])
         return _validate_classification(result)
 
 

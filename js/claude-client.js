@@ -11,7 +11,7 @@
 //   options.systemArray  — raw system array [{type,text,cache_control?}] for dynamic prompts
 // ============================================================
 
-const CLAUDE_MODEL = 'claude-sonnet-4.6';
+const CLAUDE_MODEL = 'claude-sonnet-5-5';
 
 const _AGENT_MAX_TOKENS = {
   // Raised over time (8000 → 10000 Sprint 68 → 12000): the 2026-06-11 15:35 run
@@ -35,6 +35,21 @@ const _AGENT_NO_CACHE = {
   macro:     true,
   assistant: true,
 };
+
+// ── Sonnet 5.5 thinking config ───────────────────────────────────────────────
+// Adaptive thinking is ON by default and cannot be switched off
+// (thinking:{type:'disabled'} → 400). 'between_tools' is the lowest setting: no
+// up-front thinking. It is valid only with effort low|medium|high and accepts no
+// other thinking fields. Thinking tokens share max_tokens with the answer, so
+// agents that think up-front get `headroom` added on top of their output budget.
+const _AGENT_THINKING = {
+  portfolio: { effort: 'high',   upfront: true,  headroom: 8000 },  // the decision that moves money
+  macro:     { effort: 'medium', upfront: true,  headroom: 3000 },
+  dayTrade:  { effort: 'low',    upfront: false, headroom: 0 },
+  universe:  { effort: 'low',    upfront: false, headroom: 0 },
+  assistant: { effort: 'medium', upfront: false, headroom: 0 },     // chat: latency first
+};
+const _isSonnet55 = (m) => /^claude-sonnet-5-5/.test(m || '');
 
 // ── §8.5: structured tool output for the portfolio agent ─────────────────────
 // Forcing tool_choice onto a JSON-schema'd tool makes the API constrain the
@@ -328,7 +343,32 @@ async function callClaude(agentType, userMessage, options = {}) {
   const useTool = !!_forcedTool && !options.noTool;
   if (useTool) {
     body.tools = [_forcedTool];
-    body.tool_choice = { type: 'tool', name: _forcedTool.name };
+    if (_isSonnet55(model)) {
+      // Sonnet 5.5 rejects forced tool_choice (400). Use auto + an explicit
+      // instruction appended to the LAST user message (after the cached prefix, so
+      // the prompt cache is unaffected). Validator layers in analysis.js still
+      // enforce business rules; the text fallback below handles a prose reply.
+      body.tool_choice = { type: 'auto' };
+      const directive = `\n\nDeliver your answer by calling the ${_forcedTool.name} tool exactly once. Do not reply in prose.`;
+      body.messages = messages.map((m, i) => (i === messages.length - 1 && m.role === 'user' && typeof m.content === 'string')
+        ? { ...m, content: m.content + directive } : m);
+    } else {
+      body.tool_choice = { type: 'tool', name: _forcedTool.name };
+    }
+  }
+
+  // Sonnet 5.5: effort + up-front thinking (see _AGENT_THINKING)
+  if (_isSonnet55(model)) {
+    const cfg = _AGENT_THINKING[agentType] || { effort: 'medium', upfront: false, headroom: 0 };
+    let effort = options.effort ?? cfg.effort;
+    const upfront = options.upfrontThinking ?? cfg.upfront;
+    body.output_config = { effort };
+    if (upfront) {
+      body.max_tokens = maxTokens + cfg.headroom;           // thinking shares the budget
+    } else {
+      if (!['low', 'medium', 'high'].includes(effort)) body.output_config.effort = 'high';  // between_tools rejects xhigh/max
+      body.thinking = { type: 'between_tools' };
+    }
   }
 
   // ── Headers ─────────────────────────────────────────────────────────────────
@@ -432,9 +472,19 @@ async function callClaude(agentType, userMessage, options = {}) {
     // text block for non-tool agents or truncated responses.
     const _toolBlock = Array.isArray(data.content)
       ? data.content.find(b => b && b.type === 'tool_use') : null;
+    // With adaptive thinking, content[0] can be a (possibly empty) thinking block —
+    // always look the text block up by type, never by position.
+    const _textBlock = Array.isArray(data.content)
+      ? data.content.find(b => b && b.type === 'text') : null;
     const responseText = _toolBlock
       ? JSON.stringify(_toolBlock.input)
-      : (data.content?.[0]?.text ?? '');
+      : (_textBlock?.text ?? '');
+    if (data.stop_reason === 'refusal') {
+      throw new Error(`Claude declined this request (${JSON.stringify(data.stop_details || {})})`);
+    }
+    if (data.stop_reason === 'max_tokens') {
+      console.warn(`[callClaude:${agentType}] hit max_tokens (${body.max_tokens}) — output (incl. thinking) truncated`);
+    }
 
     console.log(
       `[callClaude] ✓ ${agentType} | sent OK → response received | ` +

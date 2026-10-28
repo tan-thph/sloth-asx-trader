@@ -78,7 +78,7 @@ function switchRecTab(tab) {
 function _onAnalysisModelSelect(val) {
   if (val === '__custom__') {
     const inp = document.getElementById('analysis-model-custom');
-    if (inp) { inp.style.display = ''; inp.value = state.settings.analysisModel && !['','claude-opus-4-8','claude-haiku-4-5-20251001'].includes(state.settings.analysisModel) ? state.settings.analysisModel : ''; inp.focus(); }
+    if (inp) { inp.style.display = ''; inp.value = state.settings.analysisModel && !['','claude-sonnet-4-6','claude-opus-4-8','claude-haiku-4-5-20251001'].includes(state.settings.analysisModel) ? state.settings.analysisModel : ''; inp.focus(); }
   } else {
     updateSetting('analysisModel', val);
     const inp = document.getElementById('analysis-model-custom');
@@ -256,12 +256,13 @@ function renderRunAnalysisPanel() {
           <div>
             <div class="form-label" style="margin-bottom:3px">Claude model</div>
             ${(()=>{
-              const _knownM = ['','claude-opus-4-8','claude-haiku-4-5-20251001'];
+              const _knownM = ['','claude-sonnet-4-6','claude-opus-4-8','claude-haiku-4-5-20251001'];
               const _isCustom = !!(state.settings.analysisModel && !_knownM.includes(state.settings.analysisModel));
               const _selStyle = 'padding:4px 8px;border-radius:var(--radius-md);border:0.5px solid var(--border-medium);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;font-family:var(--font)';
               return `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                 <select id="analysis-model-select" onchange="_onAnalysisModelSelect(this.value)" style="${_selStyle}">
-                  <option value="" ${!state.settings.analysisModel?'selected':''}>claude-sonnet-4-6 (default)</option>
+                  <option value="" ${!state.settings.analysisModel?'selected':''}>claude-sonnet-5-5 (default)</option>
+                  <option value="claude-sonnet-4-6" ${state.settings.analysisModel==='claude-sonnet-4-6'?'selected':''}>claude-sonnet-4-6 (previous)</option>
                   <option value="claude-opus-4-8" ${state.settings.analysisModel==='claude-opus-4-8'?'selected':''}>claude-opus-4-8 (most capable)</option>
                   <option value="claude-haiku-4-5-20251001" ${state.settings.analysisModel==='claude-haiku-4-5-20251001'?'selected':''}>claude-haiku-4-5 (fastest)</option>
                   <option value="__custom__" ${_isCustom?'selected':''}>Custom…</option>
