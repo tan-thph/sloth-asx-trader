@@ -184,7 +184,11 @@ async function runAnalysis(opts = {}) {
 
     async function fetchNews() {
         if (!state.serverOk) return [];
-        const tickers = mergedPortfolio().map(h => h.ticker).join(',');
+        // Same scope as the Holdings list (day-trade account excluded) so "Holdings directly
+        // covered" never contains a ticker the model has no Holdings row for.
+        const tickers = [...new Set(mergedPortfolio()
+          .filter(h => (h.account || 'personal') !== 'trading')
+          .map(h => h.ticker))].join(',');
         try {
           // Try new news scanner brief first (LLM-classified, high-impact articles)
           const r = await fetch(`${API}/api/news/brief?tickers=${tickers}&days=3`);
@@ -361,18 +365,28 @@ async function runAnalysis(opts = {}) {
   // ── Portfolio sector allocation summary ──────────────────────────────────
   // Computed here so it sits just above the per-ticker indicator block.
   const sectorAllocCtx = (() => {
+    // Denominator = total net worth (cash + ALL holdings) — the same basis Rule 4 / Rule 9
+    // use for the 15% / 30% caps. Rows = Holdings-list scope (day-trade account excluded);
+    // the excluded day-trade value and cash are shown explicitly so the % reconcile to 100.
+    const nw = totalNetWorth();
+    if (!nw) return '';
     const smap = {};
-    const pv = portfolioValue();
-    if (!pv) return '';
+    let tradingVal = 0;
     for (const h of mergedPortfolio()) {
-      const sec = h.sector || 'Other';
-      smap[sec] = (smap[sec] || 0) + h.shares * (h.currentPrice || 0);
+      const val = h.shares * (h.currentPrice || 0);
+      if ((h.account || 'personal') === 'trading') { tradingVal += val; continue; }
+      // Banking is part of Financials for the 30% sector cap (same XFJ exposure).
+      let sec = h.sector || 'Other';
+      if (sec === 'Banking') sec = 'Financials';
+      smap[sec] = (smap[sec] || 0) + val;
     }
     if (!Object.keys(smap).length) return '';
     const parts = Object.entries(smap)
       .sort((a, b) => b[1] - a[1])
-      .map(([sec, val]) => `${sec}=${(val / pv * 100).toFixed(0)}%`);
-    return `\n\nPORTFOLIO SECTOR ALLOCATION: ${parts.join(', ')}`;
+      .map(([sec, val]) => `${sec === 'Financials' ? 'Financials (incl. Banking)' : sec === 'Other' ? 'Other (ETFs/funds)' : sec}=${(val / nw * 100).toFixed(0)}%`);
+    parts.push(`Cash=${(viewCash() / nw * 100).toFixed(0)}%`);
+    if (tradingVal > 0) parts.push(`Day-trade account (not in Holdings)=${(tradingVal / nw * 100).toFixed(0)}%`);
+    return `\n\nPORTFOLIO SECTOR ALLOCATION (% of net worth): ${parts.join(', ')}`;
   })();
 
   // Sector ETF key lookup for relative-strength computation
@@ -568,7 +582,11 @@ async function runAnalysis(opts = {}) {
       unrealisedPnl: (livePrice - h.avgPrice) * h.shares,
       unrealisedPnlPct: pnlPct,
       daysHeld: days,
-      weight: ((h.shares * livePrice) / portfolioValue() * 100).toFixed(1) + '%',
+      // % of total NET WORTH (cash + holdings) — the basis of the 15% cap (Rule 4) and the
+      // >12% weight test (Rule 15). Previously divided by holdings value only (cash excluded).
+      weight: ((h.shares * livePrice) / (totalNetWorth() || 1) * 100).toFixed(1) + '%',
+      account: h.account || 'personal',
+      mode: h.mode || 'paper',
     };
   }));
 
@@ -815,6 +833,23 @@ ${riskRows}`;
     ? '\n\nENTRY THESIS CONTEXT (original buy rationale per holding):\n' + _holdingCtxLines.join('\n')
     : '';
 
+  // Engine-detected data-quality notes: surfaced so the model flags them instead of
+  // silently reasoning over inconsistent inputs.
+  const _dqNotes = [];
+  const _noDays = [...new Set(mp.filter(h => _daysHeld(h.ticker) == null).map(h => h.ticker))];
+  if (_noDays.length) _dqNotes.push(`daysHeld unknown for ${_noDays.join(', ')} — the CGT 11–12 month window cannot be verified. List each in dataGaps[] and flag this in reasoning before any SELL/TRIM.`);
+  const _rowsByTicker = {};
+  for (const h of mp) (_rowsByTicker[h.ticker] = _rowsByTicker[h.ticker] || []).push(`${h.account || 'personal'}/${h.mode || 'paper'}`);
+  for (const [t, rows] of Object.entries(_rowsByTicker)) {
+    if (rows.length > 1) _dqNotes.push(`${t} appears in ${rows.length} Holdings rows (${rows.join(', ')}) — treat as ONE holding, emit exactly one rec, and mention the split if it affects tax/CGT.`);
+  }
+  const _paperTickers = [...new Set(mp.filter(h => !isRealTrade(h)).map(h => h.ticker))];
+  if (_paperTickers.length) _dqNotes.push(`Holdings rows with mode=paper are SIMULATED, not real money: ${_paperTickers.join(', ')}.`);
+  const _tradingVal = mergedPortfolio().filter(h => (h.account || 'personal') === 'trading')
+    .reduce((s, h) => s + h.shares * (h.currentPrice || 0), 0);
+  if (_tradingVal > 0) _dqNotes.push(`Net worth includes $${fmt(_tradingVal)} of day-trade account positions that are NOT in Holdings. Weights are % of net worth.`);
+  const _dqBlock = _dqNotes.length ? `\n\nDATA QUALITY NOTES (engine-detected):\n- ${_dqNotes.join('\n- ')}` : '';
+
   const _budgetNote = `\nANALYSIS_BUDGET: ${_budgetTier.label} (~${_budgetTier.maxTokens} output tokens). Analyse EVERY holding fully FIRST — holdings are the priority and must never be truncated or skipped. Watchlist tickers are SECONDARY. ${_deferredWatchlist.length ? `${_deferredWatchlist.length} watchlist ticker(s) were deferred this run due to the budget (${_deferredWatchlist.join(', ')}) — state this in dataGaps[].` : `Cover watchlist only if budget remains; if you must trim, drop whole watchlist tickers (note them in dataGaps[]) rather than shorten any holding's analysis.`}`;
 
   const userMessage = `Date: ${todayStr()} | Time: ${nowSydney()} | TAX_LOSS_HARVEST_ACTIVE: ${inHarvestWindow}${_acctLabel}${_budgetNote}
@@ -824,7 +859,7 @@ ACTIVE_REGIME: __REGIME_PLACEHOLDER__ (confidence: __CONF_PLACEHOLDER__)
 LIVE PORTFOLIO STATE:
 Holdings: ${portfolioJson}${_holdingCtxBlock}
 Cash available: $${fmt(state.cash)} | Total invested: $${fmt(totalCost())} | Net worth: $${fmt(totalNetWorth())}
-RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})
+RBA Cash Rate: ${state.rbaRate.toFixed(2)}% (${state.rbaRateSource}${state.rbaRateDate ? ', ' + state.rbaRateDate : ''})${_dqBlock}
 ${recCtx}__CHANGES_PLACEHOLDER__${pendingFeedbackCtx}__CALIBRATION_PLACEHOLDER__${macroCtx}${newsOutlook}${annCtx}${marketViewCtx}${extraTickersCtx}${dividendCtx}${earningsCtx}${riskCtx}${rulesCtx}${indicatorCtx}
 
 TASK:

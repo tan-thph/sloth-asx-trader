@@ -717,10 +717,52 @@ def _extract_article_tickers(title: str, content: str,
     """Return portfolio tickers that appear as the primary subject of the article."""
     title_u  = title.upper()
     early_u  = (content or '')[:400].upper()
-    title_hits   = [t for t in portfolio_tickers if t.upper() in title_u]
+    # Whole-word match: a bare substring test made 'SUN' hit "SUNDAY", 'ANZ' hit "ANZAC",
+    # 'WOW' hit "WOWSER", etc.
+    def _has(t: str, text_u: str) -> bool:
+        return re.search(r'(?<![A-Z0-9])' + re.escape(t.upper()) + r'(?![A-Z0-9])', text_u) is not None
+    title_hits   = [t for t in portfolio_tickers if _has(t, title_u)]
     content_hits = [t for t in portfolio_tickers
-                    if t.upper() in early_u and t not in title_hits]
+                    if _has(t, early_u) and t not in title_hits]
     return (title_hits + content_hits)[:2]  # cap at 2 tickers to control prompt size
+
+
+# Company-name hints used to sanity-check LLM-assigned primary_tickers. A weak local model
+# can emit a ticker from the supplied list that the article never mentions (e.g. an article
+# about Star Entertainment tagged SGP/Stockland). Only tickers listed here are validated;
+# unlisted tickers are trusted as before. Add new holdings/watchlist names as needed.
+_TICKER_NAME_HINTS: dict[str, tuple[str, ...]] = {
+    'BHP': ('bhp',), 'RIO': ('rio tinto',), 'FMG': ('fortescue',),
+    'MQG': ('macquarie',), 'QBE': ('qbe',), 'SUN': ('suncorp',),
+    'CBA': ('commonwealth bank', 'commbank'), 'ANZ': ('anz', 'australia and new zealand banking'),
+    'WBC': ('westpac',), 'NAB': ('national australia bank',),
+    'SGP': ('stockland',), 'SCG': ('scentre',), 'TCL': ('transurban',),
+    'WOW': ('woolworths',), 'COL': ('coles',), 'JBH': ('jb hi-fi', 'jb hi fi'),
+    'SHL': ('sonic healthcare',), 'CSL': ('csl',), 'COH': ('cochlear',),
+    'WDS': ('woodside',), 'JHX': ('james hardie',), 'XRO': ('xero',),
+    'NXT': ('nextdc',), 'QAN': ('qantas',), 'DOW': ('downer',),
+}
+
+
+def _validate_primary_tickers(primary: list[str], title: str, content: str) -> list[str]:
+    """Drop LLM-assigned primary tickers the article text does not support.
+
+    Keep a ticker if its symbol appears as a whole word, or one of its company-name hints
+    appears, in the title or the first 1500 chars of content. Tickers with no hint entry
+    are kept (benefit of the doubt) so recall on unmapped names is unchanged.
+    """
+    text_u = f"{title or ''} {(content or '')[:1500]}".upper()
+    text_l = text_u.lower()
+    kept = []
+    for t in primary:
+        hints = _TICKER_NAME_HINTS.get(t.upper())
+        if not hints:
+            kept.append(t)
+            continue
+        sym_ok = re.search(r'(?<![A-Z0-9])' + re.escape(t.upper()) + r'(?![A-Z0-9])', text_u) is not None
+        if sym_ok or any(h in text_l for h in hints):
+            kept.append(t)
+    return kept
 
 
 # Below this, clean_content is too thin for any model to reliably fill every
@@ -1890,6 +1932,11 @@ class NewsPipeline:
                                     t.upper() for t in (result.get("primary_tickers") or [])
                                     if isinstance(t, str)
                                 ][:5]
+                                # Drop primary tickers the article text doesn't support
+                                # (LLM picked a ticker from the supplied list that the
+                                # article never mentions).
+                                primary = _validate_primary_tickers(
+                                    primary, row["title"] or "", row["content"] or "")
                                 # mentioned_tickers = all incidental refs
                                 mentioned = [
                                     t.upper() for t in (result.get("mentioned_tickers") or result.get("tickers_mentioned") or [])

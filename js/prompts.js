@@ -15,7 +15,7 @@
 
 // Learning Loop: every AI call logs this version so calibration stats can be
 // correlated to prompt changes. Increment when ANALYSIS_SYSTEM_PROMPT changes.
-const PROMPT_VERSION = '2026-10-v25';
+const PROMPT_VERSION = '2026-10-v26';
 
 
 // ── Macro brief ──────────────────────────────────────────────────────────────
@@ -101,7 +101,13 @@ const ANALYSIS_SYSTEM_PROMPT =
      specific forward event or level that would flip this from HOLD to SELL/TRIM/TOP_UP (an earnings date,
      a price/valuation level, a macro print). A HOLD with catalysts omitted is treated as under-specified;
      only leave it blank when no dated event exists AND you state that explicitly in reasoning.
-     FACTOR TYPING: EVERY factorsUsed[] entry MUST begin with a type tag: [FUNDAMENTAL] (valuation, earnings, margins, balance sheet), [MACRO] (rates, FX, commodities, sector tailwind), [TECHNICAL] (any price/indicator signal), or [RISK] (Sharpe, VaR, drawdown, correlation). Only [FUNDAMENTAL] and [MACRO] entries count toward the ≥3 requirement above. [TECHNICAL] and [RISK] tags never satisfy it. Analyst targets/ratings are supporting context only and must NOT be tagged [FUNDAMENTAL].
+     FACTOR TYPING: EVERY factorsUsed[] entry MUST begin with a type tag: [FUNDAMENTAL] (valuation, earnings, margins, balance sheet), [MACRO] (rates, FX, commodities, sector tailwind), [TECHNICAL] (any price/indicator signal), or [RISK] (Sharpe, VaR, drawdown, correlation). Only [FUNDAMENTAL] and [MACRO] entries count toward the ≥3 requirement above. [TECHNICAL] and [RISK] tags never satisfy it. Analyst targets/ratings are supporting context only and must NOT be tagged [FUNDAMENTAL] — not even inside a line that also holds a real fundamental.
+     TAG INTEGRITY: A factor is [FUNDAMENTAL] only if it is a company/fund fundamental (valuation, earnings, margins, balance sheet, distribution cover). Trade mechanics — anti-churn thresholds, minimum trade size, position weight, unrealised gain, tax status — are NOT fundamentals: put them in reasoning, or tag [RISK]. For ETFs/funds with no company fundamentals, use [MACRO] (rate/yield-vs-RBA, sector or regime fit) and [RISK]; do not invent a [FUNDAMENTAL] entry to look compliant.
+     CONSISTENCY: catalysts[] and invalidationCondition must use the SAME thresholds. Every level or "floor" you cite must come from the user message — never coin one. If a fact in the user message cuts against the keep (e.g. negative epsGrowth, analyst SELL, yield below the RBA rate), name it in the reasoning rather than omit it.
+     YIELD vs RBA: if you cite a holding's yield trailing the RBA cash rate as a reason, apply the same test to every holding with a similar shortfall, or say why this one differs.
+     CASH vs CASH-LIKE: only actual cash earns the RBA rate. Hybrid/credit/income funds (e.g. HBRD) carry credit and duration risk — never call them cash or add their distribution yield to the cash balance. Report them separately in the summary.
+     CONFIDENCE ANCHORING: the CHANGES SINCE LAST REVIEW block shows your prior confidence. Keep it unless something NEW in the user message justifies a move; if you move it by 3+ points, state the new fact in reasoning.
+     WATCHLIST SUMMARY: if watchlist tickers were screened and none qualified, say so in one clause of summary (e.g. "9 watchlist names screened, none met 3 independent factors").
   6. SELL/TRIM VALIDITY: Only recommend if holding exists. priceRange[0] = limit sell price.
      netProfit for SELL/TRIM = (priceRange[0] − holding.avgPrice) × qty − brokerage.
      Note: the client will override this with authoritative cost-basis data post-response. Your value is for display only.
