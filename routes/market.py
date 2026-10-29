@@ -513,6 +513,20 @@ _RBA_CACHE_KEY = "rba_cash_rate"
 _RBA_DATE_KEY  = "rba_cash_rate_date"
 
 
+def _parse_rba_cash_rate(html: str):
+    """Extract the cash rate target from the rba.gov.au homepage statistics box.
+    Markup: <h3 class="statistic-heading">Cash rate target</h3>
+            <p class="statistic-value">4.60 <span class="unit">%</span></p>
+    The '%' lives in a separate <span>, so it must not be required next to the number."""
+    m = re.search(
+        r'Cash\s+rate\s+target\s*</h3>\s*<p[^>]*statistic-value[^>]*>\s*(\d+(?:\.\d+)?)',
+        html, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    rate = float(m.group(1))
+    return rate if 0 <= rate <= 10 else None
+
+
 @ttl_cache(seconds=21600)  # 6 h in-memory; avoids network hit on every macro refresh
 def _rba_rate_cached() -> tuple:
     """Live RBA scrape → DB cache (7d). Returns (rate, source, date) or raises RuntimeError.
@@ -522,21 +536,17 @@ def _rba_rate_cached() -> tuple:
     rate = None
     source = "live"
     try:
-        url = "https://www.rba.gov.au/statistics/cash-rate/"
+        url = "https://www.rba.gov.au/"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-        m = re.search(r"Cash\s+Rate\s+Target[^0-9]*(\d+\.\d+)\s*%", html, re.IGNORECASE | re.DOTALL)
-        if not m:
-            m = re.search(r'<td[^>]*>\s*(\d+\.\d+)\s*%\s*</td>', html)
-        if m:
-            rate = float(m.group(1))
-            if not (0 <= rate <= 10):
-                rate = None
-            else:
-                source = "live-rba"
-    except Exception:
-        pass
+        rate = _parse_rba_cash_rate(html)
+        if rate is not None:
+            source = "live-rba"
+        else:
+            log.warning("[rba_rate] cash rate box not found in RBA homepage HTML - markup may have changed")
+    except Exception as e:
+        log.warning(f"[rba_rate] live scrape failed: {e}")
 
     if rate is not None:
         with get_db() as conn:
