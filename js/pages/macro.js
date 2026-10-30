@@ -470,7 +470,15 @@ async function runMacroAnalysis(force=false) {
         if(d.nasdaq)   lines.push(`Nasdaq: ${fmtPC(d.nasdaq, 0)}`);
         if(d.dow)      lines.push(`Dow: ${fmtPC(d.dow, 0)}`);
         if(d.vix)      lines.push(`VIX: ${fmtPC(d.vix)}`);
-        if(d.us10y)    lines.push(`US 10Y Yield: ${fmtPC(d.us10y)}%`);
+        if(d.us10y) {
+          // Yield moves are quoted in basis points, not as a % change of the yield level.
+          const _bp = d.us10y_change_bp
+            ?? (d.us10y.prev_close != null ? Math.round((d.us10y.value - d.us10y.prev_close) * 1000) / 10 : null);
+          lines.push(d.us10y.prev_close != null && _bp != null
+            ? `US 10Y Yield: ${fmt(d.us10y.prev_close)}% → ${fmt(d.us10y.value)}% (${_bp > 0 ? '+' : ''}${_bp}bp)`
+            : `US 10Y Yield: ${fmt(d.us10y.value)}%`);
+        }
+        if(d.dxy)      lines.push(`US Dollar Index (DXY): ${fmtPC(d.dxy)}`);
         if(d.gold)     lines.push(`Gold: ${fmtPC(d.gold, 0)}`);
         if(d.oil)      lines.push(`Oil WTI: ${fmtPC(d.oil, 1)}`);
         if(d.iron_ore) lines.push(`Iron Ore: ${fmtPC(d.iron_ore, 1)}` + (d.iron_ore_change_5d != null ? ` (5d: ${fmtp(d.iron_ore_change_5d)})` : ''));
@@ -480,11 +488,27 @@ async function runMacroAnalysis(force=false) {
           + (d.asx200_5d_return != null ? ` (5d: ${fmtp(d.asx200_5d_return)}` : '')
           + (d.asx200_20d_return != null ? `, 20d: ${fmtp(d.asx200_20d_return)})` : (d.asx200_5d_return != null ? ')' : '')));
         if(d.asx_vol_20d != null) lines.push(`ASX 20d Realised Vol: ${d.asx_vol_20d.toFixed(1)}%`);
+        if(d.asx200_atr_pct != null) lines.push(`ASX200 ATR(14): ${d.asx200_atr_pct.toFixed(2)}% of price` + (d.asx200_adx != null ? `, ADX ${d.asx200_adx}` : ''));
         if(d.advance_decline_ratio != null) lines.push(`ASX Breadth (% above 20d SMA): ${d.advance_decline_ratio.toFixed(1)}%`);
         if(d.sectors) {
           const sLines = Object.values(d.sectors).filter(Boolean)
             .map(s => `${s.label} ${fmtp(s.change_1d)}${s.return_5d != null ? ` (5d ${fmtp(s.return_5d)})` : ''}`);
           if(sLines.length) lines.push('Sector ETFs: ' + sLines.join(', '));
+        }
+        if(d.rba && (d.rba.cash_rate != null || d.rba.cpi_annual != null)) {
+          const r = d.rba, parts = [];
+          if(r.cash_rate != null) {
+            parts.push(`RBA cash rate target: ${r.cash_rate.toFixed(2)}%`
+              + (r.cash_rate_effective ? ` (current rate effective ${r.cash_rate_effective})` : '')
+              + (r.next_meeting ? `; next decision ${r.next_meeting}` + (r.days_to_meeting != null ? ` (in ${r.days_to_meeting} day${r.days_to_meeting === 1 ? '' : 's'})` : '')
+                                 : (r.cash_rate_next_update ? `; next update ${r.cash_rate_next_update}` : '')));
+          }
+          if(r.cpi_annual != null) {
+            parts.push(`CPI annual: ${r.cpi_annual.toFixed(1)}%`
+              + (r.cpi_period ? ` (${r.cpi_period})` : '')
+              + (r.cpi_next_update ? `; next release ${r.cpi_next_update}` : ''));
+          }
+          lines.push(parts.join(' | '));
         }
         liveCtx = lines.join(' | ');
       }
@@ -518,14 +542,20 @@ async function runMacroAnalysis(force=false) {
   let newsCtx = '';
   if (state.serverOk) {
     try {
-      const nr = await fetch(`${API}/api/news/brief?days=2&limit=20`);
+      // limit=60 (was 20): /api/news/brief fills ~2/3 of its slots with items tied to portfolio
+      // tickers, so with 20 the macro/geopolitics filter below left only ~6 items.
+      const nr = await fetch(`${API}/api/news/brief?days=2&limit=60`);
       if (nr.ok) {
         const nd = await nr.json();
+        const seen = new Set();
         const items = (nd.items || [])
           .filter(it => ['macro', 'geopolitics'].includes(it.category))
+          .filter(it => { const k = (it.title || it.signal || '').toLowerCase().slice(0, 80); if (seen.has(k)) return false; seen.add(k); return true; })
           .slice(0, 12);
         if (items.length) {
-          newsCtx = ' | Recent news (last 48h): ' + items.map(it => it.signal || it.title).join('; ');
+          // One item per line (was a single ';'-joined run-on appended to the data line, easy to miss).
+          newsCtx = '\n\nRecent news (last 48h; macro and geopolitics only):\n'
+            + items.map(it => '- ' + String(it.signal || it.title).slice(0, 260)).join('\n');
         }
       }
     } catch (_) {}
@@ -535,7 +565,7 @@ async function runMacroAnalysis(force=false) {
     + (liveCtx ? '. Live market data: ' + liveCtx : '. Use realistic current estimates.')
     + (pmCtx || '')
     + (newsCtx || '')
-    + '  Return only JSON.';
+    + '\n\nReturn only JSON.';
 
   try {
     // I-2: callClaude('macro', ...) is now forced-tool (_MACRO_TOOL in

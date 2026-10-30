@@ -243,7 +243,10 @@ def _macro_payload() -> dict:
         "xfj":      ("^AXFJ",  "1mo"),   # Financials
         "xhj":      ("^AXHJ",  "1mo"),   # Healthcare
         "xej":      ("^AXEJ",  "1mo"),   # Energy
-        "xrj":      ("^AXRJ",  "1mo"),   # Real Estate
+        "xrj":      ("^AXPJ",  "1mo"),   # A-REITs (was ^AXRJ, which returned no data)
+        "xij":      ("^AXIJ",  "1mo"),   # Information Technology
+        # US dollar index — global USD strength, a driver of AUD, gold and commodities.
+        "dxy":      ("DX-Y.NYB", "5d"),
     }
     macro_data = {}
     _histories: dict = {}
@@ -387,12 +390,29 @@ def _macro_payload() -> dict:
         "xfj": "Financials",
         "xhj": "Healthcare",
         "xej": "Energy",
-        "xrj": "RealEstate",
+        "xrj": "A-REITs",
+        "xij": "Technology",
     }
+    # Fallback proxies when a sector index returns nothing from Yahoo (A-REIT ETF).
+    _SECTOR_FALLBACK = {"xrj": "VAP.AX"}
+    for _sk, _fsym in _SECTOR_FALLBACK.items():
+        if macro_data.get(_sk) is None or _histories.get(_sk) is None:
+            _n, _h, _s = _fetch_symbol((_sk, (_fsym, "1mo")))
+            if _s:
+                macro_data[_sk] = _s
+                if _h is not None:
+                    _histories[_sk] = _h
+                log.warning("macro: sector %s unavailable from index feed - using %s proxy", _sk, _fsym)
     sectors_out = {}
     for sk, label in _SECTOR_ETF_LABELS.items():
         h    = _histories.get(sk)
         sm   = macro_data.pop(sk, None)   # remove raw key; replace with structured block
+        if sm and h is None:
+            # Stooq-fallback summary has no history: keep the 1d move, no 5d return.
+            sectors_out[sk] = {"label": label, "value": sm["value"],
+                               "change_1d": sm["change_pct"], "return_5d": None}
+        elif not sm:
+            log.warning("macro: sector %s (%s) unavailable - omitted from payload", sk, label)
         if h is not None and sm:
             ret5d = None
             if len(h) >= 6:
@@ -405,6 +425,19 @@ def _macro_payload() -> dict:
             }
     if sectors_out:
         macro_data["sectors"] = sectors_out
+
+    # US 10Y move in basis points. ^TNX is quoted in percent, so a "change_pct" of -1.11 is a
+    # 1.11% change of the yield LEVEL (5.05 -> 4.99 = -6bp), which is not what yield rules mean.
+    _u = macro_data.get("us10y")
+    if _u and _u.get("prev_close") is not None:
+        macro_data["us10y_change_bp"] = round((_u["value"] - _u["prev_close"]) * 100, 1)
+
+    # RBA cash rate / next decision / CPI (6 h cache; never blocks the macro payload).
+    try:
+        macro_data["rba"] = _rba_homepage_stats()
+    except Exception as _e:
+        log.warning("macro: RBA stats unavailable: %s", _e)
+        macro_data["rba"] = None
 
     # Advance/decline breadth: populated from the most recent market scan's
     # universe breadth (% of ASX tickers above 20-day SMA). Falls back to None
@@ -439,6 +472,74 @@ def _macro_payload() -> dict:
         pass
 
     return macro_data
+
+
+def _parse_rba_homepage_stats(html: str) -> dict:
+    """Parse the rba.gov.au homepage 'statistics-boxes' block.
+
+    Returns {cash_rate, cash_rate_effective, cash_rate_next_update, cpi_annual, cpi_period,
+    cpi_next_update}; any field not found is None. Matches on each box's heading text, not
+    on position, and reads only the value paragraph (the unit is a separate <span>).
+    """
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    out = {"cash_rate": None, "cash_rate_effective": None, "cash_rate_next_update": None,
+           "cpi_annual": None, "cpi_period": None, "cpi_next_update": None}
+
+    def _squash(t: str) -> str:
+        return re.sub(r"\s+", " ", t or "").strip()
+
+    def _num(node):
+        if not node:
+            return None
+        m = re.search(r"\d+(?:\.\d+)?", _squash(node.get_text(" ")))
+        return float(m.group()) if m else None
+
+    for art in soup.select("div.statistics-boxes article.statistic"):
+        h = art.select_one(".statistic-heading")
+        head = _squash(h.get_text()).lower() if h else ""
+        meta = _squash(" ".join(m.get_text(" ") for m in art.select(".statistic-meta")))
+        if head == "cash rate target":
+            rate = _num(art.select_one(".statistic-value"))
+            if rate is not None and 0 <= rate <= 20:
+                out["cash_rate"] = rate
+            m = re.search(r"Effective date\s+(\d{1,2} \w+ \d{4})", meta)
+            out["cash_rate_effective"] = m.group(1) if m else None
+            m = re.search(r"Next update\s+(.+?)$", meta)
+            out["cash_rate_next_update"] = m.group(1).strip() if m else None
+        elif head == "inflation":
+            cpi = _num(art.select_one(".statistic-value"))
+            if cpi is not None and -5 <= cpi <= 30:
+                out["cpi_annual"] = cpi
+            m = re.search(r"Annual change\s+(.+?)(?:\s+Next update|$)", meta)
+            out["cpi_period"] = m.group(1).strip() if m else None
+            m = re.search(r"Next update\s+(\d{1,2} \w+ \d{4})", meta)
+            out["cpi_next_update"] = m.group(1) if m else None
+    if out["cash_rate"] is None and out["cpi_annual"] is None:
+        raise ValueError("RBA statistics boxes not found - markup may have changed")
+    return out
+
+
+@ttl_cache(seconds=21600)  # 6 h
+def _rba_homepage_stats() -> dict:
+    """Cash rate target, next decision and CPI from the rba.gov.au homepage, plus the next
+    Monetary Policy Board decision date from the meeting schedule (days away)."""
+    req = urllib.request.Request("https://www.rba.gov.au/", headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        html = resp.read().decode("utf-8", errors="ignore")
+    stats = _parse_rba_homepage_stats(html)
+    stats["next_meeting"] = None
+    stats["days_to_meeting"] = None
+    try:
+        today = datetime.now().date()
+        upcoming = [d for d in _rba_meetings_cached() if d >= today.isoformat()]
+        if upcoming:
+            stats["next_meeting"] = upcoming[0]
+            stats["days_to_meeting"] = (datetime.fromisoformat(upcoming[0]).date() - today).days
+    except Exception:
+        pass
+    return stats
 
 
 @bp.route("/api/macro")
@@ -1120,6 +1221,18 @@ def earnings_calendar():
 
 # ── AI response / call logging ────────────────────────────────────────────────
 
+_AI_LOG_MAX_CHARS = 5_000_000   # safety ceiling per field (~1.2M tokens); not a working limit
+
+
+def _cap_log_text(s: str):
+    """Return (text, original_len_if_cut_else_None). Never cuts silently."""
+    if len(s) <= _AI_LOG_MAX_CHARS:
+        return s, None
+    return (s[:_AI_LOG_MAX_CHARS]
+            + f"\n\n[LOG TRUNCATED: {len(s) - _AI_LOG_MAX_CHARS} of {len(s)} chars omitted "
+              f"(safety ceiling {_AI_LOG_MAX_CHARS})]"), len(s)
+
+
 @bp.route("/api/log/ai_response", methods=["POST"])
 def log_ai_response():
     """Store the full AI call (prompt + response) for debugging and audit.
@@ -1138,8 +1251,12 @@ def log_ai_response():
     if not text:
         return jsonify({"error": "text required"}), 400
 
-    system_prompt = (data.get("system_prompt") or "")[:20000]
-    user_message  = (data.get("user_message")  or "")[:30000]
+    # Store prompts IN FULL. These were previously cut to 20,000 / 30,000 chars, which
+    # silently truncated every portfolio-analysis log (the real system prompt is ~49k chars
+    # and the user message ~100k). The only remaining cap is a generous safety ceiling;
+    # if it ever fires the cut is stated explicitly in the text and the file header.
+    system_prompt, _sys_cut = _cap_log_text(data.get("system_prompt") or "")
+    user_message,  _usr_cut = _cap_log_text(data.get("user_message")  or "")
     agent_type    = data.get("agent_type", "")
     model         = data.get("model", "")
     duration_ms   = data.get("duration_ms")
@@ -1178,10 +1295,25 @@ def log_ai_response():
         f"Cache: read={cache_read} written={cache_written} | "
         f"Duration: {duration_ms or '?'}ms"
     )
+    # Logged sizes make any truncation detectable at a glance. `sent_*` are the lengths the
+    # client reports for the text it actually sent to the model (None on older clients).
+    _sent_sys = data.get("system_chars")
+    _sent_usr = data.get("user_chars")
+    size_summary = (
+        f"Logged chars: system={len(system_prompt)} user={len(user_message)} response={len(cleaned)}"
+        + (f" | Sent chars: system={_sent_sys} user={_sent_usr}"
+           if _sent_sys is not None or _sent_usr is not None else "")
+    )
+    _cuts = [n for n, c in (("system", _sys_cut), ("user", _usr_cut)) if c]
+    if _cuts:
+        size_summary += f" | WARNING: {', '.join(_cuts)} prompt exceeded the safety ceiling and was truncated"
+    elif (_sent_sys is not None and _sent_sys != len(system_prompt)) or \
+         (_sent_usr is not None and _sent_usr != len(user_message)):
+        size_summary += " | WARNING: logged length differs from sent length (truncated in transit?)"
     with open(filename, "w", encoding="utf-8") as f:
         f.write(f"=== AI CALL LOG ===\n")
         f.write(f"Agent: {agent_type or '?'} | Model: {model or '?'} | {timestamp}\n")
-        f.write(f"{tok_summary}\n\n")
+        f.write(f"{tok_summary}\n{size_summary}\n\n")
         if system_prompt:
             f.write(f"--- SYSTEM PROMPT ---\n{system_prompt}\n\n")
         if user_message:

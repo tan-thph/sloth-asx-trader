@@ -291,6 +291,10 @@ async function renderLearningPage(gen) {
   renderHoldDecisionsCard().catch(() => {});
   // Async: load entry signal factor analysis card
   renderFactorWinRatesCard().catch(() => {});
+  // Async: headline decision-quality strip (exit counterfactuals + HOLD regret rate)
+  renderDecisionQualityCard().catch(() => {});
+  // Sample-size badges + auto-collapse for thin cards (see _LL_GUARDS)
+  _llInitCardGuards().catch(() => {});
 }
 
 function _renderLearningContent(d, brier) {
@@ -1506,7 +1510,7 @@ function _renderLearningContent(d, brier) {
   // calibration loop (are the deterministic quant rules themselves right?) and
   // was previously buried 28th in this assembly, well below the Debate Engine's
   // supplementary/optional material.
-  return introNote + _llWindowBar() + summaryCards + goLivePlaceholder + coveragePlaceholder + ruleEfficacyPlaceholder + regressionBanner + phase8Note + holdOutcomesCard + holdDecisionsPlaceholder + calibCard + calibQualityPlaceholder +
+  return introNote + _llWindowBar() + summaryCards + `<div id="ll-decision-quality-card"></div>` + goLivePlaceholder + coveragePlaceholder + ruleEfficacyPlaceholder + regressionBanner + phase8Note + holdOutcomesCard + holdDecisionsPlaceholder + calibCard + calibQualityPlaceholder +
     `<div class="grid-2" style="margin-top:14px">${regimeCard}${versionsCard}</div>` +
     failureCard + successCard +
     realVsPaperCard + byModelCard + buyVsTopupCard + capitalEffCard + ensembleDivCard + maeMfeCard +
@@ -4549,4 +4553,201 @@ async function submitTagReview(eventId, verdict) {
   } catch (e) {
     toast(`Review failed: ${e.message}`, 'error');
   }
+}
+
+
+// ═══ Decision Quality headline strip ═════════════════════════════════════════
+// Realised P&L on a TRIM/SELL only says the position was in profit when it was sold, so it
+// is not a measure of the AI's decision quality. This card scores exits against the
+// counterfactual "kept holding" and HOLD calls against their 20-day forward review.
+let _llDQBook = 'all';   // 'all' | 'real' | 'paper' — which book's EXITS the card shows
+async function renderDecisionQualityCard() {
+  const el = document.getElementById('ll-decision-quality-card');
+  if (!el) return;
+  let d = null;
+  try {
+    const r = await fetch(`${API}/api/learning/decision-quality?book=${_llDQBook}`);
+    if (!r.ok) return;
+    d = await r.json();
+  } catch (e) { return; }
+  if (!d || !d.ok) return;
+
+  const pp = v => (v == null ? '—' : (v > 0 ? '+' : v < 0 ? '-' : '') + Math.abs(v).toFixed(2) + 'pp');
+  const thin = n => n < 30 ? `<span style="color:var(--warn,#d97706);font-size:10px;margin-left:6px">thin sample</span>` : '';
+  const exitRow = (label, e) => `
+    <tr>
+      <td style="padding:4px 8px 4px 0;font-weight:600">${label}</td>
+      <td style="padding:4px 8px;text-align:right">${e.scored}${thin(e.scored)}</td>
+      <td style="padding:4px 8px;text-align:right">${e.validated}</td>
+      <td style="padding:4px 8px;text-align:right">${e.neutral}</td>
+      <td style="padding:4px 8px;text-align:right">${e.regretted}</td>
+      <td style="padding:4px 8px;text-align:right">${pp(e.avg_excess_pct)}</td>
+      <td style="padding:4px 0 4px 8px;text-align:right">${e.pct_outperformed_after_exit == null ? '—' : e.pct_outperformed_after_exit + '%'}</td>
+    </tr>`;
+  const h = d.hold || {};
+  const bk = d.books || {};
+  const chip = (key, label, n) => {
+    const on = _llDQBook === key;
+    return `<button type="button" data-ll-book="${key}" style="cursor:pointer;font-size:11px;padding:2px 9px;margin-right:4px;border-radius:10px;`
+      + `border:1px solid ${on ? 'var(--accent-primary,#2563eb)' : 'var(--border,#8884)'};`
+      + `background:${on ? 'var(--accent-primary-bg,rgba(37,99,235,.1))' : 'transparent'};color:var(--text-primary,inherit)">${label}${n == null ? '' : ` (${n})`}</button>`;
+  };
+  el.innerHTML = `
+    <div class="card" style="margin-top:14px">
+      <div class="card-title">Decision Quality <span class="text-xs text-muted" style="font-weight:400">(judged against what happened next, not realised P&amp;L)</span></div>
+      <div style="margin:2px 0 8px"><span class="text-xs text-muted" style="margin-right:6px">Exits from book:</span>${chip('all', 'Both', (bk.real || 0) + (bk.paper || 0))}${chip('real', '● Live', bk.real || 0)}${chip('paper', '◦ Paper', bk.paper || 0)}</div>
+      <div class="grid-2" style="gap:16px;align-items:start">
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:4px">Exits vs "kept holding" (${d.horizon_days}-day window, excess = stock minus ASX200 after the sale)</div>
+          <table style="width:100%;font-size:12px;border-collapse:collapse">
+            <thead><tr class="text-xs text-muted">
+              <th style="text-align:left;padding:2px 8px 2px 0">&nbsp;</th><th style="text-align:right;padding:2px 8px">Scored</th>
+              <th style="text-align:right;padding:2px 8px">Validated</th><th style="text-align:right;padding:2px 8px">Neutral</th>
+              <th style="text-align:right;padding:2px 8px">Regretted</th><th style="text-align:right;padding:2px 8px">Avg excess</th>
+              <th style="text-align:right;padding:2px 0 2px 8px">Beat mkt after</th></tr></thead>
+            <tbody>${exitRow('SELL', d.exits.SELL)}${exitRow('TRIM', d.exits.TRIM)}</tbody>
+          </table>
+          <div class="text-xs text-muted" style="margin-top:6px">Positive excess = the stock kept outperforming after you sold (exit was early). Negative = the exit avoided underperformance.</div>
+        </div>
+        <div>
+          <div class="text-xs text-muted" style="margin-bottom:4px">HOLD calls (forward review, all books: HOLDs are not tied to a book)</div>
+          <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px">
+            <div><div style="font-size:18px;font-weight:700">${h.resolved ?? 0}${thin(h.resolved ?? 0)}</div><div class="text-xs text-muted">resolved of ${h.total ?? 0}</div></div>
+            <div><div style="font-size:18px;font-weight:700">${h.validated_rate_pct == null ? '—' : h.validated_rate_pct + '%'}</div><div class="text-xs text-muted">validated (${h.validated ?? 0})</div></div>
+            <div><div style="font-size:18px;font-weight:700">${h.regret_rate_pct == null ? '—' : h.regret_rate_pct + '%'}</div><div class="text-xs text-muted">regretted (${h.regretted ?? 0})</div></div>
+            <div><div style="font-size:18px;font-weight:700">${h.pending ?? 0}</div><div class="text-xs text-muted">pending review</div></div>
+          </div>
+          <div class="text-xs text-muted" style="margin-top:6px">Most outcomes are "neutral": the call neither helped nor hurt beyond the volatility band.</div>
+        </div>
+      </div>
+    </div>`;
+  el.querySelectorAll('button[data-ll-book]').forEach(b => b.addEventListener('click', () => {
+    _llDQBook = b.getAttribute('data-ll-book');
+    renderDecisionQualityCard().catch(() => {});
+  }));
+}
+
+// ═══ Sample-size guards: badge every data-driven card, collapse the thin ones ═══
+// Each entry matches a card by the start of its title. thin = n < min (or extra(r)).
+// A thin card is collapsed behind a one-line reason with a "show anyway" link, so n=2 cannot
+// pass for a result. Readiness counts come from GET /api/learning/card-readiness.
+// Only the cards that read REALISED P&L (outcome_status on the raw events) get this caveat.
+// Confidence Calibration and Performance by Regime read the calibration view instead, where a
+// SELL/TRIM counts only when its counterfactual verdict is decisive, so they must not carry it.
+const _LL_WINRATE_NOTE = r => (r.closed_n > 0 && r.exit_share >= 0.8)
+  ? `ⓘ ${Math.round(r.exit_share * 100)}% of closed trades are SELL/TRIM exits: "win" here means in profit at exit, not a good decision. See Decision Quality above.`
+  : null;
+const _LL_GUARDS = [
+  { title: 'Confidence Calibration',  n: r => r.calib_n,  min: 30, extra: r => r.calib_buckets < 3,
+    why: r => `only ${r.calib_n} decisive outcomes (effective n≈${r.calib_ess}) across ${r.calib_buckets} confidence bucket(s); most exits were "neutral" and are not scored` },
+  { title: 'Calibration Trend',       n: r => r.calib_n,  min: 30, extra: r => r.calib_buckets < 3,
+    why: r => `only ${r.calib_n} decisive outcomes across ${r.calib_buckets} confidence bucket(s): a trend would be noise` },
+  { title: 'Calibration Efficacy',    n: r => r.calibrated_n, min: 10,
+    why: r => `${r.calibrated_n} recommendations have a calibrated confidence recorded (no calibration nudges applied yet)` },
+  { title: 'Performance by Regime',   n: r => r.regime_decisive_n, min: 20,
+    why: r => `only ${r.regime_decisive_n} decisive outcomes across ${r.regimes_n} regime(s)`,
+    note: r => (r.top_regime_share >= 0.6 && r.regime_decisive_n > 0) ? `ⓘ ${Math.round(r.top_regime_share * 100)}% of scored outcomes are in "${r.top_regime}"; other regimes are thin.` : null },
+  { title: 'Performance by Model',    n: r => r.model_known_n, min: 30,
+    why: r => `only ${r.model_known_n} closed trades have a model recorded` , note: _LL_WINRATE_NOTE },
+  { title: 'Live vs Paper Performance', n: r => r.real_closed, min: 1,
+    why: r => `no closed live-book trades yet (${r.paper_closed} paper)` },
+  { title: 'BUY vs TOP_UP Performance', n: r => r.closed_entries, min: 10,
+    why: r => `only ${r.closed_entries} closed entries (BUY/TOP_UP)` },
+  { title: 'Capital Efficiency by Entry Driver', n: r => r.entry_driver_n, min: 10,
+    why: r => `only ${r.entry_driver_n} closed trades carry an entry driver` },
+  { title: 'MAE / MFE Path Quality',  n: r => r.mae_mfe_n, min: 10,
+    why: r => `only ${r.mae_mfe_n} trades have MAE/MFE resolved` },
+  { title: 'Execution Alpha',         n: r => r.exec_alpha_n, min: 10,
+    why: r => `only ${r.exec_alpha_n} trades have a mechanical-exit comparison` },
+  { title: 'Entry Signal Factor Analysis', n: r => r.closed_entries, min: 10,
+    why: r => `only ${r.closed_entries} closed entries; exits carry entry signals but say little about entry quality` },
+  { title: 'Thesis Accuracy Matrix',  n: r => r.thesis_informative_n, min: 10,
+    why: r => `only ${r.thesis_informative_n} closed trades have a thesis verdict other than "irrelevant"` },
+  { title: 'Thesis Drift',            n: r => r.thesis_snap_informative_n, min: 5,
+    why: r => `only ${r.thesis_snap_informative_n} thesis snapshots are not "irrelevant"` },
+  { title: 'Auto-Tag Accuracy',       n: r => r.tag_reviews_n, min: 1,
+    why: () => 'no tag reviews submitted yet' },
+  { title: 'Trading Lessons',         n: r => r.lessons_n, min: 1,
+    why: () => 'no lessons stored yet (the lessons block in the analysis prompt is empty)' },
+  { title: 'Recent Debate Summaries', n: r => r.debates_n, min: 5,
+    why: r => `only ${r.debates_n} stored debate(s)` },
+  // Note-only cards (always shown): realised-P&L win rates that mean little for exits.
+  { title: 'Failure Patterns',        note: _LL_WINRATE_NOTE },
+  { title: 'Success Patterns',        note: _LL_WINRATE_NOTE },
+  { title: 'Prompt Version History', note: _LL_WINRATE_NOTE },
+];
+
+function _llCardTitleKey(el) {
+  return (el.textContent || '').replace(/\s+/g, ' ').trim().replace(/^[^A-Za-z]+/, '');
+}
+
+function _llApplyCardGuards(r) {
+  if (!r || !document.getElementById('ll-coverage-card')) return false;   // not on the Learning page
+  document.querySelectorAll('#main-content .card-title').forEach(t => {
+    const card = t.closest('.card');
+    if (!card || card.dataset.llGuard) return;
+    const key = _llCardTitleKey(t);
+    const g = _LL_GUARDS.find(x => key.startsWith(x.title));
+    if (!g) return;
+    card.dataset.llGuard = '1';
+
+    let top = t;                                    // the title's row inside the card
+    while (top.parentElement && top.parentElement !== card) top = top.parentElement;
+
+    const noteText = g.note ? g.note(r) : null;
+    if (noteText) {
+      const n = document.createElement('div');
+      n.className = 'text-xs text-muted';
+      n.style.cssText = 'margin:2px 0 6px';
+      n.textContent = noteText;
+      top.insertAdjacentElement('afterend', n);
+    }
+    if (!g.n) return;                               // note-only card
+    const nVal = g.n(r);
+    const thin = nVal < g.min || (g.extra && g.extra(r));
+    const badge = document.createElement('span');
+    badge.className = 'text-xs';
+    badge.style.cssText = 'font-weight:400;margin-left:8px;color:var(--text-muted)';
+    if (!thin) { badge.textContent = `n=${nVal}`; t.appendChild(badge); return; }
+
+    // Thin: hide everything after the title row; offer to show it anyway.
+    const hidden = [];
+    for (let s = top.nextElementSibling; s; s = s.nextElementSibling) {
+      if (s.classList && s.classList.contains('text-xs') && s.textContent.startsWith('ⓘ')) continue;
+      hidden.push(s); s.style.display = 'none';
+    }
+    badge.style.color = 'var(--warn, #d97706)';
+    // Explicit theme colour: a bare <a> falls back to the browser's default blue, which is
+    // unreadable on the dark theme. --accent-primary is defined for both themes.
+    badge.innerHTML = `⚠ Thin data: ${g.why(r)}. <a href="#" style="color:var(--accent-primary,#2563eb);text-decoration:underline;cursor:pointer">show anyway</a>`;
+    badge.querySelector('a').addEventListener('click', ev => {
+      ev.preventDefault();
+      const show = hidden[0] && hidden[0].style.display === 'none';
+      hidden.forEach(s => { s.style.display = show ? '' : 'none'; });
+      ev.target.textContent = show ? 'hide' : 'show anyway';
+    });
+    t.appendChild(badge);
+  });
+  return true;
+}
+
+let _llGuardObserver = null;
+async function _llInitCardGuards() {
+  if (_llGuardObserver) { _llGuardObserver.disconnect(); _llGuardObserver = null; }
+  let r = null;
+  try {
+    const resp = await fetch(`${API}/api/learning/card-readiness`);
+    if (resp.ok) r = await resp.json();
+  } catch (e) { return; }
+  if (!r || !r.ok) return;
+  const host = document.getElementById('main-content');
+  if (!host) return;
+  let timer = null;
+  const run = () => {
+    // Async cards fill their placeholders at different times; guards are idempotent per card.
+    if (!_llApplyCardGuards(r) && _llGuardObserver) { _llGuardObserver.disconnect(); _llGuardObserver = null; }
+  };
+  _llGuardObserver = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(run, 150); });
+  _llGuardObserver.observe(host, { childList: true, subtree: true });
+  run();
 }

@@ -518,8 +518,13 @@ async function callClaude(agentType, userMessage, options = {}) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text:          responseText,
-          system_prompt: _sysText.slice(0, 50000),
-          user_message:  _userText.slice(0, 50000),
+          // Sent in full (previously .slice(0, 50000), which cut the ~100k-char portfolio
+          // user message). The true lengths ride along so the server can verify nothing was
+          // lost between here and the log file.
+          system_prompt: _sysText,
+          user_message:  _userText,
+          system_chars:  _sysText.length,
+          user_chars:    _userText.length,
           agent_type:    agentType,
           model:         model,   // the model actually sent (options.model override or default) — NOT hardcoded
           usage,

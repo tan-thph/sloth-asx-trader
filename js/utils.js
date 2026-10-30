@@ -130,7 +130,9 @@ function entrySignature(sig) {
 }
 
 const fmt = (n, d=2) => (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString('en-AU',{minimumFractionDigits:d,maximumFractionDigits:d});
-const fmtp = (n, d=2) => (n==null||isNaN(n)) ? '—' : (n>=0?'+':'') + fmt(Math.abs(n),d) + '%';
+// Sign fix: this used Math.abs(n) and only ever prepended '+', so every NEGATIVE value was
+// displayed unsigned (a -1.38% Nasdaq fall read "1.38%") — in the UI and in AI prompts.
+const fmtp = (n, d=2) => (n==null||isNaN(n)) ? '—' : (n<0 && Math.abs(n) >= 0.5*Math.pow(10,-d) ? '-' : '+') + fmt(Math.abs(n),d) + '%';
 
 // ── Paper/real view mode (gotcha #88, Phase D) ───────────────────────────────
 // The DISPLAY view mode: 'all' (default — real + paper together, distinguished by

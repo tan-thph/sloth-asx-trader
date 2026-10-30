@@ -3277,11 +3277,23 @@ def learning_calibration_stats():
                     "SELECT prompt_version FROM ai_learning_events "
                     "WHERE prompt_version IS NOT NULL ORDER BY id DESC LIMIT 1"
                 ).fetchone()
-                conn.execute(
-                    "INSERT OR REPLACE INTO calibration_snapshots "
-                    "(snapshot_date, brier_score, n, prompt_version) VALUES (?,?,?,?)",
-                    (today, brier, int(round(wsum)), latest_pv["prompt_version"] if latest_pv else None),
-                )
+                _pv = latest_pv["prompt_version"] if latest_pv else None
+                # Only persist a snapshot when the numbers CHANGED since the latest earlier-day
+                # row. Unconditional daily writes produced dozens of identical (brier, n, version)
+                # rows that made the trend chart look like history when nothing had been learned.
+                _prev = conn.execute(
+                    "SELECT brier_score, n, prompt_version FROM calibration_snapshots "
+                    "WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1", (today,)
+                ).fetchone()
+                _same = (_prev is not None and _prev["brier_score"] == brier
+                         and int(_prev["n"] or 0) == int(round(wsum))
+                         and _prev["prompt_version"] == _pv)
+                if not _same:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO calibration_snapshots "
+                        "(snapshot_date, brier_score, n, prompt_version) VALUES (?,?,?,?)",
+                        (today, brier, int(round(wsum)), _pv),
+                    )
         except Exception:
             pass  # snapshotting must never break the stats response
 
@@ -3321,8 +3333,155 @@ def learning_calibration_trend():
                 FROM calibration_snapshots
                 ORDER BY snapshot_date DESC LIMIT 180
             """).fetchall()
-        snapshots = [dict(r) for r in rows][::-1]  # chronological order for charting
+        snapshots = []
+        for r in [dict(r) for r in rows][::-1]:  # chronological order for charting
+            p = snapshots[-1] if snapshots else None
+            # Drop rows identical to the previous one (legacy daily duplicates): keep the first.
+            if p and (p["brier_score"], p["n"], p["prompt_version"]) == (r["brier_score"], r["n"], r["prompt_version"]):
+                continue
+            snapshots.append(r)
         return jsonify({"ok": True, "snapshots": snapshots})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+_CLOSED_SQL = "outcome_status IN ('win','loss','breakeven') AND was_executed = 1"
+
+
+def _lc_scalar(conn, sql, params=(), default=0):
+    """Single-value query that tolerates older schemas (missing column/table -> default)."""
+    try:
+        row = conn.execute(sql, params).fetchone()
+        return row[0] if row and row[0] is not None else default
+    except Exception:
+        return default
+
+
+@bp.route("/api/learning/card-readiness")
+def learning_card_readiness():
+    """Sample sizes behind the Learning page cards, so thin cards can say so (and collapse)
+    instead of presenting n=2 as a result. Pure read; every metric degrades to 0."""
+    try:
+        with get_db() as conn:
+            c = lambda where, table="ai_learning_events": _lc_scalar(
+                conn, f"SELECT COUNT(*) FROM {table} WHERE {where}")
+            closed = c(_CLOSED_SQL)
+            exits = c(f"{_CLOSED_SQL} AND recommendation IN ('SELL','TRIM')")
+            # The calibration, confidence-band and regime cards read ai_learning_calib, where a
+            # SELL/TRIM counts only when its counterfactual verdict is decisive (validated=win,
+            # regretted=loss; 'neutral' is dropped) and rows are de-clustered by cal_weight.
+            # Their real sample is therefore the decisive set, not the 54 closed trades.
+            top_share, top_regime, regimes_n = 0.0, None, 0
+            calib_n, calib_ess, calib_buckets = 0, 0.0, 0
+            try:
+                _ensure_calib_view(conn)
+                _dec = ("outcome_status IN ('win','loss') AND ai_confidence IS NOT NULL")
+                calib_n = _lc_scalar(conn, f"SELECT COUNT(*) FROM ai_learning_calib WHERE {_dec}")
+                calib_ess = round(float(_lc_scalar(
+                    conn, f"SELECT COALESCE(SUM(cal_weight),0) FROM ai_learning_calib WHERE {_dec}", default=0.0)), 1)
+                calib_buckets = _lc_scalar(
+                    conn, f"SELECT COUNT(DISTINCT ROUND(ai_confidence,1)) FROM ai_learning_calib WHERE {_dec}")
+                rows = conn.execute(
+                    "SELECT regime, COUNT(*) n FROM ai_learning_calib WHERE regime IS NOT NULL "
+                    "AND outcome_status IN ('win','loss','breakeven') GROUP BY regime").fetchall()
+                tot = sum(r["n"] for r in rows)
+                top_share = round(max((r["n"] for r in rows), default=0) / tot, 2) if tot else 0.0
+                top_regime = max(rows, key=lambda r: r["n"])["regime"] if rows else None
+                regimes_n = len(rows)
+                regime_decisive_n = tot
+            except Exception:
+                regime_decisive_n = 0
+            out = {
+                "closed_n": closed,
+                "closed_exits": exits,
+                "closed_entries": c(f"{_CLOSED_SQL} AND recommendation IN ('BUY','TOP_UP')"),
+                "exit_share": round(exits / closed, 2) if closed else 0.0,
+                # trade_mode is stored as 'real' | 'paper' (NULL = paper), never 'live'.
+                "real_closed": c(f"{_CLOSED_SQL} AND trade_mode = 'real'"),
+                "paper_closed": c(f"{_CLOSED_SQL} AND COALESCE(trade_mode,'paper') <> 'real'"),
+                "calib_n": calib_n,
+                "calib_ess": calib_ess,
+                "calib_buckets": calib_buckets,
+                "regimes_n": regimes_n,
+                "regime_decisive_n": regime_decisive_n,
+                "top_regime": top_regime,
+                "top_regime_share": top_share,
+                "model_known_n": c(f"{_CLOSED_SQL} AND model IS NOT NULL AND model <> ''"),
+                "calibrated_n": c("calibrated_confidence IS NOT NULL"),
+                "entry_driver_n": c(f"{_CLOSED_SQL} AND primary_entry_driver IS NOT NULL AND primary_entry_driver <> ''"),
+                "mae_mfe_n": c(f"{_CLOSED_SQL} AND mae_pct IS NOT NULL"),
+                "exec_alpha_n": c("exec_mech_pnl_pct IS NOT NULL"),
+                "thesis_informative_n": c(f"{_CLOSED_SQL} AND thesis_verdict IS NOT NULL "
+                                          "AND thesis_verdict NOT IN ('irrelevant','')"),
+                "thesis_snap_informative_n": c("verdict IS NOT NULL AND verdict NOT IN ('irrelevant','')",
+                                               "thesis_snapshots"),
+                "debates_n": c("postmortem_debate IS NOT NULL AND postmortem_debate <> ''"),
+                "lessons_n": _lc_scalar(conn, "SELECT COUNT(*) FROM trading_lessons"),
+                "tag_reviews_n": _lc_scalar(conn, "SELECT COUNT(*) FROM tag_reviews"),
+                "exit_cf_n": c("exit_cf_excess_pct IS NOT NULL AND recommendation IN ('SELL','TRIM')"),
+                "hold_resolved_n": c("recommendation = 'HOLD' AND decision_outcome IS NOT NULL"),
+            }
+        return jsonify({"ok": True, **out})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/learning/decision-quality")
+def learning_decision_quality():
+    """Headline decision-quality view that does NOT depend on realised P&L.
+
+    SELL/TRIM: scored against the counterfactual 'kept holding' over the exit horizon.
+      excess = stock return minus ASX200 return after the exit. POSITIVE excess means the stock
+      kept outperforming after the sale (exit was early/costly); NEGATIVE means the exit avoided
+      underperformance. 'validated' / 'regretted' / 'neutral' are classify_exit_decision's verdicts.
+    HOLD: the 20-trading-day forward review of each 'keep holding' call.
+    Realised P&L on a TRIM only says the position was in profit when trimmed, which is why it is
+    not used here."""
+    book = (request.args.get("book") or "all").lower()
+    if book not in ("all", "real", "paper"):
+        book = "all"
+    # trade_mode is set when the user EXECUTES a trade, so it identifies the book for exits.
+    # HOLD events are never executed and always carry the default 'paper', so HOLDs are NOT
+    # split by book (they describe holdings in every book).
+    book_sql = {"all": "", "real": " AND trade_mode = 'real'",
+                "paper": " AND COALESCE(trade_mode,'paper') <> 'real'"}[book]
+    try:
+        with get_db() as conn:
+            books = {
+                bk: _lc_scalar(conn, "SELECT COUNT(*) FROM ai_learning_events WHERE "
+                                     f"{_CLOSED_SQL} AND recommendation IN ('SELL','TRIM'){sql}")
+                for bk, sql in (("real", " AND trade_mode = 'real'"),
+                                ("paper", " AND COALESCE(trade_mode,'paper') <> 'real'"))
+            }
+            exits = {}
+            for rec in ("SELL", "TRIM"):
+                rows = conn.execute(
+                    "SELECT decision_outcome o, exit_cf_excess_pct x FROM ai_learning_events "
+                    f"WHERE {_CLOSED_SQL} AND recommendation = ?{book_sql}", (rec,)).fetchall()
+                scored = [r for r in rows if r["x"] is not None]
+                cnt = lambda k: sum(1 for r in rows if r["o"] == k)
+                exits[rec] = {
+                    "closed": len(rows),
+                    "scored": len(scored),
+                    "validated": cnt("validated"), "neutral": cnt("neutral"), "regretted": cnt("regretted"),
+                    "avg_excess_pct": round(sum(r["x"] for r in scored) / len(scored), 2) if scored else None,
+                    "pct_outperformed_after_exit": round(
+                        100.0 * sum(1 for r in scored if r["x"] > 0) / len(scored), 0) if scored else None,
+                }
+            hrows = conn.execute(
+                "SELECT decision_outcome o, COUNT(*) n FROM ai_learning_events "
+                "WHERE recommendation = 'HOLD' GROUP BY decision_outcome").fetchall()
+            hc = {(r["o"] or "pending"): r["n"] for r in hrows}
+            resolved = sum(v for k, v in hc.items() if k != "pending")
+            hold = {
+                "total": sum(hc.values()), "pending": hc.get("pending", 0), "resolved": resolved,
+                "validated": hc.get("validated", 0), "neutral": hc.get("neutral", 0),
+                "regretted": hc.get("regretted", 0),
+                "regret_rate_pct": round(100.0 * hc.get("regretted", 0) / resolved, 1) if resolved else None,
+                "validated_rate_pct": round(100.0 * hc.get("validated", 0) / resolved, 1) if resolved else None,
+            }
+        return jsonify({"ok": True, "book": book, "books": books,
+                        "horizon_days": _EXIT_HORIZON_DAYS, "exits": exits, "hold": hold})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

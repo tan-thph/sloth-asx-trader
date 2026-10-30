@@ -393,7 +393,8 @@ async function runAnalysis(opts = {}) {
   const _SECTOR_TO_ETF = {
     'Materials': 'xmj', 'Financials': 'xfj',
     'Health Care': 'xhj', 'Healthcare': 'xhj',
-    'Energy': 'xej', 'Real Estate': 'xrj', 'RealEstate': 'xrj',
+    'Energy': 'xej', 'Real Estate': 'xrj', 'RealEstate': 'xrj', 'A-REITs': 'xrj',
+    'Technology': 'xij', 'Information Technology': 'xij',
   };
 
   // ── Tiered ticker detail — keyed on OWNERSHIP, not signal strength ───────────

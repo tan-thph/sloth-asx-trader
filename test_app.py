@@ -14486,5 +14486,146 @@ class TestPromptRelevanceFixes(unittest.TestCase):
         self.assertIn("'Admin', 'Other'", src)  # ANN_TYPES filter dropdown
 
 
+class TestLearningCardReadiness(unittest.TestCase):
+    """Sample-size guards + decision-quality endpoints behind the Learning page cards."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+        from routes import learning as _lm
+        with _lm.get_db() as conn:
+            # The in-memory DB is shared across test classes: start from a clean slate so the
+            # exact-count assertions below are not polluted by earlier classes' rows.
+            for _t in ("ai_learning_events", "calibration_snapshots", "thesis_snapshots",
+                       "trading_lessons", "tag_reviews"):
+                conn.execute(f"DELETE FROM {_t}")
+            def ev(rec, status, executed=1, **kw):
+                cols = {"ticker": "TST", "event_type": "recommendation", "recommendation": rec,
+                        "outcome_status": status, "was_executed": executed, "regime": "sideways",
+                        "ai_confidence": 0.65, "timestamp": "2026-09-01 10:00:00"}
+                cols.update(kw)
+                conn.execute(
+                    f"INSERT INTO ai_learning_events ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                    list(cols.values()))
+            ev("TRIM", "win", decision_outcome="validated", exit_cf_excess_pct=-4.0)
+            ev("TRIM", "win", decision_outcome="neutral", exit_cf_excess_pct=2.0)
+            ev("TRIM", "loss", decision_outcome="regretted", exit_cf_excess_pct=6.0)
+            ev("SELL", "loss", decision_outcome="neutral", exit_cf_excess_pct=1.0, trade_mode="real")
+            ev("BUY", "win", trade_mode="real")
+            ev("HOLD", None, executed=0, decision_outcome="neutral")
+            ev("HOLD", None, executed=0, decision_outcome="regretted")
+            ev("HOLD", None, executed=0)                       # pending
+            conn.execute("INSERT INTO calibration_snapshots (snapshot_date,brier_score,n,prompt_version) "
+                         "VALUES ('2026-09-01',0.2,10,'v1'),('2026-09-02',0.2,10,'v1'),"
+                         "('2026-09-03',0.2,10,'v1'),('2026-09-04',0.15,12,'v1'),('2026-09-05',0.15,12,'v1')")
+
+    def test_readiness_counts(self):
+        r = self.client.get("/api/learning/card-readiness").get_json()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["closed_n"], 5)          # 4 exits + 1 BUY, HOLDs excluded
+        self.assertEqual(r["closed_exits"], 4)
+        self.assertEqual(r["closed_entries"], 1)
+        self.assertAlmostEqual(r["exit_share"], 0.8)
+        self.assertEqual(r["hold_resolved_n"], 2)
+        self.assertEqual(r["real_closed"], 2)       # stored value is 'real', not 'live'
+        self.assertEqual(r["paper_closed"], 3)
+        self.assertEqual(r["lessons_n"], 0)
+        self.assertEqual(r["tag_reviews_n"], 0)
+        self.assertEqual(r["exit_cf_n"], 4)         # SELL/TRIM only — HOLD rows excluded
+        self.assertEqual(r["calib_buckets"], 1)
+        self.assertEqual(r["calib_n"], 3)   # decisive only: TRIM validated (win), TRIM regretted (loss), BUY win; neutral exits dropped
+
+    def test_decision_quality_exits_and_hold(self):
+        d = self.client.get("/api/learning/decision-quality").get_json()
+        self.assertTrue(d["ok"])
+        trim = d["exits"]["TRIM"]
+        self.assertEqual((trim["scored"], trim["validated"], trim["neutral"], trim["regretted"]), (3, 1, 1, 1))
+        self.assertAlmostEqual(trim["avg_excess_pct"], 1.33, places=2)
+        self.assertEqual(trim["pct_outperformed_after_exit"], 67.0)   # 2 of 3 had excess > 0
+        self.assertEqual(d["exits"]["SELL"]["scored"], 1)
+        h = d["hold"]
+        self.assertEqual((h["total"], h["resolved"], h["pending"], h["regretted"]), (3, 2, 1, 1))
+        self.assertEqual(h["regret_rate_pct"], 50.0)
+        self.assertEqual(d["book"], "all")
+        self.assertEqual(d["books"], {"real": 1, "paper": 3})
+
+    def test_decision_quality_book_filter_applies_to_exits_not_holds(self):
+        live = self.client.get("/api/learning/decision-quality?book=real").get_json()
+        self.assertEqual((live["exits"]["SELL"]["scored"], live["exits"]["TRIM"]["scored"]), (1, 0))
+        self.assertEqual(live["hold"]["total"], 3)              # HOLDs are not split by book
+        paper = self.client.get("/api/learning/decision-quality?book=paper").get_json()
+        self.assertEqual((paper["exits"]["SELL"]["scored"], paper["exits"]["TRIM"]["scored"]), (0, 3))
+        bad = self.client.get("/api/learning/decision-quality?book=nonsense").get_json()
+        self.assertEqual(bad["book"], "all")
+
+    def test_calibration_trend_collapses_identical_snapshots(self):
+        t = self.client.get("/api/learning/calibration-trend").get_json()
+        self.assertEqual([x["snapshot_date"] for x in t["snapshots"]], ["2026-09-01", "2026-09-04"])
+
+    def test_learning_js_wires_guards_and_decision_card(self):
+        with open(os.path.join(ROOT, "js", "pages", "learning.js"), encoding="utf-8") as f:
+            src = f.read()
+        for needle in ("ll-decision-quality-card", "renderDecisionQualityCard", "_LL_GUARDS",
+                       "_llApplyCardGuards", "_llInitCardGuards", "/api/learning/card-readiness",
+                       "/api/learning/decision-quality", "data-ll-book", "var(--accent-primary"):
+            self.assertIn(needle, src)
+
+
+class TestCalibrationSnapshotDedupe(unittest.TestCase):
+    """calibration-stats must not persist a new daily snapshot when nothing changed."""
+
+    @classmethod
+    def setUpClass(cls):
+        _install_in_memory_db()
+        asx_server.init_db()
+        cls.client = asx_server.app.test_client()
+        asx_server.app.config["TESTING"] = True
+        from routes import learning as _lm
+        cls.lm = _lm
+        from datetime import datetime, timedelta
+        with _lm.get_db() as conn:
+            for i, (conf, win) in enumerate([(0.65, 1), (0.7, 0), (0.62, 1), (0.68, 1),
+                                             (0.66, 0), (0.7, 1), (0.64, 1), (0.69, 0)]):
+                conn.execute(
+                    "INSERT INTO ai_learning_events (ticker,event_type,recommendation,outcome_status,"
+                    "decision_outcome,was_executed,ai_confidence,timestamp,prompt_version) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (f"SNP{i}", "recommendation", "TRIM", "win" if win else "loss",
+                     "validated" if win else "regretted", 1, conf,
+                     (datetime.now() - timedelta(days=20 * i)).strftime("%Y-%m-%d %H:%M:%S"), "vSNAP"))
+
+    @classmethod
+    def tearDownClass(cls):
+        with cls.lm.get_db() as conn:
+            conn.execute("DELETE FROM ai_learning_events WHERE prompt_version='vSNAP'")
+            conn.execute("DELETE FROM calibration_snapshots WHERE prompt_version='vSNAP'")
+
+    def _rows(self):
+        with self.lm.get_db() as conn:
+            return [tuple(r) for r in conn.execute(
+                "SELECT snapshot_date, brier_score, n, prompt_version FROM calibration_snapshots "
+                "WHERE prompt_version='vSNAP'").fetchall()]
+
+    def test_unchanged_numbers_are_not_persisted_again(self):
+        from datetime import datetime, timedelta
+        today = datetime.now().date().isoformat()
+        yday = (datetime.now().date() - timedelta(days=1)).isoformat()
+        r = self.client.get("/api/learning/calibration-stats").get_json()
+        self.assertIsNotNone(r["brier_score"])
+        with self.lm.get_db() as conn:                       # pretend yesterday already stored it
+            conn.execute("DELETE FROM calibration_snapshots WHERE prompt_version='vSNAP'")
+            conn.execute("INSERT INTO calibration_snapshots (snapshot_date,brier_score,n,prompt_version) "
+                         "VALUES (?,?,?,?)", (yday, r["brier_score"], int(round(r["n"])), "vSNAP"))
+        self.client.get("/api/learning/calibration-stats")
+        self.assertFalse(any(x[0] == today for x in self._rows()), "identical numbers must not add a row")
+        with self.lm.get_db() as conn:                       # yesterday differs -> today is written
+            conn.execute("UPDATE calibration_snapshots SET brier_score=0.9 WHERE prompt_version='vSNAP'")
+        self.client.get("/api/learning/calibration-stats")
+        self.assertTrue(any(x[0] == today for x in self._rows()), "changed numbers must be persisted")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
